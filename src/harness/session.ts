@@ -21,6 +21,8 @@ export class SessionJournal {
     }
     const line = JSON.stringify({ t: new Date().toISOString(), sessionId, ...event })
     fs.appendFileSync(path.join(this.dir, `${sessionId}.jsonl`), `${line}\n`)
+    // Turns outlive finish()/close(). node:sqlite throws ERR_INVALID_STATE if we write after that.
+    if (!this.store.isOpen) return
     this.store.appendMessage(sessionId, String(event.role ?? event.kind ?? 'event'), line)
     const existing = this.store.listSessions().find(session => session.id === sessionId)
     if (existing) {

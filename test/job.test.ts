@@ -32,6 +32,18 @@ describe('async job', () => {
     expect(bodies).toContain('job_1')
     expect(bodies).toContain('started')
   })
+
+  it('does not throw if the store closes before the worker turn runs', async () => {
+    runtime = freshRuntime()
+    runtime.ingest(imTrigger({
+      id: 'trg_login',
+      thread: 'topic/bug-login',
+      text: '@ds-agent please fix the login timeout on checkout',
+    }))
+    runtime.daemon.stop()
+    runtime.store.close()
+    await runtime.drain()
+  })
 })
 
 describe('watchdog', () => {
