@@ -108,7 +108,7 @@ LofiSu × Grokbot（CoderBot）。
 - [~] Router 扩展 / Worker 直连拓扑（§8.1）— opt-in `RouterShardRegistry` + `WorkerMeshRegistry`
 - [~] 跨 Ticket 长记忆（§8.1）— opt-in `SpillBackedLongTermMemory`（尚未到跨月）
 - [~] 脱离 Session 的产品交互壳（§8.2）— opt-in `ProductShellBus`
-- [ ] 中途人机协同 UX（§8.2）— 仍开着
+- [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— opt-in `A2ARouter`（进程内）
 - [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` + FileVault `describe()`（仅名字）+ Darwin `sandbox-exec` / Linux `bwrap|unshare`（`DS_AGENT_SANDBOX=1`）（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
 
