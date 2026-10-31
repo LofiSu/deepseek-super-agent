@@ -151,6 +151,7 @@ export class Harness {
   }
 
   private async run(sessionId: string, role: Role, ticketId: string | undefined, prompt: string): Promise<void> {
+    if (!this.opts.store.isOpen) return
     const createdAt = new Date().toISOString()
     this.opts.store.upsertSession({
       id: sessionId,
