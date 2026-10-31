@@ -52,7 +52,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
-- [~] **Subagent / Team inside a Worker.** Async jobs + `spawn_team` topology validation / `describeTopology()` (T14). Full multi-agent Team UX still thin.
+- [x] **Subagent / Team inside a Worker.** Async jobs + `spawn_team`/`team_status`/`complete_team` → member jobs → `TEAM_MEMBER_DONE` → aggregate report. Team rows persist in SQLite and `ds-agent team`/`teams` inspect them offline. Router only sees the parent Assignment report (T14; unit + harness + live e2e).
 - [~] **One UI, many topics.** Several Tickets can exist at once. Opt-in `ProductShellBus` exists; not the default UI (T15/T49).
 
 ### §3 Event-driven
