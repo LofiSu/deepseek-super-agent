@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS spills (
   body TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS spill_grants (
+  spill_id TEXT NOT NULL,
+  grantee TEXT NOT NULL,
+  PRIMARY KEY (spill_id, grantee)
+);
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
