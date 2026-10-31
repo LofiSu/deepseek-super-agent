@@ -26,8 +26,12 @@ function help(): void {
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
-pnpm demo requires a real API key (DEEPSEEK_API_KEY, DS_AGENT_API_*, OPENROUTER_API_KEY, OPENAI_API_KEY, or GROK_API_KEY).
-Unit tests may still use MockModel offline.`)
+Cloud model: DS_AGENT_API_BASE + DS_AGENT_API_KEY (optional DS_AGENT_API_MODEL),
+or one provider key: DEEPSEEK_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+XAI_API_KEY / GROK_API_KEY, MOONSHOT_API_KEY / KIMI_API_KEY, ZHIPU_API_KEY / GLM_API_KEY,
+GEMINI_API_KEY / GOOGLE_API_KEY, ANTHROPIC_API_KEY.
+Optional DS_AGENT_PROVIDER picks a preset when several keys are set.
+pnpm demo uses MockModel only when no key is set, and it prints that. A half-set DS_AGENT_API_BASE/KEY fails instead of silently using MockModel.`)
 }
 
 async function withRuntime(work: (runtime: Runtime) => Promise<void> | void): Promise<void> {

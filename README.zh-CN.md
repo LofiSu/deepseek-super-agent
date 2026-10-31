@@ -85,7 +85,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **计算可无状态，Session/领域进 DB** — SQLite Store
 - [x] **执行环境留在原地（沙箱目录）** — `LocalEnv`
 - [x] **端侧 daemon 不持会话状态** — `daemon.ts` 只调度 Watchdog 等
-- [x] **BYOM：OpenAI 兼容 `DS_AGENT_API_*`** — `createModelFromEnv`
+- [x] **BYOM：OpenAI 兼容 `DS_AGENT_API_*` 与厂商 Key 预设** — `resolveLiveApi`
 - [~] **间歇上线设备 / 多机切换** — Store 可续；真·跨机 daemon 未做（T40 部分）
 
 ### §6 Watchdog
@@ -210,25 +210,31 @@ Channel ──► Ingress (Fast/Slow → Thread key)
 
 ## 快速开始
 
-Node.js 22+（见 [package.json](./package.json) 的 `engines`），[pnpm](https://pnpm.io/)。**`pnpm demo` 必须接真模型**（不再静默用 MockModel）。
+Node.js 22+（见 [package.json](./package.json) 的 `engines`），[pnpm](https://pnpm.io/)。
 
 ```bash
 pnpm install
-
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # 可选
-
-# DS_AGENT_API_* 之后也会认这些：
-#   DEEPSEEK_API_KEY=sk-...          # https://api.deepseek.com/v1，模型 deepseek-chat
-#   OPENROUTER_API_KEY=...           # 例如 deepseek/deepseek-chat
-#   OPENAI_API_KEY=...
-#   GROK_API_KEY=...                 # 或 XAI_API_KEY
-
-pnpm demo          # 真 API；没 Key 会报错说明怎么设
-pnpm test          # 离线单测仍可用 MockModel
+pnpm demo          # 没 Key 时用 MockModel，并在日志里写明
+pnpm test          # 离线；单测固定 MockModel
 pnpm test:live     # 有 Key 时跑真模型集成测试
 pnpm ds-agent chat "fix the login timeout"
+```
+
+一把厂商 Key，或者同时设置 `DS_AGENT_API_BASE` 与 `DS_AGENT_API_KEY`，会走 `HttpOpenAI`。没有任何 Key 时，`pnpm demo` 用 MockModel，并在日志里写明。只设置 `DS_AGENT_API_BASE` 或只设置 `DS_AGENT_API_KEY` 会报错退出。
+
+```bash
+export DS_AGENT_API_BASE=https://api.deepseek.com
+export DS_AGENT_API_KEY=sk-...
+export DS_AGENT_API_MODEL=deepseek-chat   # 可选；不设则仍是 deepseek-chat
+
+# 或一把厂商 Key（见模型配置）：
+#   DEEPSEEK_API_KEY、OPENAI_API_KEY、OPENROUTER_API_KEY、
+#   XAI_API_KEY / GROK_API_KEY、MOONSHOT_API_KEY / KIMI_API_KEY、
+#   ZHIPU_API_KEY / GLM_API_KEY、GEMINI_API_KEY / GOOGLE_API_KEY、
+#   ANTHROPIC_API_KEY
+# 多把 Key 同时存在时，用 DS_AGENT_PROVIDER 指定一家。
+
+pnpm demo          # 走 HttpOpenAI；脚本化 Mock 断言会放宽
 ```
 
 [GitHub Actions](./.github/workflows/ci.yml) 在推送到 `main` 和每个 pull request 上跑 `pnpm typecheck` 与 `pnpm test`。只有仓库 secret 里配了 `DEEPSEEK_API_KEY` 或 `DS_AGENT_API_KEY` 时才会跑 demo，并且打真模型。
@@ -244,41 +250,43 @@ pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 
 ## Demo
 
-`pnpm demo` 注入一批假 IM / GitHub 事件，**必须用真模型 API**（无 Key 会报错）。事件是假的，模型调用是真的。管线验收包括：噪声过滤、Ticket → Worker、`bypass=subscription`、Spill + `read_object`、投机 gate、Watchdog、重启持久化。真模型运行会跳过脚本化的离线断言。
+`pnpm demo` 注入一批假 IM / GitHub 事件。没有任何 Key 时用 **MockModel**（不连网），并在日志里写明。管线验收包括：噪声过滤、Ticket → Worker、`bypass=subscription`、Spill + `read_object`、投机 gate、Watchdog、重启持久化。真模型运行会跳过脚本化的离线断言。
 
 ```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
+export DS_AGENT_API_BASE=https://api.deepseek.com
 export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # 可选
+export DS_AGENT_API_MODEL=deepseek-chat   # 可选；不设则仍是 deepseek-chat
 pnpm demo
 ```
+
+只导出一把厂商 Key（例如 `DEEPSEEK_API_KEY`）同样会走 HttpOpenAI。没有任何 Key 时 demo 用 MockModel，并在日志里写明。只设置 `DS_AGENT_API_BASE` 或只设置 `DS_AGENT_API_KEY` 会报错退出。
 
 ## 模型配置
 
-`resolveLiveApi()` 按下面的顺序找 Key，先命中的生效。`DS_AGENT_API_MODEL` 可覆盖模型名。
+`DS_AGENT_API_BASE` 与 `DS_AGENT_API_KEY` 同时存在时优先于下表，模型名缺省仍是 `deepseek-chat`。只设厂商 Key 时，`resolveLiveApi` 填上 Base 和默认模型。`DS_AGENT_API_MODEL`（或 `DS_AGENT_MODEL`）覆盖默认模型。多把 Key 同时存在时按表从上到下取第一把；要指定一家，设 `DS_AGENT_PROVIDER`（`xai`/`grok`、`moonshot`/`kimi`、`zhipu`/`glm`、`gemini`/`google`、`anthropic`/`claude` 这些别名也可以）。
 
-| 变量 | 作用 |
-|------|------|
-| `DS_AGENT_API_BASE` + `DS_AGENT_API_KEY` | OpenAI 兼容 Base 和 Key（最先检查） |
-| `DEEPSEEK_API_KEY` | DeepSeek Key。Base 默认 `https://api.deepseek.com/v1`，模型 `deepseek-chat` |
-| `OPENROUTER_API_KEY` | OpenRouter。默认模型 `deepseek/deepseek-chat` |
-| `OPENAI_API_KEY` | OpenAI。默认模型 `gpt-4o-mini` |
-| `GROK_API_KEY` 或 `XAI_API_KEY` | xAI。默认模型 `grok-2-latest` |
-| `DS_AGENT_API_MODEL` | 可选，覆盖模型名 |
+默认模型取自各厂商当前文档里的示例，用 `DS_AGENT_API_MODEL` 就能换掉。
 
-Router / Watchdog 用轻量模型，Worker 用强一点的。
+| 厂商 | 环境变量 | OpenAI 兼容 Base | 默认模型 |
+|------|----------|------------------|----------|
+| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `deepseek-flash` |
+| OpenAI | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `deepseek/deepseek-chat` |
+| xAI / Grok | `XAI_API_KEY` 或 `GROK_API_KEY` | `https://api.x.ai/v1` | `grok-4.7` |
+| Moonshot / Kimi | `MOONSHOT_API_KEY` 或 `KIMI_API_KEY` | `https://api.moonshot.cn/v1` | `kimi-k3.1-pro` |
+| 智谱 / GLM | `ZHIPU_API_KEY` 或 `GLM_API_KEY` | `https://open.bigmodel.cn/api/paas/v4` | `glm-5.3` |
+| Gemini | `GEMINI_API_KEY` 或 `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-3.8-flash` |
+| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1` | `claude-opus-5-5` |
 
-```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # 可选
-# 或 DEEPSEEK_API_KEY、OPENROUTER_API_KEY、OPENAI_API_KEY、GROK_API_KEY / XAI_API_KEY
-pnpm demo
-```
+Gemini、Anthropic 两行用的是官方文档里的 OpenAI 兼容 Base（Gemini 标为 beta；Anthropic 兼容层覆盖 Chat Completions）。请求仍由 `HttpOpenAI` 发出：`/chat/completions`，`Authorization: Bearer`。
 
-`pnpm demo` 走 `requireLiveModelFromEnv()`。没配 Key 会打印配置说明并退出，不会用 MockModel。
+Moonshot 国际站 Base 是 `https://api.moonshot.ai/v1`，智谱海外是 `https://api.z.ai/api/paas/v4`。这两处配 `DS_AGENT_API_BASE` 与 `DS_AGENT_API_KEY`。
 
-`pnpm test` 和 `pnpm ds-agent` 走 `createModelFromEnv()`：有 Key 就打真接口，否则用 MockModel，离线单测可以继续跑。
+指定 `DS_AGENT_PROVIDER` 时，优先用该厂商自己的 Key；该厂商没有 Key 时用 `DS_AGENT_API_KEY`。没有可用配置时，`requireLiveModelFromEnv()` 抛错，不会返回 MockModel。
+
+Router / Watchdog 用轻量模型，Worker 用强一点的。上表是进程级的一个模型。
+
+`pnpm demo` 只在没有 Key 时用 MockModel，并在日志里写明。`pnpm test` 固定 MockModel，开发者本机的 Key 不会把单测打到网上。`createModelFromEnv()` 在没有任何配置时返回 MockModel，解析到真接口时返回 `HttpOpenAI`。只设置 `DS_AGENT_API_BASE` 或只设置 `DS_AGENT_API_KEY` 会抛错，不会退回 MockModel。
 
 ## 致谢
 

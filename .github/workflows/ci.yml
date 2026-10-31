@@ -43,10 +43,23 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        # Keep this gate offline. DS_AGENT_API_* would select HttpOpenAI instead of MockModel.
+        # Keep this gate offline. A provider key would select HttpOpenAI and can call the network.
         env:
           DS_AGENT_API_BASE: ""
           DS_AGENT_API_KEY: ""
+          DS_AGENT_PROVIDER: ""
+          DEEPSEEK_API_KEY: ""
+          OPENAI_API_KEY: ""
+          OPENROUTER_API_KEY: ""
+          XAI_API_KEY: ""
+          GROK_API_KEY: ""
+          MOONSHOT_API_KEY: ""
+          KIMI_API_KEY: ""
+          ZHIPU_API_KEY: ""
+          GLM_API_KEY: ""
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
         run: pnpm test
 
       - name: Detect live API key

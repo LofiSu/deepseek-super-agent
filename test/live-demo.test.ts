@@ -2,11 +2,19 @@ import { afterAll, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { runDemo } from '../src/cli/demo.ts'
-import { requireLiveModelFromEnv, resolveLiveApi } from '../src/harness/model.ts'
+import { demoModel, runDemo } from '../src/cli/demo.ts'
+import { requireLiveModelFromEnv } from '../src/harness/model.ts'
+import { resolveLiveApi } from '../src/harness/providers.ts'
 
-const cfg = resolveLiveApi()
-const hasLive = Boolean(cfg)
+function detectLive(): boolean {
+  try {
+    return resolveLiveApi() !== null
+  } catch {
+    return false
+  }
+}
+
+const hasLive = detectLive()
 
 describe.skipIf(!hasLive)('live model demo (real API)', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-live-'))
@@ -37,7 +45,9 @@ describe.skipIf(!hasLive)('live model demo (real API)', () => {
 })
 
 describe('live model gate (always)', () => {
-  it('documents that demo refuses empty env', () => {
-    expect(() => requireLiveModelFromEnv({})).toThrow(/DEEPSEEK_API_KEY|real model API key/)
+  it('requireLiveModelFromEnv throws, and demo uses MockModel only with no key', () => {
+    expect(() => requireLiveModelFromEnv({})).toThrow(/No live model configured; refusing MockModel/)
+    expect(demoModel({}).model.name).toBe('MockModel')
+    expect(demoModel({}).provider).toBeNull()
   })
 })
