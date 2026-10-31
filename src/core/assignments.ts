@@ -42,6 +42,18 @@ export class Assignments {
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
     if (ticket.ended?.by === 'human') return { surfaced: false, verdict: 'hold' }
+    if (ticket.collab?.paused) {
+      assignment.report = { kind: report.kind, text: report.text, deliver: report.deliver, verdict: 'hold' }
+      this.host.repo.putDoc('ticket', ticket.id, ticket)
+      this.host.log(`[collab] report held ticketId=${ticket.id} kind=${report.kind}`)
+      this.host.repo.addEvent('collab.report_held', {
+        ticketId: ticket.id,
+        assignmentId: assignment.id,
+        kind: report.kind,
+        pausedAt: ticket.collab.paused.at,
+      })
+      return { surfaced: false, verdict: 'hold' }
+    }
     const wasSpeculative = ticket.speculative
     const terminal = TERMINAL.has(report.kind)
     let verdict: SurfaceVerdict = 'hold'

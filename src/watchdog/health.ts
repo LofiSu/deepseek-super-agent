@@ -17,11 +17,15 @@ export function healthProbe(store: Store, home: string, machines?: MachineRegist
     ? (fs.statSync(vaultPath).mode & 0o077) === 0 ? 'ok' : 'insecure'
     : 'absent'
   const now = Date.now()
+  const tickets = store.listDocs<Ticket>('ticket')
+  const paused = new Set(tickets.filter(ticket => ticket.collab?.paused).map(ticket => ticket.id))
+  const sessions = store.listSessions().filter(session =>
+    !(session.ticketId != null && paused.has(session.ticketId)))
   return {
     store: store.health(),
     vaultMode,
     machinesOnline: machines?.list().filter(machine => machine.status === 'online').length ?? 0,
-    watchdogIdle: stuckAssignments(store.listDocs<Ticket>('ticket'), store.listJobs(), now, 60_000).length === 0
-      && stuckSessions(store.listSessions(), now, 60_000).length === 0,
+    watchdogIdle: stuckAssignments(tickets, store.listJobs(), now, 60_000).length === 0
+      && stuckSessions(sessions, now, 60_000).length === 0,
   }
 }

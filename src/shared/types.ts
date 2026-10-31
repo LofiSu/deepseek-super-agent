@@ -91,6 +91,42 @@ export interface TicketInput {
   human?: boolean
 }
 
+/** One human guidance note injected into the next Router/Worker turn. */
+export interface Guidance {
+  id: string
+  at: string
+  actor: string
+  text: string
+  /** Set once a Worker turn has received this note. */
+  seenByWorker?: boolean
+  /** Set once a Router turn has received this note. */
+  seenByRouter?: boolean
+}
+
+export interface PauseState {
+  at: string
+  by: string
+  reason?: string
+}
+
+export interface ResumeRecord {
+  at: string
+  by: string
+  reason?: string
+  /** Pause this resume ended; follow-up inputs after this point continue the task. */
+  pausedAt?: string
+}
+
+/**
+ * Mid-task collaboration state for one Ticket. Persisted with the Ticket document
+ * in SQLite, so pause/guidance/resume survive a process restart.
+ */
+export interface Collaboration {
+  paused?: PauseState
+  guidance: Guidance[]
+  resumes: ResumeRecord[]
+}
+
 export interface TicketEnd {
   at: string
   outcome: string
@@ -111,6 +147,8 @@ export interface Ticket {
   originTriggerId: string
   createdAt: string
   ended?: TicketEnd
+  /** Mid-task pause / human guidance / resume state. Absent means untouched. */
+  collab?: Collaboration
 }
 
 export interface Decision {
