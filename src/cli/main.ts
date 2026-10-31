@@ -4,6 +4,7 @@ import { imTrigger } from '../channels/im.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv } from '../harness/model.ts'
 import { Runtime } from '../runtime.ts'
+import { visibleTickets } from '../speculate/index.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 import { defaultHome, runDemo } from './demo.ts'
@@ -69,7 +70,7 @@ async function main(): Promise<void> {
   }
   if (cmd === 'tasks') {
     const store = new Store(home)
-    const tickets = store.listDocs<Ticket>('ticket')
+    const tickets = visibleTickets(store.listDocs<Ticket>('ticket'))
     if (tickets.length === 0) console.log('no tickets')
     for (const ticket of tickets) console.log(`${ticket.id}\t${ticketStage(ticket)}\t${ticket.title}`)
     store.close()

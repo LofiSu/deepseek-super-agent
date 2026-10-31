@@ -1,4 +1,5 @@
 import { renderOutbound } from '../channels/norms.ts'
+import { maySurface } from '../speculate/gate.ts'
 import type { Ticket } from '../shared/types.ts'
 import type { Host } from './host.ts'
 
@@ -14,6 +15,10 @@ export class Replies {
   }
 
   send(ticket: Ticket, text: string, purpose: string): void {
+    if (!maySurface(ticket.speculative, ticket.speculative ? false : undefined)) {
+      this.host.log(`[speculate] reply held ticketId=${ticket.id} purpose=${purpose}`)
+      return
+    }
     const channel = ticket.channels[0]?.source ?? 'cli'
     const rendered = renderOutbound(channel, text, ticket.id)
     const row = {
