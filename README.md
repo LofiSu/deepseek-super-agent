@@ -277,6 +277,14 @@ pnpm demo
 
 `pnpm test:live` runs that path when a key is already in the environment.
 
+## Phase-2 opt-in
+
+Phase-2 helpers (`src/phase2`: router shards, worker mesh, spill-backed long-term memory, product-shell bus, A2A) are off by default and are never consulted by admission or the harness loop. Set `DS_AGENT_PHASE2=1` (or pass `RuntimeOptions.phase2: true`) to construct them; they are then available on `runtime.phase2`.
+
+```bash
+DS_AGENT_PHASE2=1 pnpm ds-agent chat "fix the login timeout"
+```
+
 ## Models
 
 Both `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY` win over the presets below. Omit the model and that pair sends `deepseek-chat`. For V4.1 Flash, set `deepseek-flash`.
