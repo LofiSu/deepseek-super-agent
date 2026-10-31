@@ -82,7 +82,7 @@ function call(name: string, args: Record<string, unknown>, n = 0): Completion {
   return { toolCalls: [{ id: `call_${name}_${n}`, name, args }] }
 }
 
-/** Deterministic stand-in. The demo never calls a network. */
+/** Legacy deterministic stand-in. Demo and the default test suite must not instantiate this. */
 export class MockModel implements Model {
   readonly name = 'MockModel'
 
@@ -214,6 +214,8 @@ export class HttpOpenAI implements Model {
       choices?: Array<{
         message?: {
           content?: string | null
+          reasoning_content?: string | null
+          reasoning?: string | null
           tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
         }
       }>
@@ -224,7 +226,12 @@ export class HttpOpenAI implements Model {
       name: toolCall.function.name,
       args: JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>,
     }))
-    return { text: message?.content ?? '', toolCalls }
+    // Magpie DeepSeek may return content:null with reasoning_content filled.
+    const text = (message?.content
+      ?? message?.reasoning_content
+      ?? message?.reasoning
+      ?? '') || ''
+    return { text, toolCalls }
   }
 }
 

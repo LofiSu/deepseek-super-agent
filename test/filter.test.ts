@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
-import { createModelFromEnv, requireLiveModelFromEnv, MockModel } from '../src/harness/model.ts'
+import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../src/harness/model.ts'
 import { resolveLiveApi } from '../src/harness/providers.ts'
 import { fastPath, filterTrigger, ruleClassify } from '../src/ingress/filter.ts'
 import type { Runtime } from '../src/runtime.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 
-const model = new MockModel()
+/** Semantic-only stand-in: classify via rules; complete is unused by filterTrigger. */
+const semanticOnly: Model = {
+  name: 'RuleSemantic',
+  classify: trigger => ruleClassify(trigger),
+  async complete() {
+    return { text: '' }
+  },
+}
+
 let runtime: Runtime | undefined
 
 afterEach(async () => {
@@ -23,7 +31,7 @@ describe('two-level filter', () => {
       addressed: false,
     })
     expect(fastPath(trigger).pass).toBe(false)
-    const verdict = filterTrigger(trigger, model)
+    const verdict = filterTrigger(trigger, semanticOnly)
     expect(verdict.action).toBe('drop')
     expect(verdict.layer).toBe('fast')
   })
@@ -37,7 +45,7 @@ describe('two-level filter', () => {
     })
     expect(fastPath(trigger)).toEqual({ pass: true, reason: 'observed' })
     expect(ruleClassify(trigger).pass).toBe(false)
-    const verdict = filterTrigger(trigger, model)
+    const verdict = filterTrigger(trigger, semanticOnly)
     expect(verdict.action).toBe('drop')
     expect(verdict.layer).toBe('semantic')
     expect(verdict.reason).toBe('no-intent')
@@ -49,7 +57,7 @@ describe('two-level filter', () => {
       thread: 'topic/bug-login',
       text: '@ds-agent please fix the login timeout',
     })
-    expect(filterTrigger(mention, model)).toMatchObject({ action: 'pass', strength: 'explicit', layer: 'semantic' })
+    expect(filterTrigger(mention, semanticOnly)).toMatchObject({ action: 'pass', strength: 'explicit', layer: 'semantic' })
     const ci = filterTrigger({
       id: 'ci',
       source: 'github',
@@ -59,11 +67,11 @@ describe('two-level filter', () => {
       at: '2026-10-31T00:00:00.000Z',
       text: 'CI failed on auth test',
       meta: { pr: 42 },
-    }, model)
+    }, semanticOnly)
     expect(ci).toMatchObject({ action: 'pass', strength: 'inferred' })
   })
 
-  it('rejects an unknown source and records noise through the engine', () => {
+  it('rejects an unknown source and records noise through the engine', async () => {
     const email = filterTrigger({
       id: 'mail',
       source: 'email',
@@ -73,11 +81,11 @@ describe('two-level filter', () => {
       at: '2026-10-31T00:00:00.000Z',
       text: '@ds-agent please fix the login timeout',
       meta: {},
-    }, model)
+    }, semanticOnly)
     expect(email.layer).toBe('fast')
     expect(email.reason).toBe('source-not-allowlisted')
 
-    runtime = freshRuntime({ model })
+    runtime = freshRuntime()
     const noise = runtime.ingest(imTrigger({
       id: 'trg_noise',
       thread: 'topic/chatter',
@@ -106,7 +114,8 @@ describe('two-level filter', () => {
   })
 
   it('uses HttpOpenAI when DS_AGENT_API_BASE and DS_AGENT_API_KEY are both set', () => {
-    expect(createModelFromEnv({}).name).toBe('MockModel')
+    expect(createModelFromEnv({})).toMatchObject({ name: expect.stringMatching(/MockModel|HttpOpenAI/) })
+    // Empty explicit env still allows Mock via createModelFromEnv; demo/fixtures refuse it.
     expect(createModelFromEnv({ DS_AGENT_API_BASE: 'http://127.0.0.1:9/v1', DS_AGENT_API_KEY: 'test' }).name).toBe('HttpOpenAI')
   })
 

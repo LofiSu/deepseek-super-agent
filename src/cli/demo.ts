@@ -2,40 +2,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { githubTrigger } from '../channels/github.ts'
 import { imTrigger } from '../channels/im.ts'
-import { MockModel, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
+import { requireLiveModelFromEnv, type Model } from '../harness/model.ts'
 import { resolveLiveApi } from '../harness/providers.ts'
 import { Runtime } from '../runtime.ts'
 import type { Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 
-export const DEMO_PROOFS = [
-  'model=MockModel',
-  'RouterSession',
-  'WorkerSession',
-  'dual-layer',
-  'two-level',
-  'layer=fast',
-  'layer=semantic',
-  'noise dropped',
-  'Intake.receive',
-  'Evals.batch',
-  'Tickets.create',
-  'Assignments.start',
-  'bypass=subscription',
-  'ticketId=',
-  'parallel workers',
-  'spillId=',
-  'read_object',
-  'speculative silent',
-  'deliver=true',
-  'async job started',
-  '[watchdog] tick',
-  'purpose=acknowledgement',
-  'purpose=result',
-  'restart persistence',
-]
-
-/** Engine-side markers that still apply with a real OpenAI-compatible model. */
+/** Engine-side markers required for the live Magpie/DeepSeek demo. */
 export const LIVE_DEMO_PROOFS = [
   'model=HttpOpenAI',
   'two-level',
@@ -47,20 +20,26 @@ export const LIVE_DEMO_PROOFS = [
   'restart persistence',
 ]
 
+/** @deprecated Demo always uses a live model; kept as an alias for LIVE_DEMO_PROOFS. */
+export const DEMO_PROOFS = LIVE_DEMO_PROOFS
+
 export function defaultHome(): string {
   return process.env.DS_AGENT_HOME ?? path.join(process.cwd(), '.ds-agent')
 }
 
 /**
- * Zero-config returns MockModel. A resolved live API is HttpOpenAI from
- * `requireLiveModelFromEnv` — demo never substitutes MockModel for that.
+ * Always returns a live HttpOpenAI. Refuses MockModel when no provider is configured.
  */
 export function demoModel(env: NodeJS.ProcessEnv = process.env): { model: Model; provider: string | null } {
   const live = resolveLiveApi(env)
-  if (!live) return { model: new MockModel(), provider: null }
+  if (!live) {
+    throw new Error(
+      'pnpm demo requires a live model (set DS_AGENT_API_BASE + DS_AGENT_API_KEY, or a provider key). MockModel is forbidden.',
+    )
+  }
   const model: Model = requireLiveModelFromEnv(env)
   if (model.name === 'MockModel') {
-    throw new Error('pnpm demo must not use MockModel when a live API is configured')
+    throw new Error('pnpm demo must not use MockModel')
   }
   return { model, provider: live.provider }
 }
@@ -68,21 +47,18 @@ export function demoModel(env: NodeJS.ProcessEnv = process.env): { model: Model;
 export async function runDemo(home = defaultHome()): Promise<void> {
   const selected = demoModel()
   const model = selected.model
-  const live = model.name !== 'MockModel'
   fs.rmSync(home, { recursive: true, force: true })
   const runtime = Runtime.create({
     home,
     model,
-    jobDelayMs: live ? 250 : 30,
-    watchdogIntervalMs: live ? 250 : 20,
+    jobDelayMs: 250,
+    watchdogIntervalMs: 250,
     stuckMs: 60_000,
   })
   runtime.log.info('ds-agent demo')
   runtime.log.info('not an official DeepSeek product')
   runtime.log.info(
-    live
-      ? `demo model=${model.name} provider=${selected.provider} (real API; scripted Mock proofs skipped)`
-      : `demo model=${model.name} (zero-config MockModel; set a provider API key or DS_AGENT_API_BASE + DS_AGENT_API_KEY to call a real model)`,
+    `demo model=${model.name} provider=${selected.provider} (live Magpie/DeepSeek; MockModel forbidden)`,
   )
   runtime.start()
   try {
@@ -126,10 +102,38 @@ export async function runDemo(home = defaultHome()): Promise<void> {
       speculate: true,
     }))
     await runtime.watchdogTurn()
-    await runtime.jobsSettled()
-    const before = runtime.store.listDocs<Ticket>('ticket')
+    // Live models may keep scheduling bash/start_job; cap wait so demo exits.
     runtime.daemon.stop()
-    runtime.store.close()
+    {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const settled = runtime.jobsSettled().then(
+        () => 'settled' as const,
+        () => 'failed' as const,
+      )
+      const deadline = new Promise<'deadline'>(resolve => {
+        timer = setTimeout(() => resolve('deadline'), 45_000)
+      })
+      try {
+        const outcome = await Promise.race([settled, deadline])
+        runtime.log.info(`jobsSettled outcome=${outcome}`)
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+    const before = runtime.store.listDocs<Ticket>('ticket')
+    runtime.log.info(
+      `pre-restart tickets=${before.length} ids=${before.map(ticket => ticket.id).join(',')}`,
+    )
+    // Snapshot while open; avoid close() racing leftover live turns.
+    const beforeIds = before.map(ticket => ticket.id).sort().join(',')
+    if (before.length < 3) {
+      throw new Error(`expected >=3 tickets before restart check, got ${before.length}`)
+    }
+    try {
+      runtime.store.close()
+    } catch (error) {
+      runtime.log.info(`store close skipped: ${error instanceof Error ? error.message : error}`)
+    }
     const reopened = new Store(home)
     try {
       const tickets = reopened.listDocs<Ticket>('ticket')
@@ -137,7 +141,8 @@ export async function runDemo(home = defaultHome()): Promise<void> {
       runtime.log.info(
         `restart persistence ok tickets=${tickets.length} ids=${tickets.map(ticket => ticket.id).join(',')} jobs=${jobs.length}`,
       )
-      if (tickets.length !== before.length || tickets.length < 3) {
+      const afterIds = tickets.map(ticket => ticket.id).sort().join(',')
+      if (tickets.length < 3 || afterIds !== beforeIds) {
         throw new Error(`restart lost tickets: before=${before.length} after=${tickets.length}`)
       }
     } finally {
@@ -149,18 +154,22 @@ export async function runDemo(home = defaultHome()): Promise<void> {
       runtime.store.close()
     }
   }
-  const proofs = live ? LIVE_DEMO_PROOFS : DEMO_PROOFS
-  const missing = proofs.filter(needle => !runtime.log.lines.some(line => line.includes(needle)))
+  const missing = LIVE_DEMO_PROOFS.filter(needle => !runtime.log.lines.some(line => line.includes(needle)))
   if (missing.length > 0) {
     throw new Error(`missing proofs: ${missing.join(', ')}`)
   }
-  runtime.log.info(live ? 'demo ok (live model)' : 'demo ok')
+  runtime.log.info('demo ok (live model)')
 }
 
 const entry = process.argv[1] ?? ''
 if (entry.endsWith('demo.ts') || entry.endsWith('demo.js')) {
-  runDemo().catch(error => {
-    console.error(error instanceof Error ? error.stack ?? error.message : error)
-    process.exitCode = 1
-  })
+  runDemo()
+    .then(() => {
+      // Live turns may still hold the event loop; exit after proofs pass.
+      process.exit(0)
+    })
+    .catch(error => {
+      console.error(error instanceof Error ? error.stack ?? error.message : error)
+      process.exit(1)
+    })
 }

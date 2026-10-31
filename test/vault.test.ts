@@ -33,7 +33,8 @@ describe('T51 vault + Store/Env boundary', () => {
       expect(wrapped.wrapped).toBe(true)
       expect(wrapped.argv[0]).toBe('sandbox-exec')
     } else {
-      expect(wrapped.argv[0]).toBe('bash')
+      // Linux runners often have unshare/bwrap; prefer that over bare bash.
+      expect(['bash', 'unshare', 'bwrap']).toContain(wrapped.argv[0])
     }
   })
 

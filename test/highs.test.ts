@@ -16,7 +16,7 @@ import type { Runtime } from '../src/runtime.ts'
 import type { Decision, Ticket } from '../src/shared/types.ts'
 import { Store } from '../src/store/sqlite.ts'
 import { stuckAssignments } from '../src/watchdog/watchdog.ts'
-import { freshRuntime, shutdown, tempHome } from './fixtures.ts'
+import { freshRuntime, settleWithDeadline, shutdown, tempHome } from './fixtures.ts'
 
 let runtime: Runtime | undefined
 const open: Store[] = []
@@ -90,7 +90,7 @@ describe('gate and assessment', () => {
     const late = runtime.engine.report(original.id, { kind: 'ready', text: 'too late', deliver: true })
     expect(late).toEqual({ surfaced: false, verdict: 'hold' })
     expect(runtime.store.getDoc<Ticket>('ticket', original.id)?.ended).toMatchObject({ outcome: 'stopped', by: 'human' })
-    await runtime.jobsSettled()
+    await settleWithDeadline(runtime, 90_000)
     expect(runtime.store.getDoc<Ticket>('ticket', original.id)?.ended).toMatchObject({ outcome: 'stopped', by: 'human' })
   })
 

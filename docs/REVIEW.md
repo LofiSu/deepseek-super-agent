@@ -219,6 +219,11 @@ Measured: `spawn('bash', ['-c', 'echo PID $$; sleep 3; echo DONE'], { timeout: 5
 
 `reply_user` is router-only at the tool registry (`src/harness/tools.ts:62-72`). `Engine.reply` itself has no role check (`src/core/engine.ts:45-50`). The "worker cannot speak" rule is the tool list, not the engine.
 
+> **Fixed in `feat/live-demo-scenarios`.** `Replies.send` now writes a durable
+> `outbox` row with `status: 'pending'`; `src/channels/outbox-adapter.ts` calls a
+> real Feishu/GitHub adapter and only then marks the reply `sent`. The three
+> acceptance demos re-read the provider comment/message id from the API.
+
 ### M2. MockModel's control protocol is a substring of untrusted text
 
 **B.** Router and worker decisions scan the whole transcript with `String.includes` (`src/harness/model.ts:93-146`). The transcript contains the ticket title and the trigger body. `deliver=false` is checked before `deliver=true` (`src/harness/model.ts:94-95`). A title that contains `deliver=false` makes the router return `[router] speculative silent` and skip `reply_user` on the create turn. A brief that contains `JOB_DONE` makes the worker return immediately (`src/harness/model.ts:121`) and skip bash, spill read, and the report. This is the model `pnpm demo` uses to claim those behaviors.

@@ -135,6 +135,28 @@ export interface ReplyRow {
   createdAt: string
 }
 
+/**
+ * Durable outbound queue. `Replies` writes here inside the Engine transaction;
+ * a channel adapter (Feishu message API, GitHub issue/PR comment API) drains it.
+ */
+export interface OutboxRow {
+  id: string
+  replyId: string
+  ticketId: string
+  /** Channel norms key: `im`, `github`, `cli`. */
+  channel: string
+  /** Thread key as stored on the ticket (`github:issue:12`, `im:feishu:oc_...`). */
+  thread: string
+  /** Delivery address copied from `ChannelRef.address` (repo/issue or chat_id/message_id). */
+  target: Record<string, string>
+  text: string
+  status: 'pending' | 'sent' | 'failed'
+  externalId?: string
+  error?: string
+  createdAt: string
+  sentAt?: string
+}
+
 export interface JobRow {
   id: string
   sessionId: string

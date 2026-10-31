@@ -20,7 +20,10 @@ function option(name: string): string | undefined {
 function help(): void {
   console.log(`ds-agent — local super-agent demo (not an official DeepSeek product)
 
-  pnpm demo
+  pnpm demo                 real GitHub issues/comments + live model (acceptance)
+  pnpm demo -- --only watchdog
+  pnpm demo:local           in-memory fixture baseline (not channel acceptance)
+  pnpm demo:feishu          real Feishu message API smoke (needs app creds)
   pnpm ds-agent init
   pnpm ds-agent tasks
   pnpm ds-agent status
@@ -37,7 +40,9 @@ or one provider key: DEEPSEEK_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
 XAI_API_KEY / GROK_API_KEY, MOONSHOT_API_KEY / KIMI_API_KEY, ZHIPU_API_KEY / GLM_API_KEY,
 GEMINI_API_KEY / GOOGLE_API_KEY, ANTHROPIC_API_KEY.
 Optional DS_AGENT_PROVIDER picks a preset when several keys are set.
-pnpm demo uses MockModel only when no key is set, and it prints that. A half-set DS_AGENT_API_BASE/KEY fails instead of silently using MockModel.`)
+pnpm demo always requires a live model and authenticated gh (MockModel/fake IM/GitHub forbidden).
+Real GitHub repo: DS_AGENT_GH_REPO (default LofiSu/deepseek-super-agent).
+A half-set DS_AGENT_API_BASE/KEY fails instead of falling back.`)
 }
 
 async function withRuntime(work: (runtime: Runtime) => Promise<void> | void): Promise<void> {
@@ -67,8 +72,9 @@ async function main(): Promise<void> {
     return
   }
   if (cmd === 'demo') {
+    // Legacy local fixture flow. `pnpm demo` is the real-channel acceptance runner.
     await runDemo(home)
-    console.log('demo ok')
+    console.log('demo:local ok (fixture baseline; use pnpm demo for real channels)')
     return
   }
   if (cmd === 'init') {

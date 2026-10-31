@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
-    testTimeout: 20_000,
+    setupFiles: ['test/setup-live.ts'],
+    // Live Magpie DeepSeek turns are slower than MockModel.
+    testTimeout: 180_000,
+    hookTimeout: 60_000,
   },
 })
