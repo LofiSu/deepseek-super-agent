@@ -3,6 +3,7 @@ import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv } from '../harness/model.ts'
+import { formatMetricsJson } from '../metrics/metrics.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
@@ -25,8 +26,10 @@ function help(): void {
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
+  pnpm ds-agent metrics
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
+Section 7 counters are written to <stateDir>/metrics.json and printed by metrics.
 Cloud model: DS_AGENT_API_BASE + DS_AGENT_API_KEY (optional DS_AGENT_API_MODEL),
 or one provider key: DEEPSEEK_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
 XAI_API_KEY / GROK_API_KEY, MOONSHOT_API_KEY / KIMI_API_KEY, ZHIPU_API_KEY / GLM_API_KEY,
@@ -78,6 +81,10 @@ async function main(): Promise<void> {
     if (tickets.length === 0) console.log('no tickets')
     for (const ticket of tickets) console.log(`${ticket.id}\t${ticketStage(ticket)}\t${ticket.title}`)
     store.close()
+    return
+  }
+  if (cmd === 'metrics') {
+    console.log(formatMetricsJson(home))
     return
   }
   if (cmd === 'status') {

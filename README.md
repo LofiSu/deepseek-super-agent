@@ -97,6 +97,7 @@ Legend: `[x]` implemented and covered by the demo or tests · `[~]` skeleton or 
 
 ### §7 Experiments (article evals; do not block the open-source release)
 
+- [x] **Runtime counters** — ingress admit/drop, eval accept, bypass fan-out, speculative deliver/discard, watchdog nudge/fail, model latency (`ds-agent metrics`, `<stateDir>/metrics.json`)
 - [ ] **End-to-end dual layer vs single Session** — Phase-2 / optional M12 (T45)
 - [ ] **Router batching stress curves** — Phase-2 (T45)
 
@@ -107,7 +108,7 @@ Legend: `[x]` implemented and covered by the demo or tests · `[~]` skeleton or 
 - [ ] A product shell that is not a Session (§8.2)
 - [ ] Mid-task human collaboration UX (§8.2)
 - [ ] A2A across instances (§8.3)
-- [ ] Deeper security and privacy; credentials never enter the model context (§8.4; baseline: secrets stay out of the prompt) — PLAN T51
+- [~] Credential values stay out of bash stdout, file reads, tool results, and prompts (LocalEnv allowlist + `[redacted]`). Vault / seccomp still open (§8.4 T51)
 
 ### Modules M0–M11
 

@@ -77,6 +77,7 @@ export class Tickets {
     this.host.repo.putDoc('decision', decision.id, decision)
     this.host.log(`[engine] Tickets.create ticketId=${id} title=${ticket.title} speculative=${ticket.speculative}`)
     this.host.log(`[engine] Evals.accept thread=${input.thread.key} ticketId=${id} strength=${input.strength}`)
+    this.host.metrics.increment('eval.accept')
     this.host.repo.addEvent('ticket.created', { ticketId: id, decisionId: decision.id, speculative })
     this.host.repo.addEvent('decision.recorded', { decisionId: decision.id, kind: 'accept' })
     if (speculative) this.host.log(`[speculate] speculative silent ticketId=${id} until deliver`)

@@ -66,6 +66,7 @@ export class Intake {
     for (const ticketId of fanout) {
       this.host.log(`bypass=subscription ticketId=${ticketId} thread=${primaryKey} triggerId=${trigger.id}`)
     }
+    if (fanout.length > 0) this.host.metrics.increment('bypass.fanout', fanout.length)
     if (fanout.length === 0 && primary) {
       primary.pending = [...primary.pending, trigger.id]
       this.host.repo.putDoc('thread', primary.key, primary)

@@ -1,4 +1,6 @@
 import type { Engine } from '../core/engine.ts'
+import { redactRecord } from '../env/sanitize.ts'
+import type { Metrics } from '../metrics/metrics.ts'
 import type { Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
@@ -12,6 +14,8 @@ export interface HarnessOptions {
   store: Store
   engine: Engine
   journal: SessionJournal
+  metrics: Metrics
+  redact: (text: string) => string
   log: (line: string) => void
   jobDelayMs: number
 }
@@ -167,6 +171,8 @@ export class Harness {
         tools: this.opts.tools,
         journal: this.opts.journal,
         log: this.opts.log,
+        metrics: this.opts.metrics,
+        redact: this.opts.redact,
         session: { id: sessionId, role, ticketId },
         prompt,
       })
@@ -190,6 +196,8 @@ export async function runTurn(input: {
   tools: ToolRegistry
   journal: SessionJournal
   log: (line: string) => void
+  metrics: Metrics
+  redact: (text: string) => string
   session: { id: string; role: Role; ticketId?: string }
   prompt: string
   maxSteps?: number
@@ -197,20 +205,28 @@ export async function runTurn(input: {
   const label = input.session.role === 'router'
     ? 'RouterSession'
     : input.session.role === 'worker' ? 'WorkerSession' : 'WatchdogSession'
+  const redact = input.redact
   input.log(`[harness] ${label} turn session=${input.session.id}`)
+  const prompt = redact(input.prompt)
   const messages: ModelMessage[] = [
-    { role: 'system', content: systemPrompt(input.session.role) },
-    { role: 'user', content: input.prompt },
+    { role: 'system', content: redact(systemPrompt(input.session.role)) },
+    { role: 'user', content: prompt },
   ]
-  input.journal.append(input.session.id, { role: 'user', kind: 'message', content: input.prompt })
+  input.journal.append(input.session.id, { role: 'user', kind: 'message', content: prompt })
   const tools = input.tools.specsFor(input.session.role)
   const maxSteps = input.maxSteps ?? 10
   for (let step = 0; step < maxSteps; step += 1) {
     input.log(`[harness] async-react step=${step} session=${input.session.id} role=${input.session.role}`)
+    const started = performance.now()
     const out = await input.model.complete({ role: input.session.role, messages, tools })
-    const calls = out.toolCalls ?? []
-    messages.push({ role: 'assistant', content: out.text ?? '', toolCalls: calls })
-    input.journal.append(input.session.id, { role: 'assistant', kind: 'message', content: out.text ?? '', toolCalls: calls })
+    input.metrics.observeModelLatency(performance.now() - started)
+    const text = redact(out.text ?? '')
+    const calls = (out.toolCalls ?? []).map(toolCall => ({
+      ...toolCall,
+      args: redactRecord(toolCall.args, redact),
+    }))
+    messages.push({ role: 'assistant', content: text, toolCalls: calls })
+    input.journal.append(input.session.id, { role: 'assistant', kind: 'message', content: text, toolCalls: calls })
     if (calls.length === 0) break
     for (const toolCall of calls) {
       let content: string
@@ -220,9 +236,9 @@ export async function runTurn(input: {
           role: input.session.role,
           ticketId: input.session.ticketId,
         })
-        content = JSON.stringify(result)
+        content = redact(JSON.stringify(result))
       } catch (error) {
-        content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) })
+        content = redact(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
       }
       messages.push({ role: 'tool', name: toolCall.name, toolCallId: toolCall.id, content })
       input.journal.append(input.session.id, { role: 'tool', name: toolCall.name, kind: 'tool', content })

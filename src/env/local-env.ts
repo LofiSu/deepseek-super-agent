@@ -3,15 +3,38 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import { UserError } from '../shared/errors.ts'
+import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
+
+export interface LocalEnvOptions {
+  timeoutMs?: number
+  /** Parent environment. Only allowlisted names are copied into the child. */
+  env?: NodeJS.ProcessEnv
+  allowlist?: readonly string[]
+}
 
 /**
  * Local workspace per worker. Speculative bash and writes use a scratch
  * directory under `speculative/` so a discard can delete them.
  * A cloud executor would implement the same EnvPort and run bash off-box.
+ *
+ * The child process receives an allowlisted environment. Secret values from the
+ * parent are stripped from stdout, stderr, and file reads before they can become
+ * tool results or model prompts.
  */
 export class LocalEnv implements EnvPort {
-  constructor(private readonly root: string, private readonly timeoutMs = 5_000) {
+  private readonly timeoutMs: number
+  private readonly childEnv: NodeJS.ProcessEnv
+  private readonly secrets: readonly string[]
+
+  constructor(private readonly root: string, timeoutOrOptions: number | LocalEnvOptions = {}) {
     fs.mkdirSync(root, { recursive: true })
+    const options: LocalEnvOptions = typeof timeoutOrOptions === 'number'
+      ? { timeoutMs: timeoutOrOptions }
+      : timeoutOrOptions
+    const env = options.env ?? process.env
+    this.timeoutMs = options.timeoutMs ?? 5_000
+    this.childEnv = allowlistedEnv(env, options.allowlist ?? ENV_ALLOWLIST)
+    this.secrets = secretValues(env)
   }
 
   workspace(workerId: string): string {
@@ -49,11 +72,11 @@ export class LocalEnv implements EnvPort {
       throw new UserError('speculative command leaves the isolated workdir')
     }
     const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
-    return await new Promise((resolve, reject) => {
+    const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn('bash', ['-c', command], {
         cwd,
         timeout: this.timeoutMs,
-        env: isolated ? { ...process.env, HOME: cwd, TMPDIR: cwd } : process.env,
+        env: this.shellEnv(cwd, isolated),
       })
       let stdout = ''
       let stderr = ''
@@ -62,6 +85,11 @@ export class LocalEnv implements EnvPort {
       child.on('error', reject)
       child.on('close', code => resolve({ code: code ?? 1, stdout, stderr }))
     })
+    return {
+      code: result.code,
+      stdout: redactSecrets(result.stdout, this.secrets),
+      stderr: redactSecrets(result.stderr, this.secrets),
+    }
   }
 
   async writeFile(workerId: string, relativePath: string, body: string, opts?: EnvRunOptions): Promise<string> {
@@ -72,7 +100,17 @@ export class LocalEnv implements EnvPort {
   }
 
   async readFile(workerId: string, relativePath: string, opts?: EnvRunOptions): Promise<string> {
-    return fs.readFileSync(this.safe(workerId, relativePath, opts?.isolated === true), 'utf8')
+    const text = fs.readFileSync(this.safe(workerId, relativePath, opts?.isolated === true), 'utf8')
+    return redactSecrets(text, this.secrets)
+  }
+
+  private shellEnv(cwd: string, isolated: boolean): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...this.childEnv }
+    if (isolated) {
+      env.HOME = cwd
+      env.TMPDIR = cwd
+    }
+    return env
   }
 
   private scratch(workerId: string): string {
