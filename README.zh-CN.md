@@ -97,6 +97,7 @@ LofiSu × Grokbot（CoderBot）。
 
 ### §7 实验（文章评测，不挡开源）
 
+- [x] **调度计数** — Ingress admit/drop、Eval accept、订阅 bypass fan-out、投机 deliver/discard、Watchdog nudge/fail、model latency；`ds-agent metrics` 与 `<stateDir>/metrics.json`
 - [ ] **端到端对比双层 vs 单 Session** — Phase-2 / 可选 M12（T45）
 - [ ] **Router 批处理压测曲线** — Phase-2（T45）
 
@@ -107,7 +108,7 @@ LofiSu × Grokbot（CoderBot）。
 - [ ] 脱离 Session 的产品交互壳（§8.2）
 - [ ] 中途人机协同 UX（§8.2）
 - [ ] A2A 跨实例（§8.3）
-- [ ] 安全隐私深化；凭据永不进模型上下文（§8.4，基线：密钥不进 prompt）— PLAN T51
+- [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 环境变量白名单 + `[redacted]`；外置 vault / seccomp 仍未做（§8.4 T51）
 
 ### 模块对照（M0–M11）
 

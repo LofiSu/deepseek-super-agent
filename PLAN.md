@@ -258,7 +258,7 @@ flowchart TB
 | T42 | Timer-driven | §6 | M10 | `setInterval` / due tick 表 |
 | T43 | Infra faults + task progress / goal drift | §6 | M10 | health + stalled Assignment + NL drift check |
 | T44 | NL maintainability prompts/rules | §6 | M10 | `prompts/watchdog.md`；规则 YAML/JSON |
-| T45 | §7 实验指标 | §7 | M12 opt | demo metrics batching/passthrough；不挡 OSS |
+| T45 | §7 实验指标 | §7 | M12 | counters in `metrics.json` + `ds-agent metrics`；端到端曲线仍可选 |
 | T46 | §8 Router sharding | §8 | Phase-2 | 见 §9 |
 | T47 | §8 Worker mesh | §8 | Phase-2 | 见 §9 |
 | T48 | §8 Long-term memory | §8 | Phase-2 | Spill 之上的跨 Ticket 记忆 |
@@ -861,13 +861,13 @@ pnpm install && pnpm test && pnpm demo
 
 | ID | 项 | 说明 | 建议接口占位 |
 |----|----|------|--------------|
-| P2-1 | §7 实验指标 | batching 延迟、passthrough 比、token；可选 `M12-metrics` | `Metrics.record(name, value)` |
+| P2-1 | §7 实验指标 | 计数已落地（admit/drop、accept、fan-out、deliver/discard、nudge/fail、model latency）；批处理曲线与 token 仍可选 | `<stateDir>/metrics.json` · `ds-agent metrics` |
 | P2-2 | Router sharding / multi-filter | 多 Sequence Point；按 source/hash 分片 | `RouterShard { filter, harness }` |
 | P2-3 | Worker mesh | Worker 间协作；对 Router 仍不透明 | Worker 侧 bus（不出 M11） |
 | P2-4 | Long-term memory | 跨 Ticket 记忆索引 | `MemoryApi.search(query)` |
 | P2-5 | Product UX without Session | 无会话产品壳 / 面板 | 另仓 |
 | P2-6 | A2A | Agent-to-agent | 标准信封 TBD |
-| P2-7 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | vault 外置；M11 已保证不进 context |
+| P2-7 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | allowlist + redact 已落地；vault / seccomp 仍外置 |
 
 ---
 
@@ -1027,7 +1027,7 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 | §4.2 信道规范 | T33–T35 | 有 | channels/norms | email 模板可再补 |
 | §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
 | §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
-| §7 实验 | T45 | 标明未做 | — | 可选 M12 |
-| §8 未决 | T46–T51 | 标明 Phase-2 | T51 基线 | 其余 Phase-2 |
+| §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
+| §8 未决 | T46–T51 | T51 白名单+脱敏已做 | `env/sanitize.ts` | vault/seccomp 仍 Phase-2 |
 
-**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单；未实现项显式标 `[ ]`/`[~]`/Phase-2，无静默遗漏。
+**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数（`metrics.json`）与 §8 凭据脱敏已落地；端到端压测曲线、vault/seccomp 及其余 §8 项仍标 `[ ]`/`[~]`/Phase-2。

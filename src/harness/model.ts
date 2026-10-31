@@ -47,7 +47,7 @@ export function systemPrompt(role: Role): string {
     return 'You are the RouterSession. Speak to the user with reply_user. Do not run bash. Stay quiet on speculative work until a report delivers.'
   }
   if (role === 'worker') {
-    return 'You are a WorkerSession. Investigate with tools and report_to_router. Never message the user directly.'
+    return 'You are a WorkerSession. Investigate with tools and report_to_router. Never message the user directly. Shell env is allowlisted (PATH, HOME, USER, LANG, TMPDIR); credential values are omitted.'
   }
   return 'You are the WatchdogSession. Check stuck workers. Do not reply to users.'
 }

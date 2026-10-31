@@ -7,6 +7,7 @@ import { Engine } from '../src/core/engine.ts'
 import type { Host } from '../src/core/host.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
+import { Metrics } from '../src/metrics/metrics.ts'
 import { workerSessionId } from '../src/harness/session.ts'
 import { HeuristicDeliverGate, maySurface } from '../src/speculate/gate.ts'
 import { visibleTickets } from '../src/speculate/index.ts'
@@ -28,6 +29,7 @@ function hostFor(store: Store, lines: string[]): Host {
     repo: store,
     now: () => '2026-10-31T00:00:00.000Z',
     log: line => lines.push(line),
+    metrics: new Metrics(path.dirname(store.path)),
     scope: { admit: () => ({ listened: true, reason: 'test' }) },
   }
 }
@@ -179,6 +181,8 @@ describe('speculative workdir', () => {
       store,
       engine,
       env,
+      metrics: new Metrics(path.dirname(store.path)),
+      redact: (text: string) => text,
       log: line => lines.push(line),
       scheduleJob: () => {},
       routerTurn: async () => {},
@@ -236,6 +240,8 @@ describe('speculative workdir', () => {
       store,
       engine,
       env,
+      metrics: new Metrics(path.dirname(store.path)),
+      redact: (text: string) => text,
       log: () => {},
       scheduleJob: () => {},
       routerTurn: async () => {},
@@ -289,6 +295,8 @@ describe('speculative workdir', () => {
       store,
       engine,
       env,
+      metrics: new Metrics(path.dirname(store.path)),
+      redact: (text: string) => text,
       log: () => {},
       scheduleJob: () => {},
       routerTurn: async () => {},
@@ -324,6 +332,8 @@ describe('speculative workdir', () => {
       store,
       engine,
       env,
+      metrics: new Metrics(path.dirname(store.path)),
+      redact: (text: string) => text,
       log: () => {},
       scheduleJob: () => {},
       routerTurn: async () => {},
