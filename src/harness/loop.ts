@@ -4,7 +4,7 @@ import type { Metrics } from '../metrics/metrics.ts'
 import type { Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
-import { workerSessionId, type SessionJournal } from './session.ts'
+import { workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -223,8 +223,13 @@ async function runTurnBody(input: {
   const redact = input.redact
   input.log(`[harness] ${label} turn session=${input.session.id}`)
   const prompt = redact(input.prompt)
+  const prior = messagesFromJournal(input.journal.history(input.session.id)).map(message => ({
+    ...message,
+    content: redact(message.content),
+  }))
   const messages: ModelMessage[] = [
     { role: 'system', content: redact(systemPrompt(input.session.role)) },
+    ...prior,
     { role: 'user', content: prompt },
   ]
   input.journal.append(input.session.id, { role: 'user', kind: 'message', content: prompt })
@@ -256,7 +261,29 @@ async function runTurnBody(input: {
         content = redact(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
       }
       messages.push({ role: 'tool', name: toolCall.name, toolCallId: toolCall.id, content })
-      input.journal.append(input.session.id, { role: 'tool', name: toolCall.name, kind: 'tool', content })
+      input.journal.append(input.session.id, {
+        role: 'tool',
+        name: toolCall.name,
+        kind: 'tool',
+        toolCallId: toolCall.id,
+        content,
+      })
     }
   }
+}
+
+function messagesFromJournal(entries: JournalEntry[]): ModelMessage[] {
+  const messages: ModelMessage[] = []
+  for (const entry of entries) {
+    if (entry.role !== 'user' && entry.role !== 'assistant' && entry.role !== 'tool') continue
+    const message: ModelMessage = {
+      role: entry.role,
+      content: String(entry.content ?? ''),
+    }
+    if (entry.name) message.name = entry.name
+    if (entry.toolCallId) message.toolCallId = entry.toolCallId
+    if (entry.toolCalls?.length) message.toolCalls = entry.toolCalls
+    messages.push(message)
+  }
+  return messages
 }

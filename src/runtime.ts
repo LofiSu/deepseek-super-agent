@@ -134,6 +134,8 @@ export class Runtime {
     late.harness = harness
     const watchdog = new Watchdog({
       store,
+      engine,
+      journal,
       metrics,
       log: line => log.info(line),
       intervalMs: opts.watchdogIntervalMs ?? 15_000,
@@ -183,6 +185,7 @@ export class Runtime {
     }
     if (result !== 'stored') return result
     for (const decision of this.engine.evaluateDue()) {
+      // Gate runs before any worker. ignore, stop, and unavailable do not launch.
       if (decision.kind === 'accept' && decision.ticketId) {
         const ticket = this.store.getDoc<Ticket>('ticket', decision.ticketId)
         if (ticket) this.harness.launch(ticket)

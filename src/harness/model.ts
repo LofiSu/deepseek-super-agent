@@ -69,6 +69,15 @@ function field(blob: string, key: string): string {
   return match?.[1]?.trim() ?? ''
 }
 
+/** Messages from the latest user prompt through the tool results of this turn. */
+export function currentTurn(messages: ModelMessage[]): ModelMessage[] {
+  let start = 0
+  for (let i = 0; i < messages.length; i += 1) {
+    if (messages[i]?.role === 'user') start = i
+  }
+  return messages.slice(start)
+}
+
 function call(name: string, args: Record<string, unknown>, n = 0): Completion {
   return { toolCalls: [{ id: `call_${name}_${n}`, name, args }] }
 }
@@ -82,13 +91,15 @@ export class MockModel implements Model {
   }
 
   async complete(request: CompletionRequest): Promise<Completion> {
-    const blob = blobOf(request.messages)
-    if (request.role === 'router') return this.router(request.messages, blob)
+    // History is on the request. Scripted control follows the current user turn only.
+    const turn = currentTurn(request.messages)
+    const blob = blobOf(turn)
+    if (request.role === 'router') return this.router(turn, blob)
     if (request.role === 'watchdog') {
-      if (!used(request.messages, 'list_tasks')) return call('list_tasks', {})
+      if (!used(turn, 'list_tasks')) return call('list_tasks', {})
       return { text: '[watchdog] healthy' }
     }
-    return this.worker(request.messages, blob)
+    return this.worker(turn, blob)
   }
 
   private router(messages: ModelMessage[], blob: string): Completion {

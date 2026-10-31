@@ -11,3 +11,5 @@ export type DomainEventName =
   | 'trigger.requeued'
   | 'speculate.delivered'
   | 'speculate.discarded'
+  | 'watchdog.nudge'
+  | 'watchdog.fail'

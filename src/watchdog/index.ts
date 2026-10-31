@@ -1,1 +1,1 @@
-export { Watchdog, stuckSessions } from './watchdog.ts'
+export { Watchdog, stuckAssignments, stuckSessions } from './watchdog.ts'

@@ -1,4 +1,6 @@
+import { grantTicketSpill } from '../memory/acl.ts'
 import { UserError } from '../shared/errors.ts'
+import { commandOf } from './assessment.ts'
 import {
   threadKey,
   type Assignment,
@@ -37,12 +39,15 @@ export class Intake {
       if (!primary) primary = thread
       if (!thread.lastAt || trigger.at > thread.lastAt) thread.lastAt = trigger.at
       thread.correlated = [...new Set([...thread.correlated, ...keys.filter(key => key !== thread.key)])]
-      for (const ticketId of [...thread.subscriptions]) {
-        if (seen.has(ticketId)) continue
-        seen.add(ticketId)
-        const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
-        if (!ticket || !bypassEligible(ticket, trigger)) continue
-        eligible.push(ticket)
+      // Stop / ignore / unavailable stay on the Eval queue instead of bypassing into the worker.
+      if (!commandOf(trigger.text)) {
+        for (const ticketId of [...thread.subscriptions]) {
+          if (seen.has(ticketId)) continue
+          seen.add(ticketId)
+          const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
+          if (!ticket || !bypassEligible(ticket, trigger)) continue
+          eligible.push(ticket)
+        }
       }
       this.host.repo.putDoc('thread', thread.key, thread)
     }
@@ -58,6 +63,7 @@ export class Intake {
         at,
         human: trigger.human,
       })
+      grantTicketSpill(this.host.repo, spillOf(trigger), winner.id)
       this.host.repo.putDoc('ticket', winner.id, winner)
     }
 
