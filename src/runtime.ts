@@ -9,7 +9,7 @@ import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger } from './ingress/filter.ts'
 import { inlineOrSpill } from './memory/recall.ts'
 import { Logger } from './shared/log.ts'
-import type { Disposition, ReceiveResult, Ticket, Trigger } from './shared/types.ts'
+import type { Disposition, ReceiveResult, SessionRow, Ticket, Trigger } from './shared/types.ts'
 import { LocalEnv } from './env/local-env.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
@@ -20,6 +20,12 @@ export interface RuntimeOptions {
   jobDelayMs?: number
   watchdogIntervalMs?: number
   stuckMs?: number
+  /** Gap between watchdog nudges for one session. Default is `stuckMs`. */
+  nudgeEveryMs?: number
+  /** Nudges before the next tick fails the assignment. Default 3. */
+  failAfter?: number
+  /** Clock for watchdog stuck detection, in epoch ms. Engine `now` stays an ISO string. */
+  watchNow?: () => number
   now?: () => string
 }
 
@@ -79,6 +85,19 @@ export class Runtime {
     const env = new LocalEnv(path.join(opts.home, 'workspaces'))
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const late: { harness?: Harness } = {}
+    const watchdog = new Watchdog({
+      store,
+      log: line => log.info(line),
+      intervalMs: opts.watchdogIntervalMs ?? 15_000,
+      stuckMs: opts.stuckMs ?? 60_000,
+      nudgeEveryMs: opts.nudgeEveryMs,
+      failAfter: opts.failAfter,
+      now: opts.watchNow,
+      inject: (session, note) => {
+        store.appendMessage(session.id, 'watchdog', note)
+      },
+      failAssignment: (session, reason) => failAssignment(store, engine, log, session, reason),
+    })
     const tools = new ToolRegistry({
       store,
       engine,
@@ -92,6 +111,7 @@ export class Runtime {
         if (!late.harness) throw new Error('harness is not ready')
         return late.harness.routerTurn(prompt)
       },
+      watchdog,
     })
     const harness = new Harness({
       model,
@@ -103,12 +123,6 @@ export class Runtime {
       jobDelayMs: opts.jobDelayMs ?? 40,
     })
     late.harness = harness
-    const watchdog = new Watchdog({
-      store,
-      log: line => log.info(line),
-      intervalMs: opts.watchdogIntervalMs ?? 15_000,
-      stuckMs: opts.stuckMs ?? 60_000,
-    })
     const daemon = new Daemon(watchdog, line => log.info(line))
     return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model })
   }
@@ -125,8 +139,9 @@ export class Runtime {
       return result
     }
     const verdict = filterTrigger(trigger, this.model)
+    const signals = verdict.signals.join(',') || '-'
     this.log.info(
-      `[ingress] two-level fast=${verdict.fast} semantic=${verdict.semantic} model=${this.model.name} action=${verdict.action} layer=${verdict.layer}`,
+      `[ingress] two-level fast=${verdict.fast} semantic=${verdict.semantic} path=${verdict.path} signals=${signals} policy=${verdict.policy} model=${this.model.name} action=${verdict.action} layer=${verdict.layer}`,
     )
     let incoming = trigger
     if (verdict.action === 'pass') {
@@ -179,4 +194,19 @@ export class Runtime {
     this.daemon.stop()
     if (this.store.isOpen) this.store.close()
   }
+}
+
+function failAssignment(
+  store: Store,
+  engine: Engine,
+  log: Logger,
+  session: SessionRow,
+  reason: string,
+): void {
+  const ticketId = session.ticketId
+  if (!ticketId) return
+  const ticket = store.getDoc<Ticket>('ticket', ticketId)
+  if (!ticket || ticket.ended) return
+  engine.report(ticketId, { kind: 'failed', text: reason, deliver: false })
+  log.info(`[watchdog] mark_task_failed ticketId=${ticketId}`)
 }

@@ -51,12 +51,12 @@ export function defaultHome(): string {
 }
 
 export async function runDemo(home = defaultHome()): Promise<void> {
-  fs.rmSync(home, { recursive: true, force: true })
   const model = requireLiveModelFromEnv()
   const cfg = resolveLiveApi()!
   if (model.name === 'MockModel') {
     throw new Error('ds-agent demo refuses MockModel; configure a real API key')
   }
+  fs.rmSync(home, { recursive: true, force: true })
   const runtime = Runtime.create({
     home,
     model,

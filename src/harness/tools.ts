@@ -1,8 +1,10 @@
 import { ticketStage } from '../core/stage.ts'
 import type { Engine } from '../core/engine.ts'
+import { linkedSpillIds, readObject } from '../memory/recall.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort } from '../shared/ports.ts'
 import type { Role, Ticket } from '../shared/types.ts'
+import { visibleTickets } from '../speculate/gate.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -19,6 +21,10 @@ export interface ToolDeps {
   log: (line: string) => void
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
+  watchdog: {
+    nudgeTicket(ticketId: string): void
+    failTicket(ticketId: string, reason: string): void
+  }
 }
 
 interface ToolDef extends ToolSpec {
@@ -76,7 +82,10 @@ export class ToolRegistry {
         description: 'List tickets and their stages.',
         parameters: schema(),
         roles: ['router', 'watchdog'],
-        run: async () => store.listDocs<Ticket>('ticket').map(ticket => ({
+        run: async (args, ctx) => visibleTickets(
+          store.listDocs<Ticket>('ticket'),
+          ctx.role === 'watchdog' && args.includeHidden !== false,
+        ).map(ticket => ({
           id: ticket.id,
           title: ticket.title,
           stage: ticketStage(ticket),
@@ -126,15 +135,22 @@ export class ToolRegistry {
       },
       {
         name: 'read_object',
-        description: 'Recall a spilled object by id.',
-        parameters: schema({ id: { type: 'string' } }),
-        roles: ['worker'],
+        description: 'Recall a spilled object by id. offset and limit page the body in code points.',
+        parameters: schema({
+          id: { type: 'string' },
+          offset: { type: 'number' },
+          limit: { type: 'number' },
+        }),
+        roles: ['router', 'worker'],
         run: async args => {
           const id = String(args.id ?? '')
-          const body = store.getSpill(id)
-          if (body == null) throw new UserError(`unknown spill ${id}`)
-          log(`[memory] read_object id=${id} bytes=${body.length}`)
-          return { id, bytes: body.length, text: body }
+          const offset = args.offset == null ? undefined : Number(args.offset)
+          const limit = args.limit == null ? undefined : Number(args.limit)
+          const body = id.trim() ? store.getSpill(id.trim()) : undefined
+          const neighbors = body == null ? [] : linkedSpillIds(store.listDocs<Ticket>('ticket'), id.trim(), body)
+          const page = readObject({ id, body, offset, limit, neighbors })
+          log(`[memory] read_object id=${page.id} bytes=${body!.length} offset=${page.offset} truncated=${page.truncated}`)
+          return page
         },
       },
       {
@@ -149,13 +165,15 @@ export class ToolRegistry {
         roles: ['worker'],
         run: async (args, ctx) => {
           const ticketId = String(args.ticketId ?? ctx.ticketId ?? '')
-          const deliver = args.deliver === true
+          const asked = args.deliver === true
           const text = String(args.text ?? '').replace(/\n/g, ' ')
-          const kind = String(args.kind ?? (deliver ? 'ready' : 'progress'))
-          const result = engine.report(ticketId, { kind, text, deliver })
-          const prompt = ['REPORT', `deliver=${deliver ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
+          const kind = String(args.kind ?? (asked ? 'ready' : 'progress'))
+          const result = engine.report(ticketId, { kind, text, deliver: asked })
+          const surfaced = result.surfaced
+          if (asked && !surfaced) log(`[speculate] deliver withheld ticketId=${ticketId}`)
+          const prompt = ['REPORT', `deliver=${surfaced ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
           await deps.routerTurn(prompt)
-          return { ...result, deliver }
+          return { ...result, deliver: surfaced }
         },
       },
       {
@@ -200,7 +218,7 @@ export class ToolRegistry {
         roles: ['watchdog'],
         run: async args => {
           const ticketId = String(args.ticketId ?? '')
-          log(`[watchdog] nudge ticketId=${ticketId}`)
+          deps.watchdog.nudgeTicket(ticketId)
           return { nudged: ticketId }
         },
       },
@@ -211,8 +229,7 @@ export class ToolRegistry {
         roles: ['watchdog'],
         run: async args => {
           const ticketId = String(args.ticketId ?? '')
-          engine.report(ticketId, { kind: 'failed', text: String(args.reason ?? 'watchdog: stuck'), deliver: false })
-          log(`[watchdog] mark_task_failed ticketId=${ticketId}`)
+          deps.watchdog.failTicket(ticketId, String(args.reason ?? 'watchdog: stuck'))
           return { failed: ticketId }
         },
       },

@@ -1,5 +1,5 @@
 export { Daemon } from './daemon.ts'
 export { Harness, runTurn } from './loop.ts'
-export { HttpOpenAI, MockModel, createModelFromEnv, systemPrompt } from './model.ts'
+export { HttpOpenAI, MockModel, createModelFromEnv, requireLiveModelFromEnv, systemPrompt } from './model.ts'
 export { SessionJournal } from './session.ts'
 export { ToolRegistry } from './tools.ts'

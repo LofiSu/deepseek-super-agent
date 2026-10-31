@@ -1,1 +1,1 @@
-export { Watchdog, stuckSessions } from './watchdog.ts'
+export { Watchdog, driftingTickets, goalDrift, scopeTokens, stuckSessions } from './watchdog.ts'

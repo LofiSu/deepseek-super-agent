@@ -8,3 +8,7 @@ export type DomainEventName =
   | 'assignment.ended'
   | 'thread.subscribed'
   | 'trigger.requeued'
+  | 'speculate.delivered'
+  | 'speculate.discarded'
+  | 'watchdog.nudge'
+  | 'watchdog.fail'

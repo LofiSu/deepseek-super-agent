@@ -64,7 +64,7 @@ CLI：`ds-agent` · MIT
 
 - [x] **环境半结构化事件 = Trigger** — IM / GitHub 风格 Source
 - [x] **Fast Path 程序过滤** — source/噪声等确定性规则（`ingress/filter`）
-- [x] **Slow Path 语义/策略过滤** — 可走模型策略；Mock 路径可跳过或规则化
+- [x] **Slow Path 语义/策略过滤** — 确定性规则；日志写出 `path` / `signals`，快路径可以否决慢路径
 - [x] **Thread = 同一话题/PR 下的事件流** — Thread key
 - [x] **已订阅 → 直通 Worker（bypass Router Eval）** — 日志 `bypass=subscription` + `ticketId`
 - [x] **未订阅 → Router/Eval 冷启动分派** — Intake → Eval → Ticket
@@ -72,10 +72,10 @@ CLI：`ds-agent` · MIT
 - [x] **Router 仍可观察全局 Trigger** — Intake 记账
 - [x] **Inline：摘要进上下文** — `memory/recall`
 - [x] **Spill：长内容外置 + id** — `store/spill`
-- [x] **局部性：先 ID/摘要，再按需展开** — `read_object`
+- [x] **局部性：先 ID/摘要，再按需展开** — `read_object` 按 offset/limit 分页，并带回相邻 spill id
 - [x] **链式召回 Chain of Recall** — spillId / 对象引用按需拉取（T25 最小实现）
 - [x] **投机执行：后台先跑** — speculative Assignment
-- [x] **有价值才交付，否则安静丢弃** — `deliver=true` gate；demo 验证
+- [x] **有价值才交付，否则安静丢弃** — speculative `ready` 还需价值信号；`failed`/`dropped` 丢弃且无出站
 
 #### §4 面向人的交互
 
@@ -99,8 +99,8 @@ CLI：`ds-agent` · MIT
 
 - [x] **外部 Control Loop Session** — `watchdog` role
 - [x] **定时驱动** — daemon interval tick
-- [x] **卡住任务 nudge / fail** — watchdog tools + demo tick
-- [~] **基础设施故障 + 目标偏离的 NL 维护** — 有 nudge/fail；完整健康检查/改规则 YAML 未齐（T43–T44）
+- [x] **卡住任务 nudge / fail** — 连续 nudge，超过次数后 fail Assignment
+- [~] **基础设施故障 + 目标偏离的 NL 维护** — db 故障与 scope/report 漂移会 nudge；规则仍是代码启发式，不是可热改 YAML（T43–T44）
 
 #### §7 实验（文章评测，不挡开源）
 
@@ -131,7 +131,7 @@ CLI：`ds-agent` · MIT
 | M8 Channels | §4.2 | [x] |
 | M9 Env | §5.2 | [x] |
 | M10 Watchdog | §6 | [x] |
-| M11 CLI demo | 验收脚本 | [x] `pnpm demo` |
+| M11 CLI demo | 验收脚本 | [x] `pnpm test` 离线；`pnpm demo` 需 live key |
 
 
 ### 架构
@@ -262,7 +262,7 @@ export DS_AGENT_API_MODEL=deepseek-chat
 pnpm demo    # 或 pnpm start / pnpm ds-agent chat "..."
 ```
 
-未设置上述变量时，`createModelFromEnv()` 回落 `MockModel`。
+没有 live key 时，`createModelFromEnv()`（`chat` / `emit`）回落 `MockModel`。`pnpm demo` 走 `requireLiveModelFromEnv()`（也认 `DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY`、`OPENAI_API_KEY`、`GROK_API_KEY`），缺 key 就退出，不会改用 MockModel。离线 `pnpm test` 仍用 MockModel。
 
 ### 致谢
 
@@ -330,7 +330,7 @@ Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not 
 
 - [x] Triggers from the environment
 - [x] Fast Path programmatic filter
-- [x] Slow Path semantic/policy filter
+- [x] Slow Path semantic/policy filter (`path` / `signals`; fast path can veto)
 - [x] Thread = event stream
 - [x] Subscribed → bypass Router Eval (`bypass=subscription`)
 - [x] Unsubscribed → cold-start Eval
@@ -338,10 +338,10 @@ Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not 
 - [x] Router still observes all Triggers
 - [x] Inline summaries
 - [x] Spill + id
-- [x] Locality / on-demand expand (`read_object`)
+- [x] Locality / on-demand expand (`read_object` pages, neighbor spill ids)
 - [x] Chain of Recall (minimal)
 - [x] Speculative background work
-- [x] Deliver only if valuable
+- [x] Deliver only if valuable (speculative ready needs a value signal; failed/dropped stay silent)
 
 #### §4 Human interaction
 
@@ -365,8 +365,8 @@ Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not 
 
 - [x] External control-loop Session
 - [x] Timer-driven ticks
-- [x] Nudge / fail stuck work
-- [~] Full infra + NL rule maintenance
+- [x] Nudge / fail stuck work (fail after repeated nudges)
+- [~] Infra faults and scope drift nudge the worker; rules are still in code, not hot-editable YAML
 
 #### §7 Experiments (optional)
 
@@ -386,7 +386,7 @@ Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not 
 
 | Module | Article | Status |
 |--------|---------|--------|
-| M0–M11 | §§2–6 + demo harness | [x] see Chinese table; `pnpm demo` green on Origin/GitHub mirror |
+| M0–M11 | §§2–6 + demo harness | [x] see Chinese table; `pnpm test` offline, `pnpm demo` needs a live key |
 
 
 ### Architecture
@@ -517,7 +517,7 @@ export DS_AGENT_API_MODEL=deepseek-chat
 pnpm demo    # or pnpm start / pnpm ds-agent chat "..."
 ```
 
-Without those vars, `createModelFromEnv()` falls back to `MockModel`.
+Without a live key, `createModelFromEnv()` (`chat` / `emit`) falls back to `MockModel`. `pnpm demo` calls `requireLiveModelFromEnv()` (also `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROK_API_KEY`) and exits instead of switching to MockModel. Offline `pnpm test` still uses MockModel.
 
 ### Credits
 
