@@ -14,6 +14,7 @@ export const METRIC_NAMES = [
   'speculate.discard',
   'watchdog.nudge',
   'watchdog.fail',
+  'watchdog.idle',
 ] as const
 
 export type MetricName = (typeof METRIC_NAMES)[number]
@@ -40,6 +41,7 @@ function blankCounters(): Record<MetricName, number> {
     'speculate.discard': 0,
     'watchdog.nudge': 0,
     'watchdog.fail': 0,
+    'watchdog.idle': 0,
   }
 }
 

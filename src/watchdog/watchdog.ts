@@ -81,6 +81,9 @@ export class Watchdog {
       this.opts.stuckMs,
     )
     this.opts.log(`[watchdog] tick db=${db} stuck=${stuck.length}`)
+    if (stuck.length === 0) {
+      this.opts.metrics.increment('watchdog.idle')
+    }
     const handled = new Set<string>()
     for (const hit of stuck) {
       handled.add(hit.sessionId)

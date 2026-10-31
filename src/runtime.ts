@@ -6,6 +6,8 @@ import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness } from './harness/loop.ts'
+import { MachineRegistry } from './harness/machines.ts'
+import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, type Model } from './harness/model.ts'
 import { SessionJournal } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
@@ -102,6 +104,8 @@ export class Runtime {
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const late: { harness?: Harness } = {}
+    const teams = new TeamRegistry(store)
+    const machines = new MachineRegistry()
     const tools = new ToolRegistry({
       store,
       ports: bindRolePorts(engine),
@@ -117,6 +121,7 @@ export class Runtime {
         if (!late.harness) throw new Error('harness is not ready')
         return late.harness.routerTurn(prompt)
       },
+      teams,
     })
     const harness = new Harness({
       model,
@@ -130,6 +135,7 @@ export class Runtime {
       redact,
       log: line => log.info(line),
       jobDelayMs: opts.jobDelayMs ?? 40,
+      teams,
     })
     late.harness = harness
     const watchdog = new Watchdog({
@@ -141,7 +147,7 @@ export class Runtime {
       intervalMs: opts.watchdogIntervalMs ?? 15_000,
       stuckMs: opts.stuckMs ?? 60_000,
     })
-    const daemon = new Daemon(watchdog, line => log.info(line))
+    const daemon = new Daemon(watchdog, line => log.info(line), machines)
     return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model, metrics })
   }
 
