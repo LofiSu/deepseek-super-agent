@@ -340,6 +340,25 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
         }
       }),
     },
+    {
+      name: 'complete_team',
+      description: 'Finish a Worker-internal team, marking any running members as done.',
+      parameters: schema({ teamId: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'complete_team', async args => {
+        if (!deps.teams) throw new UserError('team registry not configured')
+        const teamId = String(args.teamId ?? '')
+        const team = deps.teams.completeTeam(teamId)
+        if (!team) return { found: false, teamId }
+        return {
+          found: true,
+          teamId,
+          completed: Boolean(team.completedAt),
+          members: team.members,
+          aggregate: deps.teams.aggregateReport(teamId),
+        }
+      }),
+    },
 
     {
       name: 'stop_job',

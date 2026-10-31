@@ -52,7 +52,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
-- [~] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team` 拓扑校验 / `describeTopology()`（T14）；完整多 Agent Team UX 仍薄
+- [x] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team`/`team_status`/`complete_team` → member job → `TEAM_MEMBER_DONE` → 汇总报告；team 行持久化到 SQLite，`ds-agent team`/`teams` 可离线查看。Router 只见父 Assignment 报告（T14；unit + harness + live e2e）
 - [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；opt-in `ProductShellBus`（T15/T49），非默认 UI
 
 ### §3 事件驱动
