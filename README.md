@@ -6,6 +6,17 @@ Open-source DeepSeek Super-agent style multi-agent framework with a thin harness
 
 > **Disclaimer:** Not an official DeepSeek product. Research / educational prototype — not production-ready. Names and ideas reference public DeepSeek Super-agent materials; implementation and packaging are independent LoomLab work under MIT.
 
+## Sources & inspiration
+
+We **built on public materials as inspiration**, with an independent LoomLab implementation — **not a copy** of DeepSeek Harness / Cordis, and **not** an official DeepSeek product.
+
+| Source | Link | How we use it |
+|--------|------|----------------|
+| **WeChat design article** | [Super-agent 设计探索：迈向更自主的 Agent 系统](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg) | Architecture goals (§2–§6): dual Router/Worker, Triggers, async ReAct, channels, compute/state/env split, Watchdog |
+| **Official prototype** | [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) | Domain vocabulary & Engine semantics (Trigger → Eval → Ticket → Assignment); we reimplement on our own thin Harness |
+
+**Our stack:** self-built thinnest Harness + domain engine in TypeScript (`ds-agent` CLI). No `@deepseek-ai/dsh*` dependency.
+
 ---
 
 ## Features (mapped to the blog)
@@ -31,6 +42,26 @@ Default demo path uses **MockModel** so you can prove the above without an API k
 ## Architecture
 
 Thinnest Harness (injectable loop + ports) + domain Engine (Intake / Evals / Tickets / Assignments / Replies). No Cordis plugin tree.
+
+### Layers (separation of concerns)
+
+```
+┌─ Channel layer ────── CLI / fake IM / fake GitHub adapters (reply norms) ─┐
+│         ▼                                                                  │
+│  Ingress ── Fast Path (deterministic) + Slow Path (LLM policy)             │
+│         ▼                                                                  │
+│  Domain Engine ── Intake → Eval (batch) → Ticket/Mandate → Assignment      │
+│         │              └─ Subscription fan-out (bypass Eval)               │
+│         ▼                                                                  │
+│  Harness ── Session log · async ReAct (start/stop) · Mock/HTTP model       │
+│         │    Router Session (dispatch) · Worker Sessions · Watchdog Session│
+│         ▼                                                                  │
+│  Store ── SQLite repositories + Spill object store                         │
+│  Env ── LocalEnv sandbox / BYOM daemon (no durable session state)          │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Data flow:** Source event → Ingress filter → `Engine.receive` → Intake (dedupe, Thread, fan-out) → Eval queue/batching (Gate + Assessment) → Ticket + first Assignment → Worker Harness Session → report → Router Outbox via Channel norms. Watchdog runs as an external Control Loop Session.
 
 ```mermaid
 flowchart LR
