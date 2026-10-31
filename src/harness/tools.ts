@@ -9,6 +9,7 @@ import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import { workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
+import type { TeamRegistry } from './team.ts'
 
 export interface ToolSession {
   sessionId: string
@@ -35,6 +36,7 @@ export interface ToolDeps {
   log: (line: string) => void
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
+  teams?: TeamRegistry
 }
 
 interface ToolDef extends ToolSpec {
@@ -76,6 +78,7 @@ export class ToolRegistry {
         log,
         scheduleJob: deps.scheduleJob,
         routerTurn: deps.routerTurn,
+        teams: deps.teams,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics }),
     ]
@@ -178,6 +181,7 @@ interface WorkerToolDeps {
   log: (line: string) => void
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
+  teams?: TeamRegistry
 }
 
 /** Worker tools close over WorkerPorts. reply, decide, and receive are not in this scope. */
@@ -289,6 +293,54 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
         return { status: 'started', jobId: job.id }
       }),
     },
+    {
+      name: 'spawn_team',
+      description: 'Spawn a Worker-internal team. Members are opaque to the Router.',
+      parameters: schema({
+        members: { type: 'string', description: 'JSON array of {name,role?} or comma-separated names' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'spawn_team', async (args, ctx) => {
+        if (!deps.teams) throw new UserError('team registry not configured')
+        const ticketId = ctx.ticketId ?? ''
+        if (!ticketId) throw new UserError('spawn_team needs a ticket')
+        let members: { name: string; role?: string }[] = []
+        const raw = args.members
+        if (typeof raw === 'string') {
+          const trimmed = raw.trim()
+          if (trimmed.startsWith('[')) members = JSON.parse(trimmed) as { name: string; role?: string }[]
+          else members = trimmed.split(',').map(name => ({ name: name.trim() })).filter(m => m.name)
+        } else if (Array.isArray(raw)) {
+          members = raw as { name: string; role?: string }[]
+        }
+        const team = deps.teams.spawnTeam({ parentSessionId: ctx.sessionId, ticketId, members })
+        for (const m of team.members) {
+          deps.scheduleJob({ id: m.jobId, sessionId: ctx.sessionId, ticketId })
+        }
+        log(`[team] spawned teamId=${team.id} members=${team.members.length}`)
+        return { teamId: team.id, members: team.members.map(m => ({ jobId: m.jobId, name: m.name, role: m.role })) }
+      }),
+    },
+    {
+      name: 'team_status',
+      description: 'Status of a Worker-internal team.',
+      parameters: schema({ teamId: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'team_status', async args => {
+        if (!deps.teams) throw new UserError('team registry not configured')
+        const teamId = String(args.teamId ?? '')
+        const team = deps.teams.getTeam(teamId)
+        if (!team) return { found: false, teamId }
+        return {
+          found: true,
+          teamId,
+          completed: Boolean(team.completedAt),
+          members: team.members,
+          aggregate: deps.teams.aggregateReport(teamId),
+        }
+      }),
+    },
+
     {
       name: 'stop_job',
       description: 'Stop a running job.',

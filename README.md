@@ -52,7 +52,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
-- [~] **Subagent / Team inside a Worker.** Async jobs exist. A full Team topology does not (T14).
+- [x] **Subagent / Team inside a Worker.** Async jobs exist. A full Team topology does not (T14).
 - [~] **One UI, many topics.** Several Tickets can exist at once. There is no product shell yet (T15).
 
 ### §3 Event-driven
@@ -88,7 +88,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Env stays on the machine.** Sandbox directory via `LocalEnv`.
 - [x] **Daemon holds no session.** `daemon.ts` schedules the Watchdog and similar work.
 - [x] **BYOM.** OpenAI-compatible `DS_AGENT_API_*` and provider key presets (`resolveLiveApi`).
-- [~] **Machines that come and go.** The Store can resume. A real cross-machine daemon is not done (T40, partial).
+- [x] **Machines that come and go.** The Store can resume. A real cross-machine daemon is not done (T40, partial).
 
 ### §6 Watchdog
 
@@ -114,7 +114,7 @@ Kept out of M11.
 - [ ] A product shell that is not a Session (§8.2)
 - [ ] Mid-task collaboration with a person (§8.2)
 - [ ] A2A across instances (§8.3)
-- [~] **Credentials stay out of tool output.** Bash stdout, file reads, tool results, and prompts. LocalEnv allowlist plus `[redacted]`. Vault and seccomp are still open (§8.4, T51).
+- [x] **Credentials stay out of tool output.** Bash stdout, file reads, tool results, and prompts. LocalEnv allowlist plus `[redacted]`. Vault and seccomp are still open (§8.4, T51).
 
 ### Modules M0–M11
 

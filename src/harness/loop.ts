@@ -5,6 +5,7 @@ import type { Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
 import { workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
+import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -19,6 +20,7 @@ export interface HarnessOptions {
   redact: (text: string) => string
   log: (line: string) => void
   jobDelayMs: number
+  teams?: TeamRegistry
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
@@ -90,6 +92,16 @@ export class Harness {
         try {
           if (!this.opts.store.isOpen) {
             resolve()
+            return
+          }
+          const teamId = this.opts.teams?.teamIdForJob(job.id)
+          if (teamId && this.opts.teams) {
+            this.opts.teams.reportFromMember(job.id, 'member done', 'succeeded')
+            this.opts.log(`[team] member done teamId=${teamId} jobId=${job.id}`)
+            const prompt = `TEAM_MEMBER_DONE\nteamId=${teamId}\njobId=${job.id}\nticketId=${job.ticketId}\naggregate=${this.opts.teams.aggregateReport(teamId)}`
+            const turn = this.enqueue(job.sessionId, () => this.run(job.sessionId, 'worker', job.ticketId, prompt))
+            this.track(turn)
+            turn.then(() => resolve(), reject)
             return
           }
           this.opts.store.completeJob(job.id, 'succeeded')

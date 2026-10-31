@@ -4,3 +4,5 @@ export { HttpOpenAI, MockModel, createModelFromEnv, requireLiveModelFromEnv, sys
 export { PROVIDER_PRESETS, resolveLiveApi, type LiveApi, type ProviderPreset } from './providers.ts'
 export { SessionJournal } from './session.ts'
 export { ToolRegistry } from './tools.ts'
+export { TeamRegistry } from './team.ts'
+export { MachineRegistry } from './machines.ts'

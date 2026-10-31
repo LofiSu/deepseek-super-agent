@@ -9,3 +9,5 @@ export {
   redactUnknown,
   secretValues,
 } from './sanitize.ts'
+export { MemoryVault, FileVault, type Vault } from './vault.ts'
+export { wrapBashCommand, sandboxEnabledFromEnv, type SandboxPolicy } from './seccomp.ts'
