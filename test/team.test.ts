@@ -4,6 +4,26 @@ import { Store } from '../src/store/sqlite.ts'
 import { tempHome } from './fixtures.ts'
 
 describe('T14 TeamRegistry', () => {
+  it('rejects duplicate member ids and blank roles without creating jobs', () => {
+    const store = new Store(tempHome())
+    const teams = new TeamRegistry(store)
+    expect(() => teams.spawnTeam({ parentSessionId: 's', ticketId: 't', members: [{ name: 'a' }, { name: 'a' }] })).toThrow()
+    expect(() => teams.spawnTeam({ parentSessionId: 's', ticketId: 't', members: [{ name: 'a', role: '  ' }] })).toThrow()
+    expect(store.listJobs()).toHaveLength(0)
+    store.close()
+  })
+
+  it('describes only compact topology fields', () => {
+    const store = new Store(tempHome())
+    const teams = new TeamRegistry(store)
+    const team = teams.spawnTeam({ parentSessionId: 'secret-session', ticketId: 'secret-ticket', members: [{ name: 'research', role: 'analyst' }] })
+    teams.reportFromMember(team.members[0]!.jobId, 'secret-report')
+    const description = teams.describeTopology(team.id)
+    expect(description).toContain('research')
+    expect(description).toContain('analyst')
+    expect(description).not.toMatch(/secret|jobId|session|ticket|report/)
+    store.close()
+  })
   it('spawns members as jobs and aggregates without Router events', () => {
     const home = tempHome()
     const store = new Store(home)
