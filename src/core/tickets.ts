@@ -1,4 +1,6 @@
+import { grantTicketSpill } from '../memory/acl.ts'
 import { isSpeculative } from '../speculate/gate.ts'
+import { UserError } from '../shared/errors.ts'
 import { threadKey, type Decision, type Strength, type Thread, type Ticket, type Trigger } from '../shared/types.ts'
 import type { Host } from './host.ts'
 import type { Replies } from './replies.ts'
@@ -54,6 +56,8 @@ export class Tickets {
       createdAt: now,
     }
     this.host.repo.putDoc('ticket', id, ticket)
+    grantTicketSpill(this.host.repo, spillId, id)
+    for (const row of ticket.inputs) grantTicketSpill(this.host.repo, row.spillId, id)
     for (const key of threadKeys) {
       const thread = key === input.thread.key ? input.thread : this.host.repo.getDoc<Thread>('thread', key)
       if (!thread) continue
@@ -83,6 +87,28 @@ export class Tickets {
     if (speculative) this.host.log(`[speculate] speculative silent ticketId=${id} until deliver`)
     else this.replies.acknowledge(ticket)
     return decision
+  }
+
+  /** End a live ticket from Eval. A stopped ticket is not resumed by the next report. */
+  stop(ticketId: string, reason: string): void {
+    const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
+    if (!ticket) throw new UserError(`unknown ticket ${ticketId}`)
+    if (ticket.ended) return
+    const now = this.host.now()
+    const assignment = [...ticket.assignments].reverse().find(item => item.state !== 'ended')
+    if (assignment) {
+      assignment.state = 'ended'
+      assignment.endedAt = now
+      assignment.report = { kind: 'stopped', text: reason, deliver: false }
+      this.host.repo.addEvent('assignment.ended', {
+        ticketId: ticket.id,
+        assignmentId: assignment.id,
+        kind: 'stop',
+      })
+    }
+    ticket.ended = { at: now, outcome: 'stopped', by: 'human' }
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome: 'stopped' })
   }
 
   subscribe(ticketId: string, key: string): void {

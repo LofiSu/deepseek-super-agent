@@ -44,6 +44,7 @@ export class Assignments {
     const ticket = this.must(ticketId)
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
+    if (ticket.ended?.by === 'human') return { surfaced: false, verdict: 'hold' }
     const wasSpeculative = ticket.speculative
     const terminal = TERMINAL.has(report.kind)
     let verdict: SurfaceVerdict = 'hold'

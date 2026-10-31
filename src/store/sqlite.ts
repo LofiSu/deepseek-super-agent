@@ -150,6 +150,19 @@ export class Store {
     return row?.body
   }
 
+  grantSpill(spillId: string, grantee: string): void {
+    this.db.prepare(
+      'INSERT INTO spill_grants(spill_id, grantee) VALUES(?, ?) ON CONFLICT(spill_id, grantee) DO NOTHING',
+    ).run(spillId, grantee)
+  }
+
+  spillGrants(spillId: string): string[] {
+    const rows = this.db.prepare(
+      'SELECT grantee FROM spill_grants WHERE spill_id = ? ORDER BY grantee',
+    ).all(spillId) as { grantee: string }[]
+    return rows.map(row => row.grantee)
+  }
+
   createJob(input: { sessionId: string; ticketId: string; name: string }): JobRow {
     const row: JobRow = {
       id: this.nextId('job'),
