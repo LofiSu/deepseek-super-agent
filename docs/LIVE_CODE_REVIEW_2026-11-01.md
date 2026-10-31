@@ -6,7 +6,7 @@ Method: [`docs/CODE_REVIEW_METHOD.md`](./CODE_REVIEW_METHOD.md). Every finding n
 
 ## Verdict
 
-**1 Critical, 5 High, 10 Medium.** The five controls the brief asked to re-check are not uniform: **#7 and #9 and #15 are fixed; #11 and #13 are partial.** The control plane is materially less hollow than `docs/REVIEW.md` describes — Eval has non-accept outcomes, the deliver gate is real, the watchdog acts, workers no longer hold the Engine, spills are paged and granted, and the journal drives the next turn. The remaining gaps are concentrated in trust of `trigger.meta`, the speculative isolation boundary, the shell process boundary, and the fact that the Router still does not assess or sequence work.
+**1 Critical, 5 High, 11 Medium.** The five controls the brief asked to re-check are not uniform: **#7 and #9 and #15 are fixed; #11 and #13 are partial.** The control plane is materially less hollow than `docs/REVIEW.md` describes — Eval has non-accept outcomes, the deliver gate is real, the watchdog acts, workers no longer hold the Engine, spills are paged and granted, and the journal drives the next turn. The remaining gaps are concentrated in trust of `trigger.meta`, the speculative isolation boundary, the shell process boundary, and the fact that the Router still does not assess or sequence work.
 
 This is a review of the tree, not a merge approval. `src/core/**`, `src/env/**`, and `src/watchdog/**` are 高 paths under the method and need a person in addition to the directing author.
 
@@ -32,7 +32,7 @@ The brief refers to `#7/#9/#11/#13/#15`; the tree has no 15-row list of its own 
 | 14 | `read_object` returns one page, not the whole body | **Fixed** | `src/memory/acl.ts:5,38-50`; `test/highs.test.ts:160-211` |
 | 15 | Session journal drives the next ReAct turn | **Fixed** | `src/harness/loop.ts:238-247,287-300`, `src/harness/session.ts:47-66`; `test/highs.test.ts:213-267` |
 
-Counts from the detailed sections: **1 Critical, 5 High, 10 Medium.**
+Counts from the detailed sections: **1 Critical, 5 High, 11 Medium.**
 
 ## Critical
 
@@ -239,6 +239,10 @@ Some assertions depend on a live model choosing a tool: `test/job.test.ts:24-33`
 
 `README.md:47` ("Router is the sequence point"), `:49` (`roleModels.router`), and `:50` ("Under load ... fold into the next Eval. Demo and tests cover it") are not true of this tree. `README.zh-CN.md:226,265` still says a missing key falls back to `MockModel`, while `demoModel` throws (`src/cli/demo.ts:33-38`). The method treats PLAN/README status lines as 中 because agents implement from them.
 
+### M11. The offline CI gate is red on Linux for a platform assumption
+
+`test/vault.test.ts:30-38` calls `wrapBashCommand('echo hi', { enabled: true, allowNetwork: false })` without stubbing `system`. On Linux, `wrapBashCommand` prefers `bwrap`, then `unshare` (`src/env/seccomp.ts:43-51`); the test's `else` branch expects `bash`. The hosted check on this doc-only PR (run `41228230887`) failed with `AssertionError: expected 'unshare' to be 'bash'` — **1 failed / 102 passed / 3 skipped**. The same test already demonstrates the correct pattern 10 lines later by passing a stubbed `{ platform: 'linux', available: ... }` (`test/vault.test.ts:40-48`). This is a test bug, not a runtime bug, but it means the offline gate is not green on `main` and cannot gate a PR. It reinforces M9: neither the live suite nor the offline gate is a reliable check right now.
+
 ## Verification of #7 / #9 / #11 / #13 / #15
 
 ### #7 — Subscription arbitration: **fixed**
@@ -319,6 +323,7 @@ This closes `docs/REVIEW.md` H5's "journal is write-only" claim. The remaining c
 | `npx vitest run test/subscription.test.ts test/highs.test.ts test/spill.test.ts` | **18 passed, 1 failed** — `test/subscription.test.ts:49` timed out at 180 s |
 | `pnpm demo` (live Magpie) | exit 0, `demo ok (live model)`, but `jobsSettled outcome=deadline`; every `Evals.batch` was `size=1`; all three tickets were still `running` with no report after exit |
 | Stored full run `/tmp/ds-agent-live-e2e-logs/vitest-full.txt` | **109 passed, 4 failed** (`job`, `metrics`, `ports`, `subscription`) |
+| GitHub Actions run `41228230887` (offline mock gate) | **102 passed, 1 failed, 3 skipped** — `test/vault.test.ts:30-38`, `expected 'unshare' to be 'bash'` |
 | Probes (`Runtime.ingest` + `LocalEnv`) | reproduced C1 (`meta.admitted`, `meta.spillId` grant), H1 (spill body), H2 (spec path), H3 (2010 ms for a 300 ms timeout), H5 (DB read from a worker shell) |
 
 The focused tests that matter for the five controls pass: `test/highs.test.ts` (gate/assessment, watchdog tick, spill ACL, journal turns), `test/speculate.test.ts` (gate/discard/workdir), and `test/ports.test.ts` (role ports). The failures are live-model timing/behavior failures, not failures of those assertions.
@@ -337,14 +342,14 @@ How to revert: git revert the merge. This PR adds one file under docs/ and chang
 Reviewer summary shape:
 
 ```text
-1 Critical, 5 High, 10 Medium.
+1 Critical, 5 High, 11 Medium.
 - Critical C1: untrusted trigger.meta still admits dropped triggers and grants arbitrary spill ids.
 - High H1: spill bodies store credential values before redaction.
 - High H2: speculative isolation is a string check; escape survives discard.
 - High H3: shell timeout does not kill the process group; 2010 ms for a 300 ms timeout.
 - High H4: Router does not assess or sequence; accept is the default.
 - High H5: worker bash can read the SQLite spill table directly.
-- Medium: batching is size 1 on the live path; roleModels absent; watchdog residuals; heuristic gate; two speakers; subscription predicate gaps; unguarded tool args; stop_job timer; flaky live suite; README drift.
+- Medium: batching is size 1 on the live path; roleModels absent; watchdog residuals; heuristic gate; two speakers; subscription predicate gaps; unguarded tool args; stop_job timer; flaky live suite; README drift; Linux CI test assumption.
 #7 fixed, #9 fixed, #11 partial, #13 partial, #15 fixed.
 ```
 
