@@ -10,7 +10,7 @@ import { Metrics } from '../src/metrics/metrics.ts'
 import type { Runtime } from '../src/runtime.ts'
 import type { RolePorts } from '../src/shared/ports.ts'
 import type { Store } from '../src/store/sqlite.ts'
-import { freshRuntime, shutdown } from './fixtures.ts'
+import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
 
 const secret = 'sk-regression-key-9f3a7c'
 let runtime: Runtime | undefined
@@ -116,7 +116,7 @@ describe('secret redaction', () => {
       thread: 'topic/bug-login',
       text: `@ds-agent please fix the login timeout ${secret} ${secret}-openai`,
     }))
-    await runtime.jobsSettled()
+    await settleWithDeadline(runtime, 90_000)
     const bodies = runtime.store.listMessages().map(message => message.body).join('\n')
     expect(bodies).not.toContain(secret)
     expect(bodies).toContain('[redacted]')

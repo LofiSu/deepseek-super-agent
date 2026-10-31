@@ -6,7 +6,7 @@ import { imTrigger } from '../src/channels/im.ts'
 import { emptySnapshot, readMetrics } from '../src/metrics/metrics.ts'
 import type { Runtime } from '../src/runtime.ts'
 import type { Ticket } from '../src/shared/types.ts'
-import { freshRuntime, shutdown } from './fixtures.ts'
+import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
 
 let runtime: Runtime | undefined
 
@@ -50,7 +50,7 @@ describe('section 7 metrics', () => {
       text: 'lol nice weather today haha',
       addressed: false,
     }))).toBe('duplicate')
-    await runtime.jobsSettled()
+    await settleWithDeadline(runtime, 90_000)
 
     runtime.store.upsertSession({
       id: 'worker_stuck_probe',

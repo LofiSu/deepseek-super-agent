@@ -37,7 +37,7 @@
 
 | 做 | 不做（M11 前） |
 |----|----------------|
-| 自研 thinnest Harness（Session 日志、async ReAct、OpenAI 兼容、角色工具、daemon） | 生产 Feishu/GitHub Source（仅 fake IM / fake GitHub / CLI） |
+| 自研 thinnest Harness（Session 日志、async ReAct、OpenAI 兼容、角色工具、daemon） | 生产 Feishu IM Source + GitHub Source（禁止 fake IM / fake GitHub 作为验收） |
 | 原型领域语义：Intake / Evals / Tickets / Assignments / Replies | Cordis 插件树、DSH Session API 兼容层 |
 | SQLite + Spill、Watchdog Session、Speculative gate | Web Panel |
 | MockModel 默认可跑 demo；BYOM `DS_AGENT_API_*` | Router sharding / Worker mesh / A2A（Phase-2） |
@@ -58,7 +58,7 @@
 
 ```
 ┌─ Channel 层 ─────────────────────────────────────────────────────────────┐
-│  CLI / fake IM / fake GitHub 适配器                                       │
+│  CLI / 真实 Feishu IM / 真实 GitHub（webhook+API）适配器                    │
 │  入站：半结构化事件 → Trigger 形状                                        │
 │  出站：Outbox 按信道规范（IM≤100词；GitHub 结构化高密度）                 │
 └───────────────────────────────────┬───────────────────────────────────────┘
@@ -138,8 +138,8 @@ Source event
 flowchart TB
   subgraph Sources
     CLI[CLI Source]
-    FIM[Fake IM]
-    FGH[Fake GitHub]
+    FIM[Feishu IM]
+    FGH[GitHub]
   end
 
   CLI --> ING
@@ -174,7 +174,7 @@ flowchart TB
 
 | 组件 | 做什么 | 不做什么 | 关键 ports / 文件 | 模块 |
 |------|--------|----------|-------------------|------|
-| **Channels** | 入站适配（CLI/fake IM/fake GH）→ Trigger；出站 ChannelNorms（IM≤100 words；GH/email 结构化）；Outbox 发送 | 写领域聚合；跑 LLM 循环 | `Outbox`, `ChannelNorms` · `src/channels/` | M8 |
+| **Channels** | 入站适配（CLI / 真实 Feishu / 真实 GitHub）→ Trigger；出站 ChannelNorms（IM≤100 words；GH 结构化）；Outbox 发到真实信道 | 写领域聚合；跑 LLM 循环 | `Outbox`, `ChannelNorms` · `src/channels/` | M8 |
 | **Ingress** | Fast Path 确定性过滤；Slow Path LLM policy；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
 | **Engine** | **领域唯一写者**：Intake / Evals(Gate+Assessment) / Tickets / Assignments / Replies / Subscribe；同步命令+事务 | Node I/O；模型 HTTP；文件系统；Channel 协议细节 | `Engine`, `Repositories`, `Assessor`, `Executor`, `Outbox` · `src/core/` | M3+M5 |
 | **Harness** | Session 事件日志；async ReAct `start/stop/runTurn`；角色工具；Mock/BYOM；daemon 调度；Router=Sequence Point；Worker 隔离；Watchdog Session 宿主 | 领域状态机；直接写 Channel；解释 Policy | `Harness`, `Tool`, `Model` · `src/harness/` | M1 |
@@ -748,9 +748,9 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/channels/` |
-| Files | `norms.ts`, `cli.ts`, `fake-im.ts`, `fake-github.ts`, `outbox-adapter.ts`, `index.ts` |
+| Files | `norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `index.ts`（禁止 fake-* 验收路径） |
 | Norms | IM：≤100 words、低打断、合并进度；GitHub：结构化（标题/清单/链接）；CLI：纯文本 |
-| Fake sources | 内存事件泵，供 demo |
+| Real sources | Feishu event webhook + GitHub webhook/API；demo 必须走真实信道 |
 | Tests | im 截断到 100 words；github 格式含 headings |
 | Accept | Router 出站；Worker 无 Channel 写权限；Worker 调用 reply/decide/receive 在类型与运行时都被拒绝 |
 | Deps | M0 |
@@ -850,7 +850,7 @@ pnpm install && pnpm test && pnpm demo
 | D6 | Speculative Assignment 在 gate 前对外不可见；通过后可见；丢弃无出站 | §3.4 T26–T28 |
 | D7 | Watchdog tick 能 nudge/fail 卡住的 Worker | §6 T41–T44 |
 | D8 | 进程重启后 Store 持久化恢复 Session/Ticket | §5 T36–T40 |
-| D9 | IM 出站 ≤100 words；GitHub fake 结构化 | §4.2 T33–T35 |
+| D9 | Feishu 出站 ≤100 words；GitHub 真实评论结构化 | §4.2 T33–T35 |
 | D10 | 长工具 `started` 不阻塞；完成作新事件 | §4.1 T29–T32 |
 | D11 | Router 工具集无 bash；出站经 Router | §2 T06 / §4.2 T35 |
 | D12 | **无** `@deepseek-ai/dsh*` / `cordis` 依赖 | 边界 |
@@ -874,7 +874,7 @@ pnpm install && pnpm test && pnpm demo
 | Fast/Slow ingress | §3.1 | `fast-path.ts` 确定性 + `slow-path.ts` policy | `ingress/*` |
 | Batching into Router turn | §2 | Eval 批 + Router inbox drain at turn start | `core/evals.ts`, `harness/loop.ts` |
 | 无 Cordis 装配 | — | `app/runtime.ts` 显式 DI 组合根 | `app/runtime.ts` |
-| Fake Sources 代替 Feishu/GH 生产 | 边界 | `fake-im` / `fake-github` / CLI Source | `channels/*` |
+| Real Feishu + GitHub Sources | 边界 | Feishu/Lark + GitHub webhook/API；CLI 仅运维 | `channels/*` |
 
 ---
 
@@ -960,12 +960,12 @@ deepseek-super-agent/          # public GitHub name
       gate.ts
       silent.ts
       index.ts
-    channels/                  # M8
+    channels/                  # M8 (real sources; fake-* is not an acceptance path)
       norms.ts
-      cli.ts
-      fake-im.ts
-      fake-github.ts
-      outbox-adapter.ts
+      cli.ts                    # ops only; not demo acceptance
+      feishu.ts                 # real Feishu IM Source + message API Outbox
+      github-source.ts          # real GitHub issue/comment Source + API Outbox
+      outbox-adapter.ts         # durable outbox dispatcher
       index.ts
     env/                       # M9
       local.ts
