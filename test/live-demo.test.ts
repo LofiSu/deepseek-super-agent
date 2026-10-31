@@ -14,7 +14,8 @@ function detectLive(): boolean {
   }
 }
 
-const hasLive = detectLive()
+const forceOffline = process.env.DS_AGENT_ALLOW_MOCK_FIXTURE === '1' || process.env.CI === 'true'
+const hasLive = !forceOffline && detectLive()
 
 describe.skipIf(!hasLive)('live model demo (real API)', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-live-'))

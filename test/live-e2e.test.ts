@@ -16,7 +16,8 @@ function detectLive(): boolean {
   }
 }
 
-const hasLive = detectLive()
+const forceOffline = process.env.DS_AGENT_ALLOW_MOCK_FIXTURE === '1' || process.env.CI === 'true'
+const hasLive = !forceOffline && detectLive()
 const logDir = '/tmp/ds-agent-live-e2e-logs'
 fs.mkdirSync(logDir, { recursive: true })
 
