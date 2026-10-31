@@ -112,7 +112,7 @@ Kept out of M11.
 - [~] Router scale-out / Worker-direct topology (§8.1) — opt-in `RouterShardRegistry` + `WorkerMeshRegistry`
 - [~] Memory that spans tickets (§8.1) — opt-in `SpillBackedLongTermMemory` (not month-scale yet)
 - [~] A product shell that is not a Session (§8.2) — opt-in `ProductShellBus`
-- [ ] Mid-task collaboration with a person (§8.2) — still open
+- [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
 - [~] A2A across instances (§8.3) — opt-in `A2ARouter` (in-process)
 - [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` + FileVault `describe()` (names only) + Darwin `sandbox-exec` / Linux `bwrap|unshare` when `DS_AGENT_SANDBOX=1` (§8.4, T51). Host vault/seccomp policy still external.
 
