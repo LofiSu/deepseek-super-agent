@@ -61,6 +61,8 @@ export class Runtime {
   readonly model: Model
   readonly metrics: Metrics
   readonly home: string
+  /** Worker-internal Team registry. Always wired (default path, not Phase-2). */
+  readonly teams: TeamRegistry
   /** Present only when opted in via DS_AGENT_PHASE2=1 or RuntimeOptions.phase2. */
   readonly phase2: Phase2Registries | undefined
 
@@ -74,6 +76,7 @@ export class Runtime {
     daemon: Daemon
     model: Model
     metrics: Metrics
+    teams: TeamRegistry
     phase2: Phase2Registries | undefined
   }) {
     this.home = parts.home
@@ -85,6 +88,7 @@ export class Runtime {
     this.daemon = parts.daemon
     this.model = parts.model
     this.metrics = parts.metrics
+    this.teams = parts.teams
     this.phase2 = parts.phase2
   }
 
@@ -166,7 +170,7 @@ export class Runtime {
       stuckMs: opts.stuckMs ?? 60_000,
     })
     const daemon = new Daemon(watchdog, line => log.info(line), machines)
-    return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model, metrics, phase2 })
+    return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model, metrics, teams, phase2 })
   }
 
   start(): void {

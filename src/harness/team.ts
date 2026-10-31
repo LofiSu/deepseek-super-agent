@@ -23,6 +23,18 @@ export interface TeamRecord {
   completedAt?: string
 }
 
+/** Compact one-line topology: member names, roles, and statuses only. */
+export function describeTopologyOf(team: TeamRecord): string {
+  return team.members.map(m => `${m.name} (${m.role}, ${m.status})`).join('; ')
+}
+
+/** Full aggregate report: one line per member with its optional report. */
+export function aggregateReportOf(team: TeamRecord): string {
+  return team.members
+    .map(m => `- ${m.name}(${m.role}): ${m.status}${m.report ? ` — ${m.report}` : ''}`)
+    .join('\n')
+}
+
 /**
  * Worker-internal Team (PLAN T14). Router only sees the parent Assignment report;
  * member job completions stay inside the parent worker session.
@@ -71,6 +83,7 @@ export class TeamRegistry {
       createdAt: new Date().toISOString(),
     }
     this.teams.set(id, team)
+    this.persist(team)
     return team
   }
 
@@ -85,8 +98,7 @@ export class TeamRegistry {
 
   describeTopology(teamId: string): string {
     const team = this.teams.get(teamId)
-    if (!team) return ''
-    return team.members.map(m => `${m.name} (${m.role}, ${m.status})`).join('; ')
+    return team ? describeTopologyOf(team) : ''
   }
 
   teamIdForJob(jobId: string): string | undefined {
@@ -106,6 +118,7 @@ export class TeamRegistry {
     if (team.members.every(m => m.status !== 'running')) {
       team.completedAt = new Date().toISOString()
     }
+    this.persist(team)
     return this.getTeam(teamId)
   }
 
@@ -119,14 +132,32 @@ export class TeamRegistry {
       }
     }
     team.completedAt = new Date().toISOString()
+    this.persist(team)
     return this.getTeam(teamId)
   }
 
   aggregateReport(teamId: string): string {
     const team = this.teams.get(teamId)
-    if (!team) return ''
-    return team.members
-      .map(m => `- ${m.name}(${m.role}): ${m.status}${m.report ? ` — ${m.report}` : ''}`)
-      .join('\n')
+    return team ? aggregateReportOf(team) : ''
+  }
+
+  /** Every team the store has recorded, in creation order. */
+  listTeams(): TeamRecord[] {
+    return this.store.listDocs<TeamRecord>('team')
+  }
+
+  /** Teams spawned under one ticket, in creation order. */
+  teamsForTicket(ticketId: string): TeamRecord[] {
+    return this.listTeams().filter(team => team.ticketId === ticketId)
+  }
+
+  /** Teams spawned under one worker session, in creation order. */
+  teamsForSession(sessionId: string): TeamRecord[] {
+    return this.listTeams().filter(team => team.parentSessionId === sessionId)
+  }
+
+  /** Persist the team row so a restart (or an offline CLI) can still read it. */
+  private persist(team: TeamRecord): void {
+    this.store.putDoc('team', team.id, team)
   }
 }
