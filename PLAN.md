@@ -1049,6 +1049,6 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 | §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
 | §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
 | §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
-| §8 未决 | T46–T51 + mid-task collab | T51 白名单+脱敏；中途 pause/intervene/resume 已合（#31） | `env/sanitize.ts` · `core/collab.ts` | vault/seccomp 仍 Phase-2；Team UX 仍薄 |
+| §8 未决 | T46–T51 + mid-task collab + T14 Team | T51 白名单+脱敏；中途 pause/intervene/resume（#31）；Team persist+CLI+e2e（#34） | `env/sanitize.ts` · `core/collab.ts` · `harness/team.ts` | vault/seccomp 仍 Phase-2 |
 
 **结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与 Phase-2 opt-in registries（T09/T46–T50）已落地；Runtime 默认路径仍不自动启用 Phase-2（仅 `DS_AGENT_PHASE2=1` 或 `RuntimeOptions.phase2: true` 时构造并挂到 `runtime.phase2`）。
