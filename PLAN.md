@@ -1,6 +1,6 @@
 # ds-agent 完整可落地技术方案（M0–M11）
 
-> LoomLab 独立 MIT 实现。自研最薄 Harness + 原型领域语义移植。**不依赖** DeepSeek Harness / Cordis。
+> 独立 MIT 实现。自研最薄 Harness + 原型领域语义移植。**不依赖** DeepSeek Harness / Cordis。
 >
 > - 博客: https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg
 > - 原型语义参考: https://github.com/deepseek-ai/dsh-superagent-prototype
@@ -1006,7 +1006,7 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 
 ---
 
-*契约文档 · 改契约先改本文 · LoomLab / LofiSu · MIT*
+*契约文档 · 改契约先改本文 · LofiSu · MIT*
 
 
 ---

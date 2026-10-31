@@ -1,6 +1,6 @@
 # deepseek-super-agent
 
-CLI：`ds-agent` · MIT · LoomLab
+CLI：`ds-agent` · MIT
 
 按公开 Super-agent 文章的思路，用 TypeScript 写的薄运行时：下层是自研 Harness，上层是领域引擎。
 
@@ -136,26 +136,83 @@ CLI：`ds-agent` · MIT · LoomLab
 
 ### 架构
 
-```
-Channel    CLI / 假 IM / 假 GitHub
-    │
-Ingress    Fast Path + Slow Path → Thread key
-    │
-Engine     Intake → Eval → Ticket / Assignment
-    │
-Harness    Session、异步 ReAct、模型、工具
-    │
-Store      SQLite + Spill          Env：LocalEnv / daemon
+分层：外层 **Channel** 进 **Ingress**，再进 **Engine**（路由 / 批处理 → Thread → Eval → Ticket → Assignment），由 **Harness** 跑 Worker Session；底盘是 **Store**（状态 / Spill）与 **Env**（沙箱 / 进程）。**Watchdog** 挂在外侧。
+
+```mermaid
+flowchart TB
+  subgraph Channels["Channel"]
+    C1[CLI / 假 IM / 假 GitHub]
+  end
+
+  subgraph Ingress["Ingress"]
+    Fast[Fast Path]
+    Slow[Slow Path]
+    Fast --> TK[Thread key]
+    Slow --> TK
+  end
+
+  subgraph Engine["Engine"]
+    Intake[Intake / 路由批处理]
+    Thread[Thread]
+    Eval[Eval]
+    Ticket[Ticket]
+    Assign[Assignment]
+    Intake --> Thread --> Eval
+    Eval -->|可行动| Ticket --> Assign
+    Eval -->|噪声| Drop[丢弃 / 归档]
+  end
+
+  subgraph Harness["Harness"]
+    Sess[Session · 异步 ReAct · 模型 · 工具]
+    Worker[Worker]
+    Assign --> Worker
+    Worker --> Sess
+  end
+
+  subgraph Bottom["底盘"]
+    Store[(Store · SQLite + Spill)]
+    Env[Env · LocalEnv / daemon]
+  end
+
+  WD[Watchdog]
+
+  C1 --> Fast
+  C1 --> Slow
+  TK --> Intake
+  Sess --> Store
+  Sess --> Env
+  Worker -.->|汇报| Intake
+  WD -.-> Worker
 ```
 
-事件进 Ingress，再进 `Engine.receive`；Eval 后出 Ticket 和 Assignment，Worker 跑完向 Router 汇报，再按信道写出。Watchdog 在外侧盯卡住的任务。
+事件流（文字版）：
+
+```
+Channel ──► Ingress (Fast/Slow → Thread key)
+              │
+              ▼
+           Engine.receive
+              │  路由 / 批处理
+              ▼
+           Thread ──► Eval ──► Ticket ──► Assignment
+                         │                    │
+                         └─ 丢弃              ▼
+                                        Harness Worker
+                                              │
+                    Store ◄───────────────────┤
+                    Env   ◄───────────────────┘
+                              Watchdog ─► 卡住的 Worker
+```
+
+同 Thread 已订阅时走 `bypass=subscription`，跳过 Router Eval，直通已有 Worker。
 
 | 层 | 职责 |
 |----|------|
-| Harness | Session、循环、模型、工具、daemon |
-| Engine | Trigger / Thread / Decision / Ticket / Assignment |
-| Store | SQLite、Spill |
-| Channels | 入站适配、出站格式 |
+| Channel | 入站适配、出站格式 |
+| Ingress | Fast / Slow Path → Thread key |
+| Engine | 路由批处理、Thread、Eval、Ticket、Assignment |
+| Harness | Session、异步 ReAct、模型、工具、daemon |
+| Store | SQLite、Spill、`read_object` |
 | Env | 沙箱目录与进程 |
 | Watchdog | 检查卡住的 Worker |
 
@@ -318,26 +375,83 @@ Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not 
 
 ### Architecture
 
-```
-Channel    CLI / fake IM / fake GitHub
-    │
-Ingress    Fast + Slow → Thread key
-    │
-Engine     Intake → Eval → Ticket / Assignment
-    │
-Harness    Session, async ReAct, model, tools
-    │
-Store      SQLite + Spill          Env: LocalEnv / daemon
+Layers: **Channel** → **Ingress** → **Engine** (routing / batching → Thread → Eval → Ticket → Assignment) → **Harness** Worker Session. **Store** and **Env** sit underneath. **Watchdog** sits outside.
+
+```mermaid
+flowchart TB
+  subgraph Channels["Channel"]
+    C1[CLI / fake IM / fake GitHub]
+  end
+
+  subgraph Ingress["Ingress"]
+    Fast[Fast Path]
+    Slow[Slow Path]
+    Fast --> TK[Thread key]
+    Slow --> TK
+  end
+
+  subgraph Engine["Engine"]
+    Intake[Intake / routing + batching]
+    Thread[Thread]
+    Eval[Eval]
+    Ticket[Ticket]
+    Assign[Assignment]
+    Intake --> Thread --> Eval
+    Eval -->|actionable| Ticket --> Assign
+    Eval -->|noise| Drop[drop / archive]
+  end
+
+  subgraph Harness["Harness"]
+    Sess[Session · async ReAct · model · tools]
+    Worker[Worker]
+    Assign --> Worker
+    Worker --> Sess
+  end
+
+  subgraph Bottom["Foundation"]
+    Store[(Store · SQLite + Spill)]
+    Env[Env · LocalEnv / daemon]
+  end
+
+  WD[Watchdog]
+
+  C1 --> Fast
+  C1 --> Slow
+  TK --> Intake
+  Sess --> Store
+  Sess --> Env
+  Worker -.->|report| Intake
+  WD -.-> Worker
 ```
 
-Event → Ingress → `Engine.receive` → Eval → Ticket / Assignment → Worker → Router outbox. Watchdog watches stuck Workers.
+Text flow:
+
+```
+Channel ──► Ingress (Fast/Slow → Thread key)
+              │
+              ▼
+           Engine.receive
+              │  routing / batching
+              ▼
+           Thread ──► Eval ──► Ticket ──► Assignment
+                         │                    │
+                         └─ drop              ▼
+                                        Harness Worker
+                                              │
+                    Store ◄───────────────────┤
+                    Env   ◄───────────────────┘
+                              Watchdog → stuck Workers
+```
+
+Subscribed Threads use `bypass=subscription` (skip Router Eval, go straight to the Worker).
 
 | Layer | Job |
 |-------|-----|
-| Harness | session, loop, model, tools, daemon |
-| Engine | Trigger / Thread / Decision / Ticket / Assignment |
-| Store | SQLite, Spill |
-| Channels | inbound adapters, outbound shape |
+| Channel | inbound adapters, outbound shape |
+| Ingress | Fast / Slow Path → Thread key |
+| Engine | routing/batching, Thread, Eval, Ticket, Assignment |
+| Harness | session, async ReAct, model, tools, daemon |
+| Store | SQLite, Spill, `read_object` |
 | Env | sandbox workdir / process |
 | Watchdog | stuck Workers |
 
