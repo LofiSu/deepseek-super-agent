@@ -110,7 +110,11 @@ export class Store {
     ).run(row.id, row.ticketId, row.channel, row.purpose, row.text, row.status, row.createdAt)
   }
 
-  listReplies(): ReplyRow[] {
+  markReplySent(id: string): void {
+    this.db.prepare(`UPDATE replies SET status = 'sent' WHERE id = ?`).run(id)
+  }
+
+    listReplies(): ReplyRow[] {
     const rows = this.db.prepare(
       'SELECT id, ticket_id, channel, purpose, text, status, created_at FROM replies ORDER BY rowid',
     ).all() as Record<string, string>[]

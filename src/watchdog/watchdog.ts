@@ -3,6 +3,7 @@ import type { JournalEntry, SessionJournal } from '../harness/session.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
+import { loadWatchdogRules, type WatchdogRules } from './rules.ts'
 
 export function stuckSessions(sessions: SessionRow[], nowMs: number, stuckMs: number): SessionRow[] {
   return sessions.filter(session =>
@@ -50,6 +51,7 @@ export interface WatchdogControl {
 
 export class Watchdog {
   private readonly nudged = new Set<string>()
+  private readonly rules: WatchdogRules
 
   constructor(private readonly opts: {
     store: Store
@@ -60,7 +62,9 @@ export class Watchdog {
     intervalMs: number
     stuckMs: number
     now?: () => number
-  }) {}
+  }) {
+    this.rules = loadWatchdogRules()
+  }
 
   get intervalMs(): number {
     return this.opts.intervalMs
@@ -115,7 +119,8 @@ export class Watchdog {
 
   private fail(hit: StuckAssignment): void {
     this.nudged.delete(hit.assignmentId)
-    this.opts.engine.report(hit.ticketId, { kind: 'failed', text: 'watchdog: stuck', deliver: false })
+    const text = hit.reason === 'failed-jobs' ? this.rules.reasons['failed-jobs'] : this.rules.reasons.stale
+    this.opts.engine.report(hit.ticketId, { kind: 'failed', text, deliver: false })
     this.opts.store.addEvent('watchdog.fail', {
       ticketId: hit.ticketId,
       assignmentId: hit.assignmentId,

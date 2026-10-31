@@ -63,7 +63,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Thread = 同一话题/PR 下的事件流** — Thread key
 - [x] **已订阅 → 直通 Worker（bypass Router Eval）** — 日志 `bypass=subscription` + `ticketId`
 - [x] **未订阅 → Router/Eval 冷启动分派** — Intake → Eval → Ticket
-- [~] **Worker 取消订阅 / 交回 Router** — 接口方向在 PLAN；demo 未强调（T21）
+- [x] **Worker 取消订阅 / 交回 Router** — `handback` 退订并把 Trigger 交回 Eval（T21）
 - [x] **Router 仍可观察全局 Trigger** — Intake 记账
 - [x] **Inline：摘要进上下文** — `memory/recall`
 - [x] **Spill：长内容外置 + id** — `store/spill`
@@ -95,7 +95,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **外部 Control Loop Session** — `watchdog` role
 - [x] **定时驱动** — daemon interval tick
 - [x] **卡住任务 nudge / fail** — watchdog tools + demo tick
-- [~] **基础设施故障 + 目标偏离的 NL 维护** — 有 nudge/fail；完整健康检查/改规则 YAML 未齐（T43–T44）
+- [~] **基础设施故障 + 目标偏离的 NL 维护** — nudge/fail + `prompts/watchdog.md` / `rules.json`；完整健康探针仍薄（T43–T44）
 
 ### §7 实验（文章评测，不挡开源）
 

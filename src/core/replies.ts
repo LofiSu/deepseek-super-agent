@@ -27,11 +27,12 @@ export class Replies {
       channel,
       purpose,
       text: rendered,
-      status: 'sent' as const,
+      status: 'pending' as const,
       createdAt: this.host.now(),
     }
     this.host.repo.addReply(row)
     this.host.log(`[channel] norm=${channel} ticketId=${ticket.id} purpose=${purpose}`)
     this.host.log(`[reply] purpose=${purpose} ticketId=${ticket.id} channel=${channel} text=${rendered.replace(/\s+/g, ' ')}`)
+    this.host.repo.markReplySent(row.id)
   }
 }
