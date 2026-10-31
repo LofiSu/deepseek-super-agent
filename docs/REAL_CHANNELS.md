@@ -76,8 +76,11 @@ Set these for a live Feishu/Lark channel:
 | `FEISHU_ENCRYPT_KEY` | no | decrypt encrypted event envelopes |
 | `FEISHU_BOT_OPEN_ID` | no | detect mentions of the bot (`ou_...`) |
 
-Bot permissions: `im:message`, `im:message.send_as_bot`, and message read
-access for the chat. The bot must be a member of `FEISHU_CHAT_ID`.
+Bot permissions: `im:message`, `im:message:send_as_bot`, `im:message:readonly`,
+and for group chats the sensitive scope `im:message.group_msg` (list/poll
+messages in groups the bot belongs to). Also useful for demo setup:
+`im:chat:create` / `im:chat:readonly`. The bot must be a member of
+`FEISHU_CHAT_ID`. Publish a new app version after adding scopes.
 
 Inbound paths:
 
