@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
-import { createModelFromEnv, MockModel } from '../src/harness/model.ts'
+import { createModelFromEnv, requireLiveModelFromEnv, resolveLiveApi, MockModel } from '../src/harness/model.ts'
 import { fastPath, filterTrigger, ruleClassify } from '../src/ingress/filter.ts'
 import type { Runtime } from '../src/runtime.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
@@ -107,5 +107,15 @@ describe('two-level filter', () => {
   it('uses HttpOpenAI only when both cloud env vars are set', () => {
     expect(createModelFromEnv({}).name).toBe('MockModel')
     expect(createModelFromEnv({ DS_AGENT_API_BASE: 'http://127.0.0.1:9/v1', DS_AGENT_API_KEY: 'test' }).name).toBe('HttpOpenAI')
+  })
+
+  it('resolves DEEPSEEK_API_KEY / OPENROUTER / OPENAI / GROK without Mock', () => {
+    expect(resolveLiveApi({})).toBeNull()
+    expect(resolveLiveApi({ DEEPSEEK_API_KEY: 'k' })?.base).toContain('deepseek.com')
+    expect(resolveLiveApi({ OPENROUTER_API_KEY: 'k' })?.model).toContain('deepseek')
+    expect(resolveLiveApi({ OPENAI_API_KEY: 'k' })?.source).toBe('OPENAI_API_KEY')
+    expect(resolveLiveApi({ GROK_API_KEY: 'k' })?.source).toBe('GROK_API_KEY')
+    expect(() => requireLiveModelFromEnv({})).toThrow(/requires a real model API key/)
+    expect(requireLiveModelFromEnv({ DEEPSEEK_API_KEY: 'k' }).name).toBe('HttpOpenAI')
   })
 })

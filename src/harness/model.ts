@@ -216,9 +216,96 @@ export class HttpOpenAI implements Model {
   }
 }
 
+export interface LiveApiConfig {
+  base: string
+  key: string
+  model: string
+  source: string
+}
+
+/**
+ * Resolve a real OpenAI-compatible endpoint from env.
+ * Order: DS_AGENT_API_* → DEEPSEEK_* → OPENROUTER_* → OPENAI_* → GROK_/XAI_*.
+ * Returns null when nothing is configured (no silent Mock here).
+ */
+export function resolveLiveApi(env: NodeJS.ProcessEnv = process.env): LiveApiConfig | null {
+  const modelOverride = env.DS_AGENT_API_MODEL || env.DS_AGENT_MODEL
+
+  if (env.DS_AGENT_API_BASE && env.DS_AGENT_API_KEY) {
+    return {
+      base: env.DS_AGENT_API_BASE,
+      key: env.DS_AGENT_API_KEY,
+      model: modelOverride || 'deepseek-chat',
+      source: 'DS_AGENT_API_*',
+    }
+  }
+
+  if (env.DEEPSEEK_API_KEY) {
+    return {
+      base: env.DEEPSEEK_API_BASE || 'https://api.deepseek.com/v1',
+      key: env.DEEPSEEK_API_KEY,
+      model: modelOverride || env.DEEPSEEK_MODEL || 'deepseek-chat',
+      source: 'DEEPSEEK_API_KEY',
+    }
+  }
+
+  if (env.OPENROUTER_API_KEY) {
+    return {
+      base: env.OPENROUTER_API_BASE || 'https://openrouter.ai/api/v1',
+      key: env.OPENROUTER_API_KEY,
+      model: modelOverride || env.OPENROUTER_MODEL || 'deepseek/deepseek-chat',
+      source: 'OPENROUTER_API_KEY',
+    }
+  }
+
+  if (env.OPENAI_API_KEY) {
+    return {
+      base: env.OPENAI_BASE_URL || env.OPENAI_API_BASE || 'https://api.openai.com/v1',
+      key: env.OPENAI_API_KEY,
+      model: modelOverride || env.OPENAI_MODEL || 'gpt-4o-mini',
+      source: 'OPENAI_API_KEY',
+    }
+  }
+
+  const grokKey = env.GROK_API_KEY || env.XAI_API_KEY
+  if (grokKey) {
+    return {
+      base: env.GROK_API_BASE || env.XAI_API_BASE || 'https://api.x.ai/v1',
+      key: grokKey,
+      model: modelOverride || env.GROK_MODEL || env.XAI_MODEL || 'grok-2-latest',
+      source: env.GROK_API_KEY ? 'GROK_API_KEY' : 'XAI_API_KEY',
+    }
+  }
+
+  return null
+}
+
+export function liveApiMissingMessage(): string {
+  return [
+    'ds-agent demo requires a real model API key (MockModel is disabled for demo).',
+    'Set one of:',
+    '  DEEPSEEK_API_KEY=...                         # uses https://api.deepseek.com/v1',
+    '  DS_AGENT_API_BASE=... DS_AGENT_API_KEY=...    # any OpenAI-compatible base',
+    '  OPENROUTER_API_KEY=...                       # e.g. model deepseek/deepseek-chat',
+    '  OPENAI_API_KEY=...',
+    '  GROK_API_KEY=... or XAI_API_KEY=...',
+    'Optional: DS_AGENT_API_MODEL / DEEPSEEK_MODEL / OPENROUTER_MODEL',
+  ].join('\n')
+}
+
+/** Real HttpOpenAI model, or throw with setup instructions (never MockModel). */
+export function requireLiveModelFromEnv(env: NodeJS.ProcessEnv = process.env): Model {
+  const cfg = resolveLiveApi(env)
+  if (!cfg) throw new Error(liveApiMissingMessage())
+  return new HttpOpenAI(cfg.base, cfg.key, cfg.model)
+}
+
+/**
+ * Prefer a live API when configured; otherwise MockModel.
+ * Used by unit tests and optional CLI paths that still allow offline.
+ */
 export function createModelFromEnv(env: NodeJS.ProcessEnv = process.env): Model {
-  const base = env.DS_AGENT_API_BASE
-  const key = env.DS_AGENT_API_KEY
-  if (base && key) return new HttpOpenAI(base, key, env.DS_AGENT_API_MODEL || env.DS_AGENT_MODEL || 'deepseek-chat')
+  const cfg = resolveLiveApi(env)
+  if (cfg) return new HttpOpenAI(cfg.base, cfg.key, cfg.model)
   return new MockModel()
 }

@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { githubTrigger } from '../channels/github.ts'
 import { imTrigger } from '../channels/im.ts'
-import { createModelFromEnv } from '../harness/model.ts'
+import { requireLiveModelFromEnv, resolveLiveApi } from '../harness/model.ts'
 import { Runtime } from '../runtime.ts'
 import type { Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
@@ -52,22 +52,21 @@ export function defaultHome(): string {
 
 export async function runDemo(home = defaultHome()): Promise<void> {
   fs.rmSync(home, { recursive: true, force: true })
-  const model = createModelFromEnv()
-  const live = model.name !== 'MockModel'
+  const model = requireLiveModelFromEnv()
+  const cfg = resolveLiveApi()!
+  if (model.name === 'MockModel') {
+    throw new Error('ds-agent demo refuses MockModel; configure a real API key')
+  }
   const runtime = Runtime.create({
     home,
     model,
-    jobDelayMs: live ? 200 : 30,
-    watchdogIntervalMs: live ? 200 : 20,
+    jobDelayMs: 250,
+    watchdogIntervalMs: 250,
     stuckMs: 60_000,
   })
   runtime.log.info('ds-agent demo')
   runtime.log.info('not an official DeepSeek product')
-  runtime.log.info(
-    live
-      ? `demo model=${model.name} (real API via DS_AGENT_API_BASE/KEY; scripted Mock proofs skipped)`
-      : `demo model=${model.name} (zero-config; set DS_AGENT_API_BASE + DS_AGENT_API_KEY to call a real model)`,
-  )
+  runtime.log.info(`demo model=${model.name} source=${cfg.source} apiModel=${cfg.model} base=${cfg.base}`)
   runtime.start()
   try {
     runtime.ingest(imTrigger({
@@ -133,12 +132,12 @@ export async function runDemo(home = defaultHome()): Promise<void> {
       runtime.store.close()
     }
   }
-  const proofs = live ? LIVE_DEMO_PROOFS : DEMO_PROOFS
+  const proofs = LIVE_DEMO_PROOFS
   const missing = proofs.filter(needle => !runtime.log.lines.some(line => line.includes(needle)))
   if (missing.length > 0) {
     throw new Error(`missing proofs: ${missing.join(', ')}`)
   }
-  runtime.log.info(live ? 'demo ok (live model)' : 'demo ok')
+  runtime.log.info('demo ok (live model)')
 }
 
 const entry = process.argv[1] ?? ''

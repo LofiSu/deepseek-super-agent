@@ -218,27 +218,31 @@ Channel ──► Ingress (Fast/Slow → Thread key)
 
 ### 快速开始
 
-Node.js 20+，[pnpm](https://pnpm.io/)。
+Node.js 20+，[pnpm](https://pnpm.io/)。**`pnpm demo` 必须接真模型**（不再静默用 MockModel）。
 
 ```bash
 pnpm install
-pnpm demo
+
+# 任选其一（DeepSeek 官方优先）
+export DEEPSEEK_API_KEY=sk-...
+# 或：export DS_AGENT_API_BASE=https://api.deepseek.com/v1
+#     export DS_AGENT_API_KEY=sk-...
+# 或：export OPENROUTER_API_KEY=...   # 可用 deepseek/deepseek-chat
+# 或：export OPENAI_API_KEY=... / GROK_API_KEY=...
+
+pnpm demo          # 真 API；没 Key 会报错说明怎么设
+pnpm test          # 离线单测仍可用 MockModel
+pnpm test:live     # 有 Key 时跑真模型集成测试
 pnpm start
-pnpm test
 ```
 
 ### Demo
 
-`pnpm demo` 注入一批假 IM / GitHub 事件，默认用 **MockModel**（不连网、不需要 Key），用来验收管线：噪声过滤、Ticket → Worker、`bypass=subscription`、Spill + `read_object`、投机 gate、Watchdog、重启持久化等。
-
-仓和代码是真实现；Mock 只是零配置 demo 模型。接真模型：
+`pnpm demo` 注入一批假 IM / GitHub 事件，**必须用真模型 API**（无 Key 会报错）。事件是假的，模型调用是真的。管线验收包括：噪声过滤、Ticket → Worker、`bypass=subscription`、Spill + `read_object`、投机 gate、Watchdog、重启持久化等。
 
 ```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # 可选
-pnpm demo    # 走 HttpOpenAI；脚本化 Mock 断言会放宽
-# 或：pnpm start / pnpm ds-agent chat "fix the login timeout"
+export DEEPSEEK_API_KEY=sk-...
+pnpm demo
 ```
 
 ### 模型配置
@@ -469,27 +473,31 @@ Subscribed Threads use `bypass=subscription` (skip Router Eval, go straight to t
 
 ### Quick start
 
-Node.js 20+, [pnpm](https://pnpm.io/).
+Node.js 20+, [pnpm](https://pnpm.io/). **`pnpm demo` requires a real model** (no silent MockModel).
 
 ```bash
 pnpm install
-pnpm demo
+
+# pick one (DeepSeek official preferred)
+export DEEPSEEK_API_KEY=sk-...
+# or: export DS_AGENT_API_BASE=https://api.deepseek.com/v1
+#     export DS_AGENT_API_KEY=sk-...
+# or: export OPENROUTER_API_KEY=...   # e.g. deepseek/deepseek-chat
+# or: export OPENAI_API_KEY=... / GROK_API_KEY=...
+
+pnpm demo          # real API; missing key → clear error
+pnpm test          # offline unit tests may still use MockModel
+pnpm test:live     # live integration tests when a key is set
 pnpm start
-pnpm test
 ```
 
 ### Demo
 
-`pnpm demo` feeds fake IM / GitHub events and defaults to **MockModel** (offline, no API key) so the pipeline checks out of the box.
-
-The repo and code are real; Mock is only the zero-config demo model. For a real model:
+`pnpm demo` feeds fake IM / GitHub events through a **real model API** (errors if no key). Fake events, real completions.
 
 ```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # optional
-pnpm demo    # uses HttpOpenAI; Mock scripted proofs are relaxed
-# or: pnpm start / pnpm ds-agent chat "fix the login timeout"
+export DEEPSEEK_API_KEY=sk-...
+pnpm demo
 ```
 
 ### Models
