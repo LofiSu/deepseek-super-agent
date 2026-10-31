@@ -1,3 +1,4 @@
+import type { Metrics } from '../metrics/metrics.ts'
 import type { SessionRow } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -12,6 +13,7 @@ export class Watchdog {
   constructor(private readonly opts: {
     store: Store
     log: (line: string) => void
+    metrics: Metrics
     intervalMs: number
     stuckMs: number
     now?: () => number
@@ -29,6 +31,7 @@ export class Watchdog {
     this.opts.log(`[watchdog] tick db=${db} stuck=${stuck.length}`)
     for (const session of stuck) {
       this.opts.log(`[watchdog] nudge session=${session.id} ticketId=${session.ticketId ?? ''}`)
+      this.opts.metrics.increment('watchdog.nudge')
     }
   }
 }

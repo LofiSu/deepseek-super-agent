@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { Engine } from './core/engine.ts'
 import type { Host } from './core/host.ts'
+import { LocalEnv } from './env/local-env.ts'
+import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness } from './harness/loop.ts'
 import { createModelFromEnv, type Model } from './harness/model.ts'
@@ -8,9 +10,9 @@ import { SessionJournal } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger } from './ingress/filter.ts'
 import { inlineOrSpill } from './memory/recall.ts'
+import { Metrics } from './metrics/metrics.ts'
 import { Logger } from './shared/log.ts'
 import type { Disposition, ReceiveResult, Ticket, Trigger } from './shared/types.ts'
-import { LocalEnv } from './env/local-env.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
 
@@ -21,6 +23,18 @@ export interface RuntimeOptions {
   watchdogIntervalMs?: number
   stuckMs?: number
   now?: () => string
+  /** Environment for the LocalEnv allowlist and secret redaction. Model selection still reads process.env. */
+  env?: NodeJS.ProcessEnv
+}
+
+class RedactingLogger extends Logger {
+  constructor(private readonly clean: (line: string) => string) {
+    super()
+  }
+
+  override info(line: string): void {
+    super.info(this.clean(line))
+  }
 }
 
 export class Runtime {
@@ -31,6 +45,7 @@ export class Runtime {
   readonly watchdog: Watchdog
   readonly daemon: Daemon
   readonly model: Model
+  readonly metrics: Metrics
   readonly home: string
 
   private constructor(parts: {
@@ -42,6 +57,7 @@ export class Runtime {
     watchdog: Watchdog
     daemon: Daemon
     model: Model
+    metrics: Metrics
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -51,17 +67,23 @@ export class Runtime {
     this.watchdog = parts.watchdog
     this.daemon = parts.daemon
     this.model = parts.model
+    this.metrics = parts.metrics
   }
 
   static create(opts: RuntimeOptions): Runtime {
-    const log = new Logger()
+    const baseEnv = opts.env ?? process.env
+    const secrets = secretValues(baseEnv)
+    const redact = (text: string) => redactSecrets(text, secrets)
+    const log = new RedactingLogger(redact)
     const model = opts.model ?? createModelFromEnv()
     const store = new Store(opts.home)
+    const metrics = new Metrics(opts.home)
     const now = opts.now ?? (() => new Date().toISOString())
     log.info(`[runtime] model=${model.name}`)
     const host: Host = {
       repo: store,
       now,
+      metrics,
       log: line => log.info(line),
       scope: {
         admit: trigger => {
@@ -76,13 +98,15 @@ export class Runtime {
       },
     }
     const engine = new Engine(host)
-    const env = new LocalEnv(path.join(opts.home, 'workspaces'))
+    const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const late: { harness?: Harness } = {}
     const tools = new ToolRegistry({
       store,
       engine,
       env,
+      metrics,
+      redact,
       log: line => log.info(line),
       scheduleJob: job => {
         if (!late.harness) throw new Error('harness is not ready')
@@ -99,18 +123,21 @@ export class Runtime {
       store,
       engine,
       journal,
+      metrics,
+      redact,
       log: line => log.info(line),
       jobDelayMs: opts.jobDelayMs ?? 40,
     })
     late.harness = harness
     const watchdog = new Watchdog({
       store,
+      metrics,
       log: line => log.info(line),
       intervalMs: opts.watchdogIntervalMs ?? 15_000,
       stuckMs: opts.stuckMs ?? 60_000,
     })
     const daemon = new Daemon(watchdog, line => log.info(line))
-    return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model })
+    return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model, metrics })
   }
 
   start(): void {
@@ -125,6 +152,8 @@ export class Runtime {
       return result
     }
     const verdict = filterTrigger(trigger, this.model)
+    if (verdict.action === 'pass') this.metrics.increment('ingress.admit')
+    else this.metrics.increment('ingress.drop')
     this.log.info(
       `[ingress] two-level fast=${verdict.fast} semantic=${verdict.semantic} model=${this.model.name} action=${verdict.action} layer=${verdict.layer}`,
     )

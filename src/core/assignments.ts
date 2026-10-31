@@ -50,6 +50,7 @@ export class Assignments {
     if (wasSpeculative && terminal) verdict = this.gate.evaluate({ ticket, report })
     else if (!wasSpeculative && report.deliver === true) verdict = 'deliver'
     assignment.report = { kind: report.kind, text: report.text, deliver: report.deliver, verdict }
+    if (report.kind === 'failed') this.host.metrics.increment('watchdog.fail')
 
     if (wasSpeculative && verdict === 'hold') {
       this.host.repo.putDoc('ticket', ticket.id, ticket)
@@ -58,6 +59,7 @@ export class Assignments {
     }
 
     if (verdict === 'discard') {
+      if (wasSpeculative) this.host.metrics.increment('speculate.discard')
       this.finish(ticket, assignment, report.kind, 'discarded')
       this.host.repo.addEvent('speculate.discarded', {
         ticketId: ticket.id,
@@ -70,6 +72,7 @@ export class Assignments {
     }
 
     if (wasSpeculative && verdict === 'deliver') {
+      this.host.metrics.increment('speculate.deliver')
       ticket.speculative = false
       assignment.speculative = false
       this.host.repo.addEvent('speculate.delivered', {

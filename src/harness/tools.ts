@@ -1,5 +1,7 @@
 import { ticketStage } from '../core/stage.ts'
 import type { Engine } from '../core/engine.ts'
+import { redactUnknown } from '../env/sanitize.ts'
+import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import type { Role, Ticket } from '../shared/types.ts'
@@ -18,6 +20,8 @@ export interface ToolDeps {
   store: Store
   engine: Engine
   env: EnvPort
+  metrics: Metrics
+  redact: (text: string) => string
   log: (line: string) => void
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
@@ -36,9 +40,11 @@ const schema = (properties: Record<string, { type: string; description?: string 
 
 export class ToolRegistry {
   private readonly tools: ToolDef[]
+  private readonly redact: (text: string) => string
 
   constructor(deps: ToolDeps) {
-    const { store, engine, env, log } = deps
+    this.redact = deps.redact
+    const { store, engine, env, log, metrics } = deps
     this.tools = [
       {
         name: 'create_worker',
@@ -208,6 +214,7 @@ export class ToolRegistry {
         roles: ['watchdog'],
         run: async args => {
           const ticketId = String(args.ticketId ?? '')
+          metrics.increment('watchdog.nudge')
           log(`[watchdog] nudge ticketId=${ticketId}`)
           return { nudged: ticketId }
         },
@@ -240,7 +247,7 @@ export class ToolRegistry {
   async invoke(call: ToolCall, ctx: ToolCtx): Promise<unknown> {
     const tool = this.tools.find(item => item.name === call.name)
     if (!tool || !tool.roles.includes(ctx.role)) throw new UserError(`tool ${call.name} is not available to ${ctx.role}`)
-    return tool.run(call.args, ctx)
+    return redactUnknown(await tool.run(call.args, ctx), this.redact)
   }
 }
 
