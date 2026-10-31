@@ -97,17 +97,40 @@
 | Engine → Channel | Outbox：`acknowledgement`/`answer`/`result`/`attention` | 对外回复只经 Router |
 | Watchdog → Engine/Harness | 定时 tick；nudge/fail stuck Worker | 独立 Session，外部 Control Loop |
 
-### 2.3 主数据流（Ingress → … → Assignment）
+### 2.3 主数据流（Source → … → Channel；并行 Watchdog）
 
-1. **Source 事件**进入 Channel 适配器，变成不可变 `Trigger`（带 Source 元数据与 Thread 归属）。
-2. **Ingress** Fast Path 丢噪声；候选进 Slow Path（可 Mock）；通过后绑定 Thread key。
-3. **`Engine.receive`**：Intake 去重入库；记入 Thread；若有 **Subscription** 且为人消息 → 日志 `bypass=subscription` + `ticketId`，直达 Ticket/Worker，**跳过 Eval**。
-4. 否则进入该 Thread 的 **Eval 队列**；同 Thread **串行**；Router 推理期间积压 Trigger **批处理**注入下一轮。
-5. **Eval**：Gate（确定规则）+ Assessment（Router Session）→ `Decision`（accept / ignore / stop / unavailable）。
-6. **accept** 原子创建：Mandate + Ticket + 首 Assignment + Subscriptions + acknowledgement Outbox。
-7. **Worker Session** 跑异步 ReAct；长工具返回 `{status:'started', jobId}`；完成后作为新事件注入 Session。
-8. Worker **只向 Router 汇报**；Router 按信道规范 Outbox；投机 Assignment 经 **deliver gate** 才对外可见。
-9. **Watchdog** 定时外部回路：检测卡住/偏离 → nudge 或 fail。
+```
+Source event
+  → Channel adapter（半结构化 → Trigger 形状）
+  → Ingress Fast Path（source/group/whitelist 确定性过滤）
+  → Ingress Slow Path（LLM policy；可 Mock）
+  → Thread key（IM topic / PR / email thread）
+  → Engine.receive(trigger)
+       → Intake：去重入库 Trigger + disposition；记入 Thread
+       → Subscription fan-out
+            · 人消息达 live Ticket → bypass=subscription（日志含 ticketId）→ 直达 Worker Input（跳过 Eval）
+            · 否则入 primary Thread Eval 队列
+  → Eval 队列 / 同 Thread 串行 batching（Router LLM 轮次中积压一并注入）
+  → Gate（确定性）+ Assessment（Router Session）→ Decision
+  → accept ⇒ 原子：Mandate + Ticket + Assignment + Subscriptions + ack Outbox
+  → Worker Harness Session（强模型；无直接用户 I/O；经 LocalEnv）
+  → Report → DomainEvents → Router
+  → Router Replies via Channel norms（IM≤100 words / GH 结构化）→ Outbox → Source
+并行：Watchdog Control Loop（timer）
+  → detect stuck / infra fault / goal drift → nudge 或 fail Assignment 或告警 Router
+旁路：speculative Assignment → DeliverGate → deliver（可见）| discard（无出站）
+异步：工具 {status:started,jobId} → 完成作新 SessionEvent（不阻塞入站）
+```
+
+逐步说明：
+
+1. **Source 事件** → Channel 适配器 → 不可变 `Trigger`。
+2. **Ingress** Fast → Slow → **Thread key**。
+3. **`Engine.receive`** → **Intake** 存 Trigger；**fan-out Subscriptions**；命中则 bypass Eval。
+4. 否则 **Eval queue/batching** → **Gate+Assessment Decision**。
+5. **Ticket+Mandate+Assignment** 原子创建 → **Worker Harness Session**。
+6. **Report** → **Router Replies via Channel norms**。
+7. 并行 **Watchdog Control Loop**；投机路径经 **deliver gate**。
 
 ### 2.4 架构图（mermaid）
 
@@ -147,15 +170,43 @@ flowchart TB
   SPEC[Speculate deliver gate] --> AS
 ```
 
-### 2.5 职责一句话
+### 2.5 职责分离 SoC 表（Harness / Engine / Store / Channels / Env / Watchdog / Ingress）
 
-- **Ingress**：两级过滤 + Thread key；Fast Path 白名单直通；Slow Path LLM policy（可 Mock）。
+| 组件 | 做什么 | 不做什么 | 关键 ports / 文件 | 模块 |
+|------|--------|----------|-------------------|------|
+| **Channels** | 入站适配（CLI/fake IM/fake GH）→ Trigger；出站 ChannelNorms（IM≤100 words；GH/email 结构化）；Outbox 发送 | 写领域聚合；跑 LLM 循环 | `Outbox`, `ChannelNorms` · `src/channels/` | M8 |
+| **Ingress** | Fast Path 确定性过滤；Slow Path LLM policy；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
+| **Engine** | **领域唯一写者**：Intake / Evals(Gate+Assessment) / Tickets / Assignments / Replies / Subscribe；同步命令+事务 | Node I/O；模型 HTTP；文件系统；Channel 协议细节 | `Engine`, `Repositories`, `Assessor`, `Executor`, `Outbox` · `src/core/` | M3+M5 |
+| **Harness** | Session 事件日志；async ReAct `start/stop/runTurn`；角色工具；Mock/BYOM；daemon 调度；Router=Sequence Point；Worker 隔离；Watchdog Session 宿主 | 领域状态机；直接写 Channel；解释 Policy | `Harness`, `Tool`, `Model` · `src/harness/` | M1 |
+| **Store** | SQLite Repositories + Spill 对象；atomic；session_event/job 持久化 | 业务 Decision；出站格式；跑工具 | `Repositories`, `SpillStore` · `src/store/` | M2 |
+| **Env** | LocalEnv 沙箱目录/进程；prepare；大输出 Spill；sanitize **凭据值永不进上下文**；daemon 的「手」 | 持 Session 状态；写 Ticket | `LocalEnv` · `src/env/` | M9 |
+| **Watchdog** | 外部 Control Loop；timer；基建故障 + 任务进度/目标漂移；nudge/fail；NL prompts/rules | 创建 Ticket；替 Router 做 Assessment；直写出站 | `Watchdog.tick` · `src/watchdog/` | M10 |
+
+横切（仍服从上表写者规则）：**Memory**（M6 Inline+Spill/`read_object`）只读图+Spill；**Speculate**（M7 DeliverGate）只改 speculative 可见性，生命周期仍经 Engine。
+
+### 2.6 Ports-only 连接约束
+
+| Port | 提供者 | 消费者 | 规则 |
+|------|--------|--------|------|
+| `Engine.receive` / 命令 API | Engine | Ingress, CLI tools, Assessor 回调 | 同步+事务；非法 `UserError` |
+| `Repositories` + `SpillStore` | Store | Engine（写）、Memory/Harness（读或追加 session 表） | Trigger/Thread/Decision/Ticket/Assignment **仅 Engine 写** |
+| `Assessor` | Router Harness 适配 | Engine.Evals | `request` → 稍后 `Engine.decide` |
+| `Executor` | Worker Harness 适配 | Engine.Assignments | `start/deliver/stop` 只入队；回调 past-tense |
+| `Outbox` | Channels adapter | Engine.Replies | Router 拥有出站；Worker 禁止直写 Channel |
+| `LocalEnv` | Env | Worker tools | 凭据值永不进 tool result / prompt |
+| `DeliverGate` | Speculate | Runtime / Assignments | gate 前对外不可见 |
+| `Watchdog.tick` | Watchdog | Daemon | 只经 Engine/Harness ports 行动 |
+
+### 2.7 职责一句话（速查）
+
+- **Ingress**：两级过滤 + Thread key；Fast Path 白名单；Slow Path LLM policy（可 Mock）。
 - **Engine**：唯一写 Trigger/Thread/Decision/Ticket/Assignment/Subscription；同步命令 + 事务。
 - **Harness Router**：Sequence Point；批处理 Trigger；轻模型；理想无 bash；出站归 Router。
 - **Harness Worker**：隔离执行；强模型；只向 Router 报告；可订阅 Thread；Subagent 对 Router 不透明。
 - **Store / Spill**：持久状态；大对象外置；Inline = summary + spillIds。
 - **Env**：留在机器；轻量 daemon 不持 Session 状态；BYOM。
 - **Watchdog**：外部 Control Loop；定时；基建故障 + 任务漂移；NL prompts/rules 可维护。
+- **Channels**：入站 Source 适配 + 出站 Norms；不写领域。
 
 ---
 
