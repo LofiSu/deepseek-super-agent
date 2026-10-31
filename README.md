@@ -85,7 +85,7 @@ Legend: `[x]` implemented and covered by the demo or tests · `[~]` skeleton or 
 - [x] **Compute can be stateless; Session and domain live in the DB** — SQLite Store
 - [x] **Execution environment stays on the machine (sandbox directory)** — `LocalEnv`
 - [x] **The daemon does not hold session state** — `daemon.ts` only schedules the Watchdog and similar work
-- [x] **BYOM: OpenAI-compatible `DS_AGENT_API_*`** — `createModelFromEnv`
+- [x] **BYOM: OpenAI-compatible `DS_AGENT_API_*` and provider key presets** — `resolveLiveApi`
 - [~] **Intermittent devices / multi-machine handoff** — the Store can resume; a real cross-machine daemon is not done (T40, partial)
 
 ### §6 Watchdog
@@ -210,25 +210,31 @@ A Thread that is already subscribed uses `bypass=subscription` and skips Router 
 
 ## Quick start
 
-Node.js 22+ (see `engines` in [package.json](./package.json)), [pnpm](https://pnpm.io/). **`pnpm demo` requires a real model** (no silent MockModel).
+Node.js 22+ (see `engines` in [package.json](./package.json)), [pnpm](https://pnpm.io/).
 
 ```bash
 pnpm install
-
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # optional
-
-# also accepted, after DS_AGENT_API_*:
-#   DEEPSEEK_API_KEY=sk-...          # https://api.deepseek.com/v1, model deepseek-chat
-#   OPENROUTER_API_KEY=...           # e.g. deepseek/deepseek-chat
-#   OPENAI_API_KEY=...
-#   GROK_API_KEY=...                 # or XAI_API_KEY
-
-pnpm demo          # real API; missing key → clear error
-pnpm test          # offline unit tests may still use MockModel
+pnpm demo          # MockModel when no key is set, and the log says so
+pnpm test          # offline; unit tests pin MockModel
 pnpm test:live     # live integration tests when a key is set
 pnpm ds-agent chat "fix the login timeout"
+```
+
+A provider key, or both `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY`, selects `HttpOpenAI`. With no key, `pnpm demo` uses MockModel and prints that. Setting only one of `DS_AGENT_API_BASE` or `DS_AGENT_API_KEY` exits with an error.
+
+```bash
+export DS_AGENT_API_BASE=https://api.deepseek.com
+export DS_AGENT_API_KEY=sk-...
+export DS_AGENT_API_MODEL=deepseek-chat   # optional; omitted model stays deepseek-chat
+
+# or one provider key (see Models):
+#   DEEPSEEK_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+#   XAI_API_KEY / GROK_API_KEY, MOONSHOT_API_KEY / KIMI_API_KEY,
+#   ZHIPU_API_KEY / GLM_API_KEY, GEMINI_API_KEY / GOOGLE_API_KEY,
+#   ANTHROPIC_API_KEY
+# DS_AGENT_PROVIDER picks one when several keys are set.
+
+pnpm demo          # HttpOpenAI; scripted Mock proofs are relaxed
 ```
 
 [GitHub Actions](./.github/workflows/ci.yml) runs `pnpm typecheck` and `pnpm test` on pushes to `main` and on pull requests. The demo job runs only when `DEEPSEEK_API_KEY` or `DS_AGENT_API_KEY` is set as a secret, and then calls the live model.
@@ -244,41 +250,43 @@ pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 
 ## Demo
 
-`pnpm demo` feeds fake IM / GitHub events through a **real model API** (errors if no key). Fake events, real completions. The checks cover noise filtering, Ticket → Worker, `bypass=subscription`, Spill + `read_object`, the speculative deliver gate, Watchdog, and restart persistence. A live run skips the scripted offline proofs.
+`pnpm demo` feeds fake IM / GitHub events. With no key it uses **MockModel** (offline) and prints that choice. The checks cover noise filtering, Ticket → Worker, `bypass=subscription`, Spill + `read_object`, the speculative deliver gate, Watchdog, and restart persistence. A live run skips the scripted offline proofs.
 
 ```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
+export DS_AGENT_API_BASE=https://api.deepseek.com
 export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # optional
+export DS_AGENT_API_MODEL=deepseek-chat   # optional; omitted model stays deepseek-chat
 pnpm demo
 ```
+
+A single provider key (for example `DEEPSEEK_API_KEY`) also selects HttpOpenAI. With no key, demo uses MockModel and prints that. Setting only `DS_AGENT_API_BASE` or only `DS_AGENT_API_KEY` exits with an error.
 
 ## Models
 
-`resolveLiveApi()` checks these in order. The first match wins. `DS_AGENT_API_MODEL` overrides the model name.
+When both `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY` are set, they win over the table below. The model name stays `deepseek-chat` unless you set one. A provider key alone makes `resolveLiveApi` fill in the base and default model. `DS_AGENT_API_MODEL` (or `DS_AGENT_MODEL`) overrides that default. If several keys are set, the first row with a key wins. `DS_AGENT_PROVIDER` picks one (`xai`/`grok`, `moonshot`/`kimi`, `zhipu`/`glm`, `gemini`/`google`, `anthropic`/`claude` are aliases).
 
-| Variable | Meaning |
-|----------|---------|
-| `DS_AGENT_API_BASE` + `DS_AGENT_API_KEY` | OpenAI-compatible base and key (checked first) |
-| `DEEPSEEK_API_KEY` | DeepSeek key. Base defaults to `https://api.deepseek.com/v1`, model `deepseek-chat` |
-| `OPENROUTER_API_KEY` | OpenRouter. Default model `deepseek/deepseek-chat` |
-| `OPENAI_API_KEY` | OpenAI. Default model `gpt-4o-mini` |
-| `GROK_API_KEY` or `XAI_API_KEY` | xAI. Default model `grok-2-latest` |
-| `DS_AGENT_API_MODEL` | Optional model override |
+Default model ids follow each vendor's current docs example. Override any of them with `DS_AGENT_API_MODEL`.
 
-Use a lightweight model for the Router and Watchdog, and a stronger one for the Worker.
+| Provider | Environment variable | OpenAI-compatible base | Default model |
+|----------|----------------------|------------------------|---------------|
+| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | `deepseek-flash` |
+| OpenAI | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `deepseek/deepseek-chat` |
+| xAI / Grok | `XAI_API_KEY` or `GROK_API_KEY` | `https://api.x.ai/v1` | `grok-4.7` |
+| Moonshot / Kimi | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | `https://api.moonshot.cn/v1` | `kimi-k3.1-pro` |
+| Zhipu / GLM | `ZHIPU_API_KEY` or `GLM_API_KEY` | `https://open.bigmodel.cn/api/paas/v4` | `glm-5.3` |
+| Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-3.8-flash` |
+| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1` | `claude-opus-5-5` |
 
-```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com/v1
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-chat   # optional
-# or DEEPSEEK_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, GROK_API_KEY / XAI_API_KEY
-pnpm demo
-```
+The Gemini and Anthropic rows are the OpenAI-compatible bases from those vendors' docs (Gemini's is beta; Anthropic's compatibility layer serves Chat Completions). `HttpOpenAI` still posts to `/chat/completions` with `Authorization: Bearer`.
 
-`pnpm demo` calls `requireLiveModelFromEnv()` and prints setup instructions when no key is set. It does not use MockModel.
+Moonshot's international base is `https://api.moonshot.ai/v1`. Zhipu's overseas base is `https://api.z.ai/api/paas/v4`. Set those with `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY`.
 
-`pnpm test` and `pnpm ds-agent` call `createModelFromEnv()`, which uses the live API when a key is set and otherwise uses MockModel so the unit tests stay offline.
+With `DS_AGENT_PROVIDER` set, that provider's own key is used when present; otherwise `DS_AGENT_API_KEY` is used. `requireLiveModelFromEnv()` throws when no live API is configured and never returns MockModel.
+
+Use a lightweight model for the Router and Watchdog, and a stronger one for the Worker. The table is one process-wide model.
+
+`pnpm demo` uses MockModel only when no key is set, and it prints that. `pnpm test` pins MockModel so a developer key cannot send the suite onto the network. `createModelFromEnv()` returns MockModel when nothing is configured, and `HttpOpenAI` when a live API resolves. A half-set `DS_AGENT_API_BASE` / `DS_AGENT_API_KEY` pair throws instead of falling through to MockModel.
 
 ## Credits
 
