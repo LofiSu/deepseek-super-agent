@@ -16,6 +16,14 @@ export interface LongTermMemoryQuery {
   limit?: number
 }
 
+export interface LongTermMemoryEntry {
+  id: string
+  ticketId: string
+  spillId: string
+  text: string
+  createdAt: string
+}
+
 export interface ProductShellEvent {
   kind: string
   payload: unknown
