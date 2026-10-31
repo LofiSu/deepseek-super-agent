@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
 import type { Runtime } from '../src/runtime.ts'
-import { freshRuntime, shutdown } from './fixtures.ts'
+import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
 import { stuckSessions } from '../src/watchdog/watchdog.ts'
 
 let runtime: Runtime | undefined
@@ -19,7 +19,7 @@ describe('async job', () => {
       thread: 'topic/bug-login',
       text: '@ds-agent please fix the login timeout on checkout',
     }))
-    await runtime.jobsSettled()
+    await settleWithDeadline(runtime, 90_000)
     const jobs = runtime.store.listJobs()
     expect(jobs.length).toBeGreaterThan(0)
     expect(jobs.every(job => job.status === 'succeeded')).toBe(true)

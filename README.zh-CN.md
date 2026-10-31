@@ -221,7 +221,7 @@ pnpm test
 pnpm demo
 ```
 
-`pnpm test` 离线，固定 MockModel。
+`pnpm test` 与 `pnpm demo` 均要求真实模型，默认套件禁止 MockModel。
 
 没有 Key 时，`pnpm demo` 用 MockModel，并在日志里写明。一把厂商 Key，或者同时设置 `DS_AGENT_API_BASE` 与 `DS_AGENT_API_KEY`，会走 HttpOpenAI。只设置其中一个会报错退出。
 
@@ -305,6 +305,21 @@ Router / Watchdog 用轻量模型，Worker 用强一点的。上表是进程级�
 ## 致谢
 
 LofiSu × Grokbot（CoderBot）。
+
+
+## 真实模型测试
+
+本机 Magpie（Asia/Shanghai）实测，模型 `workbuddy/deepseek-v4.1-flash`：
+
+```bash
+export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
+export DS_AGENT_API_KEY=magpie
+export DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash
+pnpm test
+pnpm demo
+```
+
+未设置环境变量时由 `test/setup-live.ts` 填入 Magpie 默认值。E2E 日志目录：`/tmp/ds-agent-live-e2e-logs/`。
 
 ## 许可
 

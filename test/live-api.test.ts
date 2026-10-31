@@ -25,8 +25,7 @@ describe('resolveLiveApi', () => {
     try {
       expect(resolveLiveApi({})).toBeNull()
       expect(createModelFromEnv({}).name).toBe('MockModel')
-      expect(demoModel({}).model.name).toBe('MockModel')
-      expect(demoModel({}).provider).toBeNull()
+      expect(() => demoModel({})).toThrow(/MockModel is forbidden|requires a live model/)
     } finally {
       if (previous === undefined) delete process.env.OPENAI_API_KEY
       else process.env.OPENAI_API_KEY = previous

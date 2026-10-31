@@ -4,7 +4,7 @@ import { imTrigger } from '../src/channels/im.ts'
 import { isPhase2Enabled, Phase2NotImplementedError } from '../src/phase2/index.ts'
 import type { Runtime } from '../src/runtime.ts'
 import type { Ticket } from '../src/shared/types.ts'
-import { freshRuntime, shutdown } from './fixtures.ts'
+import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
 
 let runtime: Runtime | undefined
 
@@ -42,7 +42,7 @@ describe('Runtime Phase-2 opt-in', () => {
       thread: 'topic/bug-login',
       text: '@ds-agent please fix the login timeout on checkout',
     }))).toBe('stored')
-    await runtime.jobsSettled()
+    await settleWithDeadline(runtime, 90_000)
     expect(runtime.store.listDocs<Ticket>('ticket').length).toBeGreaterThan(0)
     expect(runtime.log.text()).toContain('Tickets.create')
   })

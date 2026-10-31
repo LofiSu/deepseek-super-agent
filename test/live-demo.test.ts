@@ -27,6 +27,7 @@ describe.skipIf(!hasLive)('live model demo (real API)', () => {
     const model = requireLiveModelFromEnv()
     expect(model.name).toBe('HttpOpenAI')
     expect(model.name).not.toBe('MockModel')
+    expect(demoModel().model.name).toBe('HttpOpenAI')
   })
 
   it('completes a tiny chat/completions round-trip', async () => {
@@ -41,13 +42,12 @@ describe.skipIf(!hasLive)('live model demo (real API)', () => {
 
   it('runs pnpm-demo flow against the live model', async () => {
     await runDemo(home)
-  }, 180_000)
+  }, 300_000)
 })
 
 describe('live model gate (always)', () => {
-  it('requireLiveModelFromEnv throws, and demo uses MockModel only with no key', () => {
+  it('requireLiveModelFromEnv and demoModel refuse MockModel with empty env', () => {
     expect(() => requireLiveModelFromEnv({})).toThrow(/No live model configured; refusing MockModel/)
-    expect(demoModel({}).model.name).toBe('MockModel')
-    expect(demoModel({}).provider).toBeNull()
+    expect(() => demoModel({})).toThrow(/MockModel is forbidden|requires a live model/)
   })
 })

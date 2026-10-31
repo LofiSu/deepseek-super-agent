@@ -43,8 +43,10 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        # Keep this gate offline. A provider key would select HttpOpenAI and can call the network.
+        # Offline CI gate: fixture stand-in only. Local default suite uses Magpie live and forbids MockModel.
         env:
+          CI: "true"
+          DS_AGENT_ALLOW_MOCK_FIXTURE: "1"
           DS_AGENT_API_BASE: ""
           DS_AGENT_API_KEY: ""
           DS_AGENT_PROVIDER: ""
