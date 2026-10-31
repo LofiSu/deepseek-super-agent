@@ -32,7 +32,7 @@ Two layers.
 
 Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg), one item at a time. Status follows this repo, `pnpm demo`, and `pnpm test`. Task list: [PLAN.md](./PLAN.md) (T01–T51). Where the plan and the code diverge: [docs/REVIEW.md](./docs/REVIEW.md).
 
-`[x]` done and covered. `[~]` partial. `[ ]` not done. Phase-2 counts as not done.
+`[x]` done and covered. `[~]` partial. `[ ]` not done. Phase-2 opt-in registries land behind `DS_AGENT_PHASE2=1` / `options.phase2` (default off).
 
 ### §1 Four traits
 
@@ -48,12 +48,12 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Router stays light.** Workers hold the execution tools. The Router tool set is smaller.
 - [x] **Small model on the Router.** `roleModels.router`. Workers can use a stronger model.
 - [x] **Trigger batching.** Under load, same-Thread Triggers fold into the next Eval. Demo and tests cover it.
-- [ ] **Router sharding / multi-layer filter.** Article §2/§8. Phase-2 (PLAN T09).
+- [~] **Router sharding / multi-layer filter.** Opt-in `RouterShardRegistry` (PLAN T09/T46). Runtime wires only when Phase-2 is enabled.
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
-- [x] **Subagent / Team inside a Worker.** Async jobs exist. A full Team topology does not (T14).
-- [~] **One UI, many topics.** Several Tickets can exist at once. There is no product shell yet (T15).
+- [~] **Subagent / Team inside a Worker.** Async jobs + `spawn_team` topology validation / `describeTopology()` (T14). Full multi-agent Team UX still thin.
+- [~] **One UI, many topics.** Several Tickets can exist at once. Opt-in `ProductShellBus` exists; not the default UI (T15/T49).
 
 ### §3 Event-driven
 
@@ -88,33 +88,33 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Env stays on the machine.** Sandbox directory via `LocalEnv`.
 - [x] **Daemon holds no session.** `daemon.ts` schedules the Watchdog and similar work.
 - [x] **BYOM.** OpenAI-compatible `DS_AGENT_API_*` and provider key presets (`resolveLiveApi`).
-- [x] **Machines that come and go.** The Store can resume. A real cross-machine daemon is not done (T40, partial).
+- [~] **Machines that come and go.** `MachineRegistry` heartbeats + stale detection (`DS_AGENT_MACHINE_STALE_MS`) + daemon resume hook (T40). True multi-host mesh still optional.
 
 ### §6 Watchdog
 
 - [x] **Outside control loop.** `watchdog` role.
 - [x] **Timer.** Daemon interval tick.
 - [x] **Stuck work.** Nudge or fail. Watchdog tools, plus the demo tick.
-- [~] **Infra faults and goal drift, in plain language.** Nudge/fail plus `prompts/watchdog.md` and `src/watchdog/rules.json` thresholds. Full health probes still thin (T43–T44).
+- [~] **Infra faults and goal drift, in plain language.** Nudge/fail + rules + read-only `ds-agent health` (store/vault mode/machines/watchdog). Deeper NL drift checks still thin (T43–T44).
 
 ### §7 Experiments
 
 Article evals. They do not block the release.
 
 - [x] **Runtime counters.** Ingress admit/drop, eval accept, bypass fan-out, speculative deliver/discard, watchdog nudge/fail, model latency. `ds-agent metrics` reads `<stateDir>/metrics.json`.
-- [ ] **Dual layer vs one Session.** Phase-2 / optional M12 (T45).
-- [ ] **Router batching stress curves.** Phase-2 (T45).
+- [~] **Latency curve samples.** Optional `curveSamples` / `summarizeCurve` in metrics (T45). Full dual-layer vs one-Session bake-off still open.
+- [ ] **Router batching stress curves.** Still open (T45 stress harness).
 
 ### §8 Left open
 
 Kept out of M11.
 
-- [ ] Router scale-out / Worker-direct topology (§8.1)
-- [ ] Memory that spans months (§8.1)
-- [ ] A product shell that is not a Session (§8.2)
-- [ ] Mid-task collaboration with a person (§8.2)
-- [ ] A2A across instances (§8.3)
-- [x] **Credentials stay out of tool output.** Bash stdout, file reads, tool results, and prompts. LocalEnv allowlist plus `[redacted]`. Vault and seccomp are still open (§8.4, T51).
+- [~] Router scale-out / Worker-direct topology (§8.1) — opt-in `RouterShardRegistry` + `WorkerMeshRegistry`
+- [~] Memory that spans tickets (§8.1) — opt-in `SpillBackedLongTermMemory` (not month-scale yet)
+- [~] A product shell that is not a Session (§8.2) — opt-in `ProductShellBus`
+- [ ] Mid-task collaboration with a person (§8.2) — still open
+- [~] A2A across instances (§8.3) — opt-in `A2ARouter` (in-process)
+- [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` + FileVault `describe()` (names only) + Darwin `sandbox-exec` / Linux `bwrap|unshare` when `DS_AGENT_SANDBOX=1` (§8.4, T51). Host vault/seccomp policy still external.
 
 ### Modules M0–M11
 

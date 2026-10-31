@@ -32,7 +32,7 @@ LofiSu × Grokbot（CoderBot）。
 
 对照微信文 [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg) **逐条**落地。状态以本仓代码 + `pnpm demo` / `pnpm test` 为准；完整任务矩阵见 [PLAN.md](./PLAN.md)（T01–T51）。计划与正在跑的代码哪里不一致，见 [docs/REVIEW.md](./docs/REVIEW.md)。
 
-图例：`[x]` 已有实现并通过 demo/测试路径验证 · `[~]` 有骨架或部分能力 · `[ ]` 未做（含 Phase-2）
+图例：`[x]` 已有实现并通过 demo/测试路径验证 · `[~]` 有骨架或部分能力 · `[ ]` 未做。Phase-2 registries 默认关闭，需 `DS_AGENT_PHASE2=1` / `options.phase2`。
 
 ### §1 四特质
 
@@ -48,12 +48,12 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Router 不直接干重活** — Worker 挂执行工具；Router 工具集更窄
 - [x] **Router 可用轻量模型** — `roleModels.router` / Mock；Worker 可配强模型
 - [x] **Trigger 批处理（拥堵时合并进下一轮）** — 同 Thread Eval batch；demo/测试覆盖
-- [ ] **Router 水平切分 / 多层过滤** — 文章 §2/§8；Phase-2（PLAN T09）
+- [~] **Router 水平切分 / 多层过滤** — opt-in `RouterShardRegistry`（PLAN T09/T46）；仅 Phase-2 开启时挂到 Runtime
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
-- [x] **Worker 内 Subagent / Team 对 Router 透明** — 有 async job；未做成完整 Team 拓扑（T14）
-- [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；产品壳未做（T15）
+- [~] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team` 拓扑校验 / `describeTopology()`（T14）；完整多 Agent Team UX 仍薄
+- [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；opt-in `ProductShellBus`（T15/T49），非默认 UI
 
 ### §3 事件驱动
 
@@ -88,29 +88,29 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **执行环境留在原地（沙箱目录）** — `LocalEnv`
 - [x] **端侧 daemon 不持会话状态** — `daemon.ts` 只调度 Watchdog 等
 - [x] **BYOM：OpenAI 兼容 `DS_AGENT_API_*` 和厂商 Key 预设** — `resolveLiveApi`
-- [x] **间歇上线设备 / 多机切换** — Store 可续；真·跨机 daemon 未做（T40 部分）
+- [~] **间歇上线设备 / 多机切换** — `MachineRegistry` 心跳 + 过期下线（`DS_AGENT_MACHINE_STALE_MS`）+ daemon resume hook（T40）；真多机 mesh 仍可选
 
 ### §6 Watchdog
 
 - [x] **外部 Control Loop Session** — `watchdog` role
 - [x] **定时驱动** — daemon interval tick
 - [x] **卡住任务 nudge / fail** — watchdog tools + demo tick
-- [~] **基础设施故障 + 目标偏离的 NL 维护** — nudge/fail + `prompts/watchdog.md` / `rules.json`；完整健康探针仍薄（T43–T44）
+- [~] **基础设施故障 + 目标偏离的 NL 维护** — nudge/fail + rules + 只读 `ds-agent health`；更深 NL 漂移检查仍薄（T43–T44）
 
 ### §7 实验（文章评测，不挡开源）
 
 - [x] **调度计数** — Ingress admit/drop、Eval accept、订阅 bypass fan-out、投机 deliver/discard、Watchdog nudge/fail、model latency；`ds-agent metrics` 与 `<stateDir>/metrics.json`
-- [ ] **端到端对比双层 vs 单 Session** — Phase-2 / 可选 M12（T45）
-- [ ] **Router 批处理压测曲线** — Phase-2（T45）
+- [~] **延迟曲线采样** — 可选 `curveSamples` / `summarizeCurve`（T45）；完整双层 vs 单 Session 对照仍开着
+- [ ] **Router 批处理压测曲线** — 仍开着（T45 压测 harness）
 
 ### §8 未决问题（明确不做进 M11）
 
-- [ ] Router 扩展 / Worker 直连拓扑（§8.1）
-- [ ] 长程跨月记忆（§8.1）
-- [ ] 脱离 Session 的产品交互壳（§8.2）
-- [ ] 中途人机协同 UX（§8.2）
-- [ ] A2A 跨实例（§8.3）
-- [x] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 环境变量白名单 + `[redacted]`；外置 vault / seccomp 仍未做（§8.4 T51）
+- [~] Router 扩展 / Worker 直连拓扑（§8.1）— opt-in `RouterShardRegistry` + `WorkerMeshRegistry`
+- [~] 跨 Ticket 长记忆（§8.1）— opt-in `SpillBackedLongTermMemory`（尚未到跨月）
+- [~] 脱离 Session 的产品交互壳（§8.2）— opt-in `ProductShellBus`
+- [ ] 中途人机协同 UX（§8.2）— 仍开着
+- [~] A2A 跨实例（§8.3）— opt-in `A2ARouter`（进程内）
+- [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` + FileVault `describe()`（仅名字）+ Darwin `sandbox-exec` / Linux `bwrap|unshare`（`DS_AGENT_SANDBOX=1`）（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
 
 ### 模块对照（M0–M11）
 
