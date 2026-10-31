@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { LocalEnv } from '../src/env/local-env.ts'
-import { MemoryVault } from '../src/env/vault.ts'
+import { FileVault, MemoryVault } from '../src/env/vault.ts'
 import { wrapBashCommand } from '../src/env/seccomp.ts'
 import { assertStoreEnvSeparation } from '../src/shared/boundary.ts'
 import { tempHome } from './fixtures.ts'
+import fs from 'node:fs'
+import path from 'node:path'
 
 describe('T51 vault + Store/Env boundary', () => {
   it('injects vault secrets into child env but redacts them from stdout', async () => {
@@ -35,8 +37,28 @@ describe('T51 vault + Store/Env boundary', () => {
     }
   })
 
+  it('uses available Linux no-network wrapper and falls back when none exists', () => {
+    const policy = { enabled: true, allowNetwork: false }
+    expect(wrapBashCommand('echo hi', policy, { platform: 'linux', available: bin => bin === 'bwrap' }).argv)
+      .toContain('--unshare-net')
+    expect(wrapBashCommand('echo hi', policy, { platform: 'linux', available: bin => bin === 'unshare' }).argv)
+      .toEqual(['unshare', '--net', '--', 'bash', '-c', 'echo hi'])
+    expect(wrapBashCommand('echo hi', policy, { platform: 'linux', available: () => false }).wrapped)
+      .toBe(false)
+  })
+
   it('enforces Store/Env boundary', () => {
     const env = new LocalEnv(tempHome(), { sandbox: { enabled: false } })
     expect(() => assertStoreEnvSeparation(env)).not.toThrow()
+  })
+
+  it('describes presence without serializing secret values', () => {
+    const file = path.join(tempHome(), 'vault.json')
+    const vault = new FileVault(file)
+    vault.set('TOKEN', 'never-print-this-value')
+    expect(vault.describe()).toEqual([{ name: 'TOKEN', present: true }])
+    expect(JSON.stringify({ vault, metadata: vault.describe() })).not.toContain('never-print-this-value')
+    expect(vault.resolveForChild(['TOKEN']).TOKEN).toBe('never-print-this-value')
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600)
   })
 })
