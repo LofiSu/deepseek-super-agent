@@ -122,6 +122,46 @@ describe('subscription bypass', () => {
     await runtime.finish()
   })
 
+  it('handback unsubscribes so the next human message goes through Eval', async () => {
+    runtime = freshRuntime()
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_login',
+      thread: 'topic/bug-login',
+      text: '@ds-agent please fix the login timeout on checkout',
+    }))).toBe('stored')
+    const ticket = runtime.store.listDocs<Ticket>('ticket')[0]!
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_login_2',
+      thread: 'topic/bug-login',
+      text: '@ds-agent login still 500, the timeout is back',
+    }))).toBe('stored')
+    expect(runtime.log.text()).toContain(`bypass=subscription ticketId=${ticket.id}`)
+    expect(runtime.store.getDoc<Thread>('thread', 'im:topic/bug-login')?.subscriptions).toEqual([ticket.id])
+
+    expect(runtime.engine.handback(ticket.id, 'trg_login_2', 'not-our-bug')).toBe(true)
+    const thread = runtime.store.getDoc<Thread>('thread', 'im:topic/bug-login')!
+    expect(thread.subscriptions).toEqual([])
+    expect(thread.pending).toContain('trg_login_2')
+    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.threadKeys).not.toContain('im:topic/bug-login')
+    expect(runtime.log.text()).toContain('unsubscribed=im:topic/bug-login')
+    expect(runtime.store.listEvents().some(event => event.type === 'subscription.removed')).toBe(true)
+
+    // Drain the requeued trigger through Eval (opens a fresh ticket). A later follow-up must not fan out to the old one.
+    runtime.engine.evaluateDue()
+    const afterHandback = runtime.store.listDocs<Ticket>('ticket').map(item => item.id)
+    expect(afterHandback).toContain(ticket.id)
+    expect(afterHandback.length).toBeGreaterThan(1)
+    expect(runtime.ingest(imTrigger({
+      id: 'trg_login_3',
+      thread: 'topic/bug-login',
+      text: '@ds-agent still broken after handback',
+    }))).toBe('stored')
+    const disposition = runtime.store.getDoc<Disposition>('disposition', 'trg_login_3')
+    expect(disposition?.fanout ?? []).not.toContain(ticket.id)
+    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.some(input => input.triggerId === 'trg_login_3')).toBe(false)
+    await runtime.finish()
+  })
+
   it('arbitration: one human follow-up reaches the active subscriber, otherwise the most recent', async () => {
     let clock = Date.parse('2026-10-31T00:00:00.000Z')
     runtime = freshRuntime({ now: () => new Date(clock += 1000).toISOString() })
