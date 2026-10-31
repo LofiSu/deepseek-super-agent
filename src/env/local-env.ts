@@ -4,12 +4,19 @@ import path from 'node:path'
 import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import { UserError } from '../shared/errors.ts'
 import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
+import type { Vault } from './vault.ts'
+import { sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
 
 export interface LocalEnvOptions {
   timeoutMs?: number
   /** Parent environment. Only allowlisted names are copied into the child. */
   env?: NodeJS.ProcessEnv
   allowlist?: readonly string[]
+  /** External vault — values inject into child env only, never into tool text. */
+  vault?: Vault
+  /** Secret names from the vault to inject into child processes. */
+  vaultNames?: readonly string[]
+  sandbox?: SandboxPolicy
 }
 
 /**
@@ -25,6 +32,9 @@ export class LocalEnv implements EnvPort {
   private readonly timeoutMs: number
   private readonly childEnv: NodeJS.ProcessEnv
   private readonly secrets: readonly string[]
+  private readonly vault?: Vault
+  private readonly vaultNames: readonly string[]
+  private readonly sandbox: SandboxPolicy
 
   constructor(private readonly root: string, timeoutOrOptions: number | LocalEnvOptions = {}) {
     fs.mkdirSync(root, { recursive: true })
@@ -34,8 +44,17 @@ export class LocalEnv implements EnvPort {
     const env = options.env ?? process.env
     this.timeoutMs = options.timeoutMs ?? 5_000
     this.childEnv = allowlistedEnv(env, options.allowlist ?? ENV_ALLOWLIST)
-    this.secrets = secretValues(env)
+    this.vault = options.vault
+    this.vaultNames = options.vaultNames ?? []
+    this.sandbox = options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }
+    const vaultSecrets = this.vault
+      ? Object.values(this.vault.resolveForChild(this.vaultNames)).filter(
+        (v): v is string => typeof v === 'string' && v.length > 0,
+      )
+      : []
+    this.secrets = [...secretValues(env), ...vaultSecrets]
   }
+
 
   workspace(workerId: string): string {
     const dir = path.join(this.root, workerId)
@@ -72,8 +91,10 @@ export class LocalEnv implements EnvPort {
       throw new UserError('speculative command leaves the isolated workdir')
     }
     const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
+    const wrapped = wrapBashCommand(command, this.sandbox)
     const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn('bash', ['-c', command], {
+      const [bin, ...args] = wrapped.argv
+      const child = spawn(bin, args, {
         cwd,
         timeout: this.timeoutMs,
         env: this.shellEnv(cwd, isolated),
@@ -106,6 +127,9 @@ export class LocalEnv implements EnvPort {
 
   private shellEnv(cwd: string, isolated: boolean): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...this.childEnv }
+    if (this.vault && this.vaultNames.length > 0) {
+      Object.assign(env, this.vault.resolveForChild(this.vaultNames))
+    }
     if (isolated) {
       env.HOME = cwd
       env.TMPDIR = cwd

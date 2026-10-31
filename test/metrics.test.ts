@@ -82,6 +82,7 @@ describe('section 7 metrics', () => {
       'bypass.fanout': 1,
       'speculate.deliver': 1,
       'speculate.discard': 1,
+      'watchdog.idle': 1,
       'watchdog.nudge': 1,
       'watchdog.fail': 1,
     })
