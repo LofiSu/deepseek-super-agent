@@ -1,0 +1,9 @@
+{
+  "stuckMsDefault": 60000,
+  "nudgeBeforeFail": true,
+  "failAfterFailedJobs": 2,
+  "reasons": {
+    "stale": "watchdog: stuck",
+    "failed-jobs": "watchdog: repeated job failures"
+  }
+}

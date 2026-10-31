@@ -9,6 +9,7 @@ export type DomainEventName =
   | 'assignment.ended'
   | 'thread.subscribed'
   | 'trigger.requeued'
+  | 'subscription.removed'
   | 'speculate.delivered'
   | 'speculate.discarded'
   | 'watchdog.nudge'

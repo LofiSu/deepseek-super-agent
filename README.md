@@ -63,7 +63,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Thread.** One topic or PR. One event stream. Thread key.
 - [x] **Already subscribed.** Straight to the Worker. Log line `bypass=subscription` plus `ticketId`.
 - [x] **Not subscribed.** Cold start: Intake → Eval → Ticket.
-- [~] **Unsubscribe / hand back.** The direction is in PLAN. The demo does not stress it (T21).
+- [x] **Unsubscribe / hand back.** `handback` drops the subscription and requeues the trigger for Eval (T21).
 - [x] **Router still sees every Trigger.** Intake records them.
 - [x] **Inline.** Short summaries stay in context (`memory/recall`).
 - [x] **Spill.** Long content is stored out of band, with an id (`store/spill`).
@@ -95,7 +95,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Outside control loop.** `watchdog` role.
 - [x] **Timer.** Daemon interval tick.
 - [x] **Stuck work.** Nudge or fail. Watchdog tools, plus the demo tick.
-- [~] **Infra faults and goal drift, in plain language.** Nudge and fail exist. Full health checks and YAML rule edits do not (T43–T44).
+- [~] **Infra faults and goal drift, in plain language.** Nudge/fail plus `prompts/watchdog.md` and `src/watchdog/rules.json` thresholds. Full health probes still thin (T43–T44).
 
 ### §7 Experiments
 
