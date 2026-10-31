@@ -15,6 +15,21 @@ export interface MachineRecord {
 export class MachineRegistry {
   private readonly machines = new Map<string, MachineRecord>()
 
+  constructor(private readonly staleMs: number = Number(process.env.DS_AGENT_MACHINE_STALE_MS) > 0
+    ? Number(process.env.DS_AGENT_MACHINE_STALE_MS)
+    : Infinity) {}
+
+  markStaleOffline(now = Date.now()): MachineRecord[] {
+    const stale: MachineRecord[] = []
+    for (const row of this.machines.values()) {
+      if (row.status === 'online' && now - Date.parse(row.lastHeartbeat) > this.staleMs) {
+        row.status = 'offline'
+        stale.push({ ...row, capabilities: [...row.capabilities] })
+      }
+    }
+    return stale
+  }
+
   register(machineId: string, capabilities: string[] = []): MachineRecord {
     const now = new Date().toISOString()
     const row: MachineRecord = {

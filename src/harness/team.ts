@@ -39,6 +39,15 @@ export class TeamRegistry {
     members: TeamMemberSpec[]
   }): TeamRecord {
     if (input.members.length === 0) throw new Error('spawnTeam needs at least one member')
+    const names = new Set<string>()
+    for (const member of input.members) {
+      if (typeof member.name !== 'string' || !member.name.trim()) throw new Error('spawnTeam member needs a name')
+      if (names.has(member.name)) throw new Error(`spawnTeam duplicate member: ${member.name}`)
+      names.add(member.name)
+      if (member.role !== undefined && (typeof member.role !== 'string' || !member.role.trim())) {
+        throw new Error(`spawnTeam member ${member.name} needs a non-empty role`)
+      }
+    }
     const id = `team_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     const members: TeamMember[] = input.members.map(spec => {
       const job = this.store.createJob({
@@ -72,6 +81,12 @@ export class TeamRegistry {
   getTeam(teamId: string): TeamRecord | undefined {
     const team = this.teams.get(teamId)
     return team ? { ...team, members: team.members.map(m => ({ ...m })) } : undefined
+  }
+
+  describeTopology(teamId: string): string {
+    const team = this.teams.get(teamId)
+    if (!team) return ''
+    return team.members.map(m => `${m.name} (${m.role}, ${m.status})`).join('; ')
   }
 
   teamIdForJob(jobId: string): string | undefined {

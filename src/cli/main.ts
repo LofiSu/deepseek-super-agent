@@ -8,6 +8,7 @@ import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
+import { healthProbe } from '../watchdog/health.ts'
 import { defaultHome, runDemo } from './demo.ts'
 
 function option(name: string): string | undefined {
@@ -23,6 +24,7 @@ function help(): void {
   pnpm ds-agent init
   pnpm ds-agent tasks
   pnpm ds-agent status
+  pnpm ds-agent health
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
@@ -81,6 +83,15 @@ async function main(): Promise<void> {
     if (tickets.length === 0) console.log('no tickets')
     for (const ticket of tickets) console.log(`${ticket.id}\t${ticketStage(ticket)}\t${ticket.title}`)
     store.close()
+    return
+  }
+  if (cmd === 'health') {
+    const store = new Store(home)
+    try {
+      console.log(JSON.stringify(healthProbe(store, home)))
+    } finally {
+      store.close()
+    }
     return
   }
   if (cmd === 'metrics') {
