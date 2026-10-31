@@ -101,7 +101,7 @@ LofiSu × Grokbot（CoderBot）。
 
 - [x] **调度计数** — Ingress admit/drop、Eval accept、订阅 bypass fan-out、投机 deliver/discard、Watchdog nudge/fail、model latency；`ds-agent metrics` 与 `<stateDir>/metrics.json`
 - [~] **延迟曲线采样** — 可选 `curveSamples` / `summarizeCurve`（T45）；完整双层 vs 单 Session 对照仍开着
-- [ ] **Router 批处理压测曲线** — 仍开着（T45 压测 harness）
+- [x] **Router 批处理压测曲线** — `runBatchingStress` 压入同 Thread Triggers，记录批次大小与 Eval 计数，并把每次 Eval 延迟写入 `curveSamples`（T45 压测 harness）
 
 ### §8 未决问题（明确不做进 M11）
 
