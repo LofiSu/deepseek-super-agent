@@ -5,6 +5,7 @@ import { Engine } from '../core/engine.ts'
 import type { Host } from '../core/host.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
+import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
@@ -107,10 +108,15 @@ Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent collab <ticketId>          # pause state + guidance audit
   <ticketId> accepts an exact id, a unique prefix, or "latest".
 
+Worker-internal teams (persisted in SQLite, offline reads):
+  pnpm ds-agent team <teamId|ticketId>     # topology, aggregate, member status
+  pnpm ds-agent teams [--ticket <id>] [--session <id>]  # list teams
+  <teamId> accepts an exact id or a unique prefix.
+
 pause freezes Router/Worker turns, reports, and outbound replies.
 intervene records guidance and pauses by default, so the note lands before more work.
 resume clears the pause and continues with the unseen guidance in the next turn.
-resume needs a live model; pause/intervene/collab are offline.
+resume needs a live model; pause/intervene/collab/team/teams are offline.
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
 Section 7 counters are written to <stateDir>/metrics.json and printed by metrics.
@@ -197,6 +203,48 @@ async function main(): Promise<void> {
     for (const job of jobs) console.log(`  ${jobLine(job)}`)
     console.log(`tickets ${store.listDocs<Ticket>('ticket').length}`)
     store.close()
+    return
+  }
+  if (cmd === 'team') {
+    const ref = bare(3)[0]
+    const store = new Store(home)
+    try {
+      const teams = store.listDocs<TeamRecord>('team')
+      if (!ref) {
+        if (teams.length === 0) console.log('no teams')
+        for (const team of teams) console.log(teamLine(team))
+        return
+      }
+      const byId = uniqueTeam(teams, ref)
+      if (byId) {
+        printTeam(byId)
+        return
+      }
+      const byTicket = teams.filter(team => team.ticketId === ref || team.ticketId.startsWith(ref))
+      if (byTicket.length === 0) {
+        console.log(`no team matches ${ref}; use "pnpm ds-agent teams" to list all teams`)
+        return
+      }
+      console.log(`ticket ${ref}: ${byTicket.length} team(s)`)
+      for (const team of byTicket) printTeam(team)
+    } finally {
+      store.close()
+    }
+    return
+  }
+  if (cmd === 'teams') {
+    const ticket = option('ticket')
+    const session = option('session')
+    const store = new Store(home)
+    try {
+      let teams = store.listDocs<TeamRecord>('team')
+      if (ticket) teams = teams.filter(team => team.ticketId === ticket)
+      if (session) teams = teams.filter(team => team.parentSessionId === session)
+      if (teams.length === 0) console.log('no teams')
+      for (const team of teams) console.log(teamLine(team))
+    } finally {
+      store.close()
+    }
     return
   }
   if (cmd === 'pause') {
@@ -326,6 +374,34 @@ function sessionLine(session: SessionRow): string {
 
 function jobLine(job: JobRow): string {
   return `${job.id} status=${job.status} ticket=${job.ticketId} name=${job.name}`
+}
+
+function teamLine(team: TeamRecord): string {
+  return `${team.id}\t${team.completedAt ? 'completed' : 'active'}\tticket=${team.ticketId}\tmembers=${team.members.length}`
+}
+
+function printTeam(team: TeamRecord): void {
+  console.log(`team ${team.id} [${team.completedAt ? 'completed' : 'active'}]`)
+  console.log(`  ticket:    ${team.ticketId}`)
+  console.log(`  session:   ${team.parentSessionId}`)
+  console.log(`  created:   ${team.createdAt}`)
+  if (team.completedAt) console.log(`  completed: ${team.completedAt}`)
+  console.log(`  topology:  ${describeTopologyOf(team)}`)
+  for (const member of team.members) {
+    const report = member.report ? ` — ${member.report}` : ''
+    console.log(`  member ${member.name} (${member.role}) job=${member.jobId} status=${member.status}${report}`)
+  }
+  console.log('  aggregate:')
+  for (const line of aggregateReportOf(team).split('\n')) console.log(`    ${line}`)
+}
+
+function uniqueTeam(teams: TeamRecord[], ref: string): TeamRecord | undefined {
+  const exact = teams.find(team => team.id === ref)
+  if (exact) return exact
+  const matches = teams.filter(team => team.id.startsWith(ref))
+  if (matches.length === 1) return matches[0]
+  if (matches.length > 1) throw new Error(`ambiguous team ${ref}; matches: ${matches.map(team => team.id).join(', ')}`)
+  return undefined
 }
 
 main().catch(error => {
