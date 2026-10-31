@@ -21,6 +21,8 @@ export interface HarnessOptions {
   log: (line: string) => void
   jobDelayMs: number
   teams?: TeamRegistry
+  /** Unseen human guidance for a Router/Worker turn. Marks it injected for that audience. */
+  takeGuidance?: (ticketId: string, audience: 'worker' | 'router') => string[]
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
@@ -40,6 +42,12 @@ export class Harness {
   }
 
   launch(ticket: Ticket): Promise<void> {
+    const held = this.pauseReason(ticket.id)
+    if (held) {
+      this.opts.log(`[collab] launch held ticketId=${ticket.id} reason=${held}`)
+      this.opts.store.addEvent('collab.delivery_held', { ticketId: ticket.id, kind: 'launch' })
+      return Promise.resolve()
+    }
     const sessionId = workerSessionId(ticket.id)
     this.running.add(ticket.id)
     this.armRouter()
@@ -77,6 +85,16 @@ export class Harness {
   }
 
   deliver(ticketId: string, trigger: Trigger): Promise<void> {
+    const held = this.pauseReason(ticketId)
+    if (held) {
+      this.opts.log(`[collab] delivery held ticketId=${ticketId} triggerId=${trigger.id} reason=${held}`)
+      this.opts.store.addEvent('collab.delivery_held', {
+        ticketId,
+        triggerId: trigger.id,
+        kind: 'followup',
+      })
+      return Promise.resolve()
+    }
     const ticket = this.opts.store.getDoc<Ticket>('ticket', ticketId)
     const mode = ticket?.speculative ? 'speculative' : 'normal'
     const lines = ['FOLLOWUP', `ticketId=${ticketId}`, `mode=${mode}`, `text=${trigger.text}`]
@@ -84,6 +102,81 @@ export class Harness {
     if (spillId) lines.push(`spillId=${spillId}`)
     const sessionId = workerSessionId(ticketId)
     return this.track(this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticketId, lines.join('\n'))))
+  }
+
+  /**
+   * Continue a ticket whose pause was just cleared. Router and Worker both get a RESUME
+   * turn. Unseen human guidance and follow-ups received while paused are in the prompt.
+   */
+  resume(ticket: Ticket): Promise<void> {
+    if (ticket.ended) {
+      this.opts.log(`[collab] resume refused ticketId=${ticket.id} ended=${ticket.ended.outcome}`)
+      return Promise.resolve()
+    }
+    if (ticket.collab?.paused) {
+      this.opts.log(`[collab] resume refused ticketId=${ticket.id} still-paused`)
+      return Promise.resolve()
+    }
+    const assignment = ticket.assignments.at(-1)
+    if (!assignment) throw new Error(`ticket ${ticket.id} has no assignment`)
+    const sessionId = workerSessionId(ticket.id)
+    const since = ticket.collab?.resumes.at(-1)?.pausedAt
+    const pending = since
+      ? ticket.inputs.filter(input => input.at >= since && typeof input.text === 'string')
+      : []
+    const mode = ticket.speculative ? 'speculative' : 'normal'
+    this.running.add(ticket.id)
+    this.armRouter()
+    this.opts.log(
+      `[harness] WorkerSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
+    )
+    if (assignment.state === 'pending') {
+      this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
+    }
+
+    const workerPrompt = (guidance: string[]): string => {
+      const lines = [
+        'RESUME',
+        `ticketId=${ticket.id}`,
+        `title=${ticket.title}`,
+        `mode=${mode}`,
+        `thread=${ticket.threadKeys[0] ?? ''}`,
+        `brief=${ticket.brief}`,
+      ]
+      if (since) lines.push(`pausedAt=${since}`)
+      for (const text of guidance) lines.push(`guidance=${text}`)
+      for (const input of pending) lines.push(`input=${input.text ?? ''}`)
+      lines.push('Continue the interrupted task from your session history. Apply the human guidance before acting.')
+      return lines.join('\n')
+    }
+    const routerPrompt = (guidance: string[]): string => {
+      const lines = [
+        'RESUME',
+        `ticketId=${ticket.id}`,
+        `title=${ticket.title}`,
+        `mode=${mode}`,
+      ]
+      for (const text of guidance) lines.push(`guidance=${text}`)
+      lines.push('The human resumed this paused task. Keep the acknowledgement short; leave the work to the Worker.')
+      return lines.join('\n')
+    }
+    const guarded = (session: string, role: 'router' | 'worker', build: (guidance: string[]) => string): Promise<void> => {
+      const held = this.pauseReason(ticket.id)
+      if (held) {
+        this.opts.log(`[collab] resume held session=${session} ticketId=${ticket.id} reason=${held}`)
+        return Promise.resolve()
+      }
+      const guidance = this.opts.takeGuidance?.(ticket.id, role) ?? []
+      return this.run(session, role, role === 'worker' ? ticket.id : undefined, build(guidance))
+    }
+
+    const work = Promise.all([
+      this.enqueue('router', () => guarded('router', 'router', routerPrompt)),
+      this.enqueue(sessionId, () => guarded(sessionId, 'worker', workerPrompt)),
+    ]).then(() => undefined).finally(() => {
+      this.running.delete(ticket.id)
+    })
+    return this.track(work)
   }
 
   scheduleJob(job: { id: string; sessionId: string; ticketId: string }): void {
@@ -160,6 +253,21 @@ export class Harness {
     return work
   }
 
+  /**
+   * Pause is read from Store on every step, so a CLI in another process can stop work.
+   * Router prompts carry `ticketId=`; worker calls pass the ticket directly.
+   */
+  private pauseReason(ticketId?: string, prompt?: string): string | undefined {
+    if (!this.opts.store.isOpen) return undefined
+    const id = ticketId ?? /^ticketId=(\S+)$/m.exec(prompt ?? '')?.[1]
+    if (!id) return undefined
+    const ticket = this.opts.store.getDoc<Ticket>('ticket', id)
+    const paused = ticket?.collab?.paused
+    if (!paused) return undefined
+    const reason = paused.reason ? ` reason=${paused.reason}` : ''
+    return `at=${paused.at} by=${paused.by}${reason}`
+  }
+
   private enqueue(sessionId: string, fn: () => Promise<void>): Promise<void> {
     const prev = this.chains.get(sessionId) ?? Promise.resolve()
     const next = prev.then(fn, fn)
@@ -188,6 +296,7 @@ export class Harness {
         redact: this.opts.redact,
         session: { id: sessionId, role, ticketId },
         prompt,
+        pause: () => this.pauseReason(ticketId, prompt),
       })
     } finally {
       if (this.opts.store.isOpen) {
@@ -214,6 +323,8 @@ export async function runTurn(input: {
   session: { id: string; role: Role; ticketId?: string }
   prompt: string
   maxSteps?: number
+  /** Return a reason to stop this turn before the next model call or tool call. */
+  pause?: () => string | undefined
 }): Promise<void> {
   return withSessionRole(input.session.role, () => runTurnBody(input))
 }
@@ -228,12 +339,21 @@ async function runTurnBody(input: {
   session: { id: string; role: Role; ticketId?: string }
   prompt: string
   maxSteps?: number
+  pause?: () => string | undefined
 }): Promise<void> {
   const label = input.session.role === 'router'
     ? 'RouterSession'
     : input.session.role === 'worker' ? 'WorkerSession' : 'WatchdogSession'
   const redact = input.redact
   input.log(`[harness] ${label} turn session=${input.session.id}`)
+  const pausedAtStart = input.pause?.()
+  if (pausedAtStart) {
+    input.log(
+      `[collab] turn paused session=${input.session.id} role=${input.session.role} ticketId=${input.session.ticketId ?? '-'} reason=${pausedAtStart}`,
+    )
+    input.journal.append(input.session.id, { kind: 'paused', content: `paused ${pausedAtStart}` })
+    return
+  }
   const prompt = redact(input.prompt)
   const prior = messagesFromJournal(input.journal.history(input.session.id)).map(message => ({
     ...message,
@@ -248,6 +368,14 @@ async function runTurnBody(input: {
   const tools = input.tools.specsFor(input.session.role)
   const maxSteps = input.maxSteps ?? 10
   for (let step = 0; step < maxSteps; step += 1) {
+    const paused = input.pause?.()
+    if (paused) {
+      input.log(
+        `[collab] turn paused session=${input.session.id} role=${input.session.role} ticketId=${input.session.ticketId ?? '-'} step=${step} reason=${paused}`,
+      )
+      input.journal.append(input.session.id, { kind: 'paused', content: `paused ${paused}` })
+      return
+    }
     input.log(`[harness] async-react step=${step} session=${input.session.id} role=${input.session.role}`)
     const started = performance.now()
     const out = await input.model.complete({ role: input.session.role, messages, tools })
@@ -261,6 +389,17 @@ async function runTurnBody(input: {
     input.journal.append(input.session.id, { role: 'assistant', kind: 'message', content: text, toolCalls: calls })
     if (calls.length === 0) break
     for (const toolCall of calls) {
+      const pausedBeforeTool = input.pause?.()
+      if (pausedBeforeTool) {
+        input.log(
+          `[collab] tool held session=${input.session.id} tool=${toolCall.name} ticketId=${input.session.ticketId ?? '-'} reason=${pausedBeforeTool}`,
+        )
+        input.journal.append(input.session.id, {
+          kind: 'paused',
+          content: `paused before tool ${toolCall.name}: ${pausedBeforeTool}`,
+        })
+        return
+      }
       let content: string
       try {
         const result = await input.tools.invoke(toolCall, {

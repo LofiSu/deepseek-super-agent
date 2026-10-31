@@ -29,6 +29,8 @@ export function stuckAssignments(
   const stuck: StuckAssignment[] = []
   for (const ticket of tickets) {
     if (ticket.ended) continue
+    // A human pause is intentional idle time, not a stuck worker.
+    if (ticket.collab?.paused) continue
     const assignment = ticket.assignments.at(-1)
     if (!assignment || assignment.state !== 'running') continue
     const sessionId = assignment.workerSessionId ?? `worker_${ticket.id}`
@@ -91,8 +93,14 @@ export class Watchdog {
       if (hit.reason === 'failed-jobs' || this.nudged.has(hit.assignmentId)) this.fail(hit)
       else this.nudge(hit)
     }
+    const pausedTickets = new Set(
+      this.opts.store.listDocs<Ticket>('ticket')
+        .filter(ticket => ticket.collab?.paused)
+        .map(ticket => ticket.id),
+    )
     for (const session of stuckSessions(this.opts.store.listSessions(), now, this.opts.stuckMs)) {
       if (handled.has(session.id) || (session.ticketId != null && handled.has(session.ticketId))) continue
+      if (session.ticketId && pausedTickets.has(session.ticketId)) continue
       this.opts.journal.append(session.id, {
         role: 'user',
         kind: 'nudge',

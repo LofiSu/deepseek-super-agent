@@ -1,9 +1,11 @@
 import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
+import { Engine } from '../core/engine.ts'
+import type { Host } from '../core/host.ts'
 import { ticketStage } from '../core/stage.ts'
-import { createModelFromEnv } from '../harness/model.ts'
-import { formatMetricsJson } from '../metrics/metrics.ts'
+import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
+import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
@@ -15,6 +17,71 @@ function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`)
   if (index < 0) return undefined
   return process.argv[index + 1]
+}
+
+/** Positional arguments after `start`, skipping flags (and the value of a value-flag). */
+function bare(start: number, valueFlags: readonly string[] = []): string[] {
+  const out: string[] = []
+  const args = process.argv.slice(start)
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!
+    if (arg.startsWith('--')) {
+      if (!arg.includes('=') && valueFlags.includes(arg.slice(2))) index += 1
+      continue
+    }
+    out.push(arg)
+  }
+  return out
+}
+
+function resolveTicket(store: Store, raw: string | undefined): Ticket {
+  const all = store.listDocs<Ticket>('ticket')
+  const live = all.filter(ticket => !ticket.ended)
+  const hint = live.length > 0
+    ? live.map(ticket => `${ticket.id} (${ticketStage(ticket)})`).join(', ')
+    : 'none'
+  if (!raw) throw new Error(`ticket id required; live tickets: ${hint}`)
+  if (raw === 'latest') {
+    const latest = [...live].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).at(-1)
+    if (!latest) throw new Error('no live ticket to select')
+    return latest
+  }
+  const exact = all.find(ticket => ticket.id === raw)
+  if (exact) return exact
+  const matches = all.filter(ticket => ticket.id.startsWith(raw))
+  if (matches.length === 1) return matches[0]!
+  if (matches.length > 1) {
+    throw new Error(`ambiguous ticket ${raw}; matches: ${matches.map(ticket => ticket.id).join(', ')}`)
+  }
+  throw new Error(`unknown ticket ${raw}; live tickets: ${hint}`)
+}
+
+/**
+ * Offline engine for pause/intervene/collab. These commands only touch SQLite,
+ * so they never construct a model (and never fall back to MockModel).
+ */
+function withEngine<T>(
+  work: (engine: Engine, store: Store) => T,
+  opts: { verbose?: boolean } = {},
+): T {
+  const home = defaultHome()
+  const store = new Store(home)
+  const metrics = new Metrics(home)
+  const host: Host = {
+    repo: store,
+    now: () => new Date().toISOString(),
+    metrics,
+    log: line => {
+      if (opts.verbose) console.error(line)
+    },
+    scope: { admit: () => ({ listened: true, reason: 'cli' }) },
+  }
+  const engine = new Engine(host)
+  try {
+    return work(engine, store)
+  } finally {
+    store.close()
+  }
 }
 
 function help(): void {
@@ -33,6 +100,18 @@ function help(): void {
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
   pnpm ds-agent metrics
 
+Mid-task collaboration (persisted in SQLite):
+  pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
+  pnpm ds-agent intervene <ticketId> "use the staging db" [--no-pause]
+  pnpm ds-agent resume <ticketId> [--reason "human verified"]
+  pnpm ds-agent collab <ticketId>          # pause state + guidance audit
+  <ticketId> accepts an exact id, a unique prefix, or "latest".
+
+pause freezes Router/Worker turns, reports, and outbound replies.
+intervene records guidance and pauses by default, so the note lands before more work.
+resume clears the pause and continues with the unseen guidance in the next turn.
+resume needs a live model; pause/intervene/collab are offline.
+
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
 Section 7 counters are written to <stateDir>/metrics.json and printed by metrics.
 Cloud model: DS_AGENT_API_BASE + DS_AGENT_API_KEY (optional DS_AGENT_API_MODEL),
@@ -45,10 +124,13 @@ Real GitHub repo: DS_AGENT_GH_REPO (default LofiSu/deepseek-super-agent).
 A half-set DS_AGENT_API_BASE/KEY fails instead of falling back.`)
 }
 
-async function withRuntime(work: (runtime: Runtime) => Promise<void> | void): Promise<void> {
+async function withRuntime(
+  work: (runtime: Runtime) => Promise<void> | void,
+  model?: Model,
+): Promise<void> {
   const runtime = Runtime.create({
     home: defaultHome(),
-    model: createModelFromEnv(),
+    model: model ?? createModelFromEnv(),
     jobDelayMs: 20,
     watchdogIntervalMs: 60_000,
   })
@@ -115,6 +197,100 @@ async function main(): Promise<void> {
     for (const job of jobs) console.log(`  ${jobLine(job)}`)
     console.log(`tickets ${store.listDocs<Ticket>('ticket').length}`)
     store.close()
+    return
+  }
+  if (cmd === 'pause') {
+    const ticketRef = bare(3, ['reason'])[0]
+    const reason = option('reason')
+    withEngine((engine, store) => {
+      const ticket = resolveTicket(store, ticketRef)
+      const outcome = engine.pause(ticket.id, { reason })
+      if (!outcome.changed) {
+        console.log(`ticket ${ticket.id} is already paused.`)
+      } else {
+        console.log(`paused ${ticket.id} "${ticket.title}"${reason ? ` — ${reason}` : ''}`)
+      }
+      console.log(`  stage: ${ticketStage(outcome.ticket)}`)
+      console.log(`  next:  pnpm ds-agent resume ${ticket.id}`)
+    }, { verbose: process.argv.includes('--verbose') })
+    return
+  }
+  if (cmd === 'intervene') {
+    const rest = bare(3, ['text', 'reason'])
+    const ticketRef = rest[0]
+    const text = option('text') ?? rest.slice(1).join(' ')
+    if (!text.trim()) throw new Error('intervene needs guidance text: ds-agent intervene <ticketId> "your note"')
+    const noPause = process.argv.includes('--no-pause')
+    withEngine((engine, store) => {
+      const ticket = resolveTicket(store, ticketRef)
+      const outcome = engine.intervene(ticket.id, text, {
+        pause: !noPause,
+        reason: option('reason'),
+      })
+      console.log(`guidance ${outcome.guidance.id} added to ${ticket.id}: "${outcome.guidance.text}"`)
+      if (outcome.paused) {
+        console.log(`  task is paused; resume with: pnpm ds-agent resume ${ticket.id}`)
+      } else {
+        console.log('  task is running; the next Router/Worker turn will include this guidance.')
+      }
+    }, { verbose: process.argv.includes('--verbose') })
+    return
+  }
+  if (cmd === 'resume') {
+    const ticketRef = bare(3, ['reason'])[0]
+    const reason = option('reason')
+    const resolved = (() => {
+      const store = new Store(home)
+      try {
+        return resolveTicket(store, ticketRef)
+      } finally {
+        store.close()
+      }
+    })()
+    await withRuntime(async runtime => {
+      const outcome = await runtime.resume(resolved.id, { reason })
+      if (!outcome.resumed) {
+        console.log(`ticket ${resolved.id} is not paused; nothing to resume.`)
+        console.log(`  stage: ${ticketStage(outcome.ticket)}`)
+        return
+      }
+      console.log(`resumed ${resolved.id} "${resolved.title}"${reason ? ` — ${reason}` : ''}`)
+      console.log(`  stage: ${ticketStage(outcome.ticket)}`)
+      const pending = outcome.ticket.collab?.guidance.filter(item => !item.seenByWorker).length ?? 0
+      if (pending > 0) console.log(`  guidance delivered in this turn: ${pending}`)
+    }, requireLiveModelFromEnv())
+    return
+  }
+  if (cmd === 'collab') {
+    const ticketRef = bare(3)[0]
+    withEngine((engine, store) => {
+      const ticket = resolveTicket(store, ticketRef)
+      const { collaboration } = engine.collaboration(ticket.id)
+      console.log(`ticket ${ticket.id} [${ticketStage(ticket)}] ${ticket.title}`)
+      const paused = collaboration.paused
+      console.log(
+        paused
+          ? `paused: ${paused.at} by ${paused.by}${paused.reason ? ` — ${paused.reason}` : ''}`
+          : 'paused: no',
+      )
+      if (collaboration.guidance.length === 0) {
+        console.log('guidance: none')
+      } else {
+        console.log('guidance:')
+        for (const item of collaboration.guidance) {
+          const seen = [item.seenByWorker ? 'worker' : '', item.seenByRouter ? 'router' : '']
+            .filter(Boolean)
+            .join('+') || 'pending'
+          console.log(`  ${item.id} [${seen}] ${item.text}`)
+        }
+      }
+      if (collaboration.resumes.length > 0) {
+        console.log('resumes:')
+        for (const item of collaboration.resumes) {
+          console.log(`  ${item.at} by ${item.by}${item.reason ? ` — ${item.reason}` : ''}`)
+        }
+      }
+    })
     return
   }
   if (cmd === 'chat') {

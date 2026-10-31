@@ -1,4 +1,12 @@
 import path from 'node:path'
+import type {
+  CollaborationView,
+  InterveneInput,
+  InterveneOutcome,
+  PauseInput,
+  PauseOutcome,
+  ResumeOutcome,
+} from './core/collab.ts'
 import { Engine } from './core/engine.ts'
 import { bindRolePorts } from './core/role-ports.ts'
 import type { Host } from './core/host.ts'
@@ -145,6 +153,7 @@ export class Runtime {
       log: line => log.info(line),
       jobDelayMs: opts.jobDelayMs ?? 40,
       teams,
+      takeGuidance: (ticketId, audience) => engine.takeGuidance(ticketId, audience),
     })
     late.harness = harness
     const watchdog = new Watchdog({
@@ -209,6 +218,35 @@ export class Runtime {
     const disposition = this.store.getDoc<Disposition>('disposition', incoming.id)
     for (const ticketId of disposition?.fanout ?? []) this.harness.deliver(ticketId, incoming)
     return result
+  }
+
+  /** Freeze a live ticket. Persisted in SQLite; the Harness reads it before each step. */
+  pause(ticketId: string, input: PauseInput = {}): PauseOutcome {
+    return this.engine.pause(ticketId, input)
+  }
+
+  /** Record human guidance (and pause by default) for the next Router/Worker turn. */
+  intervene(ticketId: string, text: string, input: InterveneInput = {}): InterveneOutcome {
+    return this.engine.intervene(ticketId, text, input)
+  }
+
+  /**
+   * Clear the pause and run the RESUME turns in this process.
+   * A paused ticket in another process picks up the cleared flag on its next step.
+   */
+  async resume(ticketId: string, input: PauseInput = {}): Promise<ResumeOutcome> {
+    const outcome = this.engine.resume(ticketId, input)
+    if (outcome.resumed && !outcome.ticket.ended) {
+      await this.harness.resume(outcome.ticket)
+    }
+    return {
+      ...outcome,
+      ticket: this.store.getDoc<Ticket>('ticket', ticketId) ?? outcome.ticket,
+    }
+  }
+
+  collaboration(ticketId: string): CollaborationView {
+    return this.engine.collaboration(ticketId)
   }
 
   watchdogTurn(): Promise<void> {
