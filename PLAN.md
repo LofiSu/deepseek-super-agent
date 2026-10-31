@@ -883,11 +883,11 @@ pnpm install && pnpm test && pnpm demo
 | ID | 项 | 说明 | 建议接口占位 |
 |----|----|------|--------------|
 | P2-1 | §7 实验指标 | 计数 + optional latency curveSamples（T45） | `<stateDir>/metrics.json` · `ds-agent metrics` · `summarizeCurve` |
-| P2-2 | Router sharding / multi-filter | opt-in registry；Runtime 未接线 | `RouterShardRegistry` |
-| P2-3 | Worker mesh | opt-in capacity registry；Runtime 未接线 | `WorkerMeshRegistry` |
-| P2-4 | Long-term memory | Spill-backed opt-in LTM；Runtime 未接线 | `SpillBackedLongTermMemory` |
+| P2-2 | Router sharding / multi-filter | opt-in registry；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `RouterShardRegistry` |
+| P2-3 | Worker mesh | opt-in capacity registry；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `WorkerMeshRegistry` |
+| P2-4 | Long-term memory | Spill-backed opt-in LTM；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `SpillBackedLongTermMemory` |
 | P2-5 | Product UX without Session | 无会话产品壳 / 面板 | 另仓 |
-| P2-6 | A2A | opt-in envelope router；Runtime 未接线 | `A2ARouter` |
+| P2-6 | A2A | opt-in envelope router；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `A2ARouter` |
 | P2-7 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | allowlist + redact 已落地；vault / seccomp 仍外置 |
 
 ---
@@ -1051,4 +1051,4 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 | §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
 | §8 未决 | T46–T51 | T51 白名单+脱敏已做 | `env/sanitize.ts` | vault/seccomp 仍 Phase-2 |
 
-**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与 Phase-2 opt-in registries（T09/T46–T50）已落地；Runtime 默认路径仍不自动启用 Phase-2。
+**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与 Phase-2 opt-in registries（T09/T46–T50）已落地；Runtime 默认路径仍不自动启用 Phase-2（仅 `DS_AGENT_PHASE2=1` 或 `RuntimeOptions.phase2: true` 时构造并挂到 `runtime.phase2`）。

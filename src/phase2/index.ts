@@ -2,7 +2,6 @@ import type { Trigger } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 import type {
   A2AEnvelope,
-  LongTermMemoryQuery,
   ProductShellEvent,
   RouterShard,
   WorkerMeshNode,
@@ -27,6 +26,52 @@ export type {
   RouterShard,
   WorkerMeshNode,
 } from './types.ts'
+
+/** A per-Runtime Phase-2 bundle. Built only when DS_AGENT_PHASE2 opts in. */
+export interface Phase2Registries {
+  readonly routerShards: RouterShardRegistry
+  readonly productShellBus: ProductShellBus
+  readonly a2aRouter: A2ARouter
+  readonly longTermMemory: SpillBackedLongTermMemory
+  route(trigger: Trigger): string[]
+  workerMesh(node: WorkerMeshNode): WorkerMeshRegistry
+  productShell(event: ProductShellEvent): ProductShellEvent
+  a2a(envelope: A2AEnvelope): A2AEnvelope
+}
+
+/**
+ * Builds fresh Phase-2 registries bound to one store. Runtime calls this only
+ * when opted in, so the default admission and harness loop never see them.
+ */
+export function createPhase2(store: Store): Phase2Registries {
+  const routerShards = new RouterShardRegistry()
+  routerShards.register({ id: 'default' })
+  const productShellBus = new ProductShellBus()
+  const a2aRouter = new A2ARouter()
+  const longTermMemory = new SpillBackedLongTermMemory(store)
+  return {
+    routerShards,
+    productShellBus,
+    a2aRouter,
+    longTermMemory,
+    route: trigger => routerShards.route(trigger),
+    workerMesh: node => {
+      const mesh = new WorkerMeshRegistry()
+      mesh.register(node)
+      return mesh
+    },
+    productShell: event => productShellBus.publish(event),
+    a2a: envelope => a2aRouter.route(envelope),
+  }
+}
+
+const PHASE2_TRUTHY = new Set(['1', 'true', 'yes', 'on'])
+
+/** Reads `DS_AGENT_PHASE2`. Unset, empty, `0`, `false`, or `off` keeps Phase-2 off. */
+export function isPhase2Enabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.DS_AGENT_PHASE2?.trim().toLowerCase()
+  return raw !== undefined && PHASE2_TRUTHY.has(raw)
+}
 
 /** @deprecated stubs removed; kept for import compatibility with older call sites */
 export class Phase2NotImplementedError extends Error {
