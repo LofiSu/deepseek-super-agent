@@ -1,4 +1,4 @@
-import type { Engine } from '../core/engine.ts'
+import { withSessionRole } from '../core/session-role.ts'
 import { redactRecord } from '../env/sanitize.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import type { Role, Ticket, Trigger } from '../shared/types.ts'
@@ -12,7 +12,8 @@ export interface HarnessOptions {
   model: Model
   tools: ToolRegistry
   store: Store
-  engine: Engine
+  /** Host bookkeeping when a worker session starts. The harness does not hold the Engine. */
+  assignmentStarted(ticketId: string, assignmentId: string, sessionId: string): void
   journal: SessionJournal
   metrics: Metrics
   redact: (text: string) => string
@@ -47,7 +48,7 @@ export class Harness {
     }
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new Error(`ticket ${ticket.id} has no assignment`)
-    this.opts.engine.assignmentStarted(ticket.id, assignment.id, sessionId)
+    this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
     const mode = ticket.speculative ? 'speculative' : 'normal'
     const task = [
       'TASK',
@@ -192,6 +193,20 @@ export class Harness {
 }
 
 export async function runTurn(input: {
+  model: Model
+  tools: ToolRegistry
+  journal: SessionJournal
+  log: (line: string) => void
+  metrics: Metrics
+  redact: (text: string) => string
+  session: { id: string; role: Role; ticketId?: string }
+  prompt: string
+  maxSteps?: number
+}): Promise<void> {
+  return withSessionRole(input.session.role, () => runTurnBody(input))
+}
+
+async function runTurnBody(input: {
   model: Model
   tools: ToolRegistry
   journal: SessionJournal

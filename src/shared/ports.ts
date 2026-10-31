@@ -1,4 +1,4 @@
-import type { Trigger } from './types.ts'
+import type { Decision, ReceiveResult, Role, Trigger } from './types.ts'
 
 /** Scope port: whether a source listens to this trigger. */
 export interface SourceScope {
@@ -25,3 +25,74 @@ export interface EnvPort {
   /** Move a speculative scratch workspace into the durable worker directory. */
   promoteIsolated?(workerId: string): void
 }
+
+/** Progress a worker is allowed to record. Delivery still goes out through the router. */
+export interface WorkerReport {
+  kind: string
+  text: string
+  deliver?: boolean
+}
+
+/** Router assessment handed to `decide`. Workers never construct this call. */
+export type AssessmentOutcome =
+  | { kind: 'ignore'; reason: string }
+  | { kind: 'unavailable'; reason: string }
+  | { kind: 'accept'; reason: string }
+  | { kind: 'stop'; ticketId: string; reason: string }
+
+export const rolePortBrand: unique symbol = Symbol('rolePort')
+
+/**
+ * Commands a router session may use.
+ * `reply`, `decide`, and `receive` live only here.
+ */
+export interface RouterPorts {
+  readonly [rolePortBrand]: 'router'
+  receive(trigger: Trigger): ReceiveResult
+  decide(triggerId: string, outcome: AssessmentOutcome): Decision
+  reply(ticketId: string, text: string, purpose: string): void
+  subscribe(ticketId: string, threadKey: string): void
+}
+
+/**
+ * Commands a worker session may use.
+ * There is no `reply`, `decide`, or `receive` on this surface.
+ */
+export interface WorkerPorts {
+  readonly [rolePortBrand]: 'worker'
+  report(ticketId: string, report: WorkerReport): {
+    surfaced: boolean
+    verdict: 'deliver' | 'discard' | 'hold'
+  }
+  subscribe(ticketId: string, threadKey: string): void
+  handback(ticketId: string, triggerId: string, reason: string): boolean
+}
+
+/**
+ * Commands a watchdog session may use.
+ * It can fail a stuck assignment. It cannot speak, intake, or assess.
+ */
+export interface WatchdogPorts {
+  readonly [rolePortBrand]: 'watchdog'
+  fail(ticketId: string, reason: string): {
+    surfaced: boolean
+    verdict: 'deliver' | 'discard' | 'hold'
+  }
+}
+
+export interface RolePorts {
+  router: RouterPorts
+  worker: WorkerPorts
+  watchdog: WatchdogPorts
+}
+
+/** Engine commands that must not run as a worker or a watchdog. */
+export const ROUTER_ONLY_OPS = ['reply', 'decide', 'receive'] as const
+export type RouterOnlyOp = typeof ROUTER_ONLY_OPS[number]
+
+/** Compile-time map so a role's port never gains a router-only command by accident. */
+export type RolePortFor<R extends Role> = R extends 'router'
+  ? RouterPorts
+  : R extends 'worker'
+    ? WorkerPorts
+    : WatchdogPorts

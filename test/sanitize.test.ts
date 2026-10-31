@@ -3,12 +3,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
-import type { Engine } from '../src/core/engine.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import { allowlistedEnv, isSecretEnvName, redactSecrets, secretValues } from '../src/env/sanitize.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import { Metrics } from '../src/metrics/metrics.ts'
 import type { Runtime } from '../src/runtime.ts'
+import type { RolePorts } from '../src/shared/ports.ts'
 import type { Store } from '../src/store/sqlite.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 
@@ -81,7 +81,11 @@ describe('secret redaction', () => {
 
     const tools = new ToolRegistry({
       store: {} as Store,
-      engine: {} as Engine,
+      ports: {
+        router: {} as RolePorts['router'],
+        worker: {} as RolePorts['worker'],
+        watchdog: {} as RolePorts['watchdog'],
+      },
       env,
       metrics: new Metrics(root),
       redact: text => redactSecrets(text, [secret, `${secret}-aws`]),

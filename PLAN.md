@@ -188,9 +188,12 @@ flowchart TB
 
 | Port | 提供者 | 消费者 | 规则 |
 |------|--------|--------|------|
-| `Engine.receive` / 命令 API | Engine | Ingress, CLI tools, Assessor 回调 | 同步+事务；非法 `UserError` |
+| `Engine.receive` / 命令 API | Engine | Ingress、RouterPorts | 同步+事务；非法 `UserError`。Worker/Watchdog 调用 `receive` 直接拒绝 |
+| `RouterPorts` | Engine | Router session 工具 | `receive` / `decide` / `reply` / `subscribe`。出站只在这里 |
+| `WorkerPorts` | Engine | Worker session 工具 | `report` / `subscribe` / `handback`。**无** `reply` / `decide` / `receive` |
+| `WatchdogPorts` | Engine | Watchdog session 工具 | `fail`。**无** `reply` / `decide` / `receive` |
 | `Repositories` + `SpillStore` | Store | Engine（写）、Memory/Harness（读或追加 session 表） | Trigger/Thread/Decision/Ticket/Assignment **仅 Engine 写** |
-| `Assessor` | Router Harness 适配 | Engine.Evals | `request` → 稍后 `Engine.decide` |
+| `Assessor` | Router Harness 适配 | Engine.Evals | `request` → 稍后 `Engine.decide`（仅 RouterPorts） |
 | `Executor` | Worker Harness 适配 | Engine.Assignments | `start/deliver/stop` 只入队；回调 past-tense |
 | `Outbox` | Channels adapter | Engine.Replies | Router 拥有出站；Worker 禁止直写 Channel |
 | `LocalEnv` | Env | Worker tools | 凭据值永不进 tool result / prompt |
@@ -224,7 +227,7 @@ flowchart TB
 | T08 | Trigger batching during LLM round | §2 | M3+M1 | `Evals.evaluateDue` 合并同 Thread 积压；Router turn 开始时 drain inbox |
 | T09 | Future Router sharding / multi-filter | §2/§8 | Phase-2 | 文档接口 `RouterShard` 占位，M11 不实现 |
 | T10 | Worker 隔离 / 最强模型 | §2 | M1+M9 | Worker Session + LocalEnv；`roleModels.worker` |
-| T11 | Worker 无直接用户 I/O | §2 | M8+M3 | Outbound 仅经 `Engine.reply` → Router/Outbox |
+| T11 | Worker 无直接用户 I/O | §2 | M8+M3 | Outbound 仅经 `RouterPorts.reply`；WorkerPorts 无 `reply`/`decide`/`receive`（类型 + 运行时） |
 | T12 | Worker 向 Router 报告 | §2 | M3 | `Assignments.report` → DomainEvents → Router inbox |
 | T13 | Workers subscribe Threads | §2/§3.2 | M5 | `Subscription` 多对多；fan-out |
 | T14 | Worker 内 Subagent/Team 对 Router 不透明 | §2 | M1 | Worker 可 spawn 子 job（`jobs` map）；Router 只见 Assignment 报告 |
@@ -494,13 +497,30 @@ export interface Tool {
   execute(args: unknown, ctx: ToolContext): Promise<ToolResult>
 }
 
-export interface ToolContext {
-  sessionId: string
-  role: SessionRole
-  engine: Engine
-  spill: SpillStore
-  env?: LocalEnv
+/** Tool-facing slices. A worker context must not be given `Engine`. */
+export interface RouterPorts {
+  receive(trigger: Trigger): ReceiveResult
+  decide(triggerId: string, outcome: AssessmentOutcome): void
+  reply(req: ReplyRequest): void
+  subscribe(ticketId: string, threadKey: string): void
 }
+
+export interface WorkerPorts {
+  report(ticketId: string, report: Report): void
+  subscribe(ticketId: string, threadKey: string): void
+  handback(ticketId: string, triggerId: string, reason: string): { queued: boolean }
+  // no reply, decide, or receive
+}
+
+export interface WatchdogPorts {
+  fail(ticketId: string, reason: string): void
+  // no reply, decide, or receive
+}
+
+export type ToolContext =
+  | { sessionId: string; role: 'router'; ports: RouterPorts; spill: SpillStore; env?: LocalEnv }
+  | { sessionId: string; role: 'worker'; ports: WorkerPorts; spill: SpillStore; env?: LocalEnv }
+  | { sessionId: string; role: 'watchdog'; ports: WatchdogPorts; spill: SpillStore; env?: LocalEnv }
 
 export interface TurnResult {
   sessionId: string
@@ -583,6 +603,7 @@ export interface RawEvent {
 /bypass=subscription.*ticketId=/
 // speculative: public list excludes speculative tickets until deliver
 // credential: prompt assembly asserts no env value substrings
+// worker: WorkerPorts has no reply/decide/receive; calling them throws `worker cannot reply`
 ```
 
 ---
@@ -731,7 +752,7 @@ export interface RawEvent {
 | Norms | IM：≤100 words、低打断、合并进度；GitHub：结构化（标题/清单/链接）；CLI：纯文本 |
 | Fake sources | 内存事件泵，供 demo |
 | Tests | im 截断到 100 words；github 格式含 headings |
-| Accept | Router 出站；Worker 无 Channel 写权限 |
+| Accept | Router 出站；Worker 无 Channel 写权限；Worker 调用 reply/decide/receive 在类型与运行时都被拒绝 |
 | Deps | M0 |
 | Wave | A |
 

@@ -1,24 +1,33 @@
 import { ticketStage } from '../core/stage.ts'
-import type { Engine } from '../core/engine.ts'
 import { redactUnknown } from '../env/sanitize.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
-import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
+import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
 import type { Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import { workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 
-export interface ToolCtx {
+export interface ToolSession {
   sessionId: string
   role: Role
   ticketId?: string
 }
 
+/** Role-discriminated tool context. Workers receive WorkerPorts, never the Engine. */
+export type ToolContext = {
+  [R in Role]: {
+    sessionId: string
+    role: R
+    ticketId?: string
+    ports: RolePortFor<R>
+  }
+}[Role]
+
 export interface ToolDeps {
   store: Store
-  engine: Engine
+  ports: RolePorts
   env: EnvPort
   metrics: Metrics
   redact: (text: string) => string
@@ -29,8 +38,13 @@ export interface ToolDeps {
 
 interface ToolDef extends ToolSpec {
   roles: Role[]
-  run: (args: Record<string, unknown>, ctx: ToolCtx) => Promise<unknown>
+  run: (args: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>
 }
+
+type ToolRun<R extends Role> = (
+  args: Record<string, unknown>,
+  ctx: Extract<ToolContext, { role: R }>,
+) => Promise<unknown>
 
 const schema = (properties: Record<string, { type: string; description?: string }> = {}): ToolSpec['parameters'] => ({
   type: 'object',
@@ -38,201 +52,31 @@ const schema = (properties: Record<string, { type: string; description?: string 
   additionalProperties: true,
 })
 
+function guard<R extends Role>(role: R, name: string, run: ToolRun<R>): ToolDef['run'] {
+  return (args, ctx) => {
+    if (ctx.role !== role) throw new UserError(`tool ${name} is not available to ${ctx.role}`)
+    return run(args, ctx as Extract<ToolContext, { role: R }>)
+  }
+}
+
 export class ToolRegistry {
   private readonly tools: ToolDef[]
   private readonly redact: (text: string) => string
 
-  constructor(deps: ToolDeps) {
+  constructor(private readonly deps: ToolDeps) {
     this.redact = deps.redact
-    const { store, engine, env, log, metrics } = deps
+    const { store, log, metrics } = deps
     this.tools = [
-      {
-        name: 'create_worker',
-        description: 'Note a worker. The engine assignment is what actually starts it.',
-        parameters: schema({ title: { type: 'string' } }),
-        roles: ['router'],
-        run: async args => {
-          log(`[harness] create_worker noted title=${String(args.title ?? '')}`)
-          return { status: 'engine-assigns' }
-        },
-      },
-      {
-        name: 'stop_worker',
-        description: 'Ask a worker to stop.',
-        parameters: schema({ ticketId: { type: 'string' } }),
-        roles: ['router'],
-        run: async args => {
-          log(`[harness] stop_worker ticketId=${String(args.ticketId ?? '')}`)
-          return { stopped: true }
-        },
-      },
-      {
-        name: 'reply_user',
-        description: 'Send a user-facing reply through the channel adapter.',
-        parameters: schema({ ticketId: { type: 'string' }, text: { type: 'string' }, purpose: { type: 'string' } }),
-        roles: ['router'],
-        run: async args => {
-          const ticketId = String(args.ticketId ?? '')
-          const text = String(args.text ?? '')
-          const purpose = String(args.purpose ?? 'result')
-          engine.reply(ticketId, text, purpose)
-          return { sent: true, ticketId, purpose }
-        },
-      },
-      {
-        name: 'list_tasks',
-        description: 'List tickets and their stages.',
-        parameters: schema(),
-        roles: ['router', 'watchdog'],
-        run: async () => visibleTickets(store.listDocs<Ticket>('ticket')).map(ticket => ({
-          id: ticket.id,
-          title: ticket.title,
-          stage: ticketStage(ticket),
-          speculative: ticket.speculative,
-        })),
-      },
-      {
-        name: 'subscribe_worker',
-        description: 'Subscribe a ticket to a thread.',
-        parameters: schema({ ticketId: { type: 'string' }, thread: { type: 'string' } }),
-        roles: ['router'],
-        run: async args => {
-          engine.subscribe(String(args.ticketId), String(args.thread))
-          return { subscribed: true }
-        },
-      },
-      {
-        name: 'bash',
-        description: 'Run a shell command in the worker workspace.',
-        parameters: schema({ command: { type: 'string' } }),
-        roles: ['worker'],
-        run: async (args, ctx) => {
-          const mode = mutableMode(store, env, ctx)
-          const result = await env.bash(ctx.sessionId, String(args.command ?? ''), mode)
-          log(`[env] bash session=${ctx.sessionId} isolated=${mode.isolated} code=${result.code}`)
-          return { code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
-        },
-      },
-      {
-        name: 'write_file',
-        description: 'Write a file in the worker workspace.',
-        parameters: schema({ path: { type: 'string' }, body: { type: 'string' } }),
-        roles: ['worker'],
-        run: async (args, ctx) => {
-          const relativePath = String(args.path ?? 'notes.txt')
-          const mode = mutableMode(store, env, ctx)
-          const full = await env.writeFile(ctx.sessionId, relativePath, String(args.body ?? ''), mode)
-          if (ctx.ticketId && !mode.isolated) store.addArtifact(ctx.ticketId, full)
-          log(`[env] write_file session=${ctx.sessionId} isolated=${mode.isolated} path=${relativePath}`)
-          return { path: relativePath, isolated: mode.isolated }
-        },
-      },
-      {
-        name: 'read_file',
-        description: 'Read a file in the worker workspace.',
-        parameters: schema({ path: { type: 'string' } }),
-        roles: ['worker'],
-        run: async (args, ctx) => ({
-          text: await env.readFile(ctx.sessionId, String(args.path ?? ''), readMode(store, env, ctx)),
-        }),
-      },
-      {
-        name: 'read_object',
-        description: 'Recall a spilled object by id.',
-        parameters: schema({ id: { type: 'string' } }),
-        roles: ['worker'],
-        run: async args => {
-          const id = String(args.id ?? '')
-          const body = store.getSpill(id)
-          if (body == null) throw new UserError(`unknown spill ${id}`)
-          log(`[memory] read_object id=${id} bytes=${body.length}`)
-          return { id, bytes: body.length, text: body }
-        },
-      },
-      {
-        name: 'report_to_router',
-        description: 'Report progress. deliver=true lets the router speak.',
-        parameters: schema({
-          ticketId: { type: 'string' },
-          text: { type: 'string' },
-          deliver: { type: 'boolean' },
-          kind: { type: 'string' },
-        }),
-        roles: ['worker'],
-        run: async (args, ctx) => {
-          const ticketId = String(args.ticketId ?? ctx.ticketId ?? '')
-          const deliver = args.deliver === true
-          const text = String(args.text ?? '').replace(/\n/g, ' ')
-          const kind = String(args.kind ?? (deliver ? 'ready' : 'progress'))
-          const result = engine.report(ticketId, { kind, text, deliver })
-          settleSpeculation(env, ctx.sessionId, result.verdict)
-          if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${ctx.sessionId}`)
-          const prompt = ['REPORT', `deliver=${deliver ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
-          await deps.routerTurn(prompt)
-          return { ...result, deliver }
-        },
-      },
-      {
-        name: 'subscribe_thread',
-        description: 'Subscribe this ticket to another thread.',
-        parameters: schema({ thread: { type: 'string' } }),
-        roles: ['worker'],
-        run: async (args, ctx) => {
-          if (!ctx.ticketId) throw new UserError('subscribe_thread needs a ticket')
-          engine.subscribe(ctx.ticketId, String(args.thread ?? ''))
-          return { subscribed: true }
-        },
-      },
-      {
-        name: 'start_job',
-        description: 'Start an async job and return immediately.',
-        parameters: schema({ name: { type: 'string' } }),
-        roles: ['worker'],
-        run: async (args, ctx) => {
-          const ticketId = ctx.ticketId ?? String(args.ticketId ?? '')
-          const job = store.createJob({ sessionId: ctx.sessionId, ticketId, name: String(args.name ?? 'job') })
-          log(`[job] async job started jobId=${job.id} status=started`)
-          deps.scheduleJob({ id: job.id, sessionId: ctx.sessionId, ticketId })
-          return { status: 'started', jobId: job.id }
-        },
-      },
-      {
-        name: 'stop_job',
-        description: 'Stop a running job.',
-        parameters: schema({ jobId: { type: 'string' } }),
-        roles: ['worker'],
-        run: async args => {
-          const jobId = String(args.jobId ?? '')
-          if (jobId) store.completeJob(jobId, 'stopped')
-          return { status: 'stopped', jobId }
-        },
-      },
-      {
-        name: 'nudge_worker',
-        description: 'Nudge a worker that looks stuck.',
-        parameters: schema({ ticketId: { type: 'string' } }),
-        roles: ['watchdog'],
-        run: async args => {
-          const ticketId = String(args.ticketId ?? '')
-          metrics.increment('watchdog.nudge')
-          log(`[watchdog] nudge ticketId=${ticketId}`)
-          return { nudged: ticketId }
-        },
-      },
-      {
-        name: 'mark_task_failed',
-        description: 'Fail a stuck task.',
-        parameters: schema({ ticketId: { type: 'string' }, reason: { type: 'string' } }),
-        roles: ['watchdog'],
-        run: async args => {
-          const ticketId = String(args.ticketId ?? '')
-          const result = engine.report(ticketId, { kind: 'failed', text: String(args.reason ?? 'watchdog: stuck'), deliver: false })
-          settleSpeculation(env, workerSessionId(ticketId), result.verdict)
-          if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${workerSessionId(ticketId)}`)
-          log(`[watchdog] mark_task_failed ticketId=${ticketId}`)
-          return { failed: ticketId }
-        },
-      },
+      listTasks(store),
+      ...routerTools(deps.ports.router, { log }),
+      ...workerTools(deps.ports.worker, {
+        store,
+        env: deps.env,
+        log,
+        scheduleJob: deps.scheduleJob,
+        routerTurn: deps.routerTurn,
+      }),
+      ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics }),
     ]
   }
 
@@ -244,20 +88,254 @@ export class ToolRegistry {
     }))
   }
 
-  async invoke(call: ToolCall, ctx: ToolCtx): Promise<unknown> {
+  async invoke(call: ToolCall, session: ToolSession): Promise<unknown> {
     const tool = this.tools.find(item => item.name === call.name)
-    if (!tool || !tool.roles.includes(ctx.role)) throw new UserError(`tool ${call.name} is not available to ${ctx.role}`)
-    return redactUnknown(await tool.run(call.args, ctx), this.redact)
+    if (!tool || !tool.roles.includes(session.role)) {
+      throw new UserError(`tool ${call.name} is not available to ${session.role}`)
+    }
+    return redactUnknown(await tool.run(call.args, this.context(session)), this.redact)
+  }
+
+  private context(session: ToolSession): ToolContext {
+    if (session.role === 'router') return { ...session, role: 'router', ports: this.deps.ports.router }
+    if (session.role === 'worker') return { ...session, role: 'worker', ports: this.deps.ports.worker }
+    return { ...session, role: 'watchdog', ports: this.deps.ports.watchdog }
   }
 }
 
-function ticketOf(store: Store, ctx: ToolCtx): Ticket | undefined {
+function listTasks(store: Store): ToolDef {
+  return {
+    name: 'list_tasks',
+    description: 'List tickets and their stages.',
+    parameters: schema(),
+    roles: ['router', 'watchdog'],
+    run: async () => visibleTickets(store.listDocs<Ticket>('ticket')).map(ticket => ({
+      id: ticket.id,
+      title: ticket.title,
+      stage: ticketStage(ticket),
+      speculative: ticket.speculative,
+    })),
+  }
+}
+
+/** Router tools close over RouterPorts. That is the only session allowed to speak. */
+function routerTools(
+  ports: RolePortFor<'router'>,
+  deps: { log: (line: string) => void },
+): ToolDef[] {
+  const { log } = deps
+  return [
+    {
+      name: 'create_worker',
+      description: 'Note a worker. The engine assignment is what actually starts it.',
+      parameters: schema({ title: { type: 'string' } }),
+      roles: ['router'],
+      run: guard('router', 'create_worker', async args => {
+        log(`[harness] create_worker noted title=${String(args.title ?? '')}`)
+        return { status: 'engine-assigns' }
+      }),
+    },
+    {
+      name: 'stop_worker',
+      description: 'Ask a worker to stop.',
+      parameters: schema({ ticketId: { type: 'string' } }),
+      roles: ['router'],
+      run: guard('router', 'stop_worker', async args => {
+        log(`[harness] stop_worker ticketId=${String(args.ticketId ?? '')}`)
+        return { stopped: true }
+      }),
+    },
+    {
+      name: 'reply_user',
+      description: 'Send a user-facing reply through the channel adapter.',
+      parameters: schema({ ticketId: { type: 'string' }, text: { type: 'string' }, purpose: { type: 'string' } }),
+      roles: ['router'],
+      run: guard('router', 'reply_user', async args => {
+        const ticketId = String(args.ticketId ?? '')
+        const text = String(args.text ?? '')
+        const purpose = String(args.purpose ?? 'result')
+        ports.reply(ticketId, text, purpose)
+        return { sent: true, ticketId, purpose }
+      }),
+    },
+    {
+      name: 'subscribe_worker',
+      description: 'Subscribe a ticket to a thread.',
+      parameters: schema({ ticketId: { type: 'string' }, thread: { type: 'string' } }),
+      roles: ['router'],
+      run: guard('router', 'subscribe_worker', async args => {
+        ports.subscribe(String(args.ticketId), String(args.thread))
+        return { subscribed: true }
+      }),
+    },
+  ]
+}
+
+interface WorkerToolDeps {
+  store: Store
+  env: EnvPort
+  log: (line: string) => void
+  scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
+  routerTurn: (prompt: string) => Promise<void>
+}
+
+/** Worker tools close over WorkerPorts. reply, decide, and receive are not in this scope. */
+function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDef[] {
+  const { store, env, log } = deps
+  return [
+    {
+      name: 'bash',
+      description: 'Run a shell command in the worker workspace.',
+      parameters: schema({ command: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'bash', async (args, ctx) => {
+        const mode = mutableMode(store, env, ctx)
+        const result = await env.bash(ctx.sessionId, String(args.command ?? ''), mode)
+        log(`[env] bash session=${ctx.sessionId} isolated=${mode.isolated} code=${result.code}`)
+        return { code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+      }),
+    },
+    {
+      name: 'write_file',
+      description: 'Write a file in the worker workspace.',
+      parameters: schema({ path: { type: 'string' }, body: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'write_file', async (args, ctx) => {
+        const relativePath = String(args.path ?? 'notes.txt')
+        const mode = mutableMode(store, env, ctx)
+        const full = await env.writeFile(ctx.sessionId, relativePath, String(args.body ?? ''), mode)
+        if (ctx.ticketId && !mode.isolated) store.addArtifact(ctx.ticketId, full)
+        log(`[env] write_file session=${ctx.sessionId} isolated=${mode.isolated} path=${relativePath}`)
+        return { path: relativePath, isolated: mode.isolated }
+      }),
+    },
+    {
+      name: 'read_file',
+      description: 'Read a file in the worker workspace.',
+      parameters: schema({ path: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'read_file', async (args, ctx) => ({
+        text: await env.readFile(ctx.sessionId, String(args.path ?? ''), readMode(store, env, ctx)),
+      })),
+    },
+    {
+      name: 'read_object',
+      description: 'Recall a spilled object by id.',
+      parameters: schema({ id: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'read_object', async args => {
+        const id = String(args.id ?? '')
+        const body = store.getSpill(id)
+        if (body == null) throw new UserError(`unknown spill ${id}`)
+        log(`[memory] read_object id=${id} bytes=${body.length}`)
+        return { id, bytes: body.length, text: body }
+      }),
+    },
+    {
+      name: 'report_to_router',
+      description: 'Report progress. deliver=true lets the router speak.',
+      parameters: schema({
+        ticketId: { type: 'string' },
+        text: { type: 'string' },
+        deliver: { type: 'boolean' },
+        kind: { type: 'string' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'report_to_router', async (args, ctx) => {
+        const ticketId = String(args.ticketId ?? ctx.ticketId ?? '')
+        const deliver = args.deliver === true
+        const text = String(args.text ?? '').replace(/\n/g, ' ')
+        const kind = String(args.kind ?? (deliver ? 'ready' : 'progress'))
+        const result = ports.report(ticketId, { kind, text, deliver })
+        settleSpeculation(env, ctx.sessionId, result.verdict)
+        if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${ctx.sessionId}`)
+        const prompt = ['REPORT', `deliver=${deliver ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
+        await deps.routerTurn(prompt)
+        return { ...result, deliver }
+      }),
+    },
+    {
+      name: 'subscribe_thread',
+      description: 'Subscribe this ticket to another thread.',
+      parameters: schema({ thread: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'subscribe_thread', async (args, ctx) => {
+        if (!ctx.ticketId) throw new UserError('subscribe_thread needs a ticket')
+        ports.subscribe(ctx.ticketId, String(args.thread ?? ''))
+        return { subscribed: true }
+      }),
+    },
+    {
+      name: 'start_job',
+      description: 'Start an async job and return immediately.',
+      parameters: schema({ name: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'start_job', async (args, ctx) => {
+        const ticketId = ctx.ticketId ?? String(args.ticketId ?? '')
+        const job = store.createJob({ sessionId: ctx.sessionId, ticketId, name: String(args.name ?? 'job') })
+        log(`[job] async job started jobId=${job.id} status=started`)
+        deps.scheduleJob({ id: job.id, sessionId: ctx.sessionId, ticketId })
+        return { status: 'started', jobId: job.id }
+      }),
+    },
+    {
+      name: 'stop_job',
+      description: 'Stop a running job.',
+      parameters: schema({ jobId: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'stop_job', async args => {
+        const jobId = String(args.jobId ?? '')
+        if (jobId) store.completeJob(jobId, 'stopped')
+        return { status: 'stopped', jobId }
+      }),
+    },
+  ]
+}
+
+/** Watchdog tools close over WatchdogPorts. They fail stuck work; they do not speak. */
+function watchdogTools(
+  ports: RolePortFor<'watchdog'>,
+  deps: { env: EnvPort; log: (line: string) => void; metrics: Metrics },
+): ToolDef[] {
+  const { env, log, metrics } = deps
+  return [
+    {
+      name: 'nudge_worker',
+      description: 'Nudge a worker that looks stuck.',
+      parameters: schema({ ticketId: { type: 'string' } }),
+      roles: ['watchdog'],
+      run: guard('watchdog', 'nudge_worker', async args => {
+        const ticketId = String(args.ticketId ?? '')
+        metrics.increment('watchdog.nudge')
+        log(`[watchdog] nudge ticketId=${ticketId}`)
+        return { nudged: ticketId }
+      }),
+    },
+    {
+      name: 'mark_task_failed',
+      description: 'Fail a stuck task.',
+      parameters: schema({ ticketId: { type: 'string' }, reason: { type: 'string' } }),
+      roles: ['watchdog'],
+      run: guard('watchdog', 'mark_task_failed', async args => {
+        const ticketId = String(args.ticketId ?? '')
+        const result = ports.fail(ticketId, String(args.reason ?? 'watchdog: stuck'))
+        const sessionId = workerSessionId(ticketId)
+        settleSpeculation(env, sessionId, result.verdict)
+        if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${sessionId}`)
+        log(`[watchdog] mark_task_failed ticketId=${ticketId}`)
+        return { failed: ticketId }
+      }),
+    },
+  ]
+}
+
+function ticketOf(store: Store, ctx: { ticketId?: string }): Ticket | undefined {
   if (!ctx.ticketId) return undefined
   return store.getDoc<Ticket>('ticket', ctx.ticketId)
 }
 
 /** Speculative mutations stay in a scratch workdir, or are refused when isolation is unavailable. */
-function mutableMode(store: Store, env: EnvPort, ctx: ToolCtx): EnvRunOptions {
+function mutableMode(store: Store, env: EnvPort, ctx: { ticketId?: string }): EnvRunOptions {
   const ticket = ticketOf(store, ctx)
   if (!ticket?.speculative) return { isolated: false }
   if (ticket.ended) throw new UserError('speculative assignment was discarded')
@@ -265,7 +343,7 @@ function mutableMode(store: Store, env: EnvPort, ctx: ToolCtx): EnvRunOptions {
   return { isolated: true }
 }
 
-function readMode(store: Store, env: EnvPort, ctx: ToolCtx): EnvRunOptions {
+function readMode(store: Store, env: EnvPort, ctx: { ticketId?: string }): EnvRunOptions {
   const ticket = ticketOf(store, ctx)
   return { isolated: ticket?.speculative === true && Boolean(env.discardIsolated) }
 }

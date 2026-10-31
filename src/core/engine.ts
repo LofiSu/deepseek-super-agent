@@ -1,10 +1,12 @@
 import { maySurface } from '../speculate/gate.ts'
+import type { AssessmentOutcome, WorkerReport } from '../shared/ports.ts'
 import type { Decision, ReceiveResult, Ticket, Trigger } from '../shared/types.ts'
-import { Assignments, type ReportResult, type WorkerReport } from './assignments.ts'
+import { Assignments, type ReportResult } from './assignments.ts'
 import { Evals } from './evals.ts'
 import type { Host } from './host.ts'
 import { Intake } from './intake.ts'
 import { Replies } from './replies.ts'
+import { assertSessionMay } from './session-role.ts'
 import { handback } from './subscribe.ts'
 import { Tickets } from './tickets.ts'
 
@@ -28,7 +30,14 @@ export class Engine {
   }
 
   receive(trigger: Trigger): ReceiveResult {
+    assertSessionMay('receive')
     return this.host.repo.atomic(() => this.intake.receive(trigger))
+  }
+
+  /** Record the router's assessment. Workers and the watchdog cannot call this. */
+  decide(triggerId: string, outcome: AssessmentOutcome): Decision {
+    assertSessionMay('decide')
+    return this.host.repo.atomic(() => this.evals.decide(triggerId, outcome))
   }
 
   evaluateDue(): Decision[] {
@@ -48,6 +57,7 @@ export class Engine {
    * Until that commit, maySurface keeps the reply off the outbox.
    */
   reply(ticketId: string, text: string, purpose: string): void {
+    assertSessionMay('reply')
     this.host.repo.atomic(() => {
       const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
       if (!ticket) throw new Error(`unknown ticket ${ticketId}`)

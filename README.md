@@ -50,7 +50,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Trigger batching.** Under load, same-Thread Triggers fold into the next Eval. Demo and tests cover it.
 - [ ] **Router sharding / multi-layer filter.** Article §2/§8. Phase-2 (PLAN T09).
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
-- [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply.
+- [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
 - [~] **Subagent / Team inside a Worker.** Async jobs exist. A full Team topology does not (T14).
 - [~] **One UI, many topics.** Several Tickets can exist at once. There is no product shell yet (T15).
