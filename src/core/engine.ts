@@ -1,5 +1,6 @@
+import { maySurface } from '../speculate/gate.ts'
 import type { Decision, ReceiveResult, Ticket, Trigger } from '../shared/types.ts'
-import { Assignments, type WorkerReport } from './assignments.ts'
+import { Assignments, type ReportResult, type WorkerReport } from './assignments.ts'
 import { Evals } from './evals.ts'
 import type { Host } from './host.ts'
 import { Intake } from './intake.ts'
@@ -38,14 +39,23 @@ export class Engine {
     this.host.repo.atomic(() => this.assignments.start(ticketId, assignmentId, sessionId))
   }
 
-  report(ticketId: string, report: WorkerReport): { surfaced: boolean } {
+  report(ticketId: string, report: WorkerReport): ReportResult {
     return this.host.repo.atomic(() => this.assignments.report(ticketId, report))
   }
 
+  /**
+   * DeliverGate clears `speculative` only when a report may surface.
+   * Until that commit, maySurface keeps the reply off the outbox.
+   */
   reply(ticketId: string, text: string, purpose: string): void {
     this.host.repo.atomic(() => {
       const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
       if (!ticket) throw new Error(`unknown ticket ${ticketId}`)
+      const deliver = ticket.speculative ? false : undefined
+      if (!maySurface(ticket.speculative, deliver)) {
+        this.host.log(`[speculate] reply held ticketId=${ticket.id} purpose=${purpose}`)
+        return
+      }
       this.replies.send(ticket, text, purpose)
     })
   }
