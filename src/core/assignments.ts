@@ -1,89 +1,63 @@
-import { AgentError } from '../shared/errors.js'
-import type { Report } from '../shared/types.js'
-import type { EngineHost } from './ports.js'
-import { queueReply } from './replies.js'
-import { loadTicket, newAssignment, persistTicket } from './tickets.js'
+import { UserError } from '../shared/errors.ts'
+import type { Ticket } from '../shared/types.ts'
+import type { Host } from './host.ts'
 
-export function assignmentStarted(host: EngineHost, ticketId: string, assignmentId: string): void {
-  const ticket = loadTicket(host, ticketId)
-  const assignment = ticket.assignments.find(item => item.id === assignmentId)
-  if (!assignment) throw new AgentError('assignment_missing', assignmentId)
-  if (assignment.state !== 'pending') throw new AgentError('assignment_state', assignment.state)
-  const now = host.now()
-  assignment.state = 'running'
-  assignment.startedAt = now
-  ticket.updatedAt = now
-  persistTicket(host, ticket)
-  host.emit({ type: 'assignment.started', at: now, data: { ticketId, assignmentId } })
-  const inputIds = [...(ticket.undelivered ?? [])]
-  if (inputIds.length > 0 && host.executor.deliver) {
-    const started = snapshot(ticket)
-    const running = snapshot(assignment)
-    host.effects.push(() => host.executor.deliver!(started, running, inputIds))
-  }
+export interface WorkerReport {
+  kind: string
+  text: string
+  deliver?: boolean
 }
 
-export function inputsDelivered(host: EngineHost, ticketId: string, assignmentId: string, inputIds: readonly string[]): void {
-  const ticket = loadTicket(host, ticketId)
-  const assignment = ticket.assignments.find(item => item.id === assignmentId)
-  if (!assignment) throw new AgentError('assignment_missing', assignmentId)
-  if (assignment.state !== 'running') throw new AgentError('assignment_state', assignment.state)
-  const now = host.now()
-  const wanted = new Set(inputIds)
-  for (const input of ticket.inputs ?? []) {
-    if (wanted.has(input.id)) input.deliveredAt = now
-  }
-  ticket.undelivered = (ticket.undelivered ?? []).filter(id => !wanted.has(id))
-  ticket.updatedAt = now
-  persistTicket(host, ticket)
-}
+export class Assignments {
+  constructor(private readonly host: Host) {}
 
-export function reportAssignment(host: EngineHost, ticketId: string, assignmentId: string, report: Report): void {
-  const ticket = loadTicket(host, ticketId)
-  const assignment = ticket.assignments.find(item => item.id === assignmentId)
-  if (!assignment) throw new AgentError('assignment_missing', assignmentId)
-  if (assignment.state !== 'running') throw new AgentError('assignment_state', assignment.state)
-  assignment.report = report
-  ticket.updatedAt = host.now()
-  if (report.state === 'ready' || report.state === 'dropped') {
-    assignment.state = 'ended'
-    assignment.endedAt = report.at
-    assignment.endedReason = report.state
-    ticket.status = 'ended'
-    ticket.ended = {
-      at: report.at,
-      by: 'executor',
-      outcome: report.state === 'ready' ? 'completed' : 'dropped',
-      reason: report.summary,
+  start(ticketId: string, assignmentId: string, sessionId: string): void {
+    const ticket = this.must(ticketId)
+    const assignment = ticket.assignments.find(item => item.id === assignmentId) ?? ticket.assignments.at(-1)
+    if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
+    assignment.state = 'running'
+    assignment.workerSessionId = sessionId
+    assignment.startedAt = this.host.now()
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    this.host.log(`[engine] Assignments.start ticketId=${ticket.id} assignmentId=${assignment.id} session=${sessionId}`)
+    this.host.repo.addEvent('assignment.started', { ticketId: ticket.id, assignmentId: assignment.id, sessionId })
+  }
+
+  /**
+   * Record a worker report. User-facing text is sent by the router, not here.
+   * Speculative tickets stay silent until deliver is true.
+   */
+  report(ticketId: string, report: WorkerReport): { surfaced: boolean } {
+    const ticket = this.must(ticketId)
+    const assignment = ticket.assignments.at(-1)
+    if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
+    assignment.report = { kind: report.kind, text: report.text, deliver: report.deliver }
+    if (ticket.speculative && report.deliver !== true) {
+      this.host.repo.putDoc('ticket', ticket.id, ticket)
+      this.host.log(`[speculate] speculative silent ticketId=${ticket.id} deliver=false`)
+      return { surfaced: false }
     }
-    queueReply(host, ticket, 'result', report.summary)
-  } else if (report.state === 'blocked' || report.state === 'failed') {
-    queueReply(host, ticket, 'attention', report.summary)
+    if (report.deliver === true) {
+      const tag = ticket.speculative ? '[speculate] ' : ''
+      this.host.log(`${tag}deliver=true ticketId=${ticket.id}`)
+    }
+    if (report.kind === 'ready' || report.kind === 'dropped' || report.kind === 'failed') {
+      assignment.state = 'ended'
+      assignment.endedAt = this.host.now()
+      ticket.ended = {
+        at: this.host.now(),
+        outcome: report.kind,
+        by: report.kind === 'failed' ? 'watchdog' : 'executor',
+      }
+      this.host.repo.addEvent('assignment.ended', { ticketId: ticket.id, assignmentId: assignment.id, kind: report.kind })
+    }
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    return { surfaced: report.deliver === true }
   }
-  persistTicket(host, ticket)
-}
 
-export function assignmentInterrupted(host: EngineHost, ticketId: string, assignmentId: string): void {
-  const ticket = loadTicket(host, ticketId)
-  const assignment = ticket.assignments.find(item => item.id === assignmentId)
-  if (!assignment) throw new AgentError('assignment_missing', assignmentId)
-  if (assignment.state !== 'running') throw new AgentError('assignment_state', assignment.state)
-  const now = host.now()
-  const stopped = snapshot(assignment)
-  assignment.state = 'ended'
-  assignment.endedAt = now
-  assignment.endedReason = 'interrupted'
-  const reason = 'interrupted'
-  host.effects.push(() => host.executor.stop?.(snapshot(ticket), stopped, reason))
-  const next = newAssignment(host, ticket.id)
-  ticket.assignments = [...ticket.assignments, next]
-  ticket.updatedAt = now
-  persistTicket(host, ticket)
-  const started = snapshot(ticket)
-  const startedAssignment = snapshot(next)
-  host.effects.push(() => host.executor.start(started, startedAssignment))
-}
-
-function snapshot<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T
+  private must(ticketId: string): Ticket {
+    const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
+    if (!ticket) throw new UserError(`unknown ticket ${ticketId}`)
+    return ticket
+  }
 }

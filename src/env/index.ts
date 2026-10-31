@@ -1,1 +1,1 @@
-export { LocalEnv } from './local.js'
+export { LocalEnv } from './local-env.ts'

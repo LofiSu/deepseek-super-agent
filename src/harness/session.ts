@@ -1,96 +1,30 @@
-import type { SessionRole } from '../shared/types.js'
-import { AgentError } from '../shared/errors.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import type { Store } from '../store/sqlite.ts'
 
-export type SessionEventKind = 'user' | 'assistant' | 'tool' | 'system'
-export type SessionStatus = 'idle' | 'running' | 'waiting' | 'stopped'
+/** Append-only JSONL plus a SQLite copy so a restart can still read the session. */
+export class SessionJournal {
+  private announced = false
 
-export interface SessionState {
-  id: string
-  role: SessionRole
-  status: SessionStatus
-  updatedAt: string
-}
-
-export interface SessionEvent {
-  id: string
-  sessionId: string
-  seq: number
-  kind: SessionEventKind
-  at: string
-  text: string
-  name?: string
-  toolCallId?: string
-  data?: Record<string, unknown>
-}
-
-export interface NewSessionEvent {
-  sessionId: string
-  kind: SessionEventKind
-  text?: string
-  name?: string
-  toolCallId?: string
-  data?: Record<string, unknown>
-  at?: string
-}
-
-/** Append-only session event log. Status is metadata; events are never rewritten. */
-export class SessionLog {
-  private readonly events = new Map<string, SessionEvent[]>()
-  private readonly states = new Map<string, SessionState>()
-  private seq = 0
-
-  constructor(private readonly now: () => string = () => new Date().toISOString()) {}
-
-  create(id: string, role: SessionRole): SessionState {
-    if (this.states.has(id)) throw new AgentError('session_exists', `session ${id} already exists`)
-    const state: SessionState = { id, role, status: 'idle', updatedAt: this.now() }
-    this.states.set(id, state)
-    this.events.set(id, [])
-    return { ...state }
+  constructor(
+    private readonly dir: string,
+    private readonly store: Store,
+    private readonly log: (line: string) => void,
+  ) {
+    fs.mkdirSync(dir, { recursive: true })
   }
 
-  get(id: string): SessionState | undefined {
-    const state = this.states.get(id)
-    return state ? { ...state } : undefined
-  }
-
-  setStatus(id: string, status: SessionStatus): SessionState {
-    const state = this.states.get(id)
-    if (!state) throw new AgentError('session_missing', `session ${id} not found`)
-    state.status = status
-    state.updatedAt = this.now()
-    return { ...state }
-  }
-
-  append(input: NewSessionEvent): SessionEvent {
-    const bucket = this.events.get(input.sessionId)
-    if (!bucket) throw new AgentError('session_missing', `session ${input.sessionId} not found`)
-    const event: SessionEvent = {
-      id: `${input.sessionId}:${bucket.length + 1}`,
-      sessionId: input.sessionId,
-      seq: ++this.seq,
-      kind: input.kind,
-      at: input.at ?? this.now(),
-      text: input.text ?? '',
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.toolCallId !== undefined ? { toolCallId: input.toolCallId } : {}),
-      ...(input.data !== undefined ? { data: input.data } : {}),
+  append(sessionId: string, event: Record<string, unknown>): void {
+    if (!this.announced) {
+      this.announced = true
+      this.log(`[harness] session journal jsonl dir=${this.dir}`)
     }
-    bucket.push(event)
-    return { ...event, data: event.data ? { ...event.data } : undefined }
-  }
-
-  /** Events in append order for one session. */
-  restore(sessionId: string): SessionEvent[] {
-    const bucket = this.events.get(sessionId)
-    if (!bucket) throw new AgentError('session_missing', `session ${sessionId} not found`)
-    return bucket.map(event => ({ ...event, data: event.data ? { ...event.data } : undefined }))
-  }
-
-  /** Sessions left running or waiting for a started job. */
-  unfinished(): SessionState[] {
-    return [...this.states.values()]
-      .filter(state => state.status === 'running' || state.status === 'waiting')
-      .map(state => ({ ...state }))
+    const line = JSON.stringify({ t: new Date().toISOString(), sessionId, ...event })
+    fs.appendFileSync(path.join(this.dir, `${sessionId}.jsonl`), `${line}\n`)
+    this.store.appendMessage(sessionId, String(event.role ?? event.kind ?? 'event'), line)
+    const existing = this.store.listSessions().find(session => session.id === sessionId)
+    if (existing) {
+      this.store.upsertSession({ ...existing, heartbeat: new Date().toISOString() })
+    }
   }
 }

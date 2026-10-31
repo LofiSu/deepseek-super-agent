@@ -1,3 +1,3 @@
-export { SCHEMA } from './schema.js'
-export { openStore, SqliteStore } from './repositories.js'
-export { SqliteSpill, toInline } from './spill.js'
+export { SCHEMA } from './schema.ts'
+export { spillPort } from './spill.ts'
+export { Store } from './sqlite.ts'

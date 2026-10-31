@@ -1,22 +1,23 @@
-import { AgentError } from '../shared/errors.js'
-import type { Thread } from '../shared/types.js'
-import type { EngineHost } from './ports.js'
+import { UserError } from '../shared/errors.ts'
+import { threadKey, type Disposition, type Thread, type Trigger } from '../shared/types.ts'
+import type { Host } from './host.ts'
 
-/** Bind a Ticket to a Thread. Context follows do not authorize or resume. */
-export function subscribe(host: EngineHost, thread: Thread, ticketId: string, context = false): void {
-  if (!thread.subscriptions.includes(ticketId)) thread.subscriptions.push(ticketId)
-  host.repos.threads.save(thread)
-  host.repos.subscriptions.save({
-    threadKey: thread.key,
-    ticketId,
-    ...(context ? { context: true } : {}),
-  })
-}
-
-export function unsubscribe(host: EngineHost, threadKey: string, ticketId: string): void {
-  const thread = host.repos.threads.get(threadKey)
-  if (!thread) throw new AgentError('thread_missing', threadKey)
-  thread.subscriptions = thread.subscriptions.filter(id => id !== ticketId)
-  host.repos.threads.save(thread)
-  host.repos.subscriptions.remove(threadKey, ticketId)
+/** Hand a fanned-out trigger back to Eval. The ticket keeps its subscription. */
+export function handback(host: Host, ticketId: string, triggerId: string, reason: string): boolean {
+  const disposition = host.repo.getDoc<Disposition>('disposition', triggerId)
+  const trigger = host.repo.getDoc<Trigger>('trigger', triggerId)
+  if (!disposition || !trigger) throw new UserError(`unknown trigger ${triggerId}`)
+  const at = host.now()
+  disposition.handbacks = [...(disposition.handbacks ?? []), { ticketId, reason, at }]
+  host.repo.putDoc('disposition', triggerId, disposition)
+  const key = threadKey(trigger.threads[0]!)
+  const thread = host.repo.getDoc<Thread>('thread', key)
+  if (thread && !thread.pending.includes(triggerId)) {
+    thread.pending.push(triggerId)
+    host.repo.putDoc('thread', key, thread)
+    host.onQueued?.(key, triggerId, thread.pending)
+  }
+  host.log(`[subscribe] handback ticketId=${ticketId} triggerId=${triggerId} reason=${reason}`)
+  host.repo.addEvent('trigger.requeued', { triggerId, ticketId, reason })
+  return true
 }

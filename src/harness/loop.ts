@@ -1,91 +1,230 @@
-import type { TurnResult } from '../shared/ports.js'
-import { isToolStart, type SessionRole } from '../shared/types.js'
-import type { Model, ModelMessage, ToolCall } from './model.js'
-import type { SessionEvent, SessionLog } from './session.js'
-import type { ToolRegistry } from './tools.js'
+import type { Engine } from '../core/engine.ts'
+import type { Role, Ticket, Trigger } from '../shared/types.ts'
+import type { Model, ModelMessage } from './model.ts'
+import { systemPrompt } from './model.ts'
+import type { SessionJournal } from './session.ts'
+import { ToolRegistry } from './tools.ts'
+import type { Store } from '../store/sqlite.ts'
 
-export interface LoopDeps {
-  sessions: SessionLog
+export interface HarnessOptions {
   model: Model
   tools: ToolRegistry
-  maxSteps?: number
+  store: Store
+  engine: Engine
+  journal: SessionJournal
+  log: (line: string) => void
+  jobDelayMs: number
 }
 
-const DEFAULT_MAX_STEPS = 8
+/** Async ReAct loop plus the in-process daemon that launches workers. */
+export class Harness {
+  private readonly chains = new Map<string, Promise<void>>()
+  private inflight: Promise<void>[] = []
+  private readonly running = new Set<string>()
+  private readonly pendingJobs: Promise<void>[] = []
+  private routerReady = false
 
-/** One async ReAct turn. A tool that returns `{ status: 'started', jobId }` ends the turn without waiting. */
-export async function runTurn(sessionId: string, deps: LoopDeps): Promise<TurnResult> {
-  const state = deps.sessions.get(sessionId)
-  if (!state) throw new Error(`session ${sessionId} not found`)
-  const maxSteps = deps.maxSteps ?? DEFAULT_MAX_STEPS
-  deps.sessions.setStatus(sessionId, 'running')
-  const started: TurnResult['started'] = []
+  constructor(private readonly opts: HarnessOptions) {}
 
-  for (let step = 0; step < maxSteps; step++) {
-    const response = await deps.model.complete({
-      messages: toMessages(deps.sessions.restore(sessionId)),
-      tools: deps.tools.schemas(state.role),
-    })
-    deps.sessions.append({
-      sessionId,
-      kind: 'assistant',
-      text: response.content,
-      data: response.toolCalls.length ? { toolCalls: response.toolCalls } : undefined,
-    })
-    if (response.toolCalls.length === 0) {
-      deps.sessions.setStatus(sessionId, 'idle')
-      return { sessionId, status: 'done', started }
+  armRouter(): void {
+    if (this.routerReady) return
+    this.routerReady = true
+    this.opts.log('[harness] RouterSession start session=router role=router')
+  }
+
+  launch(ticket: Ticket): Promise<void> {
+    const sessionId = `worker_${ticket.id}`
+    this.running.add(ticket.id)
+    this.armRouter()
+    this.opts.log(`[harness] dual-layer RouterSession=router WorkerSession=${sessionId} ticketId=${ticket.id}`)
+    this.opts.log(`[harness] WorkerSession start session=${sessionId} ticketId=${ticket.id} role=worker`)
+    if (this.running.size >= 2) {
+      this.opts.log(`[harness] parallel workers=${this.running.size} sessions=${[...this.running].join(',')}`)
     }
+    const assignment = ticket.assignments.at(-1)
+    if (!assignment) throw new Error(`ticket ${ticket.id} has no assignment`)
+    this.opts.engine.assignmentStarted(ticket.id, assignment.id, sessionId)
+    const mode = ticket.speculative ? 'speculative' : 'normal'
+    const task = [
+      'TASK',
+      `ticketId=${ticket.id}`,
+      `title=${ticket.title}`,
+      `mode=${mode}`,
+      `thread=${ticket.threadKeys[0] ?? ''}`,
+      `brief=${ticket.brief}`,
+    ]
+    if (ticket.spillId) task.push(`spillId=${ticket.spillId}`)
+    const routerPrompt = [
+      ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
+      `ticketId=${ticket.id}`,
+      `title=${ticket.title}`,
+      `mode=${mode}`,
+    ].join('\n')
+    const work = Promise.all([
+      this.enqueue('router', () => this.run('router', 'router', undefined, routerPrompt)),
+      this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticket.id, task.join('\n'))),
+    ]).then(() => undefined).finally(() => {
+      this.running.delete(ticket.id)
+    })
+    return this.track(work)
+  }
 
-    let yielded = false
-    for (const call of response.toolCalls) {
-      const result = await runCall(deps, sessionId, state.role, call)
-      deps.sessions.append({
-        sessionId,
-        kind: 'tool',
-        text: JSON.stringify(result),
-        name: call.name,
-        toolCallId: call.id,
-        data: isToolStart(result) ? { ...result } : undefined,
+  deliver(ticketId: string, trigger: Trigger): Promise<void> {
+    const ticket = this.opts.store.getDoc<Ticket>('ticket', ticketId)
+    const mode = ticket?.speculative ? 'speculative' : 'normal'
+    const lines = ['FOLLOWUP', `ticketId=${ticketId}`, `mode=${mode}`, `text=${trigger.text}`]
+    const spillId = typeof trigger.meta.spillId === 'string' ? trigger.meta.spillId : ''
+    if (spillId) lines.push(`spillId=${spillId}`)
+    const sessionId = `worker_${ticketId}`
+    return this.track(this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticketId, lines.join('\n'))))
+  }
+
+  scheduleJob(job: { id: string; sessionId: string; ticketId: string }): void {
+    const done = new Promise<void>((resolve, reject) => {
+      setTimeout(() => {
+        try {
+          if (!this.opts.store.isOpen) {
+            resolve()
+            return
+          }
+          this.opts.store.completeJob(job.id, 'succeeded')
+          this.opts.log(`[job] async job finished jobId=${job.id} status=succeeded`)
+          this.opts.log(`[job] completion trigger session=${job.sessionId} jobId=${job.id}`)
+          const prompt = `JOB_DONE\njobId=${job.id}\nticketId=${job.ticketId}`
+          const turn = this.enqueue(job.sessionId, () => this.run(job.sessionId, 'worker', job.ticketId, prompt))
+          this.track(turn)
+          turn.then(() => resolve(), reject)
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)))
+        }
+      }, this.opts.jobDelayMs)
+    })
+    this.pendingJobs.push(done)
+  }
+
+  routerTurn(prompt: string): Promise<void> {
+    this.armRouter()
+    return this.enqueue('router', () => this.run('router', 'router', undefined, prompt))
+  }
+
+  async watchdogTurn(): Promise<void> {
+    this.opts.log('[watchdog] WatchdogSession start session=watchdog role=watchdog')
+    await this.track(this.enqueue('watchdog', () => this.run(
+      'watchdog',
+      'watchdog',
+      undefined,
+      'WATCHDOG\ncheck stuck workers and database health',
+    )))
+  }
+
+  async drain(): Promise<void> {
+    for (let wave = 0; wave < 40; wave += 1) {
+      if (this.inflight.length === 0) return
+      const batch = this.inflight.splice(0, this.inflight.length)
+      const results = await Promise.allSettled(batch)
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed && failed.status === 'rejected') throw failed.reason
+    }
+    if (this.inflight.length > 0) throw new Error('harness drain did not settle')
+  }
+
+  async jobsSettled(): Promise<void> {
+    for (let wave = 0; wave < 20; wave += 1) {
+      await this.drain()
+      if (this.pendingJobs.length === 0) return
+      const batch = this.pendingJobs.splice(0, this.pendingJobs.length)
+      await Promise.all(batch)
+    }
+    throw new Error('jobs did not settle')
+  }
+
+  private track(work: Promise<void>): Promise<void> {
+    this.inflight.push(work)
+    return work
+  }
+
+  private enqueue(sessionId: string, fn: () => Promise<void>): Promise<void> {
+    const prev = this.chains.get(sessionId) ?? Promise.resolve()
+    const next = prev.then(fn, fn)
+    this.chains.set(sessionId, next.then(() => undefined, () => undefined))
+    return next
+  }
+
+  private async run(sessionId: string, role: Role, ticketId: string | undefined, prompt: string): Promise<void> {
+    const createdAt = new Date().toISOString()
+    this.opts.store.upsertSession({
+      id: sessionId,
+      role,
+      ticketId,
+      status: 'running',
+      heartbeat: createdAt,
+      createdAt,
+    })
+    try {
+      await runTurn({
+        model: this.opts.model,
+        tools: this.opts.tools,
+        journal: this.opts.journal,
+        log: this.opts.log,
+        session: { id: sessionId, role, ticketId },
+        prompt,
       })
-      if (isToolStart(result)) {
-        started.push(result)
-        yielded = true
+    } finally {
+      if (this.opts.store.isOpen) {
+        this.opts.store.upsertSession({
+          id: sessionId,
+          role,
+          ticketId,
+          status: 'idle',
+          heartbeat: new Date().toISOString(),
+          createdAt,
+        })
       }
     }
-    if (yielded) {
-      deps.sessions.setStatus(sessionId, 'waiting')
-      return { sessionId, status: 'waiting', started }
-    }
-  }
-
-  deps.sessions.append({ sessionId, kind: 'system', text: 'max steps' })
-  deps.sessions.setStatus(sessionId, 'stopped')
-  return { sessionId, status: 'stopped', started }
-}
-
-async function runCall(deps: LoopDeps, sessionId: string, role: SessionRole, call: ToolCall): Promise<unknown> {
-  try {
-    return await deps.tools.invoke(role, call.name, call.arguments, { sessionId, role, callId: call.id })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'tool failed'
-    return { error: message }
   }
 }
 
-function toMessages(events: SessionEvent[]): ModelMessage[] {
-  return events.map(event => {
-    if (event.kind === 'assistant') {
-      const toolCalls = event.data?.toolCalls
-      return {
-        role: 'assistant',
-        content: event.text,
-        ...(Array.isArray(toolCalls) ? { toolCalls: toolCalls as ModelMessage['toolCalls'] } : {}),
+export async function runTurn(input: {
+  model: Model
+  tools: ToolRegistry
+  journal: SessionJournal
+  log: (line: string) => void
+  session: { id: string; role: Role; ticketId?: string }
+  prompt: string
+  maxSteps?: number
+}): Promise<void> {
+  const label = input.session.role === 'router'
+    ? 'RouterSession'
+    : input.session.role === 'worker' ? 'WorkerSession' : 'WatchdogSession'
+  input.log(`[harness] ${label} turn session=${input.session.id}`)
+  const messages: ModelMessage[] = [
+    { role: 'system', content: systemPrompt(input.session.role) },
+    { role: 'user', content: input.prompt },
+  ]
+  input.journal.append(input.session.id, { role: 'user', kind: 'message', content: input.prompt })
+  const tools = input.tools.specsFor(input.session.role)
+  const maxSteps = input.maxSteps ?? 10
+  for (let step = 0; step < maxSteps; step += 1) {
+    input.log(`[harness] async-react step=${step} session=${input.session.id} role=${input.session.role}`)
+    const out = await input.model.complete({ role: input.session.role, messages, tools })
+    const calls = out.toolCalls ?? []
+    messages.push({ role: 'assistant', content: out.text ?? '', toolCalls: calls })
+    input.journal.append(input.session.id, { role: 'assistant', kind: 'message', content: out.text ?? '', toolCalls: calls })
+    if (calls.length === 0) break
+    for (const toolCall of calls) {
+      let content: string
+      try {
+        const result = await input.tools.invoke(toolCall, {
+          sessionId: input.session.id,
+          role: input.session.role,
+          ticketId: input.session.ticketId,
+        })
+        content = JSON.stringify(result)
+      } catch (error) {
+        content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) })
       }
+      messages.push({ role: 'tool', name: toolCall.name, toolCallId: toolCall.id, content })
+      input.journal.append(input.session.id, { role: 'tool', name: toolCall.name, kind: 'tool', content })
     }
-    if (event.kind === 'tool') {
-      return { role: 'tool', content: event.text, toolCallId: event.toolCallId }
-    }
-    return { role: event.kind, content: event.text }
-  })
+  }
 }

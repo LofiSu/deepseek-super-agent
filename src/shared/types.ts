@@ -1,14 +1,10 @@
-/** Domain types. Glossary-aligned; no harness runtime. */
+export type Role = 'router' | 'worker' | 'watchdog'
 
-export type SessionRole = 'router' | 'worker' | 'watchdog'
-
-export type DecisionKind = 'accept' | 'stop' | 'ignore' | 'unavailable'
-export type Strength = 'explicit' | 'inferred'
-export type AssignmentState = 'pending' | 'running' | 'ended'
-export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
-export type TicketStatus = 'open' | 'ended'
 export type ReceiveResult = 'stored' | 'duplicate' | 'filtered'
-export type JobStatus = 'started' | 'done' | 'failed'
+
+export type Strength = 'explicit' | 'inferred' | 'maybe'
+
+export type DecisionKind = 'accept' | 'ignore' | 'stop' | 'unavailable'
 
 export interface ActorRef {
   source: string
@@ -20,193 +16,139 @@ export interface ThreadRef {
   id: string
 }
 
-/** Write side of a Thread. Address format belongs to the Source. */
 export interface ChannelRef {
   source: string
   thread: string
-  address: Record<string, string>
+  address?: Record<string, string>
 }
 
-/** A stream of events: kind plus one instance configuration. */
-export interface Source {
-  id: string
-  kind: string
-  enabled: boolean
-  cursor?: string
-}
-
-/** One immutable event from a Source. */
+/** One immutable event from a source. `text` and `meta` are untrusted. */
 export interface Trigger {
   id: string
   source: string
   threads: ThreadRef[]
   actor: ActorRef
   human: boolean
+  addressed?: 'mention' | 'direct'
   at: string
   text: string
   channel?: ChannelRef
   meta: Record<string, unknown>
 }
 
-/** Judgement on a batch of Triggers. Holds no durable state of its own. */
-export interface Eval {
-  id: string
-  threadKey: string
-  triggerIds: string[]
-  strength: Strength
-  policyVersion: string
-  startedAt: string
-  /** When this passes without a Decision, the Eval is recorded unavailable. */
-  deadline?: string
+export function threadKey(ref: ThreadRef): string {
+  return `${ref.source}:${ref.id}`
 }
 
-/** Triggers in time order. At most one Eval runs on it at a time. */
 export interface Thread {
   key: string
   ref: ThreadRef
   createdAt: string
   lastAt?: string
   subscriptions: string[]
+  correlated: string[]
   pending: string[]
-  evaluating?: Eval
   meta: Record<string, unknown>
 }
 
-/** What an accept grants. Immutable. */
+export interface Disposition {
+  filtered?: string
+  fanout: string[]
+  handbacks?: { ticketId: string; reason: string; at: string }[]
+  at: string
+}
+
 export interface Mandate {
   strength: Strength
   policyVersion: string
-  actor: ActorRef
   scope: string
+  actor: ActorRef
+  basis: string
 }
 
-/** Result of an Eval. */
+export interface Assignment {
+  id: string
+  state: 'pending' | 'running' | 'ended'
+  speculative: boolean
+  workerSessionId?: string
+  startedAt?: string
+  endedAt?: string
+  report?: { kind: string; text: string; deliver?: boolean }
+}
+
+export interface TicketInput {
+  id: string
+  kind: 'trigger' | 'text' | 'job'
+  triggerId?: string
+  text?: string
+  spillId?: string
+  at: string
+  human?: boolean
+}
+
+export interface TicketEnd {
+  at: string
+  outcome: string
+  by: 'executor' | 'human' | 'watchdog'
+}
+
+export interface Ticket {
+  id: string
+  title: string
+  brief: string
+  spillId?: string
+  mandate: Mandate
+  threadKeys: string[]
+  channels: ChannelRef[]
+  inputs: TicketInput[]
+  assignments: Assignment[]
+  speculative: boolean
+  originTriggerId: string
+  createdAt: string
+  ended?: TicketEnd
+}
+
 export interface Decision {
   id: string
   evalId: string
   threadKey: string
   triggerIds: string[]
-  policyVersion: string
-  at: string
   kind: DecisionKind
+  ticketId?: string
+  at: string
+  reason: string
   strength: Strength
-  ticketId?: string
-  mandate?: Mandate
-  reason?: string
 }
 
-export interface Channel {
-  ref: ChannelRef
-  ticketId?: string
-}
-
-/** Ticket–Thread relation held by the Thread. */
-export interface Subscription {
-  threadKey: string
-  ticketId: string
-  context?: boolean
-}
-
-export interface Report {
-  state: ReportState
-  summary: string
-  at: string
-}
-
-/** Binding of a Ticket to one executor instance. */
-export interface Assignment {
+export interface ReplyRow {
   id: string
   ticketId: string
-  state: AssignmentState
-  createdAt: string
-  startedAt?: string
-  endedAt?: string
-  endedReason?: string
-  report?: Report
-}
-
-export interface TicketEnd {
-  at: string
-  by: 'executor' | 'human'
-  outcome: 'completed' | 'dropped' | 'stopped' | 'failed'
-  reason?: string
-}
-
-export interface TicketInput {
-  id: string
-  kind: 'trigger' | 'resumed' | 'text'
-  at: string
-  triggerId?: string
-  text?: string
-  human?: boolean
-  deliveredAt?: string
-}
-
-/** A unit of authorized work. Only Eval creates one. */
-export interface Ticket {
-  id: string
-  title: string
-  decisionId: string
-  mandate: Mandate
-  channels: ChannelRef[]
-  status: TicketStatus
-  assignments: Assignment[]
-  createdAt: string
-  updatedAt: string
-  ended?: TicketEnd
-  inputs?: TicketInput[]
-  /** Input ids not yet handed to the running Assignment. */
-  undelivered?: string[]
-}
-
-/** Offloaded body. Inline keeps the summary and these ids. */
-export interface Spill {
-  id: string
-  summary: string
-  createdAt: string
-}
-
-/** Inline memory: summary plus spill ids. Bodies live in the spill store. */
-export interface Inline {
-  summary: string
-  spillIds: string[]
-}
-
-export type SpillBody = string | Uint8Array | Record<string, unknown>
-
-export interface SpillRecord extends Spill {
-  encoding: 'text' | 'json' | 'bytes'
-  /** Text, JSON source, or base64 for bytes. */
-  body: string
-}
-
-export type ReplyKind = 'acknowledgement' | 'answer' | 'result' | 'attention'
-export type ReplyStatus = 'pending' | 'sent' | 'dropped'
-
-export interface OutboundMessage {
-  id: string
-  channel: ChannelRef
+  channel: string
+  purpose: string
   text: string
-  kind: ReplyKind
-  ticketId?: string
+  status: 'pending' | 'sent' | 'dropped'
+  createdAt: string
 }
 
-/** Async tool work. A tool may return `{ status: 'started', jobId }`. */
-export interface Job {
+export interface JobRow {
   id: string
   sessionId: string
-  status: JobStatus
+  ticketId: string
+  name: string
+  status: 'running' | 'succeeded' | 'failed' | 'stopped'
+  createdAt: string
+  finishedAt?: string
 }
 
-export interface ToolStart {
-  status: 'started'
-  jobId: string
+export interface SessionRow {
+  id: string
+  role: Role
+  ticketId?: string
+  status: 'running' | 'idle'
+  heartbeat: string
+  createdAt: string
 }
 
-export function isToolStart(value: unknown): value is ToolStart {
-  if (!value || typeof value !== 'object') return false
-  const record = value as { status?: unknown; jobId?: unknown }
-  return record.status === 'started' && typeof record.jobId === 'string'
+export function liveTicket(ticket: Ticket): boolean {
+  return ticket.ended == null
 }
-
-export const threadKey = (ref: ThreadRef): string => `${ref.source}:${ref.id}`

@@ -1,37 +1,23 @@
-import type { OutboundMessage, ReplyKind } from '../shared/types.js'
-import { assertReply, formatReply, type NormalizedInbound } from './norm.js'
+import type { Trigger } from '../shared/types.ts'
 
-export interface ImLine {
-  from: string
+export function imTrigger(input: {
+  id?: string
+  thread: string
   text: string
-  kind?: ReplyKind
-}
-
-/** In-memory chat rooms. Not a Feishu client. */
-export class FakeImChannel {
-  readonly kind = 'im' as const
-  readonly rooms = new Map<string, ImLine[]>()
-
-  deliver(message: OutboundMessage): void {
-    assertReply(message)
-    const room = message.channel.address.room ?? message.channel.thread
-    const lines = this.rooms.get(room) ?? []
-    lines.push({ from: 'ds-agent', text: formatReply(message), kind: message.kind })
-    this.rooms.set(room, lines)
-  }
-
-  post(room: string, from: string, text: string, at = new Date().toISOString()): NormalizedInbound {
-    const lines = this.rooms.get(room) ?? []
-    lines.push({ from, text })
-    this.rooms.set(room, lines)
-    return {
-      source: this.kind,
-      threadId: room,
-      actorId: from,
-      human: !from.endsWith('-bot'),
-      text,
-      at,
-      address: { room },
-    }
+  actor?: string
+  addressed?: boolean
+  at?: string
+}): Trigger {
+  return {
+    id: input.id ?? `trg_im_${Date.now().toString(36)}`,
+    source: 'im',
+    threads: [{ source: 'im', id: input.thread }],
+    actor: { source: 'im', id: input.actor ?? 'alex' },
+    human: true,
+    addressed: input.addressed === false ? undefined : 'mention',
+    at: input.at ?? new Date().toISOString(),
+    text: input.text,
+    channel: { source: 'im', thread: input.thread },
+    meta: {},
   }
 }

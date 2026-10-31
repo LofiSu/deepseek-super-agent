@@ -1,25 +1,16 @@
-import type { OutboundMessage } from '../shared/types.js'
-import { assertReply, formatReply, type NormalizedInbound } from './norm.js'
+import type { Trigger } from '../shared/types.ts'
 
-/** Local CLI transcript. Inbound lines are pushed by the caller; nothing reads a real terminal. */
-export class CliChannel {
-  readonly kind = 'cli' as const
-  readonly outbound: string[] = []
-
-  deliver(message: OutboundMessage): void {
-    assertReply(message)
-    this.outbound.push(formatReply(message))
-  }
-
-  receive(text: string, actorId = 'local', at = new Date().toISOString()): NormalizedInbound {
-    return {
-      source: this.kind,
-      threadId: 'cli',
-      actorId,
-      human: true,
-      text,
-      at,
-      address: { stream: 'stdout' },
-    }
+export function cliTrigger(input: { id?: string; text: string; actor?: string; at?: string }): Trigger {
+  return {
+    id: input.id ?? `trg_cli_${Date.now().toString(36)}`,
+    source: 'cli',
+    threads: [{ source: 'cli', id: 'local' }],
+    actor: { source: 'cli', id: input.actor ?? 'you' },
+    human: true,
+    addressed: 'direct',
+    at: input.at ?? new Date().toISOString(),
+    text: input.text,
+    channel: { source: 'cli', thread: 'local' },
+    meta: {},
   }
 }

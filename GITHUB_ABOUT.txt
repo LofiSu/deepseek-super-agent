@@ -1,3 +1,0 @@
-description: Open-source DeepSeek Super-agent style multi-agent framework with a thin harness — Router/Worker, triggers, Watchdog (not an official DeepSeek product).
-topics: deepseek,super-agent,agent-framework,multi-agent,open-source,ai-agent,typescript,openai-compatible,loomlab
-homepage:

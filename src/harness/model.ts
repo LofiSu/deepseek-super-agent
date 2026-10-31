@@ -1,160 +1,224 @@
-import { AgentError } from '../shared/errors.js'
+import { ruleClassify, type SemanticHit, type SemanticModel } from '../ingress/filter.ts'
+import type { Role } from '../shared/types.ts'
+import type { Trigger } from '../shared/types.ts'
+
+export interface ToolSpec {
+  name: string
+  description: string
+  parameters: {
+    type: 'object'
+    properties: Record<string, { type: string; description?: string }>
+    additionalProperties: boolean
+  }
+}
 
 export interface ToolCall {
   id: string
   name: string
-  arguments: Record<string, unknown>
+  args: Record<string, unknown>
 }
 
 export interface ModelMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
+  name?: string
   toolCallId?: string
   toolCalls?: ToolCall[]
 }
 
-export interface ModelToolSchema {
-  name: string
-  description: string
-  parameters: Record<string, unknown>
-}
-
-export interface ModelRequest {
+export interface CompletionRequest {
+  role: Role
   messages: ModelMessage[]
-  tools: ModelToolSchema[]
+  tools: ToolSpec[]
 }
 
-export interface ModelResponse {
-  content: string
-  toolCalls: ToolCall[]
+export interface Completion {
+  text?: string
+  toolCalls?: ToolCall[]
 }
 
-export interface Model {
-  complete(request: ModelRequest): Promise<ModelResponse>
+export interface Model extends SemanticModel {
+  complete(request: CompletionRequest): Promise<Completion>
 }
 
-/** Deterministic model. Replays a script, then repeats the last reply. Echoes when the script is empty. */
+export function systemPrompt(role: Role): string {
+  if (role === 'router') {
+    return 'You are the RouterSession. Speak to the user with reply_user. Do not run bash. Stay quiet on speculative work until a report delivers.'
+  }
+  if (role === 'worker') {
+    return 'You are a WorkerSession. Investigate with tools and report_to_router. Never message the user directly.'
+  }
+  return 'You are the WatchdogSession. Check stuck workers. Do not reply to users.'
+}
+
+function blobOf(messages: ModelMessage[]): string {
+  return messages.map(message => message.content).join('\n')
+}
+
+function used(messages: ModelMessage[], name: string): boolean {
+  return messages.some(message => message.role === 'tool' && message.name === name)
+}
+
+function count(messages: ModelMessage[], name: string): number {
+  return messages.filter(message => message.role === 'tool' && message.name === name).length
+}
+
+function field(blob: string, key: string): string {
+  const match = new RegExp(`^${key}=(.*)$`, 'm').exec(blob)
+  return match?.[1]?.trim() ?? ''
+}
+
+function call(name: string, args: Record<string, unknown>, n = 0): Completion {
+  return { toolCalls: [{ id: `call_${name}_${n}`, name, args }] }
+}
+
+/** Deterministic stand-in. The demo never calls a network. */
 export class MockModel implements Model {
-  readonly calls: ModelRequest[] = []
+  readonly name = 'MockModel'
 
-  constructor(private readonly replies: ModelResponse[] = []) {}
+  classify(trigger: Trigger): SemanticHit {
+    return ruleClassify(trigger)
+  }
 
-  async complete(request: ModelRequest): Promise<ModelResponse> {
-    this.calls.push(request)
-    if (this.replies.length === 0) {
-      const last = [...request.messages].reverse().find(message => message.role === 'user')
-      return { content: `mock:${last?.content ?? ''}`, toolCalls: [] }
+  async complete(request: CompletionRequest): Promise<Completion> {
+    const blob = blobOf(request.messages)
+    if (request.role === 'router') return this.router(request.messages, blob)
+    if (request.role === 'watchdog') {
+      if (!used(request.messages, 'list_tasks')) return call('list_tasks', {})
+      return { text: '[watchdog] healthy' }
     }
-    const index = Math.min(this.calls.length - 1, this.replies.length - 1)
-    const reply = this.replies[index]!
-    return {
-      content: reply.content,
-      toolCalls: reply.toolCalls.map(call => ({ ...call, arguments: { ...call.arguments } })),
+    return this.worker(request.messages, blob)
+  }
+
+  private router(messages: ModelMessage[], blob: string): Completion {
+    if (blob.includes('deliver=false')) return { text: '[router] speculative silent' }
+    if (blob.includes('deliver=true')) {
+      if (!used(messages, 'reply_user')) {
+        return call('reply_user', {
+          ticketId: field(blob, 'ticketId'),
+          text: field(blob, 'reportText') || 'Done.',
+          purpose: 'result',
+        })
+      }
+      return { text: 'router done' }
     }
+    if (blob.includes('mode=speculative') && !blob.includes('REPORT')) {
+      return { text: '[router] speculative silent' }
+    }
+    if (blob.includes('TICKET_CREATED') && !used(messages, 'reply_user')) {
+      const title = field(blob, 'title')
+      return call('reply_user', {
+        ticketId: field(blob, 'ticketId'),
+        text: `Working on ${title}.`,
+        purpose: 'result',
+      })
+    }
+    if (!used(messages, 'list_tasks')) return call('list_tasks', {})
+    return { text: 'router idle' }
+  }
+
+  private worker(messages: ModelMessage[], blob: string): Completion {
+    if (blob.includes('JOB_DONE')) return { text: `job consumed ${field(blob, 'jobId')}` }
+    const spill = field(blob, 'spillId') || (/spillId=(\S+)/.exec(blob)?.[1] ?? '')
+    if (spill && !used(messages, 'read_object')) return call('read_object', { id: spill })
+    if (!used(messages, 'bash')) return call('bash', { command: 'echo worker-ok' })
+    if (!used(messages, 'write_file')) return call('write_file', { path: 'notes.txt', body: 'worker-ok\n' })
+    if (!used(messages, 'start_job')) return call('start_job', { name: 'investigate' })
+    const reports = count(messages, 'report_to_router')
+    const speculative = blob.includes('mode=speculative')
+    const ticketId = field(blob, 'ticketId')
+    if (speculative && reports === 0) {
+      return call('report_to_router', {
+        ticketId,
+        text: 'investigating quietly',
+        deliver: false,
+        kind: 'progress',
+      }, reports)
+    }
+    if (reports === 0 || (speculative && reports === 1)) {
+      return call('report_to_router', {
+        ticketId,
+        text: 'ready: investigation recorded',
+        deliver: true,
+        kind: 'ready',
+      }, reports)
+    }
+    return { text: 'worker done' }
   }
 }
 
-export interface HttpOpenAIOptions {
-  base?: string
-  apiKey?: string
-  model?: string
-  fetch?: typeof fetch
-  env?: NodeJS.ProcessEnv
-}
+/** OpenAI-compatible chat completions. Used when DS_AGENT_API_BASE and DS_AGENT_API_KEY are set. */
+export class HttpOpenAI implements Model {
+  readonly name = 'HttpOpenAI'
 
-interface OpenAIToolCall {
-  id?: string
-  function?: { name?: string; arguments?: string }
-}
+  constructor(
+    private readonly base: string,
+    private readonly apiKey: string,
+    private readonly model: string,
+  ) {}
 
-interface OpenAIResponse {
-  choices?: { message?: { content?: string | null; tool_calls?: OpenAIToolCall[] } }[]
-}
-
-/** OpenAI-compatible chat completions. Reads DS_AGENT_API_BASE, DS_AGENT_API_KEY, and optional DS_AGENT_API_MODEL. */
-export class HttpOpenAIModel implements Model {
-  readonly base: string
-  readonly apiKey: string
-  readonly model: string
-  private readonly fetchImpl: typeof fetch
-
-  constructor(options: HttpOpenAIOptions = {}) {
-    const env = options.env ?? process.env
-    this.base = (options.base ?? env.DS_AGENT_API_BASE ?? '').replace(/\/$/, '')
-    this.apiKey = options.apiKey ?? env.DS_AGENT_API_KEY ?? ''
-    this.model = options.model ?? env.DS_AGENT_API_MODEL ?? 'ds-agent'
-    this.fetchImpl = options.fetch ?? fetch
+  classify(trigger: Trigger): SemanticHit {
+    return ruleClassify(trigger)
   }
 
-  async complete(request: ModelRequest): Promise<ModelResponse> {
-    if (!this.base || !this.apiKey) throw new AgentError('model_config', 'DS_AGENT_API_BASE and DS_AGENT_API_KEY are required')
-    const response = await this.fetchImpl(`${this.base}/chat/completions`, {
+  async complete(request: CompletionRequest): Promise<Completion> {
+    const url = `${this.base.replace(/\/$/, '')}/chat/completions`
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         model: this.model,
-        messages: request.messages.map(toOpenAIMessage),
-        ...(request.tools.length
-          ? {
-            tools: request.tools.map(tool => ({
-              type: 'function',
-              function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-              },
-            })),
+        messages: request.messages.map(message => {
+          if (message.role === 'tool') {
+            return { role: 'tool', tool_call_id: message.toolCallId, content: message.content }
           }
-          : {}),
+          if (message.role === 'assistant' && message.toolCalls?.length) {
+            return {
+              role: 'assistant',
+              content: message.content || null,
+              tool_calls: message.toolCalls.map(toolCall => ({
+                id: toolCall.id,
+                type: 'function',
+                function: { name: toolCall.name, arguments: JSON.stringify(toolCall.args) },
+              })),
+            }
+          }
+          return { role: message.role, content: message.content }
+        }),
+        tools: request.tools.map(tool => ({
+          type: 'function',
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+        })),
       }),
     })
-    if (!response.ok) throw new AgentError('model_http', `model HTTP ${response.status}`)
-    const json = await response.json() as OpenAIResponse
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`HttpOpenAI ${response.status} ${body.slice(0, 200)}`)
+    }
+    const json = await response.json() as {
+      choices?: Array<{
+        message?: {
+          content?: string | null
+          tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
+        }
+      }>
+    }
     const message = json.choices?.[0]?.message
-    return {
-      content: message?.content ?? '',
-      toolCalls: (message?.tool_calls ?? []).map((call, index) => ({
-        id: call.id || `call-${index + 1}`,
-        name: call.function?.name ?? '',
-        arguments: parseArgs(call.function?.arguments),
-      })),
-    }
+    const toolCalls = (message?.tool_calls ?? []).map(toolCall => ({
+      id: toolCall.id,
+      name: toolCall.function.name,
+      args: JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>,
+    }))
+    return { text: message?.content ?? '', toolCalls }
   }
 }
 
-export function createModel(env: NodeJS.ProcessEnv = process.env, fetchImpl?: typeof fetch): Model {
-  if (env.DS_AGENT_API_BASE && env.DS_AGENT_API_KEY) return new HttpOpenAIModel({ env, fetch: fetchImpl })
+export function createModelFromEnv(env: NodeJS.ProcessEnv = process.env): Model {
+  const base = env.DS_AGENT_API_BASE
+  const key = env.DS_AGENT_API_KEY
+  if (base && key) return new HttpOpenAI(base, key, env.DS_AGENT_MODEL || 'deepseek-chat')
   return new MockModel()
-}
-
-function toOpenAIMessage(message: ModelMessage): Record<string, unknown> {
-  if (message.role === 'tool') {
-    return { role: 'tool', content: message.content, tool_call_id: message.toolCallId }
-  }
-  if (message.role === 'assistant' && message.toolCalls?.length) {
-    return {
-      role: 'assistant',
-      content: message.content,
-      tool_calls: message.toolCalls.map(call => ({
-        id: call.id,
-        type: 'function',
-        function: { name: call.name, arguments: JSON.stringify(call.arguments) },
-      })),
-    }
-  }
-  return { role: message.role, content: message.content }
-}
-
-function parseArgs(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
-    return {}
-  } catch {
-    return {}
-  }
 }

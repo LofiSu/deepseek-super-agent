@@ -1,73 +1,103 @@
-import { threadKey, type ReceiveResult, type Thread, type ThreadRef, type Trigger } from '../shared/types.js'
-import type { EngineHost } from './ports.js'
-import { deliverTrigger, persistTicket, resumeTicket } from './tickets.js'
+import { UserError } from '../shared/errors.ts'
+import {
+  threadKey,
+  type Disposition,
+  type ReceiveResult,
+  type Thread,
+  type ThreadRef,
+  type Ticket,
+  type Trigger,
+} from '../shared/types.ts'
+import type { Host } from './host.ts'
 
-/** Store a Trigger once, record its Threads, and fan out to Subscriptions. */
-export function receive(host: EngineHost, trigger: Trigger): ReceiveResult {
-  if (host.repos.triggers.get(trigger.id)) return 'duplicate'
-  if (trigger.threads.length === 0 || !host.filter(trigger)) return 'filtered'
+export class Intake {
+  constructor(private readonly host: Host) {}
 
-  host.repos.triggers.save(trigger)
-  let bypassEval = false
-  const seen = new Set<string>()
-  for (const ref of trigger.threads) {
-    const key = threadKey(ref)
-    if (seen.has(key)) continue
-    seen.add(key)
-    const thread = ensureThread(host, ref, trigger.at)
-    thread.lastAt = trigger.at
-    if (fanout(host, thread, trigger)) bypassEval = true
-    host.repos.threads.save(thread)
-  }
-
-  if (!bypassEval) {
-    const primary = host.repos.threads.get(threadKey(trigger.threads[0]!))
-    if (primary && !primary.pending.includes(trigger.id)) {
-      primary.pending = [...primary.pending, trigger.id]
-      host.repos.threads.save(primary)
+  receive(trigger: Trigger): ReceiveResult {
+    if (!trigger.threads.length) throw new UserError('A trigger must belong to at least one thread')
+    if (this.host.repo.getDoc<Trigger>('trigger', trigger.id)) return 'duplicate'
+    const at = this.host.now()
+    const gate = this.host.scope.admit(trigger)
+    if (!gate.listened) {
+      this.host.repo.putDoc('trigger', trigger.id, trigger)
+      const disposition: Disposition = { filtered: gate.reason, fanout: [], at }
+      this.host.repo.putDoc('disposition', trigger.id, disposition)
+      this.host.repo.addEvent('trigger.received', { triggerId: trigger.id, result: 'filtered', reason: gate.reason })
+      return 'filtered'
     }
+
+    this.host.repo.putDoc('trigger', trigger.id, trigger)
+    const keys = trigger.threads.map(threadKey)
+    const reached = new Set<string>()
+    let primary: Thread | undefined
+    for (const ref of trigger.threads) {
+      const thread = this.ensure(ref)
+      if (!primary) primary = thread
+      if (!thread.lastAt || trigger.at > thread.lastAt) thread.lastAt = trigger.at
+      thread.correlated = [...new Set([...thread.correlated, ...keys.filter(key => key !== thread.key)])]
+      for (const ticketId of [...thread.subscriptions]) {
+        if (reached.has(ticketId)) continue
+        const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
+        if (!ticket || !this.deliverable(ticket, trigger)) continue
+        ticket.inputs.push({
+          id: this.host.repo.nextId('input'),
+          kind: 'trigger',
+          triggerId: trigger.id,
+          text: trigger.text,
+          spillId: spillOf(trigger),
+          at,
+          human: trigger.human,
+        })
+        this.host.repo.putDoc('ticket', ticket.id, ticket)
+        reached.add(ticket.id)
+      }
+      this.host.repo.putDoc('thread', thread.key, thread)
+    }
+
+    const fanout = [...reached]
+    const primaryKey = primary?.key ?? threadKey(trigger.threads[0]!)
+    for (const ticketId of fanout) {
+      this.host.log(`bypass=subscription ticketId=${ticketId} thread=${primaryKey} triggerId=${trigger.id}`)
+    }
+    if (fanout.length === 0 && primary) {
+      primary.pending = [...primary.pending, trigger.id]
+      this.host.repo.putDoc('thread', primary.key, primary)
+      this.host.onQueued?.(primary.key, trigger.id, primary.pending)
+    }
+    const disposition: Disposition = { fanout, at }
+    this.host.repo.putDoc('disposition', trigger.id, disposition)
+    this.host.repo.addEvent('trigger.received', { triggerId: trigger.id, result: 'stored', fanout })
+    return 'stored'
   }
 
-  const threads = trigger.threads.map(ref => threadKey(ref))
-  host.emit({
-    type: 'trigger.received',
-    at: host.now(),
-    data: { triggerId: trigger.id, threads, result: 'stored' },
-  })
-  return 'stored'
+  private deliverable(ticket: Ticket, trigger: Trigger): boolean {
+    if (!ticket.ended) return true
+    if (ticket.ended.by === 'human') return false
+    if (!trigger.human) return false
+    delete ticket.ended
+    this.host.log(`[engine] Tickets.resume ticketId=${ticket.id} triggerId=${trigger.id}`)
+    this.host.repo.addEvent('ticket.resumed', { ticketId: ticket.id, triggerId: trigger.id })
+    return true
+  }
+
+  private ensure(ref: ThreadRef): Thread {
+    const key = threadKey(ref)
+    const existing = this.host.repo.getDoc<Thread>('thread', key)
+    if (existing) return existing
+    const thread: Thread = {
+      key,
+      ref,
+      createdAt: this.host.now(),
+      subscriptions: [],
+      correlated: [],
+      pending: [],
+      meta: {},
+    }
+    this.host.repo.putDoc('thread', key, thread)
+    return thread
+  }
 }
 
-function ensureThread(host: EngineHost, ref: ThreadRef, at: string): Thread {
-  const key = threadKey(ref)
-  const existing = host.repos.threads.get(key)
-  if (existing) return existing
-  const thread: Thread = {
-    key,
-    ref,
-    createdAt: at,
-    subscriptions: [],
-    pending: [],
-    meta: {},
-  }
-  host.repos.threads.save(thread)
-  return thread
-}
-
-/** Returns true when a person's message reached a Ticket that owns the Thread. */
-function fanout(host: EngineHost, thread: Thread, trigger: Trigger): boolean {
-  let bypass = false
-  for (const subscription of host.repos.subscriptions.byThread(thread.key)) {
-    const ticket = host.repos.tickets.get(subscription.ticketId)
-    if (!ticket || ticket.ended?.by === 'human') continue
-    const live = ticket.status === 'open'
-    if (!live && !trigger.human) continue
-    if (subscription.context && !live) continue
-    host.logFanout(ticket.id, trigger.id)
-    deliverTrigger(host, ticket, trigger)
-    if (!live && trigger.human && !subscription.context) resumeTicket(host, ticket, trigger)
-    if (trigger.human && !subscription.context) bypass = true
-    if (!thread.subscriptions.includes(ticket.id)) thread.subscriptions.push(ticket.id)
-    persistTicket(host, ticket)
-  }
-  return bypass
+function spillOf(trigger: Trigger): string | undefined {
+  return typeof trigger.meta.spillId === 'string' && trigger.meta.spillId ? trigger.meta.spillId : undefined
 }
