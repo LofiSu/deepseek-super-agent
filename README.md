@@ -53,7 +53,7 @@ CLI：`ds-agent` · MIT
 - [x] **Router 不直接干重活** — Worker 挂执行工具；Router 工具集更窄
 - [x] **Router 可用轻量模型** — `roleModels.router` / Mock；Worker 可配强模型
 - [x] **Trigger 批处理（拥堵时合并进下一轮）** — 同 Thread Eval batch；demo/测试覆盖
-- [ ] **Router 水平切分 / 多层过滤** — 文章 §2/§8；Phase-2（PLAN T09）
+- [~] **Router 水平切分 / 多层过滤** — `RouterShard` + `selectShard`（`src/router/shard.ts`）。默认 `mode: 'single'`，单进程单序点。`sharded` 只在进程内挑 shard，不起第二个进程。
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
@@ -104,16 +104,16 @@ CLI：`ds-agent` · MIT
 
 #### §7 实验（文章评测，不挡开源）
 
-- [ ] **端到端对比双层 vs 单 Session** — Phase-2 / 可选 M12（T45）
-- [ ] **Router 批处理压测曲线** — Phase-2（T45）
+- [x] **端到端对比双层 vs 单 Session** — `compareLayers`（`src/compare/layers.ts`）+ `test/compare.test.ts`。本地 MockModel 夹具，不是文章里的公开评测数字。
+- [x] **Router 批处理压测曲线** — `pnpm bench:batch`（`scripts/bench-batching.ts`）。同线程一次 Eval，对照分线程。本地计时，不是论文曲线。
 
-#### §8 未决问题（明确不做进 M11）
+#### §8 未决问题
 
-- [ ] Router 扩展 / Worker 直连拓扑（§8.1）
-- [ ] 长程跨月记忆（§8.1）
+- [~] Router 扩展 / Worker 直连拓扑（§8.1）— `src/topology/topologies.ts` 列出 dual-layer / router-sharded / worker-mesh / worker-direct。只有 dual-layer 会跑。
+- [~] 长程跨月记忆（§8.1）— `MemoryApi` + `spill_index` 子串检索（`src/memory/long-term.ts`）。无向量，无跨月淘汰。
 - [ ] 脱离 Session 的产品交互壳（§8.2）
-- [ ] 中途人机协同 UX（§8.2）
-- [ ] A2A 跨实例（§8.3）
+- [x] 中途人机协同 UX（§8.2）— `ds-agent steer --ticket <id> --text "..."` 把人工跟进送进该 Ticket 的线程；`ds-agent inbox` 列出 `waiting` 报告。
+- [~] A2A 跨实例（§8.3）— `A2AEnvelope`（`src/a2a/envelope.ts`）。无传输。
 - [ ] 安全隐私深化；凭据永不进模型上下文（§8.4，基线：密钥不进 prompt）— PLAN T51
 
 #### 模块对照（M0–M11）
@@ -225,6 +225,7 @@ pnpm install
 pnpm demo
 pnpm start
 pnpm test
+pnpm bench:batch
 ```
 
 ### Demo
@@ -315,7 +316,7 @@ Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not 
 - [x] Router does not do heavy execution
 - [x] Lightweight Router model slot
 - [x] Trigger batching under load
-- [ ] Router sharding / multi-filter (Phase-2)
+- [~] Router sharding / multi-filter — `RouterShard` + `selectShard`. Default `mode: 'single'` (one in-process sequence point). `sharded` only picks a shard id.
 - [x] Isolated Workers with exec tools
 - [x] Workers never speak to users directly
 - [x] Many-to-many Worker↔Thread subscriptions
@@ -366,16 +367,16 @@ Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not 
 
 #### §7 Experiments (optional)
 
-- [ ] E2E dual-layer vs single Session (Phase-2)
-- [ ] Router batching stress curves (Phase-2)
+- [x] E2E dual-layer vs single Session — `compareLayers` + `test/compare.test.ts`. Local MockModel harness, not the article's published numbers.
+- [x] Router batching curve — `pnpm bench:batch` (`scripts/bench-batching.ts`). One thread vs one thread per trigger. Local timings, not a paper figure.
 
-#### §8 Open questions (out of M11)
+#### §8 Open questions
 
-- [ ] Router scale-out / Worker mesh
-- [ ] Long-horizon memory
-- [ ] Session-free product UX
-- [ ] Mid-task human co-pilot UX
-- [ ] A2A
+- [~] Router scale-out / Worker mesh — `src/topology/topologies.ts` lists dual-layer, router-sharded, worker-mesh, and worker-direct. Only dual-layer runs.
+- [~] Long-horizon memory — `MemoryApi` + `spill_index` substring search. No vectors and no month-scale retention policy.
+- [ ] Session-free product shell
+- [x] Mid-task human co-pilot — `ds-agent steer --ticket <id> --text "..."` posts a human follow-up on that ticket's thread; `ds-agent inbox` lists `waiting` reports.
+- [~] A2A — `A2AEnvelope` types only. No transport.
 - [ ] Hardened security/privacy (creds never in context — baseline kept)
 
 #### Modules M0–M11
@@ -476,6 +477,7 @@ pnpm install
 pnpm demo
 pnpm start
 pnpm test
+pnpm bench:batch
 ```
 
 ### Demo

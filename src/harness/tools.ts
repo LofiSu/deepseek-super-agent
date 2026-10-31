@@ -2,7 +2,7 @@ import { ticketStage } from '../core/stage.ts'
 import type { Engine } from '../core/engine.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort } from '../shared/ports.ts'
-import type { Role, Ticket } from '../shared/types.ts'
+import type { Role, SessionLayering, Ticket } from '../shared/types.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -19,6 +19,7 @@ export interface ToolDeps {
   log: (line: string) => void
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
+  layering?: SessionLayering
 }
 
 interface ToolDef extends ToolSpec {
@@ -153,6 +154,11 @@ export class ToolRegistry {
           const text = String(args.text ?? '').replace(/\n/g, ' ')
           const kind = String(args.kind ?? (deliver ? 'ready' : 'progress'))
           const result = engine.report(ticketId, { kind, text, deliver })
+          if ((deps.layering ?? 'dual') === 'single') {
+            if (deliver) engine.reply(ticketId, text, 'result')
+            log(`[harness] single-session report ticketId=${ticketId} deliver=${deliver}`)
+            return { ...result, deliver }
+          }
           const prompt = ['REPORT', `deliver=${deliver ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
           await deps.routerTurn(prompt)
           return { ...result, deliver }

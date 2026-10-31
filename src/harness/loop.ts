@@ -1,5 +1,5 @@
 import type { Engine } from '../core/engine.ts'
-import type { Role, Ticket, Trigger } from '../shared/types.ts'
+import type { Role, SessionLayering, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
 import type { SessionJournal } from './session.ts'
@@ -14,6 +14,7 @@ export interface HarnessOptions {
   journal: SessionJournal
   log: (line: string) => void
   jobDelayMs: number
+  layering: SessionLayering
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
@@ -35,12 +36,6 @@ export class Harness {
   launch(ticket: Ticket): Promise<void> {
     const sessionId = `worker_${ticket.id}`
     this.running.add(ticket.id)
-    this.armRouter()
-    this.opts.log(`[harness] dual-layer RouterSession=router WorkerSession=${sessionId} ticketId=${ticket.id}`)
-    this.opts.log(`[harness] WorkerSession start session=${sessionId} ticketId=${ticket.id} role=worker`)
-    if (this.running.size >= 2) {
-      this.opts.log(`[harness] parallel workers=${this.running.size} sessions=${[...this.running].join(',')}`)
-    }
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new Error(`ticket ${ticket.id} has no assignment`)
     this.opts.engine.assignmentStarted(ticket.id, assignment.id, sessionId)
@@ -54,6 +49,20 @@ export class Harness {
       `brief=${ticket.brief}`,
     ]
     if (ticket.spillId) task.push(`spillId=${ticket.spillId}`)
+    if (this.opts.layering === 'single') {
+      this.opts.log(`[harness] single-session session=${sessionId} ticketId=${ticket.id} role=worker`)
+      const work = this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticket.id, task.join('\n')))
+        .finally(() => {
+          this.running.delete(ticket.id)
+        })
+      return this.track(work)
+    }
+    this.armRouter()
+    this.opts.log(`[harness] dual-layer RouterSession=router WorkerSession=${sessionId} ticketId=${ticket.id}`)
+    this.opts.log(`[harness] WorkerSession start session=${sessionId} ticketId=${ticket.id} role=worker`)
+    if (this.running.size >= 2) {
+      this.opts.log(`[harness] parallel workers=${this.running.size} sessions=${[...this.running].join(',')}`)
+    }
     const routerPrompt = [
       ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
       `ticketId=${ticket.id}`,

@@ -139,6 +139,46 @@ export class Store {
     return row?.body
   }
 
+  indexSpill(row: { spillId: string; ticketId?: string; summary: string; preview: string; at: string }): void {
+    this.db.prepare(
+      `INSERT INTO spill_index(spill_id, ticket_id, summary, preview, created_at)
+       VALUES(?, ?, ?, ?, ?)
+       ON CONFLICT(spill_id) DO UPDATE SET
+         ticket_id = COALESCE(excluded.ticket_id, spill_index.ticket_id),
+         summary = excluded.summary,
+         preview = excluded.preview`,
+    ).run(row.spillId, row.ticketId ?? null, row.summary, row.preview, row.at)
+  }
+
+  attachSpill(spillId: string, ticketId: string): void {
+    this.db.prepare('UPDATE spill_index SET ticket_id = ? WHERE spill_id = ?').run(ticketId, spillId)
+  }
+
+  searchSpills(query: string, limit: number): {
+    spillId: string
+    ticketId?: string
+    summary: string
+    preview: string
+    at: string
+  }[] {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return []
+    const rows = this.db.prepare(
+      `SELECT spill_id, ticket_id, summary, preview, created_at
+       FROM spill_index
+       WHERE instr(lower(summary), ?) > 0 OR instr(lower(preview), ?) > 0
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    ).all(needle, needle, limit) as Record<string, string | null>[]
+    return rows.map(row => ({
+      spillId: String(row.spill_id),
+      ticketId: row.ticket_id ? String(row.ticket_id) : undefined,
+      summary: String(row.summary),
+      preview: String(row.preview),
+      at: String(row.created_at),
+    }))
+  }
+
   createJob(input: { sessionId: string; ticketId: string; name: string }): JobRow {
     const row: JobRow = {
       id: this.nextId('job'),

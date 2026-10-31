@@ -7,9 +7,11 @@ import { createModelFromEnv, type Model } from './harness/model.ts'
 import { SessionJournal } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger } from './ingress/filter.ts'
+import { MemoryApi } from './memory/long-term.ts'
 import { inlineOrSpill } from './memory/recall.ts'
+import { selectShard, singleProcessShards, type RouterShardConfig } from './router/shard.ts'
 import { Logger } from './shared/log.ts'
-import type { Disposition, ReceiveResult, Ticket, Trigger } from './shared/types.ts'
+import type { Disposition, ReceiveResult, SessionLayering, Ticket, Trigger } from './shared/types.ts'
 import { LocalEnv } from './env/local-env.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
@@ -21,6 +23,8 @@ export interface RuntimeOptions {
   watchdogIntervalMs?: number
   stuckMs?: number
   now?: () => string
+  layering?: SessionLayering
+  shards?: RouterShardConfig
 }
 
 export class Runtime {
@@ -31,7 +35,10 @@ export class Runtime {
   readonly watchdog: Watchdog
   readonly daemon: Daemon
   readonly model: Model
+  readonly memory: MemoryApi
   readonly home: string
+  readonly layering: SessionLayering
+  readonly shards: RouterShardConfig
 
   private constructor(parts: {
     home: string
@@ -42,6 +49,9 @@ export class Runtime {
     watchdog: Watchdog
     daemon: Daemon
     model: Model
+    memory: MemoryApi
+    layering: SessionLayering
+    shards: RouterShardConfig
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -51,12 +61,18 @@ export class Runtime {
     this.watchdog = parts.watchdog
     this.daemon = parts.daemon
     this.model = parts.model
+    this.memory = parts.memory
+    this.layering = parts.layering
+    this.shards = parts.shards
   }
 
   static create(opts: RuntimeOptions): Runtime {
     const log = new Logger()
     const model = opts.model ?? createModelFromEnv()
     const store = new Store(opts.home)
+    const layering = opts.layering ?? 'dual'
+    const shards = opts.shards ?? singleProcessShards()
+    const memory = new MemoryApi(store)
     const now = opts.now ?? (() => new Date().toISOString())
     log.info(`[runtime] model=${model.name}`)
     const host: Host = {
@@ -92,6 +108,7 @@ export class Runtime {
         if (!late.harness) throw new Error('harness is not ready')
         return late.harness.routerTurn(prompt)
       },
+      layering,
     })
     const harness = new Harness({
       model,
@@ -101,6 +118,7 @@ export class Runtime {
       journal,
       log: line => log.info(line),
       jobDelayMs: opts.jobDelayMs ?? 40,
+      layering,
     })
     late.harness = harness
     const watchdog = new Watchdog({
@@ -110,7 +128,19 @@ export class Runtime {
       stuckMs: opts.stuckMs ?? 60_000,
     })
     const daemon = new Daemon(watchdog, line => log.info(line))
-    return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model })
+    return new Runtime({
+      home: opts.home,
+      log,
+      store,
+      engine,
+      harness,
+      watchdog,
+      daemon,
+      model,
+      memory,
+      layering,
+      shards,
+    })
   }
 
   start(): void {
@@ -119,6 +149,8 @@ export class Runtime {
 
   /** Ingress, then Engine.receive, then Eval for anything that was not a subscription bypass. */
   ingest(trigger: Trigger): ReceiveResult {
+    const shard = selectShard(this.shards, trigger)
+    this.log.info(`[router] shard=${shard.id} mode=${this.shards.mode} harness=${shard.harness}`)
     if (this.store.getDoc<Trigger>('trigger', trigger.id)) {
       const result = this.engine.receive(trigger)
       this.log.info(`[engine] Intake.receive id=${trigger.id} result=${result}`)
@@ -133,6 +165,11 @@ export class Runtime {
       const recall = inlineOrSpill(trigger.text, body => this.store.putSpill(body))
       if (recall.spillId) {
         this.log.info(`[memory] Inline/Spill chain-of-recall spillId=${recall.spillId} bytes=${recall.bytes}`)
+        this.memory.remember({
+          spillId: recall.spillId,
+          summary: recall.inline,
+          preview: trigger.text,
+        })
       }
       const meta: Record<string, unknown> = {
         ...trigger.meta,
@@ -153,11 +190,17 @@ export class Runtime {
     for (const decision of this.engine.evaluateDue()) {
       if (decision.kind === 'accept' && decision.ticketId) {
         const ticket = this.store.getDoc<Ticket>('ticket', decision.ticketId)
-        if (ticket) this.harness.launch(ticket)
+        if (!ticket) continue
+        if (ticket.spillId) this.memory.attach(ticket.spillId, ticket.id)
+        this.harness.launch(ticket)
       }
     }
     const disposition = this.store.getDoc<Disposition>('disposition', incoming.id)
-    for (const ticketId of disposition?.fanout ?? []) this.harness.deliver(ticketId, incoming)
+    const spilled = typeof incoming.meta.spillId === 'string' ? incoming.meta.spillId : undefined
+    for (const ticketId of disposition?.fanout ?? []) {
+      if (spilled) this.memory.attach(spilled, ticketId)
+      this.harness.deliver(ticketId, incoming)
+    }
     return result
   }
 

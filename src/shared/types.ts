@@ -1,5 +1,8 @@
 export type Role = 'router' | 'worker' | 'watchdog'
 
+/** `dual` is the running default. `single` exists for the local §7 comparison arm. */
+export type SessionLayering = 'dual' | 'single'
+
 export type ReceiveResult = 'stored' | 'duplicate' | 'filtered'
 
 export type Strength = 'explicit' | 'inferred' | 'maybe'

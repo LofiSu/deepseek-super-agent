@@ -40,8 +40,8 @@
 | 自研 thinnest Harness（Session 日志、async ReAct、OpenAI 兼容、角色工具、daemon） | 生产 Feishu/GitHub Source（仅 fake IM / fake GitHub / CLI） |
 | 原型领域语义：Intake / Evals / Tickets / Assignments / Replies | Cordis 插件树、DSH Session API 兼容层 |
 | SQLite + Spill、Watchdog Session、Speculative gate | Web Panel |
-| MockModel 默认可跑 demo；BYOM `DS_AGENT_API_*` | Router sharding / Worker mesh / A2A（Phase-2） |
-| MIT OSS，`pnpm demo` 验收博客能力 | §7 实验指标（可选 M12，不挡开源） |
+| MockModel 默认可跑 demo；BYOM `DS_AGENT_API_*` | 生产级多进程 Router mesh / A2A 传输（仅有单进程 shard 选择、拓扑占位、信封类型） |
+| MIT OSS，`pnpm demo` 验收博客能力 | §7 文章公开评测数字（本地有对照夹具 `compareLayers` 与 `pnpm bench:batch`） |
 
 ### 1.4 技术栈冻结
 
@@ -222,7 +222,7 @@ flowchart TB
 | T06 | Router = Sequence Point | §2 | M1 | Router tools 默认无 bash（`ROUTER_TOOLS` 白名单）；批 Triggers 进一轮 |
 | T07 | Router 轻模型 | §2 | M1 | `roleModels.router` 默认小模型 / Mock |
 | T08 | Trigger batching during LLM round | §2 | M3+M1 | `Evals.evaluateDue` 合并同 Thread 积压；Router turn 开始时 drain inbox |
-| T09 | Future Router sharding / multi-filter | §2/§8 | Phase-2 | 文档接口 `RouterShard` 占位，M11 不实现 |
+| T09 | Future Router sharding / multi-filter | §2/§8 | stub | `src/router/shard.ts`：`RouterShard` + `selectShard`；默认 `mode: 'single'` 单进程。`sharded` 只选 id，不起第二进程 |
 | T10 | Worker 隔离 / 最强模型 | §2 | M1+M9 | Worker Session + LocalEnv；`roleModels.worker` |
 | T11 | Worker 无直接用户 I/O | §2 | M8+M3 | Outbound 仅经 `Engine.reply` → Router/Outbox |
 | T12 | Worker 向 Router 报告 | §2 | M3 | `Assignments.report` → DomainEvents → Router inbox |
@@ -258,12 +258,12 @@ flowchart TB
 | T42 | Timer-driven | §6 | M10 | `setInterval` / due tick 表 |
 | T43 | Infra faults + task progress / goal drift | §6 | M10 | health + stalled Assignment + NL drift check |
 | T44 | NL maintainability prompts/rules | §6 | M10 | `prompts/watchdog.md`；规则 YAML/JSON |
-| T45 | §7 实验指标 | §7 | M12 opt | demo metrics batching/passthrough；不挡 OSS |
-| T46 | §8 Router sharding | §8 | Phase-2 | 见 §9 |
-| T47 | §8 Worker mesh | §8 | Phase-2 | 见 §9 |
-| T48 | §8 Long-term memory | §8 | Phase-2 | Spill 之上的跨 Ticket 记忆 |
-| T49 | §8 Product UX without Session | §8 | Phase-2 | 无 Session 的产品壳 |
-| T50 | §8 A2A | §8 | Phase-2 | Agent-to-agent 协议 |
+| T45 | §7 实验指标 | §7 | compare | `src/compare/layers.ts` 双层 vs 单 Session；`scripts/bench-batching.ts` 批处理计时。本地 Mock，不是文章公开数字 |
+| T46 | §8 Router sharding | §8 | stub | 同 T09 |
+| T47 | §8 Worker mesh | §8 | stub | `src/topology/topologies.ts`；仅 `dual-layer` runnable |
+| T48 | §8 Long-term memory | §8 | stub | `MemoryApi.search` + `spill_index` 子串；无跨月策略 |
+| T49 | §8 Product UX without Session | §8 | 未做 | 无 Session 的产品壳仍未做 |
+| T50 | §8 A2A | §8 | stub | `src/a2a/envelope.ts`：`A2AEnvelope`；无传输 |
 | T51 | §8 Security/privacy；credential never in context | §8 | M0+M9 | Env 变量描述可进 prompt；**值永不**；vault 外置 |
 
 ---
@@ -857,17 +857,20 @@ pnpm install && pnpm test && pnpm demo
 
 ---
 
-## 9. Phase-2（博客 §7–§8，不挡 M11）
+## 9. 博客 §7–§8（原 Phase-2）
 
-| ID | 项 | 说明 | 建议接口占位 |
-|----|----|------|--------------|
-| P2-1 | §7 实验指标 | batching 延迟、passthrough 比、token；可选 `M12-metrics` | `Metrics.record(name, value)` |
-| P2-2 | Router sharding / multi-filter | 多 Sequence Point；按 source/hash 分片 | `RouterShard { filter, harness }` |
-| P2-3 | Worker mesh | Worker 间协作；对 Router 仍不透明 | Worker 侧 bus（不出 M11） |
-| P2-4 | Long-term memory | 跨 Ticket 记忆索引 | `MemoryApi.search(query)` |
-| P2-5 | Product UX without Session | 无会话产品壳 / 面板 | 另仓 |
-| P2-6 | A2A | Agent-to-agent | 标准信封 TBD |
-| P2-7 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | vault 外置；M11 已保证不进 context |
+状态以代码为准。stub = 类型/配置/本地夹具在，生产路径不在。
+
+| ID | 项 | 状态 | 落点 |
+|----|----|------|------|
+| P2-1 | §7 双层对照 + 批处理计时 | 本地夹具 | `compareLayers`；`pnpm bench:batch`。不是文章公开评测数字 |
+| P2-2 | Router sharding / multi-filter | stub | `RouterShard { id, filter, harness }`；默认单进程 `in-process` |
+| P2-3 | Worker mesh / 扩展拓扑 | stub | `TopologyStub`：dual-layer 会跑；mesh / direct / sharded 只描述 |
+| P2-4 | Long-term memory | stub | `LongTermMemoryPort` / `MemoryApi.search`；SQLite `spill_index` 子串 |
+| P2-5 | Product UX without Session | 未做 | 无会话产品壳 / 面板仍未做 |
+| P2-6 | A2A | stub | `A2AEnvelope` version `0`；`a2aProblems`；无传输 |
+| P2-7 | Security/privacy 深化 | 未做 | 凭据值仍不进上下文；无 vault / seccomp |
+| P2-8 | 中途人机协同 | CLI | `ds-agent steer` 注入人工跟进；`ds-agent inbox` 列 `waiting` |
 
 ---
 
@@ -1018,7 +1021,7 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 | 文章块 | 覆盖任务 | README 勾选 | 代码落点 | 缺口 |
 |--------|----------|-------------|----------|------|
 | §1 四特质 | T01–T04 | 有 | Harness/Engine/Store/Speculate | — |
-| §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding；T14/T15 部分 |
+| §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 为单进程 shard stub；T14/T15 部分 |
 | §3.1 Fast/Slow | T16–T17 | 有 | ingress | Slow Path 真 LLM 策略可再加强 |
 | §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | T21 handback 弱 |
 | §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object | 多跳图可再密 |
@@ -1027,7 +1030,7 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 | §4.2 信道规范 | T33–T35 | 有 | channels/norms | email 模板可再补 |
 | §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
 | §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
-| §7 实验 | T45 | 标明未做 | — | 可选 M12 |
-| §8 未决 | T46–T51 | 标明 Phase-2 | T51 基线 | 其余 Phase-2 |
+| §7 实验 | T45 | 本地对照 + bench | `compareLayers`、`scripts/bench-batching.ts` | 不是文章公开数字 |
+| §8 未决 | T46–T51、P2-8 | stub / CLI / 未做分开标 | shard、topology、`spill_index`、steer/inbox、A2A 类型 | T49 产品壳与 T51 深化仍未做 |
 
-**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单；未实现项显式标 `[ ]`/`[~]`/Phase-2，无静默遗漏。
+**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 有本地夹具。§8 里 shard、拓扑、长程索引、A2A 是 stub，人机协同是 CLI；产品壳和安全深化仍是 `[ ]`。

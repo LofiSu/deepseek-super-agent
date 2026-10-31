@@ -1,6 +1,7 @@
 import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
+import { steerTrigger, waitingForHuman } from './steer.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv } from '../harness/model.ts'
 import { Runtime } from '../runtime.ts'
@@ -22,6 +23,8 @@ function help(): void {
   pnpm ds-agent tasks
   pnpm ds-agent status
   pnpm ds-agent chat "fix the login timeout"
+  pnpm ds-agent steer --ticket ticket_1 --text "focus on the auth test"
+  pnpm ds-agent inbox
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 
@@ -86,6 +89,29 @@ async function main(): Promise<void> {
     for (const job of jobs) console.log(`  ${jobLine(job)}`)
     console.log(`tickets ${store.listDocs<Ticket>('ticket').length}`)
     store.close()
+    return
+  }
+  if (cmd === 'inbox') {
+    const store = new Store(home)
+    const rows = waitingForHuman(store.listDocs<Ticket>('ticket'))
+    store.close()
+    if (rows.length === 0) {
+      console.log('no mid-task questions')
+      return
+    }
+    for (const row of rows) console.log(`${row.ticketId}\t${row.title}\t${row.text}`)
+    return
+  }
+  if (cmd === 'steer') {
+    const ticketId = option('ticket')
+    const text = option('text')
+    if (!ticketId || !text) throw new Error('steer needs --ticket and --text')
+    await withRuntime(runtime => {
+      const ticket = runtime.store.getDoc<Ticket>('ticket', ticketId)
+      if (!ticket) throw new Error(`unknown ticket ${ticketId}`)
+      const result = runtime.ingest(steerTrigger(ticket, text))
+      console.log(`steer ${ticketId} result=${result}`)
+    })
     return
   }
   if (cmd === 'chat') {

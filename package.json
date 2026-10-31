@@ -11,6 +11,7 @@
   "scripts": {
     "demo": "NODE_NO_WARNINGS=1 tsx src/cli/demo.ts",
     "test": "NODE_NO_WARNINGS=1 vitest run",
+    "bench:batch": "NODE_NO_WARNINGS=1 tsx scripts/bench-batching.ts",
     "ds-agent": "NODE_NO_WARNINGS=1 tsx src/cli/main.ts",
     "typecheck": "tsc --noEmit"
   },

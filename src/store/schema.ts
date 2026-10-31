@@ -15,6 +15,13 @@ CREATE TABLE IF NOT EXISTS spills (
   body TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS spill_index (
+  spill_id TEXT PRIMARY KEY,
+  ticket_id TEXT,
+  summary TEXT NOT NULL,
+  preview TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
