@@ -73,7 +73,12 @@ export interface Assignment {
   workerSessionId?: string
   startedAt?: string
   endedAt?: string
-  report?: { kind: string; text: string; deliver?: boolean }
+  report?: {
+    kind: string
+    text: string
+    deliver?: boolean
+    verdict?: 'deliver' | 'discard' | 'hold'
+  }
 }
 
 export interface TicketInput {

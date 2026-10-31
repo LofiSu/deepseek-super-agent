@@ -92,6 +92,17 @@ export class Store {
     ).run(type, JSON.stringify(payload), new Date().toISOString())
   }
 
+  listEvents(): { type: DomainEventName; payload: unknown; createdAt: string }[] {
+    const rows = this.db.prepare(
+      'SELECT type, payload, created_at FROM events ORDER BY id',
+    ).all() as { type: DomainEventName; payload: string; created_at: string }[]
+    return rows.map(row => ({
+      type: row.type,
+      payload: JSON.parse(row.payload) as unknown,
+      createdAt: row.created_at,
+    }))
+  }
+
   addReply(row: ReplyRow): void {
     this.db.prepare(
       `INSERT INTO replies(id, ticket_id, channel, purpose, text, status, created_at)

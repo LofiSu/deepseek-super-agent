@@ -1,9 +1,11 @@
 import { ticketStage } from '../core/stage.ts'
 import type { Engine } from '../core/engine.ts'
 import { UserError } from '../shared/errors.ts'
-import type { EnvPort } from '../shared/ports.ts'
+import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import type { Role, Ticket } from '../shared/types.ts'
+import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
+import { workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 
 export interface ToolCtx {
@@ -76,7 +78,7 @@ export class ToolRegistry {
         description: 'List tickets and their stages.',
         parameters: schema(),
         roles: ['router', 'watchdog'],
-        run: async () => store.listDocs<Ticket>('ticket').map(ticket => ({
+        run: async () => visibleTickets(store.listDocs<Ticket>('ticket')).map(ticket => ({
           id: ticket.id,
           title: ticket.title,
           stage: ticketStage(ticket),
@@ -99,8 +101,9 @@ export class ToolRegistry {
         parameters: schema({ command: { type: 'string' } }),
         roles: ['worker'],
         run: async (args, ctx) => {
-          const result = await env.bash(ctx.sessionId, String(args.command ?? ''))
-          log(`[env] bash session=${ctx.sessionId} code=${result.code}`)
+          const mode = mutableMode(store, env, ctx)
+          const result = await env.bash(ctx.sessionId, String(args.command ?? ''), mode)
+          log(`[env] bash session=${ctx.sessionId} isolated=${mode.isolated} code=${result.code}`)
           return { code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
         },
       },
@@ -111,10 +114,11 @@ export class ToolRegistry {
         roles: ['worker'],
         run: async (args, ctx) => {
           const relativePath = String(args.path ?? 'notes.txt')
-          const full = await env.writeFile(ctx.sessionId, relativePath, String(args.body ?? ''))
-          if (ctx.ticketId) store.addArtifact(ctx.ticketId, full)
-          log(`[env] write_file session=${ctx.sessionId} path=${relativePath}`)
-          return { path: relativePath }
+          const mode = mutableMode(store, env, ctx)
+          const full = await env.writeFile(ctx.sessionId, relativePath, String(args.body ?? ''), mode)
+          if (ctx.ticketId && !mode.isolated) store.addArtifact(ctx.ticketId, full)
+          log(`[env] write_file session=${ctx.sessionId} isolated=${mode.isolated} path=${relativePath}`)
+          return { path: relativePath, isolated: mode.isolated }
         },
       },
       {
@@ -122,7 +126,9 @@ export class ToolRegistry {
         description: 'Read a file in the worker workspace.',
         parameters: schema({ path: { type: 'string' } }),
         roles: ['worker'],
-        run: async (args, ctx) => ({ text: await env.readFile(ctx.sessionId, String(args.path ?? '')) }),
+        run: async (args, ctx) => ({
+          text: await env.readFile(ctx.sessionId, String(args.path ?? ''), readMode(store, env, ctx)),
+        }),
       },
       {
         name: 'read_object',
@@ -153,6 +159,8 @@ export class ToolRegistry {
           const text = String(args.text ?? '').replace(/\n/g, ' ')
           const kind = String(args.kind ?? (deliver ? 'ready' : 'progress'))
           const result = engine.report(ticketId, { kind, text, deliver })
+          settleSpeculation(env, ctx.sessionId, result.verdict)
+          if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${ctx.sessionId}`)
           const prompt = ['REPORT', `deliver=${deliver ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
           await deps.routerTurn(prompt)
           return { ...result, deliver }
@@ -211,7 +219,9 @@ export class ToolRegistry {
         roles: ['watchdog'],
         run: async args => {
           const ticketId = String(args.ticketId ?? '')
-          engine.report(ticketId, { kind: 'failed', text: String(args.reason ?? 'watchdog: stuck'), deliver: false })
+          const result = engine.report(ticketId, { kind: 'failed', text: String(args.reason ?? 'watchdog: stuck'), deliver: false })
+          settleSpeculation(env, workerSessionId(ticketId), result.verdict)
+          if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${workerSessionId(ticketId)}`)
           log(`[watchdog] mark_task_failed ticketId=${ticketId}`)
           return { failed: ticketId }
         },
@@ -232,4 +242,23 @@ export class ToolRegistry {
     if (!tool || !tool.roles.includes(ctx.role)) throw new UserError(`tool ${call.name} is not available to ${ctx.role}`)
     return tool.run(call.args, ctx)
   }
+}
+
+function ticketOf(store: Store, ctx: ToolCtx): Ticket | undefined {
+  if (!ctx.ticketId) return undefined
+  return store.getDoc<Ticket>('ticket', ctx.ticketId)
+}
+
+/** Speculative mutations stay in a scratch workdir, or are refused when isolation is unavailable. */
+function mutableMode(store: Store, env: EnvPort, ctx: ToolCtx): EnvRunOptions {
+  const ticket = ticketOf(store, ctx)
+  if (!ticket?.speculative) return { isolated: false }
+  if (ticket.ended) throw new UserError('speculative assignment was discarded')
+  if (!env.discardIsolated) throw new UserError('speculative workers are read-only without an isolated workdir')
+  return { isolated: true }
+}
+
+function readMode(store: Store, env: EnvPort, ctx: ToolCtx): EnvRunOptions {
+  const ticket = ticketOf(store, ctx)
+  return { isolated: ticket?.speculative === true && Boolean(env.discardIsolated) }
 }

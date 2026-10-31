@@ -1,5 +1,7 @@
+import { HeuristicDeliverGate, type DeliverGate } from '../speculate/gate.ts'
+import type { SurfaceVerdict } from '../speculate/silent.ts'
 import { UserError } from '../shared/errors.ts'
-import type { Ticket } from '../shared/types.ts'
+import type { Assignment, Ticket } from '../shared/types.ts'
 import type { Host } from './host.ts'
 
 export interface WorkerReport {
@@ -8,8 +10,19 @@ export interface WorkerReport {
   deliver?: boolean
 }
 
+export interface ReportResult {
+  surfaced: boolean
+  verdict: SurfaceVerdict
+}
+
+const TERMINAL = new Set(['ready', 'failed', 'dropped'])
+
 export class Assignments {
-  constructor(private readonly host: Host) {}
+  private readonly gate: DeliverGate
+
+  constructor(private readonly host: Host, gate?: DeliverGate) {
+    this.gate = gate ?? new HeuristicDeliverGate()
+  }
 
   start(ticketId: string, assignmentId: string, sessionId: string): void {
     const ticket = this.must(ticketId)
@@ -25,34 +38,69 @@ export class Assignments {
 
   /**
    * Record a worker report. User-facing text is sent by the router, not here.
-   * Speculative tickets stay silent until deliver is true.
+   * A speculative discard ends the assignment and the ticket with no outbound copy.
    */
-  report(ticketId: string, report: WorkerReport): { surfaced: boolean } {
+  report(ticketId: string, report: WorkerReport): ReportResult {
     const ticket = this.must(ticketId)
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
-    assignment.report = { kind: report.kind, text: report.text, deliver: report.deliver }
-    if (ticket.speculative && report.deliver !== true) {
+    const wasSpeculative = ticket.speculative
+    const terminal = TERMINAL.has(report.kind)
+    let verdict: SurfaceVerdict = 'hold'
+    if (wasSpeculative && terminal) verdict = this.gate.evaluate({ ticket, report })
+    else if (!wasSpeculative && report.deliver === true) verdict = 'deliver'
+    assignment.report = { kind: report.kind, text: report.text, deliver: report.deliver, verdict }
+
+    if (wasSpeculative && verdict === 'hold') {
       this.host.repo.putDoc('ticket', ticket.id, ticket)
       this.host.log(`[speculate] speculative silent ticketId=${ticket.id} deliver=false`)
-      return { surfaced: false }
+      return { surfaced: false, verdict }
     }
-    if (report.deliver === true) {
-      const tag = ticket.speculative ? '[speculate] ' : ''
-      this.host.log(`${tag}deliver=true ticketId=${ticket.id}`)
+
+    if (verdict === 'discard') {
+      this.finish(ticket, assignment, report.kind, 'discarded')
+      this.host.repo.addEvent('speculate.discarded', {
+        ticketId: ticket.id,
+        assignmentId: assignment.id,
+        kind: report.kind,
+      })
+      this.host.repo.putDoc('ticket', ticket.id, ticket)
+      this.host.log(`[speculate] discarded ticketId=${ticket.id} kind=${report.kind}`)
+      return { surfaced: false, verdict }
     }
-    if (report.kind === 'ready' || report.kind === 'dropped' || report.kind === 'failed') {
-      assignment.state = 'ended'
-      assignment.endedAt = this.host.now()
-      ticket.ended = {
-        at: this.host.now(),
-        outcome: report.kind,
-        by: report.kind === 'failed' ? 'watchdog' : 'executor',
-      }
-      this.host.repo.addEvent('assignment.ended', { ticketId: ticket.id, assignmentId: assignment.id, kind: report.kind })
+
+    if (wasSpeculative && verdict === 'deliver') {
+      ticket.speculative = false
+      assignment.speculative = false
+      this.host.repo.addEvent('speculate.delivered', {
+        ticketId: ticket.id,
+        assignmentId: assignment.id,
+      })
+      this.host.log(`[speculate] deliver=true ticketId=${ticket.id}`)
+    } else if (report.deliver === true) {
+      this.host.log(`deliver=true ticketId=${ticket.id}`)
     }
+
+    if (terminal) this.finish(ticket, assignment, report.kind, report.kind)
     this.host.repo.putDoc('ticket', ticket.id, ticket)
-    return { surfaced: report.deliver === true }
+    const surfaced = wasSpeculative ? verdict === 'deliver' : report.deliver === true
+    return { surfaced, verdict }
+  }
+
+  private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {
+    assignment.state = 'ended'
+    assignment.endedAt = this.host.now()
+    ticket.ended = {
+      at: this.host.now(),
+      outcome,
+      by: kind === 'failed' ? 'watchdog' : 'executor',
+    }
+    this.host.repo.addEvent('assignment.ended', {
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      kind,
+    })
+    this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome })
   }
 
   private must(ticketId: string): Ticket {

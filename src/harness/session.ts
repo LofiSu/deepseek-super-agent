@@ -2,6 +2,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { Store } from '../store/sqlite.ts'
 
+export function workerSessionId(ticketId: string): string {
+  return `worker_${ticketId}`
+}
+
 /** Append-only JSONL plus a SQLite copy so a restart can still read the session. */
 export class SessionJournal {
   private announced = false

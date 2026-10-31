@@ -2,7 +2,7 @@ import type { Engine } from '../core/engine.ts'
 import type { Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
-import type { SessionJournal } from './session.ts'
+import { workerSessionId, type SessionJournal } from './session.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -33,7 +33,7 @@ export class Harness {
   }
 
   launch(ticket: Ticket): Promise<void> {
-    const sessionId = `worker_${ticket.id}`
+    const sessionId = workerSessionId(ticket.id)
     this.running.add(ticket.id)
     this.armRouter()
     this.opts.log(`[harness] dual-layer RouterSession=router WorkerSession=${sessionId} ticketId=${ticket.id}`)
@@ -75,7 +75,7 @@ export class Harness {
     const lines = ['FOLLOWUP', `ticketId=${ticketId}`, `mode=${mode}`, `text=${trigger.text}`]
     const spillId = typeof trigger.meta.spillId === 'string' ? trigger.meta.spillId : ''
     if (spillId) lines.push(`spillId=${spillId}`)
-    const sessionId = `worker_${ticketId}`
+    const sessionId = workerSessionId(ticketId)
     return this.track(this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticketId, lines.join('\n'))))
   }
 
