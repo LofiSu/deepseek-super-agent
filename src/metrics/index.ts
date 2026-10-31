@@ -1,4 +1,13 @@
 export {
+  DEFAULT_CURVE_SAMPLE_LIMIT,
+  curveSamples,
+  normalizeCurveSamples,
+  recordLatencySample,
+  summarizeCurve,
+  type CurveSampleSource,
+  type CurveSummary,
+} from './curve.ts'
+export {
   METRIC_NAMES,
   Metrics,
   emptySnapshot,

@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { DEFAULT_CURVE_SAMPLE_LIMIT, normalizeCurveSamples, recordLatencySample } from './curve.ts'
 
 /**
  * Blog §7 counters. Written to `<stateDir>/metrics.json` and printed by `ds-agent metrics`.
@@ -29,6 +30,8 @@ export interface ModelLatencyMs {
 export interface MetricsSnapshot {
   counters: Record<MetricName, number>
   modelLatencyMs: ModelLatencyMs
+  /** Optional raw latency samples (Phase-2 T45 curve); absent until recorded. */
+  curveSamples?: number[]
 }
 
 function blankCounters(): Record<MetricName, number> {
@@ -63,12 +66,16 @@ export function emptySnapshot(): MetricsSnapshot {
 
 export function normalizeSnapshot(value: unknown): MetricsSnapshot {
   const raw = value && typeof value === 'object'
-    ? value as { counters?: Partial<Record<MetricName, unknown>>; modelLatencyMs?: Partial<ModelLatencyMs> }
+    ? value as {
+      counters?: Partial<Record<MetricName, unknown>>
+      modelLatencyMs?: Partial<ModelLatencyMs>
+      curveSamples?: unknown
+    }
     : {}
   const counters = blankCounters()
   for (const name of METRIC_NAMES) counters[name] = asNumber(raw.counters?.[name])
   const latency = raw.modelLatencyMs ?? {}
-  return {
+  const snapshot: MetricsSnapshot = {
     counters,
     modelLatencyMs: {
       count: asNumber(latency.count),
@@ -77,6 +84,10 @@ export function normalizeSnapshot(value: unknown): MetricsSnapshot {
       last: asNumber(latency.last),
     },
   }
+  if (Array.isArray(raw.curveSamples)) {
+    snapshot.curveSamples = normalizeCurveSamples(raw.curveSamples)
+  }
+  return snapshot
 }
 
 export function readMetrics(stateDir: string): MetricsSnapshot {
@@ -95,6 +106,7 @@ export class Metrics {
   readonly file: string
   private readonly counters: Record<MetricName, number>
   private latency: ModelLatencyMs
+  private curve: number[] | undefined
 
   constructor(stateDir: string) {
     fs.mkdirSync(stateDir, { recursive: true })
@@ -102,6 +114,7 @@ export class Metrics {
     const loaded = readMetrics(stateDir)
     this.counters = loaded.counters
     this.latency = loaded.modelLatencyMs
+    this.curve = loaded.curveSamples
   }
 
   increment(name: MetricName, by = 1): void {
@@ -116,14 +129,21 @@ export class Metrics {
     this.latency.sum += sample
     this.latency.last = sample
     if (sample > this.latency.max) this.latency.max = sample
+    this.curve = recordLatencySample(
+      { counters: this.counters, modelLatencyMs: this.latency, curveSamples: this.curve },
+      sample,
+      DEFAULT_CURVE_SAMPLE_LIMIT,
+    ).curveSamples
     this.flush()
   }
 
   snapshot(): MetricsSnapshot {
-    return {
+    const snapshot: MetricsSnapshot = {
       counters: { ...this.counters },
       modelLatencyMs: { ...this.latency },
     }
+    if (this.curve) snapshot.curveSamples = [...this.curve]
+    return snapshot
   }
 
   flush(): void {
