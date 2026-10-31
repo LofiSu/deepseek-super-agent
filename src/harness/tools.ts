@@ -1,5 +1,6 @@
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
+import { readSpillFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
@@ -220,15 +221,25 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
     },
     {
       name: 'read_object',
-      description: 'Recall a spilled object by id.',
-      parameters: schema({ id: { type: 'string' } }),
+      description: 'Recall one page of a spilled object. The caller ticket or session must be granted.',
+      parameters: schema({
+        id: { type: 'string' },
+        offset: { type: 'number' },
+        limit: { type: 'number' },
+      }),
       roles: ['worker'],
-      run: guard('worker', 'read_object', async args => {
-        const id = String(args.id ?? '')
-        const body = store.getSpill(id)
-        if (body == null) throw new UserError(`unknown spill ${id}`)
-        log(`[memory] read_object id=${id} bytes=${body.length}`)
-        return { id, bytes: body.length, text: body }
+      run: guard('worker', 'read_object', async (args, ctx) => {
+        const offset = Number(args.offset ?? 0)
+        const limit = args.limit == null ? undefined : Number(args.limit)
+        const page = readSpillFor(store, String(args.id ?? ''), {
+          ticketId: ctx.ticketId,
+          sessionId: ctx.sessionId,
+        }, {
+          offset: Number.isFinite(offset) ? offset : 0,
+          limit: limit != null && Number.isFinite(limit) ? limit : undefined,
+        })
+        log(`[memory] read_object id=${page.id} bytes=${page.text.length} total=${page.total}`)
+        return page
       }),
     },
     {
