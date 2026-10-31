@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: typecheck and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      live_demo: ${{ steps.live_key.outputs.present }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        # Keep this gate offline. A provider key would select HttpOpenAI and can call the network.
+        env:
+          DS_AGENT_API_BASE: ""
+          DS_AGENT_API_KEY: ""
+          DS_AGENT_PROVIDER: ""
+          DEEPSEEK_API_KEY: ""
+          OPENAI_API_KEY: ""
+          OPENROUTER_API_KEY: ""
+          XAI_API_KEY: ""
+          GROK_API_KEY: ""
+          MOONSHOT_API_KEY: ""
+          KIMI_API_KEY: ""
+          ZHIPU_API_KEY: ""
+          GLM_API_KEY: ""
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+        run: pnpm test
+
+      - name: Detect live API key
+        id: live_key
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DS_AGENT_API_KEY: ${{ secrets.DS_AGENT_API_KEY }}
+        run: |
+          if [ -n "$DEEPSEEK_API_KEY" ] || [ -n "$DS_AGENT_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  demo:
+    name: demo
+    runs-on: ubuntu-latest
+    needs: check
+    # Job `if` cannot read `secrets` (allowed: github, needs, vars, inputs).
+    # `if: secrets.DEEPSEEK_API_KEY != ''` is rejected. Skip unless
+    # DEEPSEEK_API_KEY or DS_AGENT_API_KEY is non-empty, and only after the gate passes.
+    if: ${{ needs.check.result == 'success' && needs.check.outputs.live_demo == 'true' }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Live demo
+        env:
+          DS_AGENT_API_BASE: https://api.deepseek.com/v1
+          DS_AGENT_API_KEY: ${{ secrets.DEEPSEEK_API_KEY || secrets.DS_AGENT_API_KEY }}
+          DS_AGENT_API_MODEL: deepseek-chat
+        run: |
+          set -o pipefail
+          if [ -z "$DS_AGENT_API_KEY" ]; then
+            echo "::error::Live demo requires DEEPSEEK_API_KEY or DS_AGENT_API_KEY; refusing MockModel."
+            exit 1
+          fi
+          pnpm demo | tee demo.log
+          if grep -q 'model=MockModel' demo.log; then
+            echo "::error::demo fell back to MockModel."
+            exit 1
+          fi

@@ -1,0 +1,159 @@
+export type Role = 'router' | 'worker' | 'watchdog'
+
+export type ReceiveResult = 'stored' | 'duplicate' | 'filtered'
+
+export type Strength = 'explicit' | 'inferred' | 'maybe'
+
+export type DecisionKind = 'accept' | 'ignore' | 'stop' | 'unavailable'
+
+export interface ActorRef {
+  source: string
+  id: string
+}
+
+export interface ThreadRef {
+  source: string
+  id: string
+}
+
+export interface ChannelRef {
+  source: string
+  thread: string
+  address?: Record<string, string>
+}
+
+/** One immutable event from a source. `text` and `meta` are untrusted. */
+export interface Trigger {
+  id: string
+  source: string
+  threads: ThreadRef[]
+  actor: ActorRef
+  human: boolean
+  addressed?: 'mention' | 'direct'
+  at: string
+  text: string
+  channel?: ChannelRef
+  meta: Record<string, unknown>
+}
+
+export function threadKey(ref: ThreadRef): string {
+  return `${ref.source}:${ref.id}`
+}
+
+export interface Thread {
+  key: string
+  ref: ThreadRef
+  createdAt: string
+  lastAt?: string
+  subscriptions: string[]
+  correlated: string[]
+  pending: string[]
+  meta: Record<string, unknown>
+}
+
+export interface Disposition {
+  filtered?: string
+  fanout: string[]
+  handbacks?: { ticketId: string; reason: string; at: string }[]
+  at: string
+}
+
+export interface Mandate {
+  strength: Strength
+  policyVersion: string
+  scope: string
+  actor: ActorRef
+  basis: string
+}
+
+export interface Assignment {
+  id: string
+  state: 'pending' | 'running' | 'ended'
+  speculative: boolean
+  workerSessionId?: string
+  startedAt?: string
+  endedAt?: string
+  report?: {
+    kind: string
+    text: string
+    deliver?: boolean
+    verdict?: 'deliver' | 'discard' | 'hold'
+  }
+}
+
+export interface TicketInput {
+  id: string
+  kind: 'trigger' | 'text' | 'job'
+  triggerId?: string
+  text?: string
+  spillId?: string
+  at: string
+  human?: boolean
+}
+
+export interface TicketEnd {
+  at: string
+  outcome: string
+  by: 'executor' | 'human' | 'watchdog'
+}
+
+export interface Ticket {
+  id: string
+  title: string
+  brief: string
+  spillId?: string
+  mandate: Mandate
+  threadKeys: string[]
+  channels: ChannelRef[]
+  inputs: TicketInput[]
+  assignments: Assignment[]
+  speculative: boolean
+  originTriggerId: string
+  createdAt: string
+  ended?: TicketEnd
+}
+
+export interface Decision {
+  id: string
+  evalId: string
+  threadKey: string
+  triggerIds: string[]
+  kind: DecisionKind
+  ticketId?: string
+  at: string
+  reason: string
+  strength: Strength
+}
+
+export interface ReplyRow {
+  id: string
+  ticketId: string
+  channel: string
+  purpose: string
+  text: string
+  status: 'pending' | 'sent' | 'dropped'
+  createdAt: string
+}
+
+export interface JobRow {
+  id: string
+  sessionId: string
+  ticketId: string
+  name: string
+  status: 'running' | 'succeeded' | 'failed' | 'stopped'
+  createdAt: string
+  finishedAt?: string
+}
+
+export interface SessionRow {
+  id: string
+  role: Role
+  ticketId?: string
+  status: 'running' | 'idle'
+  heartbeat: string
+  createdAt: string
+}
+
+export function liveTicket(ticket: Ticket): boolean {
+  return ticket.ended == null
+}

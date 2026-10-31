@@ -1,0 +1,27 @@
+{
+  "name": "ds-agent",
+  "version": "0.1.0",
+  "description": "Independent MIT super-agent: thin harness plus a proactive engine. Not an official DeepSeek product.",
+  "license": "MIT",
+  "author": "LofiSu <163713803+LofiSu@users.noreply.github.com>",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "NODE_NO_WARNINGS=1 tsx src/cli/demo.ts",
+    "test": "NODE_NO_WARNINGS=1 vitest run",
+    "test:live": "NODE_NO_WARNINGS=1 vitest run test/live-demo.test.ts",
+    "ds-agent": "NODE_NO_WARNINGS=1 tsx src/cli/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

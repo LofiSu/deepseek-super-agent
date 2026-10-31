@@ -1,0 +1,13 @@
+export type DomainEventName =
+  | 'trigger.received'
+  | 'eval.started'
+  | 'decision.recorded'
+  | 'ticket.created'
+  | 'ticket.resumed'
+  | 'ticket.ended'
+  | 'assignment.started'
+  | 'assignment.ended'
+  | 'thread.subscribed'
+  | 'trigger.requeued'
+  | 'speculate.delivered'
+  | 'speculate.discarded'
