@@ -1007,3 +1007,27 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 ---
 
 *契约文档 · 改契约先改本文 · LoomLab / LofiSu · MIT*
+
+
+---
+
+## 博客全文逐条覆盖审计
+
+对照 https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg （抓取日与开源同周）。
+
+| 文章块 | 覆盖任务 | README 勾选 | 代码落点 | 缺口 |
+|--------|----------|-------------|----------|------|
+| §1 四特质 | T01–T04 | 有 | Harness/Engine/Store/Speculate | — |
+| §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding；T14/T15 部分 |
+| §3.1 Fast/Slow | T16–T17 | 有 | ingress | Slow Path 真 LLM 策略可再加强 |
+| §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | T21 handback 弱 |
+| §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object | 多跳图可再密 |
+| §3.4 投机 | T26–T28 | 有 | speculate + deliver | — |
+| §4.1 异步 ReAct | T29–T32 | 有 | loop/jobs | — |
+| §4.2 信道规范 | T33–T35 | 有 | channels/norms | email 模板可再补 |
+| §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
+| §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
+| §7 实验 | T45 | 标明未做 | — | 可选 M12 |
+| §8 未决 | T46–T51 | 标明 Phase-2 | T51 基线 | 其余 Phase-2 |
+
+**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单；未实现项显式标 `[ ]`/`[~]`/Phase-2，无静默遗漏。

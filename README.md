@@ -35,21 +35,104 @@ CLI：`ds-agent` · MIT · LoomLab
 
 ### 能力清单
 
-对照上面那篇文章。下列是设计目标，是否跑通以本机 `pnpm demo` 为准。
+对照微信文 [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg) **逐条**落地。状态以本仓代码 + `pnpm demo` / `pnpm test` 为准；完整任务矩阵见 [PLAN.md](./PLAN.md)（T01–T51）。
 
-- [ ] 双层 Router / Worker（§2）
-- [ ] 异步 ReAct：`start()` 与完成事件，长工具不堵前台（§2.2、§4.1）
-- [ ] Trigger + Fast / Slow 两级过滤（§3.1）
-- [ ] SQLite，重启可恢复（§5.1）
-- [ ] Thread 订阅扇出，可绕过 Router Eval（§3.2）
-- [ ] Inline / Spill + `read_object`（§3.3）
-- [ ] 投机 Assignment，过 deliver gate 再对外（§3.4）
-- [ ] CLI / 假 IM / 假 GitHub（§4.2）
-- [ ] Store 与 LocalEnv 沙箱分开（§5）
-- [ ] `DS_AGENT_API_*` 接自有模型 + daemon（§5.2）
-- [ ] Watchdog：卡住就 nudge / fail（§6）
+图例：`[x]` 已有实现并通过 demo/测试路径验证 · `[~]` 有骨架或部分能力 · `[ ]` 未做（含 Phase-2）
 
-没配 Key 时用 MockModel。
+#### §1 四特质
+
+- [x] **连续 Continuous** — 跨 IM / GitHub 等信道共用同一套领域状态，用户不必管 Session（Harness Session + Engine Thread/Ticket）
+- [x] **高效 Efficient** — 多 Worker 并行；Router 侧批处理同 Thread 积压 Trigger（`evals` + harness inbox）
+- [x] **主动 Proactive** — Trigger 驱动；投机 Assignment + deliver gate（`speculate/`）
+- [x] **持久 Persistent** — SQLite 持久化；进程重启后可恢复（`store/` + demo restart 断言）
+
+#### §2 双层 Router / Worker
+
+- [x] **连续性 vs 吞吐权衡 → 双层拆分** — Router 管交互与分派，Worker 隔离执行（`SessionRole`）
+- [x] **Router = 全局序点 / 协调 / 记忆入口** — 入站经 Engine；出站经 Router/Outbox
+- [x] **Router 不直接干重活** — Worker 挂执行工具；Router 工具集更窄
+- [x] **Router 可用轻量模型** — `roleModels.router` / Mock；Worker 可配强模型
+- [x] **Trigger 批处理（拥堵时合并进下一轮）** — 同 Thread Eval batch；demo/测试覆盖
+- [ ] **Router 水平切分 / 多层过滤** — 文章 §2/§8；Phase-2（PLAN T09）
+- [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
+- [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站
+- [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
+- [~] **Worker 内 Subagent / Team 对 Router 透明** — 有 async job；未做成完整 Team 拓扑（T14）
+- [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；产品壳未做（T15）
+
+#### §3 事件驱动
+
+- [x] **环境半结构化事件 = Trigger** — IM / GitHub 风格 Source
+- [x] **Fast Path 程序过滤** — source/噪声等确定性规则（`ingress/filter`）
+- [x] **Slow Path 语义/策略过滤** — 可走模型策略；Mock 路径可跳过或规则化
+- [x] **Thread = 同一话题/PR 下的事件流** — Thread key
+- [x] **已订阅 → 直通 Worker（bypass Router Eval）** — 日志 `bypass=subscription` + `ticketId`
+- [x] **未订阅 → Router/Eval 冷启动分派** — Intake → Eval → Ticket
+- [~] **Worker 取消订阅 / 交回 Router** — 接口方向在 PLAN；demo 未强调（T21）
+- [x] **Router 仍可观察全局 Trigger** — Intake 记账
+- [x] **Inline：摘要进上下文** — `memory/recall`
+- [x] **Spill：长内容外置 + id** — `store/spill`
+- [x] **局部性：先 ID/摘要，再按需展开** — `read_object`
+- [x] **链式召回 Chain of Recall** — spillId / 对象引用按需拉取（T25 最小实现）
+- [x] **投机执行：后台先跑** — speculative Assignment
+- [x] **有价值才交付，否则安静丢弃** — `deliver=true` gate；demo 验证
+
+#### §4 面向人的交互
+
+- [x] **异步 ReAct：`start` 立即返回，不堵前台** — harness loop / async job
+- [x] **Started 通知** — job started 日志/事件
+- [x] **完成后作为新 Session 事件回来** — completion 回灌 Worker
+- [x] **全双工：后台跑时仍接新输入** — 入站与 job 完成并行入队
+- [x] **IM 低打扰 / 短回复规范** — `channels/norms`（含词数上限思路）
+- [x] **GitHub 等异步信道结构化输出** — github channel formatter
+- [x] **对外只由 Router 说话** — Worker 禁直写信道
+
+#### §5 计算 / 状态 / 环境分离
+
+- [x] **计算可无状态，Session/领域进 DB** — SQLite Store
+- [x] **执行环境留在原地（沙箱目录）** — `LocalEnv`
+- [x] **端侧 daemon 不持会话状态** — `daemon.ts` 只调度 Watchdog 等
+- [x] **BYOM：OpenAI 兼容 `DS_AGENT_API_*`** — `createModelFromEnv`
+- [~] **间歇上线设备 / 多机切换** — Store 可续；真·跨机 daemon 未做（T40 部分）
+
+#### §6 Watchdog
+
+- [x] **外部 Control Loop Session** — `watchdog` role
+- [x] **定时驱动** — daemon interval tick
+- [x] **卡住任务 nudge / fail** — watchdog tools + demo tick
+- [~] **基础设施故障 + 目标偏离的 NL 维护** — 有 nudge/fail；完整健康检查/改规则 YAML 未齐（T43–T44）
+
+#### §7 实验（文章评测，不挡开源）
+
+- [ ] **端到端对比双层 vs 单 Session** — Phase-2 / 可选 M12（T45）
+- [ ] **Router 批处理压测曲线** — Phase-2（T45）
+
+#### §8 未决问题（明确不做进 M11）
+
+- [ ] Router 扩展 / Worker 直连拓扑（§8.1）
+- [ ] 长程跨月记忆（§8.1）
+- [ ] 脱离 Session 的产品交互壳（§8.2）
+- [ ] 中途人机协同 UX（§8.2）
+- [ ] A2A 跨实例（§8.3）
+- [ ] 安全隐私深化；凭据永不进模型上下文（§8.4，基线：密钥不进 prompt）— PLAN T51
+
+#### 模块对照（M0–M11）
+
+| 模块 | 文章落点 | 状态 |
+|------|----------|------|
+| M0 shared | 类型/端口 | [x] |
+| M1 Harness | §2/§4.1/§5 | [x] |
+| M2 Store | §5.1/§3.3 Spill | [x] |
+| M3 Engine | §2/§3 Eval·Ticket·Assignment | [x] |
+| M4 Ingress | §3.1 | [x] |
+| M5 Subscribe | §3.2 | [x] |
+| M6 Memory | §3.3 | [x] |
+| M7 Speculate | §3.4 | [x] |
+| M8 Channels | §4.2 | [x] |
+| M9 Env | §5.2 | [x] |
+| M10 Watchdog | §6 | [x] |
+| M11 CLI demo | 验收脚本 | [x] `pnpm demo` |
+
 
 ### 架构
 
@@ -145,21 +228,93 @@ Author: LofiSu, co-written with Grokbot (CoderBot).
 
 ### Features
 
-Design targets from the article. Trust `pnpm demo` for what actually runs.
+Mapped **point-by-point** to [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg). Status from this repo + `pnpm demo` / `pnpm test`. Full task matrix: [PLAN.md](./PLAN.md) (T01–T51).
 
-- [ ] Dual Router / Worker (§2)
-- [ ] Async ReAct: `start()` / completion events (§2.2, §4.1)
-- [ ] Triggers + Fast / Slow filter (§3.1)
-- [ ] SQLite across restart (§5.1)
-- [ ] Thread subscription fan-out (§3.2)
-- [ ] Inline / Spill + `read_object` (§3.3)
-- [ ] Speculative Assignment + deliver gate (§3.4)
-- [ ] CLI / fake IM / fake GitHub (§4.2)
-- [ ] Store vs LocalEnv (§5)
-- [ ] `DS_AGENT_API_*` BYOM + daemon (§5.2)
-- [ ] Watchdog nudge / fail (§6)
+Legend: `[x]` implemented & covered by demo/tests · `[~]` partial · `[ ]` not done (incl. Phase-2)
 
-No key → MockModel.
+#### §1 Four traits
+
+- [x] **Continuous** — shared domain state across IM/GitHub-style channels
+- [x] **Efficient** — parallel Workers; Router-side Trigger batching
+- [x] **Proactive** — Trigger-driven; speculative Assignment + deliver gate
+- [x] **Persistent** — SQLite; survives restart
+
+#### §2 Dual Router / Worker
+
+- [x] Continuity vs throughput → dual layer
+- [x] Router as sequence / coordination point
+- [x] Router does not do heavy execution
+- [x] Lightweight Router model slot
+- [x] Trigger batching under load
+- [ ] Router sharding / multi-filter (Phase-2)
+- [x] Isolated Workers with exec tools
+- [x] Workers never speak to users directly
+- [x] Many-to-many Worker↔Thread subscriptions
+- [~] In-Worker Subagent/Team opaque to Router
+- [~] One UI / many topics → many Workers
+
+#### §3 Event-driven
+
+- [x] Triggers from the environment
+- [x] Fast Path programmatic filter
+- [x] Slow Path semantic/policy filter
+- [x] Thread = event stream
+- [x] Subscribed → bypass Router Eval (`bypass=subscription`)
+- [x] Unsubscribed → cold-start Eval
+- [~] Unsubscribe / handback to Router
+- [x] Router still observes all Triggers
+- [x] Inline summaries
+- [x] Spill + id
+- [x] Locality / on-demand expand (`read_object`)
+- [x] Chain of Recall (minimal)
+- [x] Speculative background work
+- [x] Deliver only if valuable
+
+#### §4 Human interaction
+
+- [x] Async ReAct `start` (non-blocking)
+- [x] Started ack
+- [x] Completion as a new session event
+- [x] Duplex while jobs run
+- [x] IM low-interrupt norms
+- [x] GitHub-style structured outbound
+- [x] Router owns outbound
+
+#### §5 Compute / state / env
+
+- [x] Stateless compute + durable DB
+- [x] Env stays local (`LocalEnv`)
+- [x] Daemon holds no session state
+- [x] BYOM via `DS_AGENT_API_*`
+- [~] Intermittent / multi-machine hands
+
+#### §6 Watchdog
+
+- [x] External control-loop Session
+- [x] Timer-driven ticks
+- [x] Nudge / fail stuck work
+- [~] Full infra + NL rule maintenance
+
+#### §7 Experiments (optional)
+
+- [ ] E2E dual-layer vs single Session (Phase-2)
+- [ ] Router batching stress curves (Phase-2)
+
+#### §8 Open questions (out of M11)
+
+- [ ] Router scale-out / Worker mesh
+- [ ] Long-horizon memory
+- [ ] Session-free product UX
+- [ ] Mid-task human co-pilot UX
+- [ ] A2A
+- [ ] Hardened security/privacy (creds never in context — baseline kept)
+
+#### Modules M0–M11
+
+| Module | Article | Status |
+|--------|---------|--------|
+| M0–M11 | §§2–6 + demo harness | [x] see Chinese table; `pnpm demo` green on Origin/GitHub mirror |
+
 
 ### Architecture
 
