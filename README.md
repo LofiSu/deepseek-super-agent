@@ -103,7 +103,7 @@ Article evals. They do not block the release.
 
 - [x] **Runtime counters.** Ingress admit/drop, eval accept, bypass fan-out, speculative deliver/discard, watchdog nudge/fail, model latency. `ds-agent metrics` reads `<stateDir>/metrics.json`.
 - [~] **Latency curve samples.** Optional `curveSamples` / `summarizeCurve` in metrics (T45). Full dual-layer vs one-Session bake-off still open.
-- [ ] **Router batching stress curves.** Still open (T45 stress harness).
+- [x] **Router batching stress curves.** `runBatchingStress` floods same-Thread Triggers, records batch sizes + eval counts, and appends one Eval latency sample per eval to `curveSamples` (T45 stress harness).
 
 ### §8 Left open
 
