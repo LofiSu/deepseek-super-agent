@@ -219,6 +219,6 @@ export class HttpOpenAI implements Model {
 export function createModelFromEnv(env: NodeJS.ProcessEnv = process.env): Model {
   const base = env.DS_AGENT_API_BASE
   const key = env.DS_AGENT_API_KEY
-  if (base && key) return new HttpOpenAI(base, key, env.DS_AGENT_MODEL || 'deepseek-chat')
+  if (base && key) return new HttpOpenAI(base, key, env.DS_AGENT_API_MODEL || env.DS_AGENT_MODEL || 'deepseek-chat')
   return new MockModel()
 }

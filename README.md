@@ -229,7 +229,17 @@ pnpm test
 
 ### Demo
 
-`pnpm demo` 注入一批假 IM / GitHub 事件，日志里大致应能看到：噪声被过滤、可行动消息变成 Ticket → Worker、同 Thread 跟进带 `bypass=subscription`、可起第二个 Worker、Spill + `read_object`、投机结果过 gate 前不可见、Watchdog 能 nudge / fail、重启后数据还在、依赖里没有 `@deepseek-ai/dsh*`。
+`pnpm demo` 注入一批假 IM / GitHub 事件，默认用 **MockModel**（不连网、不需要 Key），用来验收管线：噪声过滤、Ticket → Worker、`bypass=subscription`、Spill + `read_object`、投机 gate、Watchdog、重启持久化等。
+
+仓和代码是真实现；Mock 只是零配置 demo 模型。接真模型：
+
+```bash
+export DS_AGENT_API_BASE=https://api.deepseek.com/v1
+export DS_AGENT_API_KEY=sk-...
+export DS_AGENT_API_MODEL=deepseek-chat   # 可选
+pnpm demo    # 走 HttpOpenAI；脚本化 Mock 断言会放宽
+# 或：pnpm start / pnpm ds-agent chat "fix the login timeout"
+```
 
 ### 模型配置
 
@@ -245,8 +255,10 @@ Router / Watchdog 用轻量模型，Worker 用强一点的。
 export DS_AGENT_API_BASE=https://api.deepseek.com/v1
 export DS_AGENT_API_KEY=sk-...
 export DS_AGENT_API_MODEL=deepseek-chat
-pnpm start
+pnpm demo    # 或 pnpm start / pnpm ds-agent chat "..."
 ```
+
+未设置上述变量时，`createModelFromEnv()` 回落 `MockModel`。
 
 ### 致谢
 
@@ -468,7 +480,17 @@ pnpm test
 
 ### Demo
 
-`pnpm demo` feeds fake IM / GitHub events. Expect noise filtered, Ticket → Worker, `bypass=subscription`, a second Worker, Spill + `read_object`, speculative work hidden until the gate, Watchdog ticks, persistence after restart, and no `@deepseek-ai/dsh*`.
+`pnpm demo` feeds fake IM / GitHub events and defaults to **MockModel** (offline, no API key) so the pipeline checks out of the box.
+
+The repo and code are real; Mock is only the zero-config demo model. For a real model:
+
+```bash
+export DS_AGENT_API_BASE=https://api.deepseek.com/v1
+export DS_AGENT_API_KEY=sk-...
+export DS_AGENT_API_MODEL=deepseek-chat   # optional
+pnpm demo    # uses HttpOpenAI; Mock scripted proofs are relaxed
+# or: pnpm start / pnpm ds-agent chat "fix the login timeout"
+```
 
 ### Models
 
@@ -484,8 +506,10 @@ Lightweight for Router / Watchdog; stronger for Worker.
 export DS_AGENT_API_BASE=https://api.deepseek.com/v1
 export DS_AGENT_API_KEY=sk-...
 export DS_AGENT_API_MODEL=deepseek-chat
-pnpm start
+pnpm demo    # or pnpm start / pnpm ds-agent chat "..."
 ```
+
+Without those vars, `createModelFromEnv()` falls back to `MockModel`.
 
 ### Credits
 

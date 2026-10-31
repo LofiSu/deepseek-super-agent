@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { githubTrigger } from '../channels/github.ts'
 import { imTrigger } from '../channels/im.ts'
-import { MockModel } from '../harness/model.ts'
+import { createModelFromEnv } from '../harness/model.ts'
 import { Runtime } from '../runtime.ts'
 import type { Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
@@ -34,21 +34,40 @@ export const DEMO_PROOFS = [
   'restart persistence',
 ]
 
+/** Engine-side markers that still apply with a real OpenAI-compatible model. */
+export const LIVE_DEMO_PROOFS = [
+  'model=HttpOpenAI',
+  'two-level',
+  'Intake.receive',
+  'noise dropped',
+  'Tickets.create',
+  'Assignments.start',
+  'bypass=subscription',
+  'restart persistence',
+]
+
 export function defaultHome(): string {
   return process.env.DS_AGENT_HOME ?? path.join(process.cwd(), '.ds-agent')
 }
 
 export async function runDemo(home = defaultHome()): Promise<void> {
   fs.rmSync(home, { recursive: true, force: true })
+  const model = createModelFromEnv()
+  const live = model.name !== 'MockModel'
   const runtime = Runtime.create({
     home,
-    model: new MockModel(),
-    jobDelayMs: 30,
-    watchdogIntervalMs: 20,
+    model,
+    jobDelayMs: live ? 200 : 30,
+    watchdogIntervalMs: live ? 200 : 20,
     stuckMs: 60_000,
   })
   runtime.log.info('ds-agent demo')
   runtime.log.info('not an official DeepSeek product')
+  runtime.log.info(
+    live
+      ? `demo model=${model.name} (real API via DS_AGENT_API_BASE/KEY; scripted Mock proofs skipped)`
+      : `demo model=${model.name} (zero-config; set DS_AGENT_API_BASE + DS_AGENT_API_KEY to call a real model)`,
+  )
   runtime.start()
   try {
     runtime.ingest(imTrigger({
@@ -114,11 +133,12 @@ export async function runDemo(home = defaultHome()): Promise<void> {
       runtime.store.close()
     }
   }
-  const missing = DEMO_PROOFS.filter(needle => !runtime.log.lines.some(line => line.includes(needle)))
+  const proofs = live ? LIVE_DEMO_PROOFS : DEMO_PROOFS
+  const missing = proofs.filter(needle => !runtime.log.lines.some(line => line.includes(needle)))
   if (missing.length > 0) {
     throw new Error(`missing proofs: ${missing.join(', ')}`)
   }
-  runtime.log.info('demo ok')
+  runtime.log.info(live ? 'demo ok (live model)' : 'demo ok')
 }
 
 const entry = process.argv[1] ?? ''

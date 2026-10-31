@@ -26,8 +26,8 @@ function help(): void {
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
-Cloud model: DS_AGENT_API_BASE + DS_AGENT_API_KEY (optional DS_AGENT_MODEL).
-The demo always uses MockModel.`)
+Cloud model: DS_AGENT_API_BASE + DS_AGENT_API_KEY (optional DS_AGENT_API_MODEL).
+pnpm demo uses MockModel by default; set those env vars to call a real OpenAI-compatible model.`)
 }
 
 async function withRuntime(work: (runtime: Runtime) => Promise<void> | void): Promise<void> {
