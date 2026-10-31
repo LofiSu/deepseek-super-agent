@@ -13,7 +13,7 @@
     "demo:local": "NODE_NO_WARNINGS=1 tsx src/cli/demo.ts",
     "demo:feishu": "NODE_NO_WARNINGS=1 tsx src/cli/demos/feishu-smoke.ts",
     "test": "NODE_NO_WARNINGS=1 DS_AGENT_API_BASE=${DS_AGENT_API_BASE:-http://127.0.0.1:3425/v1} DS_AGENT_API_KEY=${DS_AGENT_API_KEY:-magpie} DS_AGENT_API_MODEL=${DS_AGENT_API_MODEL:-workbuddy/deepseek-v4.1-flash} vitest run",
-    "test:live": "NODE_NO_WARNINGS=1 DS_AGENT_API_BASE=${DS_AGENT_API_BASE:-http://127.0.0.1:3425/v1} DS_AGENT_API_KEY=${DS_AGENT_API_KEY:-magpie} DS_AGENT_API_MODEL=${DS_AGENT_API_MODEL:-workbuddy/deepseek-v4.1-flash} vitest run test/live-demo.test.ts test/live-e2e.test.ts",
+    "test:live": "NODE_NO_WARNINGS=1 DS_AGENT_API_BASE=${DS_AGENT_API_BASE:-http://127.0.0.1:3425/v1} DS_AGENT_API_KEY=${DS_AGENT_API_KEY:-magpie} DS_AGENT_API_MODEL=${DS_AGENT_API_MODEL:-workbuddy/deepseek-v4.1-flash} vitest run test/live-demo.test.ts test/live-e2e.test.ts test/live-modules.test.ts",
     "test:demo:real": "NODE_NO_WARNINGS=1 DS_AGENT_REAL_CHANNELS=1 DS_AGENT_API_BASE=${DS_AGENT_API_BASE:-http://127.0.0.1:3425/v1} DS_AGENT_API_KEY=${DS_AGENT_API_KEY:-magpie} DS_AGENT_API_MODEL=${DS_AGENT_API_MODEL:-workbuddy/deepseek-v4.1-flash} vitest run test/demos-real-channels.test.ts",
     "ds-agent": "NODE_NO_WARNINGS=1 tsx src/cli/main.ts",
     "typecheck": "tsc --noEmit"
