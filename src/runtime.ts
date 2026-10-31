@@ -14,6 +14,7 @@ import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger } from './ingress/filter.ts'
 import { inlineOrSpill } from './memory/recall.ts'
 import { Metrics } from './metrics/metrics.ts'
+import { createPhase2, isPhase2Enabled, type Phase2Registries } from './phase2/index.ts'
 import { Logger } from './shared/log.ts'
 import type { Disposition, ReceiveResult, Ticket, Trigger } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
@@ -26,8 +27,10 @@ export interface RuntimeOptions {
   watchdogIntervalMs?: number
   stuckMs?: number
   now?: () => string
-  /** Environment for the LocalEnv allowlist and secret redaction. Model selection still reads process.env. */
+  /** Environment for the LocalEnv allowlist, secret redaction, and the DS_AGENT_PHASE2 opt-in. Model selection still reads process.env. */
   env?: NodeJS.ProcessEnv
+  /** Opt in to Phase-2 registries. Defaults to DS_AGENT_PHASE2 in `env`; off otherwise. */
+  phase2?: boolean
 }
 
 class RedactingLogger extends Logger {
@@ -50,6 +53,8 @@ export class Runtime {
   readonly model: Model
   readonly metrics: Metrics
   readonly home: string
+  /** Present only when opted in via DS_AGENT_PHASE2=1 or RuntimeOptions.phase2. */
+  readonly phase2: Phase2Registries | undefined
 
   private constructor(parts: {
     home: string
@@ -61,6 +66,7 @@ export class Runtime {
     daemon: Daemon
     model: Model
     metrics: Metrics
+    phase2: Phase2Registries | undefined
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -71,6 +77,7 @@ export class Runtime {
     this.daemon = parts.daemon
     this.model = parts.model
     this.metrics = parts.metrics
+    this.phase2 = parts.phase2
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -82,6 +89,8 @@ export class Runtime {
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
     const now = opts.now ?? (() => new Date().toISOString())
+    const phase2 = (opts.phase2 ?? isPhase2Enabled(baseEnv)) ? createPhase2(store) : undefined
+    if (phase2) log.info('[phase2] opt-in registries enabled')
     log.info(`[runtime] model=${model.name}`)
     const host: Host = {
       repo: store,
@@ -148,7 +157,7 @@ export class Runtime {
       stuckMs: opts.stuckMs ?? 60_000,
     })
     const daemon = new Daemon(watchdog, line => log.info(line), machines)
-    return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model, metrics })
+    return new Runtime({ home: opts.home, log, store, engine, harness, watchdog, daemon, model, metrics, phase2 })
   }
 
   start(): void {
