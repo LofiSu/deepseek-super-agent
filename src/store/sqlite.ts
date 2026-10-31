@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { DomainEventName } from '../shared/events.ts'
-import type { JobRow, ReplyRow, SessionRow } from '../shared/types.ts'
+import type { JobRow, OutboxRow, ReplyRow, SessionRow } from '../shared/types.ts'
 import { SCHEMA } from './schema.ts'
 
 export class Store {
@@ -127,6 +127,55 @@ export class Store {
       status: row.status as ReplyRow['status'],
       createdAt: row.created_at,
     }))
+  }
+
+  enqueueOutbox(row: OutboxRow): void {
+    this.db.prepare(
+      `INSERT INTO outbox(id, reply_id, ticket_id, channel, thread, target, text, status, external_id, error, created_at, sent_at)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)`,
+    ).run(
+      row.id,
+      row.replyId,
+      row.ticketId,
+      row.channel,
+      row.thread,
+      JSON.stringify(row.target),
+      row.text,
+      row.status,
+      row.createdAt,
+    )
+  }
+
+  listOutbox(status?: OutboxRow['status']): OutboxRow[] {
+    const rows = (status
+      ? this.db.prepare(
+        `SELECT * FROM outbox WHERE status = ? ORDER BY rowid`,
+      ).all(status)
+      : this.db.prepare('SELECT * FROM outbox ORDER BY rowid').all()) as Record<string, string | null>[]
+    return rows.map(row => ({
+      id: String(row.id),
+      replyId: String(row.reply_id),
+      ticketId: String(row.ticket_id),
+      channel: String(row.channel),
+      thread: String(row.thread),
+      target: JSON.parse(String(row.target)) as Record<string, string>,
+      text: String(row.text),
+      status: row.status as OutboxRow['status'],
+      externalId: row.external_id ? String(row.external_id) : undefined,
+      error: row.error ? String(row.error) : undefined,
+      createdAt: String(row.created_at),
+      sentAt: row.sent_at ? String(row.sent_at) : undefined,
+    }))
+  }
+
+  markOutboxSent(id: string, externalId?: string): void {
+    this.db.prepare(
+      `UPDATE outbox SET status = 'sent', external_id = ?, sent_at = ? WHERE id = ?`,
+    ).run(externalId ?? null, new Date().toISOString(), id)
+  }
+
+  markOutboxFailed(id: string, error: string): void {
+    this.db.prepare(`UPDATE outbox SET status = 'failed', error = ? WHERE id = ?`).run(error, id)
   }
 
   addSubscription(threadKey: string, ticketId: string, at: string): void {

@@ -136,7 +136,7 @@ LofiSu × Grokbot（CoderBot）。
 ```mermaid
 flowchart TB
   subgraph Channels["Channel"]
-    C1[CLI / 假 IM / 假 GitHub]
+    C1[CLI / Feishu IM / GitHub（真实适配器）]
   end
 
   subgraph Ingress["Ingress"]
@@ -218,12 +218,13 @@ Node.js 22+（见 [package.json](./package.json) 的 `engines`，用到 `node:sq
 ```bash
 pnpm install
 pnpm test
+gh auth login            # 真实 GitHub Source / Outbox
 pnpm demo
 ```
 
-`pnpm test` 与 `pnpm demo` 均要求真实模型，默认套件禁止 MockModel。
+`pnpm test` 与 `pnpm demo` 均要求真实模型，默认套件禁止 MockModel。`pnpm demo` 只走真实信道：通过 `gh api` 创建/读取真实 GitHub issue，并把回复发成真实 issue comment；没有 fake IM/GitHub 回退。`pnpm demo:local` 是内存 fixture 冒烟基线，不是验收路径。Feishu 配置与 `pnpm demo:feishu` 见 [docs/REAL_CHANNELS.md](./docs/REAL_CHANNELS.md)。
 
-没有 Key 时，`pnpm demo` 用 MockModel，并在日志里写明。一把厂商 Key，或者同时设置 `DS_AGENT_API_BASE` 与 `DS_AGENT_API_KEY`，会走 HttpOpenAI。只设置其中一个会报错退出。
+一把厂商 Key，或者同时设置 `DS_AGENT_API_BASE` 与 `DS_AGENT_API_KEY`，会走 HttpOpenAI。只设置其中一个会报错退出。
 
 实况 demo 用 DeepSeek V4.1 Flash。API 模型名是 `deepseek-flash`。用 `DS_AGENT_API_*` 配置：
 
@@ -246,7 +247,7 @@ export DS_AGENT_API_MODEL=deepseek/deepseek-flash
 pnpm demo
 ```
 
-[GitHub Actions](./.github/workflows/ci.yml) 在推送到 `main` 和每个 pull request 上跑 `pnpm typecheck` 与 `pnpm test`。仓库 secret 里有 `DEEPSEEK_API_KEY` 或 `DS_AGENT_API_KEY` 时才会跑 demo，并且打真模型。
+[GitHub Actions](./.github/workflows/ci.yml) 在推送到 `main` 和每个 pull request 上跑 `pnpm typecheck` 与 `pnpm test`。仓库 secret 里有 `DEEPSEEK_API_KEY` 或 `DS_AGENT_API_KEY` 时运行 `pnpm demo:local`（内存 fixture 冒烟，不写仓库）；真实信道验收由有 `gh` 登录的运维者运行 `pnpm demo`。
 
 状态在 `DS_AGENT_HOME`，否则在 `./.ds-agent`（SQLite）。
 
@@ -258,20 +259,30 @@ pnpm ds-agent emit im --thread bug-login --text "login still 500"
 pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 ```
 
-## Demo
+## Demo（真实信道）
 
-`pnpm demo` 注入一批假 IM / GitHub 事件，验收管线：噪声过滤、Ticket → Worker、`bypass=subscription`、Spill + `read_object`、投机 gate、Watchdog、重启持久化。
+`pnpm demo` 是验收路径，只走真实信道：
 
-没有 Key 时用 MockModel，并在日志里写明。配了真接口就走 HttpOpenAI，并跳过脚本化的 Mock 断言。
+| 场景 | 真实入站 Source | 真实出站 Outbox |
+|------|-----------------|-----------------|
+| `01-parallel-github` | 三个真实 GitHub issue（`gh api` 拉取） | 每个 ticket 一条真实 issue comment |
+| `02-spill-github` | 一个真实 issue 正文 + 两条真实 comment | Router 回复写成 issue comment |
+| `03-watchdog-github` | 一个真实 GitHub issue | acknowledgement issue comment |
+
+每次运行在 `DS_AGENT_GH_REPO`（默认 `LofiSu/deepseek-super-agent`）创建新 issue，等待真实 Magpie/DeepSeek 模型，发布真实 comment，再通过 GitHub API 重新读取 comment 作为验收证据。默认运行后关闭 issue；`DS_AGENT_GH_KEEP=1` 保留。日志与 JSON 证据在 `/tmp/ds-agent-live-e2e-logs/demos/`。
 
 ```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-flash
-pnpm demo
+export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
+export DS_AGENT_API_KEY=magpie
+export DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash
+export DS_AGENT_GH_REPO=LofiSu/deepseek-super-agent
+gh auth login
+pnpm demo                              # 三个场景
+pnpm demo -- --only watchdog           # 单个场景
+DS_AGENT_GH_KEEP=1 pnpm demo           # 保留真实 issue
 ```
 
-环境里已经有 Key 时，`pnpm test:live` 跑同一条实况路径。
+`pnpm demo:local` 是旧的纯内存 fixture 基线，不是信道验收路径。设置 `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_CHAT_ID` 后，`pnpm demo:feishu` 会走真实 Feishu 消息 API。环境里已经有 Key 时，`pnpm test:live` 跑实况模型测试。
 
 ## 模型配置
 
@@ -315,11 +326,13 @@ LofiSu × Grokbot（CoderBot）。
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
 export DS_AGENT_API_KEY=magpie
 export DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash
+export DS_AGENT_GH_REPO=LofiSu/deepseek-super-agent
+gh auth login
 pnpm test
-pnpm demo
+pnpm demo          # 真实 GitHub issue/comment + 真实模型
 ```
 
-未设置环境变量时由 `test/setup-live.ts` 填入 Magpie 默认值。E2E 日志目录：`/tmp/ds-agent-live-e2e-logs/`。
+未设置环境变量时由 `test/setup-live.ts` 填入 Magpie 默认值。E2E 日志目录：`/tmp/ds-agent-live-e2e-logs/`；真实信道 demo 日志与证据：`/tmp/ds-agent-live-e2e-logs/demos/`。
 
 ## 许可
 

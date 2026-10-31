@@ -140,7 +140,7 @@ A Channel enters Ingress, then the Engine. The Engine routes and batches, then r
 ```mermaid
 flowchart TB
   subgraph Channels["Channel"]
-    C1[CLI / fake IM / fake GitHub]
+    C1[CLI / Feishu IM / GitHub (real adapters)]
   end
 
   subgraph Ingress["Ingress"]
@@ -222,10 +222,11 @@ Node.js 22+. See `engines` in [package.json](./package.json). The store uses `no
 ```bash
 pnpm install
 pnpm test
+gh auth login            # real GitHub Source + Outbox
 pnpm demo
 ```
 
-`pnpm test` and `pnpm demo` both require a live OpenAI-compatible model. MockModel is forbidden in the default suite and demo.
+`pnpm test` and `pnpm demo` both require a live OpenAI-compatible model. MockModel is forbidden in the default suite and demo. `pnpm demo` uses real channels only: it creates/reads real GitHub issues and posts real issue comments through `gh api`; there is no fake IM/GitHub fallback. `pnpm demo:local` is an in-memory fixture baseline for offline smoke checks, not the acceptance path. Feishu setup and `pnpm demo:feishu` are documented in [docs/REAL_CHANNELS.md](./docs/REAL_CHANNELS.md).
 
 Set both `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY` (or a provider key). Setting only one of that pair exits with an error. Local Magpie defaults are applied by `test/setup-live.ts` when unset.
 
@@ -250,7 +251,7 @@ export DS_AGENT_API_MODEL=deepseek/deepseek-flash
 pnpm demo
 ```
 
-[GitHub Actions](./.github/workflows/ci.yml) runs `pnpm typecheck` and `pnpm test` on pushes to `main` and on pull requests. The demo job runs when `DEEPSEEK_API_KEY` or `DS_AGENT_API_KEY` is set as a secret, and then calls the live model.
+[GitHub Actions](./.github/workflows/ci.yml) runs `pnpm typecheck` and `pnpm test` on pushes to `main` and on pull requests. The demo job runs `pnpm demo:local` (in-memory fixture smoke, no repository writes) when `DEEPSEEK_API_KEY` or `DS_AGENT_API_KEY` is set; real-channel acceptance is `pnpm demo` run by an operator with `gh` auth.
 
 State lives in `DS_AGENT_HOME`, or in `./.ds-agent` (SQLite).
 
@@ -262,20 +263,30 @@ pnpm ds-agent emit im --thread bug-login --text "login still 500"
 pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 ```
 
-## Demo
+## Demo (real channels)
 
-`pnpm demo` injects fake IM and GitHub events. It checks noise filtering, Ticket → Worker, `bypass=subscription`, Spill + `read_object`, the speculative deliver gate, Watchdog, and restart persistence.
+`pnpm demo` is the acceptance path and it uses real channels only:
 
-Demo always uses HttpOpenAI. Without a live API it exits. Proofs are engine-side markers that still hold with a real model.
+| Scenario | Real inbound Source | Real outbound Outbox |
+|----------|---------------------|----------------------|
+| `01-parallel-github` | three real GitHub issues pulled via `gh api` | one issue comment per ticket |
+| `02-spill-github` | one real issue body + two real comments | Router replies as issue comments |
+| `03-watchdog-github` | one real issue pulled via `gh api` | acknowledgement issue comment |
+
+Each run creates fresh issues on `DS_AGENT_GH_REPO` (default `LofiSu/deepseek-super-agent`), waits for the live Magpie/DeepSeek model, posts real comments, then re-reads those comments from the GitHub API as proof. Issues are closed at the end unless `DS_AGENT_GH_KEEP=1`. Logs and JSON proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`.
 
 ```bash
-export DS_AGENT_API_BASE=https://api.deepseek.com
-export DS_AGENT_API_KEY=sk-...
-export DS_AGENT_API_MODEL=deepseek-flash
-pnpm demo
+export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
+export DS_AGENT_API_KEY=magpie
+export DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash
+export DS_AGENT_GH_REPO=LofiSu/deepseek-super-agent
+gh auth login
+pnpm demo                              # all three scenarios
+pnpm demo -- --only watchdog           # one scenario
+DS_AGENT_GH_KEEP=1 pnpm demo           # keep the real issues open
 ```
 
-`pnpm test:live` runs that path when a key is already in the environment.
+`pnpm demo:local` runs the legacy in-memory fixture baseline; it is not the channel acceptance path. `pnpm demo:feishu` exercises the real Feishu message API when `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_CHAT_ID` are set. `pnpm test:live` runs the live-model tests when a key is already in the environment.
 
 ## Phase-2 opt-in
 
@@ -327,11 +338,13 @@ Measured on a local [Magpie](https://github.com/yetone/magpie) gateway (Asia/Sha
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
 export DS_AGENT_API_KEY=magpie
 export DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash
+export DS_AGENT_GH_REPO=LofiSu/deepseek-super-agent
+gh auth login
 pnpm test
-pnpm demo
+pnpm demo          # real GitHub issues/comments + live model
 ```
 
-`test/setup-live.ts` applies those Magpie defaults when the env vars are unset. Transcripts from the E2E cases land under `/tmp/ds-agent-live-e2e-logs/`. Update the pass/fail counts in this section after each live run.
+`test/setup-live.ts` applies those Magpie defaults when the env vars are unset. Transcripts from the E2E cases land under `/tmp/ds-agent-live-e2e-logs/`; real-channel demo logs and proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`. Update the pass/fail counts in this section after each live run.
 
 ## License
 

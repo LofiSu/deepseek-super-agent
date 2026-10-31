@@ -53,6 +53,20 @@ CREATE TABLE IF NOT EXISTS replies (
   status TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS outbox (
+  id TEXT PRIMARY KEY,
+  reply_id TEXT NOT NULL,
+  ticket_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  thread TEXT NOT NULL,
+  target TEXT NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL,
+  external_id TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  sent_at TEXT
+);
 CREATE TABLE IF NOT EXISTS subscriptions (
   thread_key TEXT NOT NULL,
   ticket_id TEXT NOT NULL,
