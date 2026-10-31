@@ -330,7 +330,7 @@ Testing:
 - pnpm typecheck: pass
 - pnpm test: not green in this pass. Focused files: 29/30 and 18/19; both failures are 180s live-model timeouts.
 - pnpm demo (live): exit 0, "demo ok (live model)", jobsSettled outcome=deadline.
-Risk: 中 (docs-only)
+Risk: 低 (docs-only)
 How to revert: git revert the merge. This PR adds one file under docs/ and changes no runtime code.
 ```
 
