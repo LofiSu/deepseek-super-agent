@@ -12,6 +12,7 @@ export class Tickets {
     primary: Trigger
     strength: Strength
     evalId: string
+    reason?: string
   }): Decision {
     const now = this.host.now()
     const id = this.host.repo.nextId('ticket')
@@ -71,7 +72,7 @@ export class Tickets {
       kind: 'accept',
       ticketId: id,
       at: now,
-      reason: speculative ? 'speculative' : 'accepted',
+      reason: input.reason ?? (speculative ? 'speculative' : 'accepted'),
       strength: input.strength,
     }
     this.host.repo.putDoc('decision', decision.id, decision)

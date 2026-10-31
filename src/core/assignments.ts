@@ -1,14 +1,11 @@
 import { HeuristicDeliverGate, type DeliverGate } from '../speculate/gate.ts'
 import type { SurfaceVerdict } from '../speculate/silent.ts'
 import { UserError } from '../shared/errors.ts'
+import type { WorkerReport } from '../shared/ports.ts'
 import type { Assignment, Ticket } from '../shared/types.ts'
 import type { Host } from './host.ts'
 
-export interface WorkerReport {
-  kind: string
-  text: string
-  deliver?: boolean
-}
+export type { WorkerReport }
 
 export interface ReportResult {
   surfaced: boolean

@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { Engine } from './core/engine.ts'
+import { bindRolePorts } from './core/role-ports.ts'
 import type { Host } from './core/host.ts'
 import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
@@ -103,7 +104,7 @@ export class Runtime {
     const late: { harness?: Harness } = {}
     const tools = new ToolRegistry({
       store,
-      engine,
+      ports: bindRolePorts(engine),
       env,
       metrics,
       redact,
@@ -121,7 +122,9 @@ export class Runtime {
       model,
       tools,
       store,
-      engine,
+      assignmentStarted: (ticketId, assignmentId, sessionId) => {
+        engine.assignmentStarted(ticketId, assignmentId, sessionId)
+      },
       journal,
       metrics,
       redact,

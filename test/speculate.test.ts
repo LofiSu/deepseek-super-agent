@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { githubTrigger } from '../src/channels/github.ts'
 import { imTrigger } from '../src/channels/im.ts'
 import { Engine } from '../src/core/engine.ts'
+import { bindRolePorts } from '../src/core/role-ports.ts'
 import type { Host } from '../src/core/host.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
@@ -179,7 +180,7 @@ describe('speculative workdir', () => {
     const env = new LocalEnv(path.join(home, 'workspaces'))
     const tools = new ToolRegistry({
       store,
-      engine,
+      ports: bindRolePorts(engine),
       env,
       metrics: new Metrics(path.dirname(store.path)),
       redact: (text: string) => text,
@@ -238,7 +239,7 @@ describe('speculative workdir', () => {
     const env = new LocalEnv(path.join(home, 'workspaces'))
     const tools = new ToolRegistry({
       store,
-      engine,
+      ports: bindRolePorts(engine),
       env,
       metrics: new Metrics(path.dirname(store.path)),
       redact: (text: string) => text,
@@ -293,7 +294,7 @@ describe('speculative workdir', () => {
     }
     const tools = new ToolRegistry({
       store,
-      engine,
+      ports: bindRolePorts(engine),
       env,
       metrics: new Metrics(path.dirname(store.path)),
       redact: (text: string) => text,
@@ -330,7 +331,7 @@ describe('speculative workdir', () => {
     const env = new LocalEnv(path.join(home, 'workspaces'))
     const tools = new ToolRegistry({
       store,
-      engine,
+      ports: bindRolePorts(engine),
       env,
       metrics: new Metrics(path.dirname(store.path)),
       redact: (text: string) => text,

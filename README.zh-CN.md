@@ -50,7 +50,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Trigger 批处理（拥堵时合并进下一轮）** — 同 Thread Eval batch；demo/测试覆盖
 - [ ] **Router 水平切分 / 多层过滤** — 文章 §2/§8；Phase-2（PLAN T09）
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
-- [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站
+- [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
 - [~] **Worker 内 Subagent / Team 对 Router 透明** — 有 async job；未做成完整 Team 拓扑（T14）
 - [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；产品壳未做（T15）
