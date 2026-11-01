@@ -12,7 +12,9 @@ Inspired by DeepSeek's public article and prototype. Independent implementation.
 
 Author: LofiSu. Co-written with Grokbot (CoderBot).
 
-[Inspiration](#inspiration) · [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Demo](#demo) · [Models](#models) · [Credits](#credits) · [License](#license)
+[Docs](docs/index.md) · [Inspiration](#inspiration) · [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Demo](#demo) · [Models](#models) · [Credits](#credits) · [License](#license)
+
+Shorter pages, same facts: [install](docs/install.md), [architecture](docs/architecture.md), [safety](docs/safety.md). [中文](docs/zh/index.md).
 
 ## What this is
 

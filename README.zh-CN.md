@@ -12,7 +12,9 @@ CLI：`ds-agent` · MIT
 
 LofiSu × Grokbot（CoderBot）。
 
-[灵感来源](#灵感来源) · [能力清单](#能力清单) · [架构](#架构) · [快速开始](#快速开始) · [Demo](#demo) · [模型配置](#模型配置) · [致谢](#致谢) · [许可](#许可)
+[文档](docs/zh/index.md) · [灵感来源](#灵感来源) · [能力清单](#能力清单) · [架构](#架构) · [快速开始](#快速开始) · [Demo](#demo) · [模型配置](#模型配置) · [致谢](#致谢) · [许可](#许可)
+
+更短的几页，事实相同：[安装](docs/zh/install.md)、[架构](docs/zh/architecture.md)、[安全](docs/zh/safety.md)。[English](docs/index.md)。
 
 ## 这是什么
 

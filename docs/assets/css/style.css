@@ -1,0 +1,272 @@
+:root {
+  color-scheme: light;
+  --paper: #f4f0e6;
+  --paper-2: #e7e0d2;
+  --ink: #1c1916;
+  --ink-soft: #3a342e;
+  --rule: #d5cbbd;
+  --accent: #8a342c;
+  --accent-ink: #6b2420;
+  --focus: #1d4a38;
+  --sans: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --serif: Georgia, "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", "STSong", "PMingLiU", "Noto Serif CJK SC", serif;
+  --mono: ui-monospace, "SFMono-Regular", "Source Code Pro", Menlo, Consolas, monospace;
+  --measure: 40rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--paper);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 1.125rem;
+  line-height: 1.75;
+  border-top: 4px solid var(--accent);
+}
+
+.skip {
+  position: absolute;
+  left: 0.75rem;
+  top: -4rem;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 0.4rem 0.7rem;
+  z-index: 2;
+}
+
+.skip:focus {
+  top: 0.75rem;
+}
+
+.site-header,
+main,
+.site-footer {
+  width: min(var(--measure), calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.site-header {
+  padding: 2.25rem 0 1.1rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0;
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.brand-slash {
+  color: var(--accent);
+  padding-inline: 0.4rem;
+  letter-spacing: 0;
+}
+
+.tagline {
+  margin: 0.55rem 0 0;
+  max-width: 36em;
+  color: var(--ink-soft);
+  font-size: 1.05rem;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+.site-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.15rem;
+  margin-top: 1.1rem;
+  font-family: var(--sans);
+  font-size: 0.98rem;
+}
+
+.site-header nav a[aria-current="page"] {
+  color: var(--ink);
+  text-decoration-thickness: 2px;
+}
+
+main {
+  flex: 1;
+  padding: 1.75rem 0 3rem;
+}
+
+.banner {
+  margin: 0 0 1.4rem;
+}
+
+.banner img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.site-footer {
+  padding: 1.25rem 0 2rem;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-soft);
+  font-family: var(--sans);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.site-footer p {
+  margin: 0.2rem 0;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--sans);
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+h1 {
+  margin: 0 0 0.8rem;
+  font-size: clamp(1.7rem, 4vw, 2.15rem);
+}
+
+h2 {
+  margin: 2rem 0 0.6rem;
+  font-size: 1.2rem;
+}
+
+h3 {
+  margin: 1.5rem 0 0.4rem;
+  font-size: 1.05rem;
+}
+
+p,
+ul,
+ol,
+pre,
+table,
+blockquote {
+  margin: 0.8rem 0;
+}
+
+a {
+  color: var(--accent-ink);
+  text-underline-offset: 0.18em;
+}
+
+a:visited {
+  color: var(--accent-ink);
+}
+
+a:hover {
+  color: var(--accent);
+}
+
+a:focus-visible,
+.skip:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: var(--paper-2);
+  padding: 0.08em 0.32em;
+}
+
+pre,
+.highlight {
+  overflow-x: auto;
+  padding: 0.9rem 1rem;
+  background: #241f1b;
+  color: #f4f0e6;
+  line-height: 1.55;
+}
+
+pre code,
+.highlight code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: 0.84rem;
+}
+
+blockquote {
+  margin-inline: 0;
+  padding-left: 1rem;
+  border-left: 3px solid var(--rule);
+  color: var(--ink-soft);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 2rem 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.98rem;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  padding: 0.4rem 0.6rem 0.4rem 0;
+  vertical-align: top;
+}
+
+.flow {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+@media (max-width: 36rem) {
+  body {
+    font-size: 1.05rem;
+  }
+}
+
+@media print {
+  body {
+    border-top: 0;
+    background: #fff;
+  }
+
+  .skip,
+  .site-header nav {
+    display: none;
+  }
+
+  a {
+    text-decoration: none;
+    color: var(--ink);
+  }
+}
