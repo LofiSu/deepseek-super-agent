@@ -25,7 +25,7 @@ Router talks and dispatches. Workers execute. Triggers drive the loop. Watchdog 
 
 ## Run it
 
-Node.js 22+, [pnpm](https://pnpm.io/). `pnpm test` and `pnpm demo` need a live OpenAI-compatible model. There is no mock on that path.
+Node.js 22+, [pnpm](https://pnpm.io/). Set `DS_AGENT_API_BASE`, `DS_AGENT_API_KEY`, and `DS_AGENT_API_MODEL` before `pnpm test`. Before `pnpm demo`, point `DS_AGENT_GH_REPO` at a repository you can write. There is no mock on that path.
 
 [Install and run]({{ '/install/' | relative_url }}) · [Architecture]({{ '/architecture/' | relative_url }}) · [Safety]({{ '/safety/' | relative_url }})
 

@@ -26,7 +26,7 @@ Router 负责说话和分派。Worker 负责执行。Trigger 驱动循环。Watc
 
 ## 跑起来
 
-Node.js 22 或更高，包管理用 [pnpm](https://pnpm.io/)。`pnpm test` 和 `pnpm demo` 都要一个能打通的 OpenAI 兼容模型。这两条路径不用 mock。
+Node.js 22 或更高，包管理用 [pnpm](https://pnpm.io/)。跑 `pnpm test` 之前先设 `DS_AGENT_API_BASE`、`DS_AGENT_API_KEY`、`DS_AGENT_API_MODEL`。跑 `pnpm demo` 之前，把 `DS_AGENT_GH_REPO` 指到你能写的仓库。这两条路径不用 mock。
 
 [安装和运行]({{ '/zh/install/' | relative_url }}) · [架构]({{ '/zh/architecture/' | relative_url }}) · [安全]({{ '/zh/safety/' | relative_url }})
 
