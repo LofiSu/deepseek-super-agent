@@ -15,7 +15,7 @@ function sbplString(value: string): string {
 }
 
 function darwinProfile(policy: SandboxPolicy): string {
-  const writes = ['/private/tmp', '/tmp', '/var/folders', ...(policy.writableRoots ?? [])]
+  const writes = ['/private/tmp', '/tmp', '/var/folders', '/private/var/folders', ...(policy.writableRoots ?? [])]
   const lines = [
     '(version 1)',
     '(deny default)',
