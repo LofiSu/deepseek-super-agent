@@ -23,14 +23,48 @@ export interface FilterVerdict {
   semantic: string
 }
 
+/**
+ * Deterministic admission rules (T16). They run before mention/keyword, so a
+ * deny rule cannot be overridden by an @-mention. These are admission filters,
+ * not authentication: an adapter that trusts a peer still has to verify it.
+ */
+export interface AdmissionRules {
+  /** When non-empty, only these `trigger.actor.id` values may pass. */
+  actors?: string[]
+  /**
+   * When non-empty, only these group ids may pass. The id comes from the
+   * channel address (`trigger.channel.address.group`), never from `meta`.
+   * A missing group is not allowed while this list is active.
+   */
+  groups?: string[]
+  /** Always drop when `trigger.actor.id` matches, e.g. the daemon's own bot id. */
+  dropSelf?: string[]
+}
+
+function admissionDeny(trigger: Trigger, rules?: AdmissionRules): string | undefined {
+  if (!rules) return undefined
+  if (rules.dropSelf?.length && rules.dropSelf.includes(trigger.actor.id)) return 'self-drop'
+  if (rules.actors?.length && !rules.actors.includes(trigger.actor.id)) {
+    return 'actor-not-allowlisted'
+  }
+  if (rules.groups?.length) {
+    const group = trigger.channel?.address?.group?.trim()
+    if (!group || !rules.groups.includes(group)) return 'group-not-allowlisted'
+  }
+  return undefined
+}
+
 function addressed(trigger: Trigger): boolean {
   return trigger.addressed === 'mention'
     || trigger.addressed === 'direct'
     || /@ds-agent\b/i.test(trigger.text)
 }
 
-/** Program fast path: source allowlist, mention, keyword, obvious noise. */
-export function fastPath(trigger: Trigger): { pass: boolean; reason: string } {
+/** Program fast path: admission rules, source allowlist, mention, keyword, obvious noise. */
+export function fastPath(
+  trigger: Trigger,
+  admission?: AdmissionRules,
+): { pass: boolean; reason: string } {
   if (
     trigger.source !== 'im'
     && trigger.source !== 'github'
@@ -39,7 +73,10 @@ export function fastPath(trigger: Trigger): { pass: boolean; reason: string } {
   ) {
     return { pass: false, reason: 'source-not-allowlisted' }
   }
+  // Deny rules precede mention/keyword so an allowlist-plus-mention still drops.
   // No meta-based admission: `meta` is data, never a filter bypass.
+  const denied = admissionDeny(trigger, admission)
+  if (denied) return { pass: false, reason: denied }
   if (addressed(trigger)) return { pass: true, reason: 'mention-or-direct' }
   if (ACTION.test(trigger.text)) return { pass: true, reason: 'keyword' }
   if (NOISE.test(trigger.text) || trigger.text.trim().length < 12) {
@@ -71,8 +108,12 @@ export function ruleClassify(trigger: Trigger): SemanticHit {
 }
 
 /** Two-level filter. Fast path can drop before the semantic layer agrees. */
-export function filterTrigger(trigger: Trigger, model: SemanticModel): FilterVerdict {
-  const fast = fastPath(trigger)
+export function filterTrigger(
+  trigger: Trigger,
+  model: SemanticModel,
+  admission?: AdmissionRules,
+): FilterVerdict {
+  const fast = fastPath(trigger, admission)
   const semantic = model.classify(trigger)
   const fastLabel = `${fast.pass ? 'pass' : 'drop'}:${fast.reason}`
   const semanticLabel = `${semantic.pass ? 'pass' : 'drop'}:${semantic.reason}`

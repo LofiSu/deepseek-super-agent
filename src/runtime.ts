@@ -22,7 +22,7 @@ import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, roleModelsFromEnv, type Model } from './harness/model.ts'
 import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
-import { filterTrigger } from './ingress/filter.ts'
+import { filterTrigger, type AdmissionRules } from './ingress/filter.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
 import { inlineOrSpill } from './memory/recall.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
@@ -61,6 +61,11 @@ export interface RuntimeOptions {
   routerShards?: RouterShard[]
   /** T45 bake-off baseline: run one Worker chain with no Router turn. */
   singleSession?: boolean
+  /**
+   * T16 deterministic admission rules. Overrides `DS_AGENT_ACTOR_ALLOWLIST`,
+   * `DS_AGENT_GROUP_ALLOWLIST`, and `DS_AGENT_DROP_SELF`.
+   */
+  admission?: AdmissionRules
   /**
    * Long-term memory retention. Overrides `DS_AGENT_MEMORY_MAX_ENTRIES` /
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
@@ -101,6 +106,29 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback
 }
 
+/** Comma-separated ids: trimmed, empty entries ignored, empty result is unset. */
+function parseIdList(raw: string | undefined): string[] | undefined {
+  if (raw == null || raw.trim() === '') return undefined
+  const ids = raw.split(',').map(id => id.trim()).filter(id => id.length > 0)
+  return ids.length ? ids : undefined
+}
+
+/**
+ * Resolve T16 admission rules. Explicit `admission` fields win over env; an
+ * explicit empty list disables that rule. Unset lists stay `undefined` so the
+ * fast path behaves exactly as before.
+ */
+export function admissionRulesFromEnv(
+  env: NodeJS.ProcessEnv,
+  override: AdmissionRules = {},
+): AdmissionRules {
+  return {
+    actors: override.actors ?? parseIdList(env.DS_AGENT_ACTOR_ALLOWLIST),
+    groups: override.groups ?? parseIdList(env.DS_AGENT_GROUP_ALLOWLIST),
+    dropSelf: override.dropSelf ?? parseIdList(env.DS_AGENT_DROP_SELF),
+  }
+}
+
 class RedactingLogger extends Logger {
   constructor(private readonly clean: (line: string) => string) {
     super()
@@ -134,6 +162,7 @@ export class Runtime {
 
   private readonly redact: (text: string) => string
   private readonly batchWindowMs: number
+  private readonly admission: AdmissionRules
   private evalTimer: ReturnType<typeof setTimeout> | undefined
 
   private constructor(parts: {
@@ -155,6 +184,7 @@ export class Runtime {
     a2aRouter: A2ARouter
     redact: (text: string) => string
     batchWindowMs: number
+    admission: AdmissionRules
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -174,6 +204,7 @@ export class Runtime {
     this.a2aRouter = parts.a2aRouter
     this.redact = parts.redact
     this.batchWindowMs = parts.batchWindowMs
+    this.admission = parts.admission
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -213,8 +244,15 @@ export class Runtime {
     const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
     const lifecycle = new LifecycleBus()
     const a2aRouter = new A2ARouter(store)
+    // T16 admission is deterministic and runs before mention/keyword. Ids only.
+    const admission = admissionRulesFromEnv(baseEnv, opts.admission)
     log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} shards=${routerShards.list().length}`)
     log.info(`[runtime] model=${model.name}`)
+    if (admission.actors || admission.groups || admission.dropSelf) {
+      log.info(
+        `[ingress] admission actors=${admission.actors?.join(',') ?? '-'} groups=${admission.groups?.join(',') ?? '-'} dropSelf=${admission.dropSelf?.join(',') ?? '-'}`,
+      )
+    }
     const host: Host = {
       repo: store,
       now,
@@ -224,7 +262,7 @@ export class Runtime {
         // Admission is computed here every time. `trigger.meta` is untrusted and
         // never short-circuits the filter (docs/REVIEW.md C1).
         admit: trigger => {
-          const verdict = filterTrigger(trigger, model)
+          const verdict = filterTrigger(trigger, model, admission)
           if (verdict.action === 'drop') return { listened: false, reason: `${verdict.layer}:${verdict.reason}` }
           return { listened: true, reason: verdict.reason }
         },
@@ -358,6 +396,7 @@ export class Runtime {
       a2aRouter,
       redact,
       batchWindowMs: opts.batchWindowMs ?? 0,
+      admission,
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     host.onAssessmentNeeded = () => runtime.assessPending()
@@ -438,7 +477,7 @@ export class Runtime {
       return result
     }
     const safe: Trigger = { ...trigger, text: this.redact(trigger.text) }
-    const verdict = filterTrigger(safe, this.model)
+    const verdict = filterTrigger(safe, this.model, this.admission)
     if (verdict.action === 'pass') this.metrics.increment('ingress.admit')
     else this.metrics.increment('ingress.drop')
     this.log.info(
