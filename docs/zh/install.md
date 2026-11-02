@@ -60,7 +60,7 @@ pnpm ds-agent status
 pnpm ds-agent metrics
 ```
 
-Phase-2 默认关着。要开的话设 `DS_AGENT_PHASE2=1`。
+可选扩展默认关着。要开的话设 `DS_AGENT_PHASE2=1`。
 
 关掉这些 issue 只是收尾。每个场景都是正事做完才调 `closeGithubIssues`。关闭请求失败会被忽略，issue 还开着，demo 也不会因此判失败。场景中途抛错，或者在这次调用之前就 return，已经建出来的 issue 也会留着：后面的 `createIssue` 可能在前面几条已经建好之后失败；watchdog 场景在 issue 没有 trigger 时直接返回；spill 场景缺 trigger 时也直接返回。`DS_AGENT_GH_KEEP=1` 是故意不关。跑完去仓库里看一眼，还有没有带着 `ds-agent-demo` 标签、仍然开着的 issue。
 

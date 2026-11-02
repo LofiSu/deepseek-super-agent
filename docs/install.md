@@ -59,7 +59,7 @@ pnpm ds-agent status
 pnpm ds-agent metrics
 ```
 
-Phase-2 helpers stay off unless you set `DS_AGENT_PHASE2=1`.
+Opt-in extension helpers stay off unless you set `DS_AGENT_PHASE2=1`.
 
 Closing those issues is best-effort. Each scenario calls `closeGithubIssues` only after its main work. A failed close is ignored, so the issue stays open and the demo does not fail for that. A throw, or a return before that call, also leaves issues open: a later `createIssue` can fail after earlier ones exist, the watchdog scenario returns when the issue has no trigger, and the spill scenario returns when a trigger is missing. `DS_AGENT_GH_KEEP=1` skips the close on purpose. After a run, look through the repo for open issues labeled `ds-agent-demo`.
 
