@@ -200,7 +200,8 @@ function higherSubscriber(left: Ticket, right: Ticket): Ticket {
   if (a.rank !== b.rank) return a.rank > b.rank ? left : right
   if (a.at !== b.at) return a.at > b.at ? left : right
   if (left.createdAt !== right.createdAt) return left.createdAt > right.createdAt ? left : right
-  return left.id > right.id ? left : right
+  // Natural order: ticket_10 is later than ticket_9, unlike a raw string compare.
+  return left.id.localeCompare(right.id, 'en', { numeric: true }) > 0 ? left : right
 }
 
 function subscriberScore(ticket: Ticket): { rank: number; at: string } {

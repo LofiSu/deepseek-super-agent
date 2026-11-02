@@ -80,6 +80,15 @@ export class Engine {
     this.host.repo.atomic(() => { this.assignments.retry(ticketId, reason) })
   }
 
+  /** Watchdog-only failure. Separate from worker reports so `watchdog.fail` stays accurate. */
+  watchdogFail(ticketId: string, reason: string): ReportResult {
+    return this.host.repo.atomic(() => this.assignments.report(ticketId, {
+      kind: 'failed',
+      text: reason,
+      deliver: false,
+    }, 'watchdog'))
+  }
+
   /** Freeze a live ticket. Router turns, Worker turns, reports, and replies stop. */
   pause(ticketId: string, input: PauseInput = {}): PauseOutcome {
     return this.host.repo.atomic(() => this.collaborations.pause(ticketId, input))
@@ -119,6 +128,20 @@ export class Engine {
           ticketId: ticket.id,
           purpose,
           pausedAt: ticket.collab.paused.at,
+        })
+        return
+      }
+      // A ticket that was speculative when it stopped never passed the delivery
+      // gate. Stopping clears `speculative` for visibility, so the end record
+      // carries `silent` and only that blocks a reply; a normal stopped ticket
+      // may still report partial findings.
+      if (ticket.ended?.silent === true) {
+        this.host.log(`[engine] reply held ticketId=${ticket.id} purpose=${purpose} ended=${ticket.ended.outcome}`)
+        this.host.repo.addEvent('collab.reply_held', {
+          ticketId: ticket.id,
+          purpose,
+          reason: 'ended-speculative',
+          outcome: ticket.ended.outcome,
         })
         return
       }

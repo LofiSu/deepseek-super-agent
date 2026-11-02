@@ -179,7 +179,7 @@ export class Evals {
       })
     }
     this.host.repo.putDoc('thread', thread.key, thread)
-    if (outcome.kind === 'stop') this.stopTicket(outcome.ticketId)
+    if (outcome.kind === 'stop') this.stopTicket(outcome.ticketId, outcome.reason)
     const now = this.host.now()
     const decision: Decision = {
       id: this.host.repo.nextId('dec'),
@@ -197,30 +197,10 @@ export class Evals {
     return decision
   }
 
-  private stopTicket(ticketId: string, by: 'human' | 'router' = 'router'): void {
-    const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
-    if (!ticket) throw new UserError(`unknown ticket ${ticketId}`)
-    const now = this.host.now()
-    const wasLive = !ticket.ended
-    if (!ticket.ended) ticket.ended = { at: now, outcome: 'stopped', by }
-    const assignment = ticket.assignments.at(-1)
-    if (assignment && assignment.state !== 'ended') {
-      assignment.state = 'ended'
-      assignment.endedAt = now
-      this.host.repo.addEvent('assignment.ended', {
-        ticketId: ticket.id,
-        assignmentId: assignment.id,
-        kind: 'stop',
-      })
-    }
-    this.host.repo.putDoc('ticket', ticket.id, ticket)
-    this.host.log(`[engine] Evals.stop ticketId=${ticket.id}`)
-    if (!wasLive) return
-    try {
-      this.host.onTicketEnded?.(ticket)
-    } catch (error) {
-      this.host.log(`[hook] hook=ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`)
-    }
+  /** Delegate to the shared stop path so scratch cleanup runs for every entrypoint. */
+  private stopTicket(ticketId: string, reason: string, by: 'human' | 'router' = 'router'): void {
+    this.tickets.stop(ticketId, reason, by)
+    this.host.log(`[engine] Evals.stop ticketId=${ticketId}`)
   }
 }
 

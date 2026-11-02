@@ -12,7 +12,8 @@ import type { RolePorts } from '../src/shared/ports.ts'
 import type { Store } from '../src/store/sqlite.ts'
 import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
 
-const secret = 'sk-regression-key-9f3a7c'
+// Deliberately not credential-shaped: exact-value redaction must do the work.
+const secret = 'regression-secret-9f3a7c'
 let runtime: Runtime | undefined
 const dirs: string[] = []
 
@@ -39,6 +40,49 @@ describe('secret redaction', () => {
       ['PATH', 'DS_AGENT_API_KEY', 'FOO'],
     )).toEqual({ PATH: '/usr/bin', FOO: '1' })
     expect(redactSecrets(`a ${secret} b ${secret}`, [secret])).toBe('a [redacted] b [redacted]')
+  })
+
+  it('redacts recognisable credentials read from files', () => {
+    const body = [
+      '[default]',
+      'aws_access_key_id = AKIAABCDEFGHIJKLMNOP',
+      'aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      'token=ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+      '-----BEGIN RSA PRIVATE KEY-----',
+      'MIIEowIBAAKCAQEA',
+      '-----END RSA PRIVATE KEY-----',
+    ].join('\n')
+    const clean = redactSecrets(body, [])
+    expect(clean).not.toContain('AKIAABCDEFGHIJKLMNOP')
+    expect(clean).not.toContain('wJalrXUtnFEMI')
+    expect(clean).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+    expect(clean).not.toContain('MIIEowIBAAKCAQEA')
+    expect(clean).toContain('[redacted]')
+    expect(redactSecrets('key sk-abcdefghijklmnopqrst', [])).not.toContain('sk-abcdefghijklmnopqrst')
+  })
+
+  it('redacts truncated keys, temporary AWS keys, and AWS CLI JSON', () => {
+    const truncated = redactSecrets([
+      '-----BEGIN PRIVATE KEY-----',
+      'MIIEowIBAAKCAQEAtruncated',
+    ].join('\n'), [])
+    expect(truncated).not.toContain('MIIEowIBAAKCAQEAtruncated')
+
+    const asia = redactSecrets('key=ASIAABCDEFGHIJKLMNOP', [])
+    expect(asia).not.toContain('ASIAABCDEFGHIJKLMNOP')
+
+    const json = redactSecrets(JSON.stringify({
+      AccessKeyId: 'ASIAABCDEFGHIJKLMNOP',
+      SecretAccessKey: 'abc123secret',
+      SessionToken: 'tok-987',
+    }), [])
+    expect(json).not.toContain('abc123secret')
+    expect(json).not.toContain('tok-987')
+    expect(json).not.toContain('ASIAABCDEFGHIJKLMNOP')
+
+    // An empty assignment must not consume the next line's field name.
+    const empty = redactSecrets('aws_access_key_id = \naws_secret_access_key = SECRETVALUE', [])
+    expect(empty).not.toContain('SECRETVALUE')
   })
 
   it('never returns API key values from LocalEnv tool output', async () => {

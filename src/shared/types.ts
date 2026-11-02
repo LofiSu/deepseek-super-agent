@@ -197,6 +197,8 @@ export interface TicketEnd {
   at: string
   outcome: string
   by: 'executor' | 'human' | 'watchdog' | 'router'
+  /** The ticket was speculative at stop time and never passed the delivery gate. */
+  silent?: boolean
 }
 
 export interface Ticket {

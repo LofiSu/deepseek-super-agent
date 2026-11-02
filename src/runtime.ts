@@ -20,7 +20,7 @@ import { Harness } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, roleModelsFromEnv, type Model } from './harness/model.ts'
-import { SessionJournal } from './harness/session.ts'
+import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger } from './ingress/filter.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
@@ -185,6 +185,7 @@ export class Runtime {
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
+    const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const now = opts.now ?? (() => new Date().toISOString())
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
@@ -258,9 +259,9 @@ export class Runtime {
         metrics.increment('memory.remembered')
         log.info(`[memory] ticket.ended ticketId=${ticket.id} memory=${entry.id}`)
       },
+      discardScratch: ticketId => env.discardIsolated?.(workerSessionId(ticketId)),
     }
     const engine = new Engine(host)
-    const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const late: { harness?: Harness } = {}
     const teams = new TeamRegistry(store)
@@ -592,7 +593,12 @@ export class Runtime {
     this.flushEvals()
     await this.harness.jobsSettled()
     this.daemon.stop()
-    if (this.store.isOpen) this.store.close()
+    try {
+      this.metrics.flush()
+    } finally {
+      // A failed metrics write must not leave SQLite open for other finish() callers.
+      if (this.store.isOpen) this.store.close()
+    }
   }
 }
 

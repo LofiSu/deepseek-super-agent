@@ -7,6 +7,9 @@
  *
  * `DS_AGENT_API_BASE` + `DS_AGENT_API_KEY` together win over every preset. With
  * that pair and no model name, the model stays `deepseek-chat`.
+ * Provider-specific overrides (`OPENAI_BASE_URL`, `DEEPSEEK_API_BASE`,
+ * `OPENROUTER_MODEL`, ...) are honored for both selected and auto-detected
+ * presets, below the generic `DS_AGENT_*` variables.
  * A Base without a Key, or a Key without a Base (and without `DS_AGENT_PROVIDER`),
  * throws. Callers must not turn that into MockModel.
  */
@@ -17,6 +20,10 @@ export interface ProviderPreset {
   base: string
   defaultModel: string
   keyEnv: readonly string[]
+  /** Provider-specific base overrides, checked before `base`. */
+  baseEnv: readonly string[]
+  /** Provider-specific model overrides, below DS_AGENT_API_MODEL / DS_AGENT_MODEL. */
+  modelEnv: readonly string[]
   aliases: readonly string[]
 }
 
@@ -36,6 +43,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://api.deepseek.com',
     defaultModel: 'deepseek-flash',
     keyEnv: ['DEEPSEEK_API_KEY'],
+    baseEnv: ['DEEPSEEK_API_BASE', 'DEEPSEEK_BASE_URL'],
+    modelEnv: ['DEEPSEEK_MODEL'],
     aliases: [],
   },
   {
@@ -44,6 +53,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4o-mini',
     keyEnv: ['OPENAI_API_KEY'],
+    baseEnv: ['OPENAI_BASE_URL', 'OPENAI_API_BASE'],
+    modelEnv: ['OPENAI_MODEL'],
     aliases: [],
   },
   {
@@ -52,6 +63,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://openrouter.ai/api/v1',
     defaultModel: 'deepseek/deepseek-chat',
     keyEnv: ['OPENROUTER_API_KEY'],
+    baseEnv: ['OPENROUTER_BASE_URL', 'OPENROUTER_API_BASE'],
+    modelEnv: ['OPENROUTER_MODEL'],
     aliases: [],
   },
   {
@@ -60,6 +73,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://api.x.ai/v1',
     defaultModel: 'grok-4.7',
     keyEnv: ['XAI_API_KEY', 'GROK_API_KEY'],
+    baseEnv: ['XAI_API_BASE', 'GROK_API_BASE'],
+    modelEnv: ['XAI_MODEL', 'GROK_MODEL'],
     aliases: ['grok'],
   },
   {
@@ -68,6 +83,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://api.moonshot.cn/v1',
     defaultModel: 'kimi-k3.1-pro',
     keyEnv: ['MOONSHOT_API_KEY', 'KIMI_API_KEY'],
+    baseEnv: ['MOONSHOT_API_BASE', 'KIMI_API_BASE'],
+    modelEnv: ['MOONSHOT_MODEL', 'KIMI_MODEL'],
     aliases: ['kimi'],
   },
   {
@@ -76,6 +93,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://open.bigmodel.cn/api/paas/v4',
     defaultModel: 'glm-5.3',
     keyEnv: ['ZHIPU_API_KEY', 'GLM_API_KEY'],
+    baseEnv: ['ZHIPU_API_BASE', 'GLM_API_BASE'],
+    modelEnv: ['ZHIPU_MODEL', 'GLM_MODEL'],
     aliases: ['glm'],
   },
   {
@@ -84,6 +103,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://generativelanguage.googleapis.com/v1beta/openai',
     defaultModel: 'gemini-3.8-flash',
     keyEnv: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+    baseEnv: ['GEMINI_API_BASE', 'GOOGLE_API_BASE'],
+    modelEnv: ['GEMINI_MODEL'],
     aliases: ['google'],
   },
   {
@@ -92,6 +113,10 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://api.anthropic.com/v1',
     defaultModel: 'claude-opus-5-5',
     keyEnv: ['ANTHROPIC_API_KEY'],
+    // `ANTHROPIC_BASE_URL` is the native (non-OpenAI-compatible) base; only the
+    // explicit API base may override the OpenAI-compatible preset endpoint.
+    baseEnv: ['ANTHROPIC_API_BASE'],
+    modelEnv: ['ANTHROPIC_MODEL'],
     aliases: ['claude'],
   },
 ]
@@ -105,8 +130,28 @@ function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   return value.length > 0 ? value : undefined
 }
 
-function modelName(env: NodeJS.ProcessEnv, fallback: string): string {
-  return readEnv(env, 'DS_AGENT_API_MODEL') || readEnv(env, 'DS_AGENT_MODEL') || fallback
+function modelName(env: NodeJS.ProcessEnv, fallback: string, overrides: readonly string[] = []): string {
+  for (const name of ['DS_AGENT_API_MODEL', 'DS_AGENT_MODEL', ...overrides]) {
+    const value = readEnv(env, name)
+    if (value) return value
+  }
+  return fallback
+}
+
+function presetBase(env: NodeJS.ProcessEnv, preset: ProviderPreset): string {
+  for (const name of preset.baseEnv) {
+    const value = readEnv(env, name)
+    if (value) return value
+  }
+  return preset.base
+}
+
+/** Resolve a preset's base and model, honoring documented provider-specific overrides. */
+function presetEndpoint(env: NodeJS.ProcessEnv, preset: ProviderPreset): { base: string; model: string } {
+  return {
+    base: presetBase(env, preset),
+    model: modelName(env, preset.defaultModel, preset.modelEnv),
+  }
 }
 
 function presetKey(env: NodeJS.ProcessEnv, preset: ProviderPreset): string | undefined {
@@ -165,9 +210,8 @@ export function resolveLiveApi(env: NodeJS.ProcessEnv = process.env): LiveApi | 
     }
     return {
       provider: preset.id,
-      base: preset.base,
       apiKey,
-      model: modelName(env, preset.defaultModel),
+      ...presetEndpoint(env, preset),
     }
   }
   for (const preset of PROVIDER_PRESETS) {
@@ -175,9 +219,8 @@ export function resolveLiveApi(env: NodeJS.ProcessEnv = process.env): LiveApi | 
     if (!apiKey) continue
     return {
       provider: preset.id,
-      base: preset.base,
       apiKey,
-      model: modelName(env, preset.defaultModel),
+      ...presetEndpoint(env, preset),
     }
   }
   return null
