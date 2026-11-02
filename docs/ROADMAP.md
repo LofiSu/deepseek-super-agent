@@ -430,8 +430,9 @@ text-summary + json-summary reporters. It excludes the live-model and
 real-channel demo test files; the report counts `src/**/*.ts` except
 `src/cli/demos/**`. No failure threshold is configured. Measured on this branch
 (no `src/` changes from `6ab69e5`; 81 source files): lines 81.51% (5605/6876),
-branches 81.57% (1815/2225), functions 89.02% (495/556); statements track lines
-at 81.51%. Treat these as informational until a later change picks a floor.
+branches 81.57-81.58% (1815/2225 to 1817/2227; the V8 branch total moves by a
+few across runs), functions 89.02% (495/556); statements track lines at 81.51%.
+Treat these as informational until a later change picks a floor.
 
 `pnpm lint` runs `scripts/lint.ts`: section 7 board rows have exactly seven
 cells; no live Phase-2 naming in `src/`, `docs/`, or the READMEs (this historical
