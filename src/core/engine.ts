@@ -61,12 +61,23 @@ export class Engine {
     return this.host.repo.atomic(() => this.evals.evaluateDue())
   }
 
+  /** Commit a Router assessment against precisely the queued trigger snapshot. */
+  commitAssessed(threadKey: string, triggerIds: string[], outcome: AssessmentOutcome): Decision | undefined {
+    assertSessionMay('decide')
+    return this.host.repo.atomic(() => this.evals.commitAssessed(threadKey, triggerIds, outcome))
+  }
+
   assignmentStarted(ticketId: string, assignmentId: string, sessionId: string): void {
     this.host.repo.atomic(() => this.assignments.start(ticketId, assignmentId, sessionId))
   }
 
   report(ticketId: string, report: WorkerReport): ReportResult {
     return this.host.repo.atomic(() => this.assignments.report(ticketId, report))
+  }
+
+  /** Start a new Assignment on the same Ticket after a failed or blocked turn. */
+  retryTicket(ticketId: string, reason = 'retry'): void {
+    this.host.repo.atomic(() => { this.assignments.retry(ticketId, reason) })
   }
 
   /** Freeze a live ticket. Router turns, Worker turns, reports, and replies stop. */
@@ -97,7 +108,7 @@ export class Engine {
    * DeliverGate clears `speculative` only when a report may surface.
    * Until that commit, maySurface keeps the reply off the outbox.
    */
-  reply(ticketId: string, text: string, purpose: string): void {
+  reply(ticketId: string, text: string, purpose: string, threadKey?: string): void {
     assertSessionMay('reply')
     this.host.repo.atomic(() => {
       const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
@@ -116,7 +127,7 @@ export class Engine {
         this.host.log(`[speculate] reply held ticketId=${ticket.id} purpose=${purpose}`)
         return
       }
-      this.replies.send(ticket, text, purpose)
+      this.replies.send(ticket, text, purpose, threadKey)
     })
   }
 
@@ -126,6 +137,11 @@ export class Engine {
 
   unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean {
     return this.host.repo.atomic(() => this.tickets.unsubscribe(ticketId, threadKey, reason))
+  }
+
+  /** Subscribe for context only: readable, never a wake-up or follow-up bypass. */
+  followForContext(ticketId: string, threadKey: string): void {
+    this.subscribe(ticketId, threadKey, { contextOnly: true })
   }
 
   handback(ticketId: string, triggerId: string, reason: string): boolean {

@@ -13,6 +13,8 @@ export interface OutboxResult {
   pending: number
 }
 
+const MAX_ATTEMPTS = 5
+
 export interface OutboxOptions {
   log?: (line: string) => void
 }
@@ -39,6 +41,10 @@ export class Outbox {
 
   start(intervalMs = 500): void {
     if (this.timer) return
+    // A crashed process may have left a row in `sending`. Requeue it; the
+    // Channel uses the idempotency key to avoid a duplicate post.
+    const requeued = this.store.requeueSending()
+    if (requeued > 0) this.log(`[outbox] requeued=${requeued} from interrupted sends`)
     void this.flush().catch(() => undefined)
     this.timer = setInterval(() => { void this.flush().catch(() => undefined) }, intervalMs)
     // Do not keep a short-lived demo process alive just for the outbox timer.
@@ -60,7 +66,10 @@ export class Outbox {
     if (!this.store.isOpen) return { sent: 0, failed: 0, pending: 0 }
     let sent = 0
     let failed = 0
-    for (const row of this.store.listOutbox('pending')) {
+    const now = new Date().toISOString()
+    for (const row of this.store.listDueOutbox(now)) {
+      // Claim first: two flushers (or two processes) must not send the same row.
+      if (!this.store.claimOutbox(row.id)) continue
       const adapter = this.adapters.find(item => item.channel === row.channel)
       if (!adapter) {
         // Local CLI output has no remote hop; keep it non-blocking but explicit.
@@ -85,9 +94,19 @@ export class Outbox {
         this.log(`[outbox] sent outboxId=${row.id} channel=${row.channel} externalId=${result.externalId}`)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        this.store.markOutboxFailed(row.id, message)
-        failed += 1
-        this.log(`[outbox] failed outboxId=${row.id} channel=${row.channel} error=${message}`)
+        const attempts = (row.attempts ?? 0) + 1
+        if (attempts >= MAX_ATTEMPTS) {
+          this.store.markOutboxFailed(row.id, message)
+          failed += 1
+          this.log(`[outbox] failed outboxId=${row.id} channel=${row.channel} attempts=${attempts} error=${message}`)
+        } else {
+          const delay = Math.min(60_000, 1_000 * 2 ** attempts)
+          const nextAttemptAt = new Date(Date.now() + delay).toISOString()
+          this.store.markOutboxRetry(row.id, message, nextAttemptAt, attempts)
+          this.log(
+            `[outbox] retry outboxId=${row.id} channel=${row.channel} attempts=${attempts} next=${nextAttemptAt} error=${message}`,
+          )
+        }
       }
     }
     const pending = this.store.listOutbox('pending').length

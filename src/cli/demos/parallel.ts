@@ -23,7 +23,7 @@ import {
  *
  * Three real issues are created on the configured repository, then pulled back
  * through the GitHub API. Their Triggers are admitted in one synchronous burst,
- * so three independent Tickets/WorkerSessions are in flight before the first
+ * so three independent Tickets/ExecutorSessions are in flight before the first
  * live model reply. Each outbound Router reply is posted as a real issue
  * comment and re-read from the API as the acceptance proof.
  */
@@ -120,7 +120,7 @@ export async function runParallelDemo() {
       check(
         ctx,
         `worker session started ${sessionId}`,
-        countLines(runtime, `WorkerSession start session=${sessionId}`) === 1,
+        countLines(runtime, `ExecutorSession start session=${sessionId}`) === 1,
       )
     }
 

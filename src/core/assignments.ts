@@ -72,7 +72,8 @@ export class Assignments {
       verdict,
       at: this.host.now(),
     }
-    if (report.kind === 'failed') this.host.metrics.increment('watchdog.fail')
+    // A failed Executor report is not a Watchdog failure. Keep the metric honest.
+    if (report.kind === 'failed') this.host.metrics.increment('executor.fail')
 
     if (wasSpeculative && verdict === 'hold') {
       this.host.repo.putDoc('ticket', ticket.id, ticket)
@@ -106,25 +107,57 @@ export class Assignments {
       this.host.log(`deliver=true ticketId=${ticket.id}`)
     }
 
-    if (terminal) this.finish(ticket, assignment, report.kind, report.kind)
+    if (report.kind === 'ready' || report.kind === 'dropped') {
+      this.finish(ticket, assignment, report.kind, report.kind)
+    } else if (report.kind === 'failed' || report.kind === 'blocked' || report.kind === 'waiting') {
+      // Failure and waiting end the Assignment, not the Ticket. The same Ticket
+      // can start a new Assignment later with the same Session and directory.
+      this.endAssignment(ticket, assignment, report.kind)
+    }
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     const surfaced = wasSpeculative ? verdict === 'deliver' : report.deliver === true
     return { surfaced, verdict }
   }
 
-  private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {
+  /** Start a new Assignment for an open Ticket after failure or a blocked turn. */
+  retry(ticketId: string, reason = 'retry'): Assignment {
+    const ticket = this.must(ticketId)
+    if (ticket.ended) throw new UserError(`ticket ${ticketId} has ended; open a new Ticket instead`)
+    const active = ticket.assignments.find(item => item.state !== 'ended')
+    if (active) throw new UserError(`ticket ${ticketId} already has an active assignment`)
+    const assignment: Assignment = {
+      id: this.host.repo.nextId('asg'),
+      state: 'pending',
+      speculative: ticket.speculative,
+    }
+    ticket.assignments.push(assignment)
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    this.host.repo.addEvent('assignment.retried', {
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      reason,
+    })
+    this.host.log(`[engine] Assignments.retry ticketId=${ticket.id} assignmentId=${assignment.id} reason=${reason}`)
+    return assignment
+  }
+
+  private endAssignment(ticket: Ticket, assignment: Assignment, kind: string): void {
     assignment.state = 'ended'
     assignment.endedAt = this.host.now()
-    ticket.ended = {
-      at: this.host.now(),
-      outcome,
-      by: kind === 'failed' ? 'watchdog' : 'executor',
-    }
     this.host.repo.addEvent('assignment.ended', {
       ticketId: ticket.id,
       assignmentId: assignment.id,
       kind,
     })
+  }
+
+  private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {
+    this.endAssignment(ticket, assignment, kind)
+    ticket.ended = {
+      at: this.host.now(),
+      outcome,
+      by: 'executor',
+    }
     this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome })
     try {
       this.host.onTicketEnded?.(ticket)

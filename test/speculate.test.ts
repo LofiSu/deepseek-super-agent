@@ -116,7 +116,7 @@ describe('speculative discard', () => {
     expect(failed).toEqual({ surfaced: false, verdict: 'discard' })
     const ticket = store.getDoc<Ticket>('ticket', ticketId)!
     expect(ticket.speculative).toBe(true)
-    expect(ticket.ended).toMatchObject({ outcome: 'discarded', by: 'watchdog' })
+    expect(ticket.ended).toMatchObject({ outcome: 'discarded', by: 'executor' })
     expect(ticket.assignments[0]).toMatchObject({ state: 'ended' })
     expect(ticket.assignments[0]?.endedAt).toBeTruthy()
 

@@ -73,8 +73,8 @@ export class ToolRegistry {
     const { store, log, metrics } = deps
     this.tools = [
       listTasks(store),
-      ...routerTools(deps.ports.router, { log }),
-      ...workerTools(deps.ports.worker, {
+      ...mainAgentTools(deps.ports.router, { log }),
+      ...executorTools(deps.ports.worker, {
         store,
         env: deps.env,
         log,
@@ -124,8 +124,8 @@ function listTasks(store: Store): ToolDef {
   }
 }
 
-/** Router tools close over RouterPorts. That is the only session allowed to speak. */
-function routerTools(
+/** Main Agent tools close over Route-level ports. That is the only session allowed to speak. */
+function mainAgentTools(
   ports: RolePortFor<'router'>,
   deps: { log: (line: string) => void },
 ): ToolDef[] {
@@ -156,15 +156,21 @@ function routerTools(
     },
     {
       name: 'reply_user',
-      description: 'Send a user-facing reply through the channel adapter.',
-      parameters: schema({ ticketId: { type: 'string' }, text: { type: 'string' }, purpose: { type: 'string' } }),
+      description: 'Send a user-facing reply to the Thread that produced the input.',
+      parameters: schema({
+        ticketId: { type: 'string' },
+        text: { type: 'string' },
+        purpose: { type: 'string' },
+        thread: { type: 'string', description: 'Thread key (source:id). Defaults to the Ticket channel.' },
+      }),
       roles: ['router'],
       run: guard('router', 'reply_user', async args => {
         const ticketId = String(args.ticketId ?? '')
         const text = String(args.text ?? '')
         const purpose = String(args.purpose ?? 'result')
-        ports.reply(ticketId, text, purpose)
-        return { sent: true, ticketId, purpose }
+        const thread = typeof args.thread === 'string' && args.thread ? args.thread : undefined
+        ports.reply(ticketId, text, purpose, thread)
+        return { sent: true, ticketId, purpose, thread: thread ?? null }
       }),
     },
     {
@@ -235,8 +241,8 @@ interface WorkerToolDeps {
   teams?: TeamRegistry
 }
 
-/** Worker tools close over WorkerPorts. reply, decide, and receive are not in this scope. */
-function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDef[] {
+/** Executor tools close over ExecutorPorts. reply, decide, and receive are not in this scope. */
+function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDef[] {
   const { store, env, log } = deps
   return [
     {
@@ -322,8 +328,11 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
     },
     {
       name: 'subscribe_thread',
-      description: 'Subscribe this ticket to another thread. contextOnly=true grants context but no follow-up bypass.',
-      parameters: schema({ thread: { type: 'string' }, contextOnly: { type: 'boolean' } }),
+      description: 'Subscribe this ticket to another thread. contextOnly means read but do not wake.',
+      parameters: schema({
+        thread: { type: 'string' },
+        contextOnly: { type: 'boolean', description: 'Read for context; never a follow-up wake-up.' },
+      }),
       roles: ['worker'],
       run: guard('worker', 'subscribe_thread', async (args, ctx) => {
         if (!ctx.ticketId) throw new UserError('subscribe_thread needs a ticket')

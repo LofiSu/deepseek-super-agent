@@ -17,6 +17,15 @@ export class Store {
     this.db = new DatabaseSync(this.path)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(SCHEMA)
+    this.ensureColumn('outbox', 'idempotency_key', 'TEXT')
+    this.ensureColumn('outbox', 'attempts', 'INTEGER NOT NULL DEFAULT 0')
+    this.ensureColumn('outbox', 'next_attempt_at', 'TEXT')
+  }
+
+  private ensureColumn(table: string, column: string, ddl: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    if (rows.some(row => row.name === column)) return
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
   }
 
   get isOpen(): boolean {
@@ -135,8 +144,10 @@ export class Store {
 
   enqueueOutbox(row: OutboxRow): void {
     this.db.prepare(
-      `INSERT INTO outbox(id, reply_id, ticket_id, channel, thread, target, text, status, external_id, error, created_at, sent_at)
-       VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)`,
+      `INSERT INTO outbox(
+         id, reply_id, ticket_id, channel, thread, target, text, status,
+         idempotency_key, attempts, next_attempt_at, external_id, error, created_at, sent_at
+       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL)`,
     ).run(
       row.id,
       row.replyId,
@@ -146,6 +157,8 @@ export class Store {
       JSON.stringify(row.target),
       row.text,
       row.status,
+      row.idempotencyKey ?? row.replyId,
+      row.attempts ?? 0,
       row.createdAt,
     )
   }
@@ -156,30 +169,52 @@ export class Store {
         `SELECT * FROM outbox WHERE status = ? ORDER BY rowid`,
       ).all(status)
       : this.db.prepare('SELECT * FROM outbox ORDER BY rowid').all()) as Record<string, string | null>[]
-    return rows.map(row => ({
-      id: String(row.id),
-      replyId: String(row.reply_id),
-      ticketId: String(row.ticket_id),
-      channel: String(row.channel),
-      thread: String(row.thread),
-      target: JSON.parse(String(row.target)) as Record<string, string>,
-      text: String(row.text),
-      status: row.status as OutboxRow['status'],
-      externalId: row.external_id ? String(row.external_id) : undefined,
-      error: row.error ? String(row.error) : undefined,
-      createdAt: String(row.created_at),
-      sentAt: row.sent_at ? String(row.sent_at) : undefined,
-    }))
+    return rows.map(outboxFromRow)
+  }
+
+  /** Pending rows whose backoff has elapsed. */
+  listDueOutbox(now = new Date().toISOString()): OutboxRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM outbox
+       WHERE status = 'pending'
+         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+       ORDER BY rowid`,
+    ).all(now) as Record<string, string | null>[]
+    return rows.map(outboxFromRow)
+  }
+
+  /** Atomically claim a row so two flushers cannot send it twice. */
+  claimOutbox(id: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE outbox SET status = 'sending' WHERE id = ? AND status = 'pending'`,
+    ).run(id)
+    return Number(result.changes ?? 0) > 0
   }
 
   markOutboxSent(id: string, externalId?: string): void {
     this.db.prepare(
-      `UPDATE outbox SET status = 'sent', external_id = ?, sent_at = ? WHERE id = ?`,
+      `UPDATE outbox SET status = 'sent', external_id = ?, sent_at = ?, next_attempt_at = NULL WHERE id = ?`,
     ).run(externalId ?? null, new Date().toISOString(), id)
   }
 
+  markOutboxRetry(id: string, error: string, nextAttemptAt: string, attempts: number): void {
+    this.db.prepare(
+      `UPDATE outbox SET status = 'pending', error = ?, next_attempt_at = ?, attempts = ? WHERE id = ?`,
+    ).run(error, nextAttemptAt, attempts, id)
+  }
+
   markOutboxFailed(id: string, error: string): void {
-    this.db.prepare(`UPDATE outbox SET status = 'failed', error = ? WHERE id = ?`).run(error, id)
+    this.db.prepare(
+      `UPDATE outbox SET status = 'failed', error = ?, next_attempt_at = NULL WHERE id = ?`,
+    ).run(error, id)
+  }
+
+  /** A process died mid-send. Requeue the row; the Channel should dedupe by idempotency key. */
+  requeueSending(): number {
+    const result = this.db.prepare(
+      `UPDATE outbox SET status = 'pending' WHERE status = 'sending'`,
+    ).run()
+    return Number(result.changes ?? 0)
   }
 
   addSubscription(threadKey: string, ticketId: string, at: string): void {
@@ -246,12 +281,24 @@ export class Store {
 
   completeJob(id: string, status: JobRow['status'] = 'succeeded'): void {
     this.db.prepare(
-      'UPDATE jobs SET status = ?, finished_at = ? WHERE id = ?',
+      "UPDATE jobs SET status = ?, finished_at = ? WHERE id = ? AND status = 'running'",
     ).run(status, new Date().toISOString(), id)
   }
 
   getJob(id: string): JobRow | undefined {
-    return this.listJobs().find(job => job.id === id)
+    const row = this.db.prepare(
+      'SELECT id, session_id, ticket_id, name, status, created_at, finished_at FROM jobs WHERE id = ?',
+    ).get(id) as Record<string, string | null> | undefined
+    if (!row) return undefined
+    return {
+      id: String(row.id),
+      sessionId: String(row.session_id),
+      ticketId: String(row.ticket_id),
+      name: String(row.name),
+      status: row.status as JobRow['status'],
+      createdAt: String(row.created_at),
+      finishedAt: row.finished_at ? String(row.finished_at) : undefined,
+    }
   }
 
   listJobs(): JobRow[] {
@@ -318,5 +365,25 @@ export class Store {
       'INSERT INTO artifacts(id, ticket_id, path, created_at) VALUES(?, ?, ?, ?)',
     ).run(id, ticketId, filePath, new Date().toISOString())
     return id
+  }
+}
+
+function outboxFromRow(row: Record<string, string | null>): OutboxRow {
+  return {
+    id: String(row.id),
+    replyId: String(row.reply_id),
+    ticketId: String(row.ticket_id),
+    channel: String(row.channel),
+    thread: String(row.thread),
+    target: JSON.parse(String(row.target)) as Record<string, string>,
+    text: String(row.text),
+    status: row.status as OutboxRow['status'],
+    idempotencyKey: row.idempotency_key ? String(row.idempotency_key) : undefined,
+    attempts: row.attempts == null ? 0 : Number(row.attempts),
+    nextAttemptAt: row.next_attempt_at ? String(row.next_attempt_at) : undefined,
+    externalId: row.external_id ? String(row.external_id) : undefined,
+    error: row.error ? String(row.error) : undefined,
+    createdAt: String(row.created_at),
+    sentAt: row.sent_at ? String(row.sent_at) : undefined,
   }
 }

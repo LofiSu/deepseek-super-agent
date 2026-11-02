@@ -21,7 +21,9 @@ Shorter pages, same facts: [install](docs/install.md), [architecture](docs/archi
 Two layers.
 
 - **Harness.** Session log, async ReAct loop, OpenAI-compatible calls, tools by role, daemon.
-- **Engine.** Intake → Eval → Ticket → Assignment → Reply. Domain writes stay in the Engine.
+- **Engine.** Intake → Eval (Gate + Assessment) → Mandate/Ticket → Assignment → Outbox. Domain writes stay in the Engine.
+
+Domain naming follows [从零打造 Personal Agent（三）](https://my.feishu.cn/docx/YtDVdzfxdobjAkxKZiIcl5Emnth): the `router` role is the **Main Agent / Main Session**, the `worker` role is the **Executor**, and `Subscription` is a context-only Ticket ↔ Thread relation. The audit and corrections are in [docs/DOMAIN_ALIGNMENT.md](./docs/DOMAIN_ALIGNMENT.md).
 
 ## Inspiration
 
@@ -115,6 +117,7 @@ Kept out of M11.
 - [~] Memory that spans tickets (§8.1) — always-wired `SpillBackedLongTermMemory` (not month-scale yet)
 - [~] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model; no default UI yet
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
+- [x] Panel · Execution — `ds-agent panel` derives Open/Pending/Working/Waiting/Blocked/Awaiting from Ticket facts, with Mandate, Executor Session, directory, report, and Outbox delivery counts (`src/core/panel.ts`)
 - [~] A2A across instances (§8.3) — always-wired `A2ARouter` (in-process; `runtime.sendA2A`)
 - [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` for secret-named env values of at least 8 characters (shorter values and other names are left as-is) + FileVault `describe()` (names only) + Darwin `sandbox-exec` / Linux `bwrap|unshare` when `DS_AGENT_SANDBOX=1` (§8.4, T51). Host vault/seccomp policy still external.
 
@@ -266,6 +269,8 @@ State lives in `DS_AGENT_HOME`, or in `./.ds-agent` (SQLite).
 
 ```bash
 pnpm ds-agent tasks
+pnpm ds-agent panel
+pnpm ds-agent retry <ticketId>
 pnpm ds-agent status
 pnpm ds-agent metrics
 pnpm ds-agent emit im --thread bug-login --text "login still 500"

@@ -21,7 +21,9 @@ LofiSu × Grokbot（CoderBot）。
 `ds-agent` 分两层：
 
 - **Harness**：Session 事件日志、异步 ReAct 循环、OpenAI 兼容调用、按角色注册工具、daemon。
-- **Engine**：Intake → Eval → Ticket → Assignment → Reply。领域状态只在这里写入。
+- **Engine**：Intake → Eval（Gate + Assessment）→ Mandate/Ticket → Assignment → Outbox。领域状态只在这里写入。
+
+领域命名以[《从零打造 Personal Agent（三）》](https://my.feishu.cn/docx/YtDVdzfxdobjAkxKZiIcl5Emnth)为准：`router` 角色是 **Main Agent / Main Session**，`worker` 角色是 **Executor**，`Subscription` 只传上下文、不增加授权。偏差清单与修正记录见 [docs/DOMAIN_ALIGNMENT.md](./docs/DOMAIN_ALIGNMENT.md)。
 
 ## 灵感来源
 
@@ -29,6 +31,7 @@ LofiSu × Grokbot（CoderBot）。
 |------|------|----------|
 | 微信文章 | [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg) | §2–§6：双层 Router/Worker、Trigger、异步工具、多信道、状态与环境分离、Watchdog |
 | 官方原型 | [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) | Trigger → Eval → Ticket → Assignment；Harness 自研 |
+| Personal Agent（三） | [从 DeepSeek Super-agent 看主动服务的设计模式](https://my.feishu.cn/docx/YtDVdzfxdobjAkxKZiIcl5Emnth) | Main Agent / Executor、Subscription 只传上下文、Mandate、Panel / Execution |
 
 ## 能力清单
 
@@ -262,6 +265,8 @@ pnpm demo
 
 ```bash
 pnpm ds-agent tasks
+pnpm ds-agent panel            # Panel · Execution
+pnpm ds-agent retry <ticketId> # 同一 Ticket 上新建 Assignment
 pnpm ds-agent status
 pnpm ds-agent metrics
 pnpm ds-agent emit im --thread bug-login --text "login still 500"

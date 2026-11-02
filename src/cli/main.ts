@@ -3,6 +3,7 @@ import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
 import { Engine } from '../core/engine.ts'
 import type { Host } from '../core/host.ts'
+import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
@@ -101,6 +102,8 @@ function help(): void {
   pnpm demo:feishu          real Feishu message API smoke (needs app creds)
   pnpm ds-agent init
   pnpm ds-agent tasks
+  pnpm ds-agent panel            # Panel · Execution (tickets, mandate, executor, outbox)
+  pnpm ds-agent retry <ticketId> # new Assignment on the same Ticket
   pnpm ds-agent status
   pnpm ds-agent health
   pnpm ds-agent chat "fix the login timeout"
@@ -186,6 +189,35 @@ async function main(): Promise<void> {
     if (tickets.length === 0) console.log('no tickets')
     for (const ticket of tickets) console.log(`${ticket.id}\t${ticketStage(ticket)}\t${ticket.title}`)
     store.close()
+    return
+  }
+  if (cmd === 'panel' || cmd === 'execution') {
+    const store = new Store(home)
+    try {
+      console.log(formatExecution(executionView(store, home)))
+    } finally {
+      store.close()
+    }
+    return
+  }
+  if (cmd === 'retry') {
+    const ticketRef = bare(3)[0]
+    const resolved = (() => {
+      const store = new Store(home)
+      try {
+        return resolveTicket(store, ticketRef)
+      } finally {
+        store.close()
+      }
+    })()
+    await withRuntime(async runtime => {
+      const ticket = await runtime.retry(resolved.id, option('reason') ?? 'manual retry')
+      if (!ticket) {
+        console.log(`unknown ticket ${resolved.id}`)
+        return
+      }
+      console.log(`retry queued ${ticket.id} "${ticket.title}" (new Assignment, stage ${ticketStage(ticket)})`)
+    }, requireLiveModelFromEnv())
     return
   }
   if (cmd === 'health') {
