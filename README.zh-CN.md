@@ -48,11 +48,11 @@ LofiSu × Grokbot（CoderBot）。
 
 ### §2 双层 Router / Worker
 
-- [x] **连续性 vs 吞吐权衡 → 双层拆分** — Router 管交互与分派，Worker 隔离执行（`SessionRole`）
+- [x] **连续性 vs 吞吐权衡 → 双层拆分** — Router 管交互与分派，Worker 隔离执行（`Role`）
 - [x] **Router = 全局序点 / 协调 / 记忆入口** — 入站经 Engine；出站经 Router/Outbox
 - [x] **Router 不直接干重活** — Worker 挂执行工具；Router 工具集更窄
-- [x] **Router 可用轻量模型** — `roleModels.router` / Mock；Worker 可配强模型
-- [x] **Trigger 批处理（拥堵时合并进下一轮）** — 同 Thread Eval batch；demo/测试覆盖
+- [x] **Router 可用轻量模型** — `models.router`（来自 `roleModelsFromEnv`）；Worker 可配强模型
+- [x] **Trigger 批处理（拥堵时合并进下一轮）** — `batchWindowMs > 0` 时同 Thread 合并；由 `test/batching-bench.test.ts` 覆盖。真实信道 demo 用默认窗口 0，不验证合并
 - [~] **Router 水平切分 / 多层过滤** — `RouterShardRegistry` 常驻 Runtime（PLAN T09/T46）；用 `DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
@@ -64,7 +64,7 @@ LofiSu × Grokbot（CoderBot）。
 
 - [x] **环境半结构化事件 = Trigger** — IM / GitHub 风格 Source
 - [x] **Fast Path 程序过滤** — source/噪声等确定性规则（`ingress/filter`）
-- [x] **Slow Path 语义/策略过滤** — 可走模型策略；Mock 路径可跳过或规则化
+- [x] **Slow Path 语义/策略过滤** — 当前实现是确定性 `ruleClassify`；模型策略分类器尚未接线，规则代替
 - [x] **Thread = 同一话题/PR 下的事件流** — Thread key
 - [x] **已订阅 → 直通 Worker（bypass Router Eval）** — 日志 `bypass=subscription` + `ticketId`
 - [x] **未订阅 → Router/Eval 冷启动分派** — Intake → Eval → Ticket
@@ -79,9 +79,9 @@ LofiSu × Grokbot（CoderBot）。
 
 ### §4 面向人的交互
 
-- [x] **异步 ReAct：`start` 立即返回，不堵前台** — harness loop / async job
+- [x] **异步 ReAct：`start_job` 立即返回，不堵前台** — 工具返回 `{status:'started',jobId}` 后结束本轮，`Harness.launch` 再入队下一轮；由 `test/job.test.ts` 覆盖。真实信道 demo 不调用 `start_job`
 - [x] **Started 通知** — job started 日志/事件
-- [x] **完成后作为新 Session 事件回来** — completion 回灌 Worker
+- [x] **完成后回到 Worker** — job 完成以 `JOB_DONE` prompt 触发下一轮
 - [x] **全双工：后台跑时仍接新输入** — 入站与 job 完成并行入队
 - [x] **IM 低打扰 / 短回复规范** — `channels/norms`（含词数上限思路）
 - [x] **GitHub 等异步信道结构化输出** — github channel formatter

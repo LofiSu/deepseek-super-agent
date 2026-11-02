@@ -47,11 +47,11 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 ### §2 Dual Router / Worker
 
-- [x] **Continuity vs throughput.** Two layers. The Router talks and dispatches. Workers execute alone (`SessionRole`).
+- [x] **Continuity vs throughput.** Two layers. The Router talks and dispatches. Workers execute alone (`Role`).
 - [x] **Router is the sequence point.** Inbound goes through the Engine. Outbound goes through Router/Outbox.
 - [x] **Router stays light.** Workers hold the execution tools. The Router tool set is smaller.
-- [x] **Small model on the Router.** `roleModels.router`. Workers can use a stronger model.
-- [x] **Trigger batching.** Under load, same-Thread Triggers fold into the next Eval. Demo and tests cover it.
+- [x] **Small model on the Router.** `models.router` from `roleModelsFromEnv`. Workers can use a stronger model.
+- [x] **Trigger batching.** A positive `batchWindowMs` folds same-Thread Triggers into one Eval. Covered by `test/batching-bench.test.ts`; the real-channel demo uses the default window (0), so it does not exercise folding.
 - [~] **Router sharding / multi-layer filter.** `RouterShardRegistry` is always wired into the Runtime (PLAN T09/T46). Configure with `DS_AGENT_SHARDS` or `RuntimeOptions.routerShards`; the default shard always exists.
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
@@ -63,7 +63,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 - [x] **Triggers.** Semi-structured events from IM / GitHub-style sources.
 - [x] **Fast Path.** Deterministic source and noise rules (`ingress/filter`).
-- [x] **Slow Path.** Semantic or policy filter. It can call a model. Rules can stand in.
+- [x] **Slow Path.** Semantic or policy filter. The shipped classifier is deterministic (`ruleClassify`); a model-backed policy classifier is not wired, so rules stand in.
 - [x] **Thread.** One topic or PR. One event stream. Thread key.
 - [x] **Already subscribed.** Straight to the Worker. Log line `bypass=subscription` plus `ticketId`.
 - [x] **Not subscribed.** Cold start: Intake → Eval → Ticket.
@@ -78,9 +78,9 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 ### §4 Talking to people
 
-- [x] **Async ReAct.** `start` returns at once. The foreground does not wait.
+- [x] **Async ReAct.** The `start_job` tool returns `{status:'started',jobId}` at once and ends the turn; `Harness.launch` enqueues the next turn. The foreground does not wait. Covered by `test/job.test.ts`; the real-channel demo does not call `start_job`.
 - [x] **Started notice.** A job-started log event.
-- [x] **Completion comes back.** The result is a new Session event on the Worker.
+- [x] **Completion comes back.** A finished job re-enters the Worker as a `JOB_DONE` prompt and triggers the next turn.
 - [x] **Duplex.** New input still arrives while a job runs.
 - [x] **IM norms.** Short replies. Low interruption (`channels/norms`, with a word cap).
 - [x] **GitHub-style output.** Structured text from the GitHub channel formatter.
