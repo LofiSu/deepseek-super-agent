@@ -134,10 +134,40 @@ bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
 - On every terminal path, `remember(ticket)` upserts `ltm_<ticketId>` with the
   title, brief, and last report, then grants the ticket access to its spill.
 - Text is redacted before it reaches the spill, including `put()` callers.
-- The next ticket queries by title (three most recent hits), receives a spill
-  grant for each hit, and gets `memory=<id> spillId=<id> text=<summary>` lines
-  in the Worker task.
+- `put()` dedupes per ticket: text that is identical after redaction and
+  normalization (whitespace collapsed, trimmed, case-insensitive) reuses the
+  existing entry and spill, unions its tags, and creates no second row.
+  Only an entry with a readable spill body can match; an entry whose spill is
+  missing is skipped and the write creates a fresh, recallable entry. The
+  truncated summary is never used as a dedupe key.
+  Different text, or the same text for another ticket, is stored normally.
+  Both the create and dedupe paths run the retention pass, with the touched
+  entry protected.
+- The next ticket queries by title (three highest-scoring hits), receives a
+  spill grant for each hit, and gets `memory=<id> spillId=<id> text=<summary>`
+  lines in the Worker task.
 - Recall requires the reader ticket id; an `ltm` id alone is not a capability.
+
+Recall formula (`query`). Matching is unchanged: every query word must appear
+in the spill body, and requested `tags` are an AND filter. The tag filter
+compares tag strings exactly after trimming (case-sensitive), as before; only
+the `tagHits` ranking needles are lower-cased. Results are ordered by a stable
+score:
+
+- `tagHits`: number of entry tags whose trimmed, lower-cased form equals a
+  distinct query word or a requested tag (trimmed, lower-cased).
+- `textHits`: sum over each distinct query word of its occurrences in the
+  lower-cased spill body, each word capped at 5.
+- Order: `tagHits` desc, then `textHits` desc, then `createdAt` desc, then
+  `id` desc. The final key is a lexicographic string comparison of ids
+  (`ltm_9` sorts after `ltm_10`), not numeric recency; it makes the order total
+  when timestamps collide.
+
+`test/long-term-memory.test.ts` pins the behavior with an injected clock: tag
+hits outrank newer untagged entries, more text hits outrank newer entries at
+equal tag hits, `createdAt` beats a conflicting id order, the per-word count
+caps at 5, recency/id break remaining ties, dedupe keeps one row and one spill,
+a missing-spill zombie is never reused, and requested tags still AND-filter.
 
 ## M7 — speculate
 
