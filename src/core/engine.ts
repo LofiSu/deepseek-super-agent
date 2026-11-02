@@ -131,14 +131,16 @@ export class Engine {
         })
         return
       }
-      // A stopped or discarded ticket never passed the delivery gate. Stopping
-      // clears `speculative` for visibility, so check the end state directly.
-      if (ticket.ended && (ticket.ended.outcome === 'stopped' || ticket.ended.outcome === 'discarded')) {
+      // A ticket that was speculative when it stopped never passed the delivery
+      // gate. Stopping clears `speculative` for visibility, so the end record
+      // carries `silent` and only that blocks a reply; a normal stopped ticket
+      // may still report partial findings.
+      if (ticket.ended?.silent === true) {
         this.host.log(`[engine] reply held ticketId=${ticket.id} purpose=${purpose} ended=${ticket.ended.outcome}`)
         this.host.repo.addEvent('collab.reply_held', {
           ticketId: ticket.id,
           purpose,
-          reason: 'ended',
+          reason: 'ended-speculative',
           outcome: ticket.ended.outcome,
         })
         return

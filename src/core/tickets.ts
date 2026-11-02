@@ -132,6 +132,7 @@ export class Tickets {
         kind: 'stop',
       })
     }
+    const wasSpeculative = ticket.speculative
     if (ticket.speculative) {
       // A stopped speculative ticket never delivered, so its scratch workdir
       // must not outlive it. Cleanup is best effort: a failure must not roll
@@ -145,7 +146,7 @@ export class Tickets {
         this.host.log(`[speculate] scratch cleanup failed ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    ticket.ended = { at: now, outcome: 'stopped', by }
+    ticket.ended = { at: now, outcome: 'stopped', by, silent: wasSpeculative }
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome: 'stopped', by })
     this.notifyTicket('ended', ticket)

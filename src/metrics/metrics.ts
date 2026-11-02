@@ -121,7 +121,8 @@ export function formatMetricsJson(stateDir: string): string {
 }
 
 const LOCK_RETRY_MS = 5
-const LOCK_TIMEOUT_MS = 5_000
+// Short enough that a contended flush cannot freeze the daemon for long.
+const LOCK_TIMEOUT_MS = 1_500
 const STALE_LOCK_MS = 3_000
 
 function sleepSync(ms: number): void {
@@ -130,6 +131,29 @@ function sleepSync(ms: number): void {
 
 function isErrno(error: unknown, code: string): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === code
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM means the process exists but we may not signal it.
+    return isErrno(error, 'EPERM')
+  }
+}
+
+/** Remove a lock only when it is old and its recorded owner is gone. */
+function clearStaleLock(lock: string): boolean {
+  try {
+    if (Date.now() - fs.statSync(lock).mtimeMs <= STALE_LOCK_MS) return false
+    const pid = Number.parseInt(fs.readFileSync(lock, 'utf8').trim(), 10)
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && isProcessAlive(pid)) return false
+    fs.rmSync(lock, { force: true })
+    return true
+  } catch {
+    return false
+  }
 }
 
 function cloneSnapshot(snapshot: MetricsSnapshot): MetricsSnapshot {
@@ -253,15 +277,9 @@ export class Metrics {
         break
       } catch (error) {
         if (!isErrno(error, 'EEXIST')) throw error
-        try {
-          // A crashed writer leaves the lock behind; only an old one is stale.
-          if (Date.now() - fs.statSync(lock).mtimeMs > STALE_LOCK_MS) {
-            fs.rmSync(lock, { force: true })
-            continue
-          }
-        } catch {
-          continue
-        }
+        // A crashed writer leaves the lock behind; an old lock with a dead
+        // owner is stale. A live holder is never stolen.
+        if (clearStaleLock(lock)) continue
         if (Date.now() >= deadline) throw new Error(`metrics lock timeout: ${lock}`)
         sleepSync(LOCK_RETRY_MS)
       }

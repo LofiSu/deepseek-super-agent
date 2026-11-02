@@ -12,7 +12,8 @@ import type { RolePorts } from '../src/shared/ports.ts'
 import type { Store } from '../src/store/sqlite.ts'
 import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
 
-const secret = 'sk-regression-key-9f3a7c'
+// Deliberately not credential-shaped: exact-value redaction must do the work.
+const secret = 'regression-secret-9f3a7c'
 let runtime: Runtime | undefined
 const dirs: string[] = []
 

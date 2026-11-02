@@ -221,16 +221,21 @@ export class LocalEnv implements EnvPort {
  * expanded text is not visible to this check.
  * A real boundary still requires the OS sandbox (PLAN §9 T51).
  */
-const SHELL_SUBSTITUTION = /\$\(|\$\{|`/
+const SHELL_SUBSTITUTION = /\$\(|\$\{|`|\$'/
 // Match path segments, not substrings: a regex like `a..b` is not an escape.
 // Any non-word/non-path character delimits a segment, including shell
 // operators (`cd ..;`, `..&&`), so operators cannot hide a parent step.
 const PARENT_SEGMENT = /(?:^|[^\w.-])\.\.(?:$|[^\w.-])/
 // `~` and named-user `~alice` both expand outside the scratch HOME.
 const HOME_SEGMENT = /(?:^|[^\w.-])~/
+// Escapes and empty-quote splicing that hide a dot from this text check:
+// `cd \.\.`, `cd .''.`, `cd ."".`. This is defense in depth, not an OS boundary.
+const ESCAPED_DOT = /\\\./
+const SPLICED_DOT = /\.(?:''|"")\./
 
 function leavesWorkdir(command: string): boolean {
   if (SHELL_SUBSTITUTION.test(command)) return true
+  if (ESCAPED_DOT.test(command) || SPLICED_DOT.test(command)) return true
   if (PARENT_SEGMENT.test(command) || HOME_SEGMENT.test(command)) return true
   if (/\$(?:\{)?HOME\b/.test(command)) return true
   return /(?:^|[^\w.-])\/(?!\*)/.test(command)

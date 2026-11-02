@@ -254,6 +254,26 @@ describe('ended tickets', () => {
     engine.reply(ticketId, 'Work finished.', 'result')
     expect(store.listReplies()).toHaveLength(0)
     expect(store.listEvents().some(event => event.type === 'collab.reply_held')).toBe(true)
+    expect(store.getDoc<Ticket>('ticket', ticketId)?.ended?.silent).toBe(true)
+  })
+
+  it('still lets a normal stopped ticket reply with partial findings', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    open.push(store)
+    const engine = new Engine(hostFor(store, []))
+    engine.receive(imTrigger({
+      id: 'trg_normal_stop',
+      thread: 'topic/normal-stop',
+      text: '@ds-agent please fix the login timeout',
+      at: '2026-10-31T00:00:00.000Z',
+    }))
+    const ticketId = engine.evaluateDue()[0]!.ticketId!
+    engine.stop(ticketId, 'router stop_worker')
+
+    engine.reply(ticketId, 'Partial findings so far.', 'result')
+    expect(store.listReplies().map(reply => reply.purpose)).toContain('result')
+    expect(store.getDoc<Ticket>('ticket', ticketId)?.ended?.silent).toBe(false)
   })
 
   it('refuses mutations from a normal ticket that has already ended', async () => {
@@ -395,6 +415,15 @@ describe('speculative workdir', () => {
       .rejects.toThrow(/isolated workdir/)
     // Named-user tilde expansion ignores the isolated HOME.
     await expect(env.bash(sessionId, 'cd ~alice; cat .ssh/config', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    // Escapes and empty-quote splicing must not hide a parent step.
+    await expect(env.bash(sessionId, 'cd \\.\\.; cat w2/secret.txt', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    await expect(env.bash(sessionId, "cd .''.; cat w2/secret.txt", { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    await expect(env.bash(sessionId, 'cd ."".; cat w2/secret.txt', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    await expect(env.bash(sessionId, "cd $'\\x2e\\x2e'; cat w2/secret.txt", { isolated: true }))
       .rejects.toThrow(/isolated workdir/)
     // Incidental dots are not a parent-directory traversal.
     const grep = await env.bash(sessionId, "printf 'a..b' | grep 'a..b'", { isolated: true })

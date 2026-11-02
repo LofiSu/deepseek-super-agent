@@ -55,6 +55,21 @@ describe('section 7 metrics', () => {
     expect(merged.counters['ingress.admit']).toBe(1)
   })
 
+  it('steals a stale lock only when its recorded owner is gone', () => {
+    const home = tempHome()
+    const metrics = new Metrics(home)
+    const lock = `${metricsPath(home)}.lock`
+    fs.writeFileSync(lock, '999999')
+    const old = new Date(Date.now() - 10_000)
+    fs.utimesSync(lock, old, old)
+
+    metrics.increment('ingress.admit')
+    metrics.flush()
+
+    expect(readMetrics(home).counters['ingress.admit']).toBe(1)
+    expect(fs.existsSync(lock)).toBe(false)
+  })
+
   it('closes the store when metrics flushing fails during finish', async () => {
     runtime = freshRuntime()
     const rt = runtime
