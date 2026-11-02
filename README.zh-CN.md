@@ -32,7 +32,7 @@ LofiSu × Grokbot（CoderBot）。
 
 对照微信文 [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg) **逐条**落地。状态以本仓代码 + `pnpm demo` / `pnpm test` 为准；完整任务矩阵见 [PLAN.md](./PLAN.md)（T01–T51）。计划与正在跑的代码哪里不一致，见 [docs/REVIEW.md](./docs/REVIEW.md)。
 
-图例：`[x]` 已有实现并通过 demo/测试路径验证 · `[~]` 有骨架或部分能力 · `[ ]` 未做。Phase-2 registries 默认关闭，需 `DS_AGENT_PHASE2=1` / `options.phase2`。
+图例：`[x]` 已有实现并通过 demo/测试路径验证 · `[~]` 有骨架或部分能力 · `[ ]` 未做。可选扩展域注册表默认关闭，需 `DS_AGENT_PHASE2=1` / `options.phase2`。
 
 ### §1 四特质
 
@@ -48,7 +48,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Router 不直接干重活** — Worker 挂执行工具；Router 工具集更窄
 - [x] **Router 可用轻量模型** — `roleModels.router` / Mock；Worker 可配强模型
 - [x] **Trigger 批处理（拥堵时合并进下一轮）** — 同 Thread Eval batch；demo/测试覆盖
-- [~] **Router 水平切分 / 多层过滤** — opt-in `RouterShardRegistry`（PLAN T09/T46）；仅 Phase-2 开启时挂到 Runtime
+- [~] **Router 水平切分 / 多层过滤** — opt-in `RouterShardRegistry`（PLAN T09/T46）；仅 `DS_AGENT_PHASE2=1` 时挂到 Runtime
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
