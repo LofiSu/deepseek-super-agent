@@ -1,8 +1,9 @@
 import { platform } from 'node:os'
 import { spawnSync } from 'node:child_process'
+import { UserError } from '../shared/errors.ts'
 
 export interface SandboxPolicy {
-  /** When true, prefer OS sandbox wrappers for bash. */
+  /** Explicit `false` is a test/embedding opt-out. Production defaults to sandboxed. */
   enabled: boolean
   allowNetwork?: boolean
   /** Worker workspace. Without this the sandboxed shell cannot write where it runs. */
@@ -30,9 +31,9 @@ function darwinProfile(policy: SandboxPolicy): string {
 }
 
 /**
- * Lightweight sandbox helper (PLAN T51). Darwin can wrap with sandbox-exec when
- * DS_AGENT_SANDBOX=1. Linux uses bwrap or unshare for a network namespace.
- * If neither is installed, it falls back to plain bash without isolation.
+ * Wrap worker bash in an OS filesystem sandbox. An explicit `enabled: false`
+ * opts out for tests/embedding; otherwise a missing sandbox wrapper is an error,
+ * never a silent fallback to unsandboxed bash.
  */
 export function wrapBashCommand(
   command: string,
@@ -44,25 +45,37 @@ export function wrapBashCommand(
 ): { argv: string[]; wrapped: boolean } {
   if (!policy.enabled) return { argv: ['bash', '-c', command], wrapped: false }
   if (system.platform === 'darwin') {
+    if (!system.available('sandbox-exec')) {
+      throw new UserError('worker bash requires sandbox-exec on Darwin')
+    }
     return {
-      argv: ['sandbox-exec', '-p', darwinProfile(policy), 'bash', '-c', command],
+      argv: ['sandbox-exec', '-p', darwinProfile(policy), 'bash', '--noprofile', '--norc', '-c', command],
       wrapped: true,
     }
   }
-  if (system.platform === 'linux' && !policy.allowNetwork) {
+  if (system.platform === 'linux') {
+    if (!system.available('bwrap')) {
+      throw new UserError('worker bash requires bubblewrap (bwrap) on Linux')
+    }
     const writable = (policy.writableRoots ?? []).flatMap(root => ['--bind', root, root])
-    if (system.available('bwrap')) return {
-      argv: ['bwrap', '--unshare-net', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...writable, '--', 'bash', '-c', command],
-      wrapped: true,
-    }
-    if (system.available('unshare')) return {
-      argv: ['unshare', '--net', '--', 'bash', '-c', command],
+    return {
+      argv: [
+        'bwrap',
+        ...(policy.allowNetwork ? [] : ['--unshare-net']),
+        '--ro-bind', '/', '/',
+        '--dev', '/dev',
+        '--proc', '/proc',
+        ...writable,
+        '--',
+        'bash', '--noprofile', '--norc', '-c', command,
+      ],
       wrapped: true,
     }
   }
-  return { argv: ['bash', '-c', command], wrapped: false }
+  throw new UserError(`worker bash has no filesystem sandbox on ${system.platform}`)
 }
 
-export function sandboxEnabledFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.DS_AGENT_SANDBOX === '1' || env.DS_AGENT_SANDBOX === 'true'
+/** Sandboxing is the default; explicit LocalEnv options can still opt out. */
+export function sandboxEnabledFromEnv(_env: NodeJS.ProcessEnv = process.env): boolean {
+  return true
 }
