@@ -46,7 +46,7 @@ refactor. **That refactor has merged as #40 (`4b919bd`).** On current `main`:
 - The services live in their owning modules:
   `src/ingress/shards.ts` (Router shards), `src/harness/mesh.ts` (Worker mesh),
   `src/memory/long-term.ts` (long-term memory), `src/core/lifecycle.ts`
-  (lifecycle events), `src/channels/a2a.ts` (A2A).
+  (lifecycle events), `src/channels/a2a.ts` + `a2a-transport.ts` (A2A).
 - `docs/MODULES.md` and `docs/HARDENING_2026-11-01.md` are tracked.
 - `PLAN.md`, both READMEs, both install pages, and the review-method docs no
   longer describe a `DS_AGENT_PHASE2` master switch (fixed by #41 and #51).
@@ -85,7 +85,7 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | **M5 subscribe** | done | `src/core/subscribe.ts`, `intake.ts` fan-out; `test/subscription.test.ts`, `hardening.test.ts` (contextOnly, unsubscribe) | `handback` is not exposed as a CLI action. The tests cover unsubscribe but not the full requeue-and-drop lifecycle as an operator flow. |
 | **M6 memory** | partial | `src/memory/recall.ts`, `acl.ts`, `long-term.ts`; `src/store/sqlite.ts` (`deleteSpill`); `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` | Recall is word-AND substring matching over a spill, not semantic or multi-hop. Retention landed in #54: `maxEntries`/`maxAgeDays` prune inside the same transaction as `put`/`remember`, `forget` deletes the spill and grants, and `DS_AGENT_MEMORY_MAX_ENTRIES`/`DS_AGENT_MEMORY_MAX_AGE_DAYS` configure it (defaults 1000/90). Remaining: dedupe beyond per-ticket upsert, semantic search, month-scale story. `README.md:115` still says "not month-scale"; that part is accurate. |
 | **M7 speculate** | done | `src/speculate/silent.ts`, `gate.ts`; `test/speculate.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | The gate is a clause-local keyword heuristic, documented as a stand-in (`docs/HARDENING_2026-11-01.md:25`). It is not a model verdict; a real value judgment remains open. |
-| **M8 channels** | done | `src/channels/norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `a2a.ts`; `test/channels-feishu.test.ts`, `channels-github-source.test.ts`, `outbox.test.ts`, `lifecycle-a2a.test.ts`; real demos in `src/cli/demos/*` | Real-channel acceptance is operator-only: `test/demos-real-channels.test.ts` is skipped offline (3 tests), and `pnpm demo` needs `gh auth` plus a live model. There is no email adapter (the plan calls it optional). |
+| **M8 channels** | done | `src/channels/norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `a2a.ts`, `a2a-transport.ts`; `test/channels-feishu.test.ts`, `channels-github-source.test.ts`, `outbox.test.ts`, `lifecycle-a2a.test.ts`, `a2a-transport.test.ts`; real demos in `src/cli/demos/*` | Real-channel acceptance is operator-only: `test/demos-real-channels.test.ts` is skipped offline (3 tests), and `pnpm demo` needs `gh auth` plus a live model. There is no email adapter (the plan calls it optional). |
 | **M9 env** | partial | `src/env/local-env.ts`, `sanitize.ts`, `vault.ts`, `seccomp.ts` (`sandboxEnabledFromEnv` returns true); `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `live-modules.test.ts`, `credential-sentinel.test.ts` | #44 made the sandbox default-on and fail-closed: a missing `sandbox-exec`/`bwrap` throws. Host vault/seccomp policy is still external. Credential non-leakage now has a single sentinel test (#53) covering SQLite tables, session JSONL, tool results, replies/outbox, and captured model request bodies, plus Worker port/tool rejection. #55 corrected the user-facing pages and historical reviews; this audit also fixed the remaining "optional OS sandbox" line in the `docs/MODULES.md` T51 section. C15/P1-10 are resolved. Host read isolation remains external. |
 | **M10 watchdog** | partial | `src/watchdog/watchdog.ts`, `rules.ts`, `rules.json`, `health.ts`; `test/health.test.ts`, `daemon-machines.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | Goal-drift detection is marker-based ("a running report that says it left the scope"), not a general NL comparison. `PLAN.md` T43–T44 ask for NL rules; `README.md:100` already calls this "thin". |
 | **M11 CLI / demo** | partial | `src/cli/main.ts` (init/tasks/status/health/chat/emit/metrics/memory/a2a/pause/intervene/resume/collab/team/teams), `src/cli/demos/run.ts`, `src/cli/bakeoff.ts`; `test/cli-memory-a2a.test.ts`, `mid-task-collab.test.ts`, `live-demo.test.ts`, `live-e2e.test.ts` | `pnpm demo` (real GitHub issues/comments) is not in the automatic PR gate; it runs through the manual `acceptance.yml` dispatch and needs an operator with `gh auth`. `package.json` has no `bin`, no `build`, and `tsconfig` is `noEmit`, so the `PLAN.md` §10 `dist/cli.js` bin does not exist. No `serve` command. The `MODULES.md` runner claim is fixed by #46. |
@@ -99,7 +99,7 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | **扩展** — Worker mesh (T47) | partial | `src/harness/mesh.ts`; `Assignment.node` in `src/shared/types.ts:102-120`; placement event in `src/harness/loop.ts:84-89,129-141`; `test/worker-mesh.test.ts`, `runtime-integration.test.ts` | Placement is logical and single-process. When capacity is full, `launch` logs `node=none capacity-full` and still runs the Worker; there is no queue, rejection, or backpressure. Cross-host transport is external, which is acceptable, but capacity enforcement is not. This is P1-3. |
 | **长期记忆** (T48) | partial | `src/memory/long-term.ts`; write on terminal ticket in `src/runtime.ts:201-216`; recall injection in `src/runtime.ts:274-282`; `test/long-term-memory.test.ts`, `runtime-integration.test.ts` | One redacted entry per ticket, keyword AND recall, three results. #54 added retention (count/age, default 1000 entries / 90 days, 0 disables) with transactional spill+grant cleanup and configurable env; dedupe beyond per-ticket upsert, semantic search, and the month-scale story remain open (P2-1 is now partially resolved). Documented as partial in `README.md:115`. |
 | **产品层** (T49) | external boundary + partial | `src/core/lifecycle.ts` (`LifecycleBus`, `subscribe`, `snapshot`); lifecycle publishing in `src/runtime.ts:190-216,432-469`; `ds-agent memory` / `ds-agent a2a` in `src/cli/main.ts:204-231`; `test/lifecycle-a2a.test.ts`, `cli-memory-a2a.test.ts`, `runtime-integration.test.ts` | The in-repo contract is done; the actual panel is another repository (PLAN §9 T49). P1-4 is resolved by #57: `LifecycleBus.history` is a bounded 1000-event ring (configurable, keep-newest) with tests. It is still in-memory, so a panel can replay only the current process; persistence is a documented boundary, not implemented. |
-| **互操作** (T50) | external boundary + partial | `src/channels/a2a.ts`; `Runtime.sendA2A` and local recipient in `src/runtime.ts:319-328,390-395`; `test/lifecycle-a2a.test.ts`, `runtime-integration.test.ts` | Validation, 64 KiB cap, persistence, `delivered\|unroutable\|failed`, and a filtered `a2a` Trigger exist. There is no cross-process transport and no authentication; an adapter must add both. Document the adapter contract and never expose the local endpoint unauthenticated (P1-5). |
+| **互操作** (T50) | external boundary + partial | `src/channels/a2a.ts`, `src/channels/a2a-transport.ts` (`A2ATransport`, `LocalA2ATransport`); `Runtime.sendA2A` and local recipient in `src/runtime.ts:319-328,390-395`; `test/lifecycle-a2a.test.ts`, `a2a-transport.test.ts`, `runtime-integration.test.ts` | Validation, 64 KiB UTF-8 byte cap, identity normalization, persistence, `delivered\|unroutable\|failed`, and a filtered non-human `a2a` Trigger exist. P1-5 is resolved by the exported contract, local double, and boundary tests. The cross-process wire transport and peer authentication remain external; an adapter must add both and never expose the local endpoint unauthenticated. |
 | **安全与隐私** (T51) | external boundary + partial | `src/env/sanitize.ts` (allowlist, secret redaction), `vault.ts`, `seccomp.ts`; `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `credential-sentinel.test.ts` | In-repo: env allowlist, spill redaction, `[redacted]` output, FileVault names only, default-on fail-closed OS sandbox (#44), spill ACL, untrusted `meta` rejection, and a single sentinel test across SQLite/journal/tool results/model requests plus Worker port/tool rejection (#53). External: host-level vault/seccomp, true host read isolation (the wrapper confines writes/network only), and provider `Authorization` header/vault values not covered by the offline sentinel. Sandbox docs corrected by #55. |
 
 ## 4. Definition of done (the whole project)
@@ -170,7 +170,8 @@ These must be documented as external, with an interface and a security note:
 
 - T49 panel UI (another repo).
 - T51 host-level vault/seccomp and true host isolation.
-- A2A cross-process transport and authentication.
+- A2A network transport and peer authentication (the in-repo `A2ATransport`
+  contract and local double are in `src/channels/a2a-transport.ts`).
 - Multi-host Worker mesh transport.
 - Managed credential storage / cloud executor.
 
@@ -306,12 +307,27 @@ state that a panel can replay only the current process. SQLite persistence
 remains a documented non-goal; nothing in the product claims restart replay.
 
 **P1-5. Define the A2A adapter contract and authentication note.**
-Status: open (external adapter). In-process only (`src/channels/a2a.ts`).
-`docs/MODULES.md` now states that this repo ships no network transport and no
-peer authentication, and that an adapter must add both and authenticate before
-constructing a human Trigger. Still missing: an exported `A2ATransport`
-interface and a test double. Do not expose the local endpoint unauthenticated.
-Suggested workstream: interop agent, `feat/a2a-transport`.
+Status: resolved (contract + local double); the network adapter remains external.
+`src/channels/a2a.ts` stays in-process. `src/channels/a2a-transport.ts` exports
+`A2ATransport` (`send(envelope)` returning `A2ADelivery` or a promise, optional
+`receive(listener)`) and `LocalA2ATransport`, which wraps `A2ARouter.send` and
+inherits validation, the 64 KiB UTF-8 byte cap, persistence, and delivery
+statuses. `send` copies only `{ from, to, body }`, assigns fresh `id`/`at`, and
+drops unknown fields, so a peer cannot overwrite or backdate a persisted
+envelope. `test/a2a-transport.test.ts` covers delivery, unroutable, handler
+failure, empty/invalid envelopes (including the byte cap and non-serializable
+bodies), persistence, identity normalization, and the security boundary: an
+envelope that forges `human` still becomes a non-human `a2a` Trigger and still
+passes the ingress filter (a forged flag changes no admission outcome).
+
+Exact remaining external boundary: there is no network transport and no peer
+authentication in this repo. An adapter must move the envelope over its wire,
+authenticate the peer (mTLS, signed envelopes, bearer tokens, etc.), and hand
+inbound bytes back through `A2ARouter.send` (which normalizes identity/timestamps
+and drops unknown fields). It must never construct a Trigger or copy identity
+from the envelope body. Attributing a human identity through this contract is
+not supported, including by bypassing ingress via `runtime.ingest`. Do not expose
+the local endpoint unauthenticated.
 
 **P1-6. Standalone daemon / `serve` and in-flight resume.**
 Status: open (documented boundary). `Daemon` is an in-process timer; there is no
@@ -394,7 +410,7 @@ the work is already public.
 | P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | resolved | Main Agent originates `accept`/`ignore`/`stop`/`unavailable`; domain-alignment test green |
 | P1-3 | Mesh capacity enforcement |  |  |  | accepted boundary (documented) | Placement is logical; no queue/backpressure. `docs/MODULES.md` says so |
 | P1-4 | Lifecycle replayability |  | `feat/lifecycle-history-cap` | #57 | resolved (current-process replay only) | Bounded history (default 1000) + test; no persistence claim |
-| P1-5 | A2A transport interface + auth note |  |  |  | open (external adapter) | In-process only; adapter must add transport + auth. Docs state the requirement; interface/test still missing |
+| P1-5 | A2A transport interface + auth note |  | `a2a-transport` | #65 | resolved (contract + local double) | In-process contract + local double now exist: `A2ATransport` + `LocalA2ATransport` in `src/channels/a2a-transport.ts`, tests in `test/a2a-transport.test.ts`. Remaining external boundary: network transport + peer authentication must be supplied by an adapter |
 | P1-6 | `ds-agent serve` + in-flight resume |  |  |  | open (documented boundary) | In-process timer only; no restart resume. Docs state the boundary; serve command still missing |
 | P1-7 | Packaging decision |  |  |  | resolved (source-only) | No `bin`/`build`; install docs say source-only via `pnpm` |
 | P1-8 | Fail-closed filesystem sandbox |  | `fix/env-fail-closed-sandbox` | #44 | resolved | Missing wrapper throws; CI installs `bubblewrap` |

@@ -2,6 +2,7 @@ export { createModelFromEnv, requireLiveModelFromEnv, HttpOpenAI, MockModel } fr
 export { PROVIDER_PRESETS, resolveLiveApi, type LiveApi, type ProviderPreset } from './harness/providers.ts'
 export { Runtime, type RuntimeOptions } from './runtime.ts'
 export { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
+export { LocalA2ATransport, type A2ATransport } from './channels/a2a-transport.ts'
 export { LifecycleBus, type LifecycleEvent } from './core/lifecycle.ts'
 export { WorkerMeshRegistry, type WorkerMeshNode } from './harness/mesh.ts'
 export { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
