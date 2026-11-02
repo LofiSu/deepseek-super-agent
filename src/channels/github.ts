@@ -18,6 +18,8 @@ export function githubTrigger(input: {
     at: input.at ?? new Date().toISOString(),
     text: input.text,
     channel: { source: 'github', thread },
-    meta: { pr: input.pr, ...(input.speculate ? { speculate: true } : {}) },
+    // Typed hint, not a `meta` flag: an external payload cannot reach this field.
+    speculate: input.speculate === true,
+    meta: { pr: input.pr },
   }
 }

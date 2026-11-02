@@ -44,7 +44,7 @@ export interface Model extends SemanticModel {
 
 export function systemPrompt(role: Role): string {
   if (role === 'router') {
-    return 'You are the RouterSession. Speak to the user with reply_user. Do not run bash. Stay quiet on speculative work until a report delivers.'
+    return 'You are the RouterSession. The Engine already acknowledged an accepted ticket; do not send a second acknowledgement. Speak to the user with reply_user only when a worker report delivers a result. Do not run bash. Stay quiet on speculative work until a report delivers.'
   }
   if (role === 'worker') {
     return 'You are a WorkerSession. Investigate with tools and report_to_router. Never message the user directly. Shell env is allowlisted (PATH, HOME, USER, LANG, TMPDIR); credential values are omitted.'
@@ -117,14 +117,7 @@ export class MockModel implements Model {
     if (blob.includes('mode=speculative') && !blob.includes('REPORT')) {
       return { text: '[router] speculative silent' }
     }
-    if (blob.includes('TICKET_CREATED') && !used(messages, 'reply_user')) {
-      const title = field(blob, 'title')
-      return call('reply_user', {
-        ticketId: field(blob, 'ticketId'),
-        text: `Working on ${title}.`,
-        purpose: 'result',
-      })
-    }
+    // No duplicate acknowledgement: Tickets.create already sent one.
     if (!used(messages, 'list_tasks')) return call('list_tasks', {})
     return { text: 'router idle' }
   }
@@ -167,6 +160,8 @@ export class HttpOpenAI implements Model {
     private readonly base: string,
     private readonly apiKey: string,
     private readonly model: string,
+    /** Hard per-request budget. An unanswered HTTP call must not hold a session chain. */
+    private readonly timeoutMs = 60_000,
   ) {}
 
   classify(trigger: Trigger): SemanticHit {
@@ -177,6 +172,7 @@ export class HttpOpenAI implements Model {
     const url = `${this.base.replace(/\/$/, '')}/chat/completions`
     const response = await fetch(url, {
       method: 'POST',
+      signal: AbortSignal.timeout(this.timeoutMs),
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         'Content-Type': 'application/json',
@@ -221,11 +217,23 @@ export class HttpOpenAI implements Model {
       }>
     }
     const message = json.choices?.[0]?.message
-    const toolCalls = (message?.tool_calls ?? []).map(toolCall => ({
-      id: toolCall.id,
-      name: toolCall.function.name,
-      args: JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>,
-    }))
+    const toolCalls: ToolCall[] = []
+    let malformed = false
+    for (const toolCall of message?.tool_calls ?? []) {
+      try {
+        toolCalls.push({
+          id: toolCall.id,
+          name: toolCall.function.name,
+          args: JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>,
+        })
+      } catch {
+        // One bad argument string must not reject the turn (or leave the assignment running).
+        malformed = true
+      }
+    }
+    if (malformed && toolCalls.length === 0) {
+      return { text: '[model] malformed tool arguments ignored', toolCalls: [] }
+    }
     // Magpie DeepSeek may return content:null with reasoning_content filled.
     const text = (message?.content
       ?? message?.reasoning_content
@@ -235,16 +243,52 @@ export class HttpOpenAI implements Model {
   }
 }
 
+function timeoutFromEnv(env: NodeJS.ProcessEnv): number {
+  const raw = Number(env.DS_AGENT_API_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 60_000
+}
+
 /** MockModel when no provider is configured. A partial key/base pair throws instead of returning MockModel. */
 export function createModelFromEnv(env: NodeJS.ProcessEnv = process.env): Model {
   const live = resolveLiveApi(env)
   if (!live) return new MockModel()
-  return new HttpOpenAI(live.base, live.apiKey, live.model)
+  return new HttpOpenAI(live.base, live.apiKey, live.model, timeoutFromEnv(env))
+}
+
+/**
+ * Per-role model ids (T07/T10). The Router can run a lighter model than the Worker.
+ * Only creates a client when the corresponding DS_AGENT_*_MODEL id is set; otherwise
+ * the runtime keeps one model for every role.
+ */
+export function roleModelsFromEnv(
+  env: NodeJS.ProcessEnv,
+  _fallback: Model,
+): Partial<Record<Role, Model>> {
+  // Role models are optional. A partial provider config (key without base) must
+  // not crash a Runtime whose caller already supplied an explicit model.
+  let live: ReturnType<typeof resolveLiveApi>
+  try {
+    live = resolveLiveApi(env)
+  } catch {
+    return {}
+  }
+  if (!live) return {}
+  const ids: Record<Role, string | undefined> = {
+    router: env.DS_AGENT_ROUTER_MODEL,
+    worker: env.DS_AGENT_WORKER_MODEL,
+    watchdog: env.DS_AGENT_WATCHDOG_MODEL,
+  }
+  const models: Partial<Record<Role, Model>> = {}
+  for (const role of ['router', 'worker', 'watchdog'] as const) {
+    const id = ids[role]
+    if (id) models[role] = new HttpOpenAI(live.base, live.apiKey, id, timeoutFromEnv(env))
+  }
+  return models
 }
 
 /** Live HttpOpenAI, or an error. Never returns MockModel. */
 export function requireLiveModelFromEnv(env: NodeJS.ProcessEnv = process.env): HttpOpenAI {
   const live = resolveLiveApi(env)
   if (!live) throw new Error('No live model configured; refusing MockModel.')
-  return new HttpOpenAI(live.base, live.apiKey, live.model)
+  return new HttpOpenAI(live.base, live.apiKey, live.model, timeoutFromEnv(env))
 }

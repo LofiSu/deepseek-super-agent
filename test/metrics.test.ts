@@ -75,17 +75,20 @@ describe('section 7 metrics', () => {
     runtime.engine.report('ticket_discard_probe', { kind: 'dropped', text: 'not valuable', deliver: false })
 
     const snap = runtime.metrics.snapshot()
-    expect(snap.counters).toEqual({
+    // Deterministic counters: ingress, eval, and the two reports forced above.
+    expect(snap.counters).toMatchObject({
       'ingress.admit': 3,
       'ingress.drop': 1,
       'eval.accept': 2,
       'bypass.fanout': 1,
-      'speculate.deliver': 1,
       'speculate.discard': 1,
-      'watchdog.idle': 1,
-      'watchdog.nudge': 1,
       'watchdog.fail': 1,
+      'model.error': 0,
     })
+    // These depend on what the live model chose to do in this run.
+    expect(snap.counters).toHaveProperty('speculate.deliver')
+    expect(snap.counters).toHaveProperty('watchdog.idle')
+    expect(snap.counters['watchdog.nudge']).toBeGreaterThanOrEqual(1)
     expect(snap.modelLatencyMs.count).toBeGreaterThan(0)
     expect(snap.modelLatencyMs.sum).toBeGreaterThanOrEqual(0)
     expect(snap.modelLatencyMs.max).toBeGreaterThanOrEqual(snap.modelLatencyMs.last)

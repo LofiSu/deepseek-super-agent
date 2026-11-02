@@ -43,7 +43,13 @@ export class Assignments {
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
     if (ticket.ended?.by === 'human') return { surfaced: false, verdict: 'hold' }
     if (ticket.collab?.paused) {
-      assignment.report = { kind: report.kind, text: report.text, deliver: report.deliver, verdict: 'hold' }
+      assignment.report = {
+        kind: report.kind,
+        text: report.text,
+        deliver: report.deliver,
+        verdict: 'hold',
+        at: this.host.now(),
+      }
       this.host.repo.putDoc('ticket', ticket.id, ticket)
       this.host.log(`[collab] report held ticketId=${ticket.id} kind=${report.kind}`)
       this.host.repo.addEvent('collab.report_held', {
@@ -59,7 +65,13 @@ export class Assignments {
     let verdict: SurfaceVerdict = 'hold'
     if (wasSpeculative && terminal) verdict = this.gate.evaluate({ ticket, report })
     else if (!wasSpeculative && report.deliver === true) verdict = 'deliver'
-    assignment.report = { kind: report.kind, text: report.text, deliver: report.deliver, verdict }
+    assignment.report = {
+      kind: report.kind,
+      text: report.text,
+      deliver: report.deliver,
+      verdict,
+      at: this.host.now(),
+    }
     if (report.kind === 'failed') this.host.metrics.increment('watchdog.fail')
 
     if (wasSpeculative && verdict === 'hold') {
@@ -114,6 +126,11 @@ export class Assignments {
       kind,
     })
     this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome })
+    try {
+      this.host.onTicketEnded?.(ticket)
+    } catch (error) {
+      this.host.log(`[hook] hook=ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   private must(ticketId: string): Ticket {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
 import type { Runtime } from '../src/runtime.ts'
 import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
+import { ScriptedModel } from './scripted-model.ts'
 import { stuckSessions } from '../src/watchdog/watchdog.ts'
 
 let runtime: Runtime | undefined
@@ -13,7 +14,14 @@ afterEach(async () => {
 
 describe('async job', () => {
   it('returns started immediately and later marks the job succeeded', async () => {
-    runtime = freshRuntime()
+    // Deterministic protocol: assert the job machinery, not a live model's tool choice.
+    const model = new ScriptedModel(request => {
+      if (request.role !== 'worker') return { text: 'router-ok' }
+      const started = request.messages.some(message => message.role === 'tool' && message.name === 'start_job')
+      if (!started) return { toolCalls: [{ id: 'job_1', name: 'start_job', args: { name: 'probe' } }] }
+      return { text: 'worker-done' }
+    })
+    runtime = freshRuntime({ model })
     runtime.ingest(imTrigger({
       id: 'trg_login',
       thread: 'topic/bug-login',

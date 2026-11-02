@@ -1,8 +1,11 @@
-import type { Ticket } from '../shared/types.ts'
+import type { Strength, Ticket } from '../shared/types.ts'
 
-/** Speculative work stays silent until a report explicitly delivers. */
-export function isSpeculative(meta: Record<string, unknown>, strength: string): boolean {
-  return meta.speculate === true || strength === 'maybe'
+/**
+ * Speculative work stays silent until a report explicitly delivers.
+ * This is derived from the ingress-owned strength, never from `trigger.meta`.
+ */
+export function isSpeculative(strength: Strength): boolean {
+  return strength === 'maybe'
 }
 
 /**
@@ -28,9 +31,20 @@ export interface DeliverGate {
 const NEGATIVE = /\b(nothing|no change|unable|could not|cannot|not valuable|wontfix|won't fix)\b/i
 const POSITIVE = /\b(ready|fixed|fix|reproduced|reproduce|valuable|found|resolved|patch|passing|passed)\b/i
 
+/**
+ * Clause-local verdict: a negative clause wins inside itself ("could not fix"),
+ * but a later positive clause wins overall ("could not reproduce, but fixed it").
+ * Still a heuristic stand-in for the plan's value signal; see docs/REVIEW.md.
+ */
 function valuable(text: string): boolean {
-  if (NEGATIVE.test(text)) return false
-  return POSITIVE.test(text)
+  const clauses = text.split(/[.;!?\n]+/).map(clause => clause.trim()).filter(Boolean)
+  let sawPositive = false
+  for (const clause of clauses) {
+    if (NEGATIVE.test(clause) && !POSITIVE.test(clause)) return false
+    if (NEGATIVE.test(clause) && POSITIVE.test(clause)) continue
+    if (POSITIVE.test(clause)) sawPositive = true
+  }
+  return sawPositive
 }
 
 /** ready + an explicit deliver vote or a value signal commits; failed/dropped roll back. */

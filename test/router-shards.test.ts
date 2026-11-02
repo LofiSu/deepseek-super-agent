@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { githubTrigger } from '../src/channels/github.ts'
 import { imTrigger } from '../src/channels/im.ts'
-import { phase2, RouterShardRegistry } from '../src/phase2/index.ts'
+import { RouterShardRegistry } from '../src/ingress/shards.ts'
 
-describe('Phase-2 router shards', () => {
+describe('Router shards', () => {
   it('routes to every matching shard and falls back to default', () => {
     const shards = new RouterShardRegistry()
     shards.register({ id: 'default' })
@@ -22,13 +22,11 @@ describe('Phase-2 router shards', () => {
     expect(() => shards.register({ id: 'bad', filter: 'unsupported:value' })).toThrow()
   })
 
-  it('matches combined predicates and exposes the thin phase2 API', () => {
+  it('matches combined predicates in priority order', () => {
     const shards = new RouterShardRegistry()
     shards.register({ id: 'ci', filter: 'source:github,thread:pr/7,text:failed' })
-    expect(shards.route(githubTrigger({ pr: 7, text: 'CI failed' }))).toEqual(['ci'])
-    expect(shards.route(githubTrigger({ pr: 8, text: 'CI failed' }))).toEqual(['default'])
-
-    phase2.routerShard({ id: 'im', filter: 'source:im' })
-    expect(phase2.route(imTrigger({ thread: 'topic/chat', text: 'hello' }))).toEqual(['im'])
+    shards.register({ id: 'first', filter: 'source:github', priority: 10 })
+    expect(shards.route(githubTrigger({ pr: 7, text: 'CI failed' }))).toEqual(['first', 'ci'])
+    expect(shards.route(githubTrigger({ pr: 8, text: 'CI failed' }))).toEqual(['first'])
   })
 })

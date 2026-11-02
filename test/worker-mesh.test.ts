@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { phase2, WorkerMeshRegistry } from '../src/phase2/index.ts'
+import { WorkerMeshRegistry } from '../src/harness/mesh.ts'
 
 describe('T47 WorkerMeshRegistry', () => {
   it('registers nodes and picks one with free capacity', () => {
@@ -13,7 +13,7 @@ describe('T47 WorkerMeshRegistry', () => {
   })
 
   it('returns no node when full and frees capacity on release', () => {
-    const mesh = phase2.workerMesh({ id: 'a', capacity: 1 })
+    const mesh = new WorkerMeshRegistry([{ id: 'a', capacity: 1 }])
     expect(mesh.pickNode('t1')?.id).toBe('a')
     expect(mesh.pickNode('t2')).toBeUndefined()
     mesh.release('t1')
@@ -29,5 +29,15 @@ describe('T47 WorkerMeshRegistry', () => {
     expect(mesh.pickNode('t1')?.id).toBe('a')
     expect(mesh.pickNode('t1')?.id).toBe('a')
     expect(mesh.inFlight('a')).toBe(1)
+  })
+
+  it('skips offline nodes and frees slots when a node leaves', () => {
+    const mesh = new WorkerMeshRegistry([{ id: 'a', capacity: 1 }, { id: 'b', capacity: 1 }])
+    mesh.markOnline('a', false)
+    expect(mesh.pickNode('t1')?.id).toBe('b')
+    expect(mesh.pickNode('t2')).toBeUndefined()
+    mesh.unregister('b')
+    expect(mesh.inFlight('b')).toBe(0)
+    expect(mesh.pickNode('t2')).toBeUndefined()
   })
 })
