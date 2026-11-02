@@ -16,6 +16,13 @@ export const METRIC_NAMES = [
   'watchdog.nudge',
   'watchdog.fail',
   'watchdog.idle',
+  'model.error',
+  'model.call',
+  'router.shard',
+  'mesh.assigned',
+  'memory.remembered',
+  'memory.recalled',
+  'a2a.delivery',
 ] as const
 
 export type MetricName = (typeof METRIC_NAMES)[number]
@@ -30,7 +37,7 @@ export interface ModelLatencyMs {
 export interface MetricsSnapshot {
   counters: Record<MetricName, number>
   modelLatencyMs: ModelLatencyMs
-  /** Optional raw latency samples (Phase-2 T45 curve); absent until recorded. */
+  /** Optional raw latency samples (T45 curve); absent until recorded. */
   curveSamples?: number[]
 }
 
@@ -45,6 +52,13 @@ function blankCounters(): Record<MetricName, number> {
     'watchdog.nudge': 0,
     'watchdog.fail': 0,
     'watchdog.idle': 0,
+    'model.error': 0,
+    'model.call': 0,
+    'router.shard': 0,
+    'mesh.assigned': 0,
+    'memory.remembered': 0,
+    'memory.recalled': 0,
+    'a2a.delivery': 0,
   }
 }
 

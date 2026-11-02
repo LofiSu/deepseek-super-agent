@@ -7,7 +7,7 @@ import { summarizeCurve, type CurveSummary } from './curve.ts'
 import { Metrics, type MetricsSnapshot } from './metrics.ts'
 
 /**
- * Phase-2 T45: Router batching stress harness.
+ * T45: Router batching stress harness.
  *
  * Floods one Thread with Triggers before the Eval sequence point. In fold mode a
  * whole round becomes one Eval, so batch size grows with load while eval count stays

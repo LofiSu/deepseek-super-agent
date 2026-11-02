@@ -86,6 +86,10 @@ export class Store {
     return rows.map(row => JSON.parse(row.payload) as T)
   }
 
+  deleteDoc(kind: string, id: string): void {
+    this.db.prepare('DELETE FROM documents WHERE kind = ? AND id = ?').run(kind, id)
+  }
+
   addEvent(type: DomainEventName, payload: unknown): void {
     this.db.prepare(
       'INSERT INTO events(type, payload, created_at) VALUES(?, ?, ?)',
@@ -201,6 +205,14 @@ export class Store {
   getSpill(id: string): string | undefined {
     const row = this.db.prepare('SELECT body FROM spills WHERE id = ?').get(id) as { body: string } | undefined
     return row?.body
+  }
+
+  /** Upsert a spill by id. Used by long-term memory so a ticket keeps one stable body. */
+  replaceSpill(id: string, body: string): void {
+    this.db.prepare(
+      `INSERT INTO spills(id, body, created_at) VALUES(?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET body = excluded.body`,
+    ).run(id, body, new Date().toISOString())
   }
 
   grantSpill(spillId: string, grantee: string): void {

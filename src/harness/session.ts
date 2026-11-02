@@ -16,6 +16,11 @@ export function workerSessionId(ticketId: string): string {
   return `worker_${ticketId}`
 }
 
+/** Router shards get their own session; the default shard keeps the legacy id. */
+export function routerSessionId(shard: string): string {
+  return !shard || shard === 'default' || shard === 'router' ? 'router' : `router:${shard}`
+}
+
 /** Append-only JSONL plus a SQLite copy so a restart can still read the session. */
 export class SessionJournal {
   private announced = false

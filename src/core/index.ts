@@ -9,6 +9,7 @@ export type {
 } from './collab.ts'
 export { Engine } from './engine.ts'
 export type { Host } from './host.ts'
+export { LifecycleBus, type LifecycleEvent } from './lifecycle.ts'
 export { bindRolePorts } from './role-ports.ts'
 export { REASONS } from './reasons.ts'
 export { withSessionRole } from './session-role.ts'

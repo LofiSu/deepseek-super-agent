@@ -33,6 +33,7 @@ export {
   type FeishuWebhookResult,
 } from './feishu.ts'
 export { githubTrigger } from './github.ts'
+export { A2ARouter, type A2ADelivery, type A2AEnvelope } from './a2a.ts'
 export { imTrigger } from './im.ts'
 export { renderOutbound, truncateWords } from './norms.ts'
 export {

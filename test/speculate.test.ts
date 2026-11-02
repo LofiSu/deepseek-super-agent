@@ -43,13 +43,14 @@ function openStore(): { store: Store; lines: string[]; engine: Engine } {
 }
 
 function speculativeTicket(engine: Engine, store: Store, id = 'trg_maybe'): string {
+  // Speculation is an ingress-owned strength; a direct Engine call passes it
+  // explicitly instead of setting a field on untrusted trigger.meta.
   engine.receive(githubTrigger({
     id,
     pr: 7,
     text: 'might be a flaky payment test',
-    speculate: true,
     at: '2026-10-31T00:00:00.000Z',
-  }))
+  }), { strength: 'maybe' })
   const decision = engine.evaluateDue()[0]
   if (!decision?.ticketId) throw new Error('expected a ticket')
   const ticket = store.getDoc<Ticket>('ticket', decision.ticketId)

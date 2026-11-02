@@ -7,6 +7,8 @@ import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
+import type { A2AEnvelope } from '../channels/a2a.ts'
+import type { LongTermMemoryEntry } from '../memory/long-term.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
@@ -33,6 +35,11 @@ function bare(start: number, valueFlags: readonly string[] = []): string[] {
     out.push(arg)
   }
   return out
+}
+
+function meshCapacity(): number {
+  const n = Number(process.env.DS_AGENT_MESH_CAPACITY)
+  return Number.isSafeInteger(n) && n > 0 ? n : 4
 }
 
 function resolveTicket(store: Store, raw: string | undefined): Ticket {
@@ -100,6 +107,8 @@ function help(): void {
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
   pnpm ds-agent metrics
+  pnpm ds-agent memory [--limit 10]   # persisted cross-ticket memories
+  pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -190,6 +199,40 @@ async function main(): Promise<void> {
   }
   if (cmd === 'metrics') {
     console.log(formatMetricsJson(home))
+    return
+  }
+  if (cmd === 'memory' || cmd === 'a2a') {
+    const limit = Math.max(1, Number(option('limit') ?? 10) || 10)
+    const store = new Store(home)
+    try {
+      const instance = process.env.DS_AGENT_INSTANCE_ID ?? 'local'
+      if (cmd === 'memory') {
+        const memories = store.listDocs<LongTermMemoryEntry>('ltm')
+        console.log(JSON.stringify({
+          instance,
+          meshCapacity: meshCapacity(),
+          memories: memories.length,
+          recent: memories.slice(-limit).map(entry => ({
+            id: entry.id,
+            ticketId: entry.ticketId,
+            text: entry.text,
+          })),
+        }, null, 2))
+      } else {
+        const envelopes = store.listDocs<A2AEnvelope>('a2a')
+        console.log(JSON.stringify({
+          instance,
+          envelopes: envelopes.length,
+          recent: envelopes.slice(-limit).map(envelope => ({
+            id: envelope.id,
+            from: envelope.from,
+            to: envelope.to,
+          })),
+        }, null, 2))
+      }
+    } finally {
+      store.close()
+    }
     return
   }
   if (cmd === 'status') {

@@ -28,14 +28,15 @@ describe('T51 vault + Store/Env boundary', () => {
   })
 
   it('wrapBashCommand uses sandbox-exec on Darwin when enabled', () => {
-    const wrapped = wrapBashCommand('echo hi', { enabled: true, allowNetwork: false })
-    if (process.platform === 'darwin') {
-      expect(wrapped.wrapped).toBe(true)
-      expect(wrapped.argv[0]).toBe('sandbox-exec')
-    } else {
-      // Linux runners often have unshare/bwrap; prefer that over bare bash.
-      expect(['bash', 'unshare', 'bwrap']).toContain(wrapped.argv[0])
-    }
+    // Stub the platform: a Linux CI runner must not decide this assertion.
+    const wrapped = wrapBashCommand(
+      'echo hi',
+      { enabled: true, allowNetwork: false },
+      { platform: 'darwin', available: () => true },
+    )
+    expect(wrapped.wrapped).toBe(true)
+    expect(wrapped.argv[0]).toBe('sandbox-exec')
+    expect(wrapped.argv.join(' ')).toContain('(deny network*)')
   })
 
   it('uses available Linux no-network wrapper and falls back when none exists', () => {

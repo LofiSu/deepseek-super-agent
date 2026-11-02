@@ -20,3 +20,4 @@ export type DomainEventName =
   | 'speculate.discarded'
   | 'watchdog.nudge'
   | 'watchdog.fail'
+  | 'assignment.placed'

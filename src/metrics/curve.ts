@@ -1,7 +1,7 @@
 import type { MetricsSnapshot } from './metrics.ts'
 
 /**
- * Phase-2 T45 / PLAN P2-1: end-to-end latency curve.
+ * T45 / PLAN §7: end-to-end latency curve.
  *
  * Counters alone cannot answer "how slow is the slow tail?". This module keeps the
  * raw model-latency samples (optionally persisted as `curveSamples` in metrics.json)
