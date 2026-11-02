@@ -4,6 +4,8 @@
   "failAfterFailedJobs": 2,
   "reasons": {
     "stale": "watchdog: stuck",
-    "failed-jobs": "watchdog: repeated job failures"
-  }
+    "failed-jobs": "watchdog: repeated job failures",
+    "goal-drift": "watchdog: report left the ticket scope"
+  },
+  "driftMarkers": ["out of scope", "unrelated to the ticket", "different task", "not what was asked"]
 }

@@ -9,6 +9,8 @@ import { sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './se
 
 export interface LocalEnvOptions {
   timeoutMs?: number
+  /** Cap for one command's stdout/stderr. Excess is truncated, not buffered forever. */
+  maxOutputBytes?: number
   /** Parent environment. Only allowlisted names are copied into the child. */
   env?: NodeJS.ProcessEnv
   allowlist?: readonly string[]
@@ -30,6 +32,7 @@ export interface LocalEnvOptions {
  */
 export class LocalEnv implements EnvPort {
   private readonly timeoutMs: number
+  private readonly maxOutputBytes: number
   private readonly childEnv: NodeJS.ProcessEnv
   private readonly secrets: readonly string[]
   private readonly vault?: Vault
@@ -43,6 +46,7 @@ export class LocalEnv implements EnvPort {
       : timeoutOrOptions
     const env = options.env ?? process.env
     this.timeoutMs = options.timeoutMs ?? 5_000
+    this.maxOutputBytes = options.maxOutputBytes ?? 1_000_000
     this.childEnv = allowlistedEnv(env, options.allowlist ?? ENV_ALLOWLIST)
     this.vault = options.vault
     this.vaultNames = options.vaultNames ?? []
@@ -91,20 +95,64 @@ export class LocalEnv implements EnvPort {
       throw new UserError('speculative command leaves the isolated workdir')
     }
     const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
-    const wrapped = wrapBashCommand(command, this.sandbox)
+    const wrapped = wrapBashCommand(command, { ...this.sandbox, writableRoots: [cwd] })
     const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
       const [bin, ...args] = wrapped.argv
+      // detached: the shell leads its own process group, so a timeout can kill the
+      // grandchildren too. Without this, `sleep 3600` keeps the pipe open and the
+      // worker turn never returns (docs/REVIEW.md H9).
       const child = spawn(bin, args, {
         cwd,
-        timeout: this.timeoutMs,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: this.shellEnv(cwd, isolated),
       })
       let stdout = ''
       let stderr = ''
-      child.stdout.on('data', chunk => { stdout += String(chunk) })
-      child.stderr.on('data', chunk => { stderr += String(chunk) })
-      child.on('error', reject)
-      child.on('close', code => resolve({ code: code ?? 1, stdout, stderr }))
+      let timedOut = false
+      let settled = false
+      const append = (current: string, chunk: Buffer): string => {
+        if (current.length >= this.maxOutputBytes) return current
+        const next = current + String(chunk)
+        if (next.length <= this.maxOutputBytes) return next
+        return `${next.slice(0, this.maxOutputBytes)}\n[truncated]`
+      }
+      const killGroup = (): void => {
+        if (!child.pid) return
+        try {
+          process.kill(-child.pid, 'SIGKILL')
+        } catch {
+          // Already gone.
+        }
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // Already gone.
+        }
+      }
+      const timer = setTimeout(() => {
+        timedOut = true
+        killGroup()
+      }, this.timeoutMs)
+      const finish = (fn: () => void): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        fn()
+      }
+      child.stdout.on('data', chunk => { stdout = append(stdout, chunk) })
+      child.stderr.on('data', chunk => { stderr = append(stderr, chunk) })
+      child.on('error', error => {
+        killGroup()
+        finish(() => reject(error))
+      })
+      child.on('close', code => finish(() => resolve({
+        code: timedOut ? 124 : (code ?? 1),
+        stdout,
+        stderr: timedOut
+          ? `${stderr}\n[timeout] killed process group after ${this.timeoutMs}ms`
+          : stderr,
+      })))
     })
     return {
       code: result.code,
@@ -157,7 +205,15 @@ export class LocalEnv implements EnvPort {
   }
 }
 
+/**
+ * Speculative shells are confined to a scratch directory. This is a text check,
+ * not an OS boundary: it rejects parent/home escapes and any absolute path,
+ * including one that follows a quote or sits inside a language string
+ * (`open('/tmp/x','w')`), which the previous whitespace-only rule missed.
+ * A real boundary still requires the OS sandbox (PLAN §9 T51).
+ */
 function leavesWorkdir(command: string): boolean {
   if (command.includes('..') || command.includes('~')) return true
-  return /(?:^|[\s<>|;&])\//.test(command)
+  if (/\$(?:\{)?HOME\b/.test(command)) return true
+  return /(?:^|[^\w.-])\/(?!\*)/.test(command)
 }

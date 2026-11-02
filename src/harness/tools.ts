@@ -9,7 +9,7 @@ import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import { workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
-import type { TeamRegistry } from './team.ts'
+import { MAX_TEAM_MEMBERS, type TeamRegistry } from './team.ts'
 
 export interface ToolSession {
   sessionId: string
@@ -36,6 +36,8 @@ export interface ToolDeps {
   log: (line: string) => void
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
+  /** Append a nudge to the worker session journal (same effect as Watchdog.nudge). */
+  nudge?: (sessionId: string, ticketId: string) => void
   teams?: TeamRegistry
 }
 
@@ -80,7 +82,7 @@ export class ToolRegistry {
         routerTurn: deps.routerTurn,
         teams: deps.teams,
       }),
-      ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics }),
+      ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
     ]
   }
 
@@ -141,12 +143,15 @@ function routerTools(
     },
     {
       name: 'stop_worker',
-      description: 'Ask a worker to stop.',
+      description: 'Stop a ticket and end its running assignment.',
       parameters: schema({ ticketId: { type: 'string' } }),
       roles: ['router'],
       run: guard('router', 'stop_worker', async args => {
-        log(`[harness] stop_worker ticketId=${String(args.ticketId ?? '')}`)
-        return { stopped: true }
+        const ticketId = String(args.ticketId ?? '')
+        // Actually end the work; a log line alone told the model a lie.
+        ports.stop(ticketId, 'router stop_worker')
+        log(`[harness] stop_worker ticketId=${ticketId}`)
+        return { stopped: true, ticketId }
       }),
     },
     {
@@ -164,12 +169,58 @@ function routerTools(
     },
     {
       name: 'subscribe_worker',
-      description: 'Subscribe a ticket to a thread.',
-      parameters: schema({ ticketId: { type: 'string' }, thread: { type: 'string' } }),
+      description: 'Subscribe a ticket to a thread. contextOnly=true grants context but no follow-up bypass.',
+      parameters: schema({
+        ticketId: { type: 'string' },
+        thread: { type: 'string' },
+        contextOnly: { type: 'boolean' },
+      }),
       roles: ['router'],
       run: guard('router', 'subscribe_worker', async args => {
-        ports.subscribe(String(args.ticketId), String(args.thread))
-        return { subscribed: true }
+        ports.subscribe(String(args.ticketId), String(args.thread), { contextOnly: args.contextOnly === true })
+        return { subscribed: true, contextOnly: args.contextOnly === true }
+      }),
+    },
+    {
+      name: 'unsubscribe_worker',
+      description: 'Stop a ticket from following a thread. Does not requeue a trigger; use handback for that.',
+      parameters: schema({ ticketId: { type: 'string' }, thread: { type: 'string' }, reason: { type: 'string' } }),
+      roles: ['router'],
+      run: guard('router', 'unsubscribe_worker', async args => {
+        const ticketId = String(args.ticketId ?? '')
+        const thread = String(args.thread ?? '')
+        const removed = ports.unsubscribe(ticketId, thread, String(args.reason ?? 'router-unsubscribe'))
+        return { removed, ticketId, thread }
+      }),
+    },
+    {
+      name: 'assess_trigger',
+      description:
+        'Router veto for a ticket the Gate already accepted. kind=stop ends it before the Worker starts; kind=unavailable records an assessor outage.',
+      parameters: schema({
+        triggerId: { type: 'string' },
+        ticketId: { type: 'string' },
+        kind: { type: 'string' },
+        reason: { type: 'string' },
+      }),
+      roles: ['router'],
+      run: guard('router', 'assess_trigger', async args => {
+        const triggerId = String(args.triggerId ?? '')
+        const kind = String(args.kind ?? '')
+        const reason = String(args.reason ?? 'router-assessment')
+        if (!triggerId) throw new UserError('assess_trigger needs a triggerId')
+        if (kind === 'stop') {
+          const ticketId = String(args.ticketId ?? '')
+          if (!ticketId) throw new UserError('assess_trigger stop needs a ticketId')
+          const decision = ports.decide(triggerId, { kind: 'stop', ticketId, reason })
+          log(`[harness] router veto ticketId=${ticketId} triggerId=${triggerId} reason=${reason}`)
+          return { decision: decision.kind, ticketId: decision.ticketId }
+        }
+        if (kind === 'unavailable') {
+          const decision = ports.decide(triggerId, { kind: 'unavailable', reason })
+          return { decision: decision.kind }
+        }
+        throw new UserError('assess_trigger kind must be stop or unavailable after the Gate accepted')
       }),
     },
   ]
@@ -271,13 +322,25 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
     },
     {
       name: 'subscribe_thread',
-      description: 'Subscribe this ticket to another thread.',
-      parameters: schema({ thread: { type: 'string' } }),
+      description: 'Subscribe this ticket to another thread. contextOnly=true grants context but no follow-up bypass.',
+      parameters: schema({ thread: { type: 'string' }, contextOnly: { type: 'boolean' } }),
       roles: ['worker'],
       run: guard('worker', 'subscribe_thread', async (args, ctx) => {
         if (!ctx.ticketId) throw new UserError('subscribe_thread needs a ticket')
-        ports.subscribe(ctx.ticketId, String(args.thread ?? ''))
-        return { subscribed: true }
+        ports.subscribe(ctx.ticketId, String(args.thread ?? ''), { contextOnly: args.contextOnly === true })
+        return { subscribed: true, contextOnly: args.contextOnly === true }
+      }),
+    },
+    {
+      name: 'unsubscribe_thread',
+      description: 'Stop this ticket from following a thread. Does not requeue a trigger; use handback for that.',
+      parameters: schema({ thread: { type: 'string' }, reason: { type: 'string' } }),
+      roles: ['worker'],
+      run: guard('worker', 'unsubscribe_thread', async (args, ctx) => {
+        if (!ctx.ticketId) throw new UserError('unsubscribe_thread needs a ticket')
+        const thread = String(args.thread ?? '')
+        const removed = ports.unsubscribe(ctx.ticketId, thread, String(args.reason ?? 'worker-unsubscribe'))
+        return { removed, ticketId: ctx.ticketId, thread }
       }),
     },
     {
@@ -297,22 +360,14 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
       name: 'spawn_team',
       description: 'Spawn a Worker-internal team. Members are opaque to the Router.',
       parameters: schema({
-        members: { type: 'string', description: 'JSON array of {name,role?} or comma-separated names' },
+        members: { type: 'string', description: `JSON array of {name,role?} or comma-separated names (max ${MAX_TEAM_MEMBERS})` },
       }),
       roles: ['worker'],
       run: guard('worker', 'spawn_team', async (args, ctx) => {
         if (!deps.teams) throw new UserError('team registry not configured')
         const ticketId = ctx.ticketId ?? ''
         if (!ticketId) throw new UserError('spawn_team needs a ticket')
-        let members: { name: string; role?: string }[] = []
-        const raw = args.members
-        if (typeof raw === 'string') {
-          const trimmed = raw.trim()
-          if (trimmed.startsWith('[')) members = JSON.parse(trimmed) as { name: string; role?: string }[]
-          else members = trimmed.split(',').map(name => ({ name: name.trim() })).filter(m => m.name)
-        } else if (Array.isArray(raw)) {
-          members = raw as { name: string; role?: string }[]
-        }
+        const members = parseTeamMembers(args.members)
         const team = deps.teams.spawnTeam({ parentSessionId: ctx.sessionId, ticketId, members })
         for (const m of team.members) {
           deps.scheduleJob({ id: m.jobId, sessionId: ctx.sessionId, ticketId })
@@ -326,10 +381,10 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
       description: 'Status of a Worker-internal team.',
       parameters: schema({ teamId: { type: 'string' } }),
       roles: ['worker'],
-      run: guard('worker', 'team_status', async args => {
+      run: guard('worker', 'team_status', async (args, ctx) => {
         if (!deps.teams) throw new UserError('team registry not configured')
         const teamId = String(args.teamId ?? '')
-        const team = deps.teams.getTeam(teamId)
+        const team = ownedTeam(deps.teams, teamId, ctx)
         if (!team) return { found: false, teamId }
         return {
           found: true,
@@ -345,9 +400,11 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
       description: 'Finish a Worker-internal team, marking any running members as done.',
       parameters: schema({ teamId: { type: 'string' } }),
       roles: ['worker'],
-      run: guard('worker', 'complete_team', async args => {
+      run: guard('worker', 'complete_team', async (args, ctx) => {
         if (!deps.teams) throw new UserError('team registry not configured')
         const teamId = String(args.teamId ?? '')
+        // Never let a worker settle another worker's team.
+        if (!ownedTeam(deps.teams, teamId, ctx)) return { found: false, teamId }
         const team = deps.teams.completeTeam(teamId)
         if (!team) return { found: false, teamId }
         return {
@@ -377,17 +434,23 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
 /** Watchdog tools close over WatchdogPorts. They fail stuck work; they do not speak. */
 function watchdogTools(
   ports: RolePortFor<'watchdog'>,
-  deps: { env: EnvPort; log: (line: string) => void; metrics: Metrics },
+  deps: {
+    env: EnvPort
+    log: (line: string) => void
+    metrics: Metrics
+    nudge?: (sessionId: string, ticketId: string) => void
+  },
 ): ToolDef[] {
   const { env, log, metrics } = deps
   return [
     {
       name: 'nudge_worker',
-      description: 'Nudge a worker that looks stuck.',
+      description: 'Nudge a worker that looks stuck. Appends a nudge to its session journal.',
       parameters: schema({ ticketId: { type: 'string' } }),
       roles: ['watchdog'],
       run: guard('watchdog', 'nudge_worker', async args => {
         const ticketId = String(args.ticketId ?? '')
+        deps.nudge?.(workerSessionId(ticketId), ticketId)
         metrics.increment('watchdog.nudge')
         log(`[watchdog] nudge ticketId=${ticketId}`)
         return { nudged: ticketId }
@@ -409,6 +472,48 @@ function watchdogTools(
       }),
     },
   ]
+}
+
+/** Parse model-supplied team members and fail with a clear error, never a raw TypeError. */
+function parseTeamMembers(raw: unknown): { name: string; role?: string }[] {
+  const isMember = (item: unknown): boolean => (
+    item !== null && typeof item === 'object' && !Array.isArray(item)
+  )
+  if (Array.isArray(raw)) {
+    if (!raw.every(isMember)) throw new UserError('spawn_team members must be an array of {name, role?} objects')
+    return raw as { name: string; role?: string }[]
+  }
+  if (typeof raw !== 'string') {
+    throw new UserError('spawn_team members must be a JSON array or comma-separated names')
+  }
+  const trimmed = raw.trim()
+  if (!trimmed) throw new UserError('spawn_team members must not be empty')
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      throw new UserError('spawn_team members is not valid JSON')
+    }
+    if (!Array.isArray(parsed)) throw new UserError('spawn_team members must be a JSON array')
+    if (!parsed.every(isMember)) {
+      throw new UserError('spawn_team members must be a JSON array of {name, role?} objects')
+    }
+    return parsed as { name: string; role?: string }[]
+  }
+  return trimmed.split(',').map(name => ({ name: name.trim() })).filter(member => member.name)
+}
+
+/** A worker session may only inspect or settle teams it spawned for its own ticket. */
+function ownedTeam(
+  teams: TeamRegistry,
+  teamId: string,
+  ctx: { sessionId: string; ticketId?: string },
+) {
+  const team = teams.getTeam(teamId)
+  if (!team || team.parentSessionId !== ctx.sessionId) return undefined
+  if (ctx.ticketId && team.ticketId !== ctx.ticketId) return undefined
+  return team
 }
 
 function ticketOf(store: Store, ctx: { ticketId?: string }): Ticket | undefined {

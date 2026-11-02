@@ -387,7 +387,7 @@ describe.skipIf(!enabled)('live module E2E', () => {
       pr: 503,
       text: 'might be a flaky payment test, not sure it is ours',
       speculate: true,
-    }))).toBe('stored')
+    }), { strength: 'maybe' })).toBe('stored')
     const decision = runtime.engine.evaluateDue().find(item => item.kind === 'accept')
     expect(decision?.ticketId).toBeTruthy()
     const ticketId = decision!.ticketId!

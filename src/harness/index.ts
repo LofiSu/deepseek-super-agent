@@ -13,3 +13,4 @@ export {
   type TeamRecord,
 } from './team.ts'
 export { MachineRegistry } from './machines.ts'
+export { WorkerMeshRegistry, type WorkerMeshNode } from './mesh.ts'

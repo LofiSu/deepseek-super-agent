@@ -8,6 +8,7 @@ import { ToolRegistry, type ToolContext } from '../src/harness/tools.ts'
 import type { HarnessOptions } from '../src/harness/loop.ts'
 import { ruleClassify, type SemanticHit } from '../src/ingress/filter.ts'
 import type { Completion, CompletionRequest, Model } from '../src/harness/model.ts'
+import { field, lastPrompt, ScriptedModel } from './scripted-model.ts'
 import type { RouterPorts, WatchdogPorts, WorkerPorts } from '../src/shared/ports.ts'
 import { UserError } from '../src/shared/errors.ts'
 import type { Ticket, Trigger } from '../src/shared/types.ts'
@@ -195,7 +196,44 @@ describe('worker cannot reply', () => {
   })
 
   it('still lets the router send a result after a worker report', async () => {
-    runtime = freshRuntime()
+    // Deterministic protocol: this asserts the routing path, not a live model's tool choice.
+    const model = new ScriptedModel(request => {
+      const prompt = lastPrompt(request)
+      if (request.role === 'worker') {
+        const reported = request.messages.some(message => message.role === 'tool' && message.name === 'report_to_router')
+        if (!reported) {
+          return {
+            toolCalls: [{
+              id: 'report_1',
+              name: 'report_to_router',
+              args: {
+                ticketId: field(prompt, 'ticketId'),
+                text: 'fixed the timeout',
+                deliver: true,
+                kind: 'ready',
+              },
+            }],
+          }
+        }
+        return { text: 'worker-done' }
+      }
+      const replied = request.messages.some(message => message.role === 'tool' && message.name === 'reply_user')
+      if (prompt.startsWith('REPORT') && !replied) {
+        return {
+          toolCalls: [{
+            id: 'reply_1',
+            name: 'reply_user',
+            args: {
+              ticketId: field(prompt, 'ticketId'),
+              text: field(prompt, 'reportText') || 'done',
+              purpose: 'result',
+            },
+          }],
+        }
+      }
+      return { text: 'router-done' }
+    })
+    runtime = freshRuntime({ model })
     runtime.ingest(imTrigger({
       id: 'trg_happy',
       thread: 'topic/happy',

@@ -6,6 +6,7 @@ import {
   recordLatencySample,
   summarizeCurve,
 } from '../src/metrics/curve.ts'
+import { compareBakeoff, type BakeoffSample } from '../src/metrics/bakeoff.ts'
 import {
   Metrics,
   emptySnapshot,
@@ -26,7 +27,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
 })
 
-describe('phase2 T45 metrics curve', () => {
+describe('T45 metrics curve', () => {
   it('summarizes an empty curve as zeros', () => {
     const zero = { count: 0, p50: 0, p95: 0, max: 0 }
     expect(summarizeCurve(undefined)).toEqual(zero)
@@ -99,5 +100,32 @@ describe('phase2 T45 metrics curve', () => {
     expect(after.curveSamples).toEqual([25])
     expect(after.counters['ingress.admit']).toBe(4)
     expect(after.modelLatencyMs).toEqual({ count: 3, sum: 55, max: 25, last: 25 })
+  })
+})
+
+describe('T45 dual-layer vs single-session bake-off', () => {
+  const sample = (mode: 'dual' | 'single', calls: number, wall: number): BakeoffSample => ({
+    mode,
+    modelCalls: calls,
+    tickets: 1,
+    evalAccepts: 1,
+    wallMs: wall,
+    counters: { 'model.call': calls, 'eval.accept': 1 },
+  })
+
+  it('reports the extra Router calls and per-ticket cost', () => {
+    const comparison = compareBakeoff(sample('dual', 4, 200), sample('single', 2, 100))
+    expect(comparison.extraModelCalls).toBe(2)
+    expect(comparison.ticketsPerCall).toEqual({ dual: 0.25, single: 0.5 })
+    expect(comparison.wallRatio).toBe(2)
+    expect(comparison.verdict).toContain('extra model call')
+  })
+
+  it('handles a cheaper dual path and a zero-call baseline', () => {
+    const cheaper = compareBakeoff(sample('dual', 3, 90), sample('single', 5, 100))
+    expect(cheaper.extraModelCalls).toBe(-2)
+    expect(cheaper.verdict).toContain('single-session paid')
+    const zero = compareBakeoff(sample('dual', 2, 10), sample('single', 0, 10))
+    expect(zero.ticketsPerCall.single).toBe(Number.POSITIVE_INFINITY)
   })
 })

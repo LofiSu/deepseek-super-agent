@@ -1,6 +1,6 @@
 import { maySurface } from '../speculate/gate.ts'
 import type { AssessmentOutcome, WorkerReport } from '../shared/ports.ts'
-import type { Decision, ReceiveResult, Ticket, Trigger } from '../shared/types.ts'
+import type { Decision, ReceiveResult, Ticket, Trigger, TriggerTrust } from '../shared/types.ts'
 import { Assignments, type ReportResult } from './assignments.ts'
 import {
   Collaborations,
@@ -40,15 +40,21 @@ export class Engine {
     this.collaborations = new Collaborations(host)
   }
 
-  receive(trigger: Trigger): ReceiveResult {
+  receive(trigger: Trigger, trust?: TriggerTrust): ReceiveResult {
     assertSessionMay('receive')
-    return this.host.repo.atomic(() => this.intake.receive(trigger))
+    return this.host.repo.atomic(() => this.intake.receive(trigger, trust))
   }
 
   /** Record the router's assessment. Workers and the watchdog cannot call this. */
   decide(triggerId: string, outcome: AssessmentOutcome): Decision {
     assertSessionMay('decide')
     return this.host.repo.atomic(() => this.evals.decide(triggerId, outcome))
+  }
+
+  /** End a live ticket on the Router's instruction. Workers and the watchdog cannot call this. */
+  stop(ticketId: string, reason: string): void {
+    assertSessionMay('stop')
+    this.host.repo.atomic(() => this.tickets.stop(ticketId, reason, 'router'))
   }
 
   evaluateDue(): Decision[] {
@@ -114,8 +120,12 @@ export class Engine {
     })
   }
 
-  subscribe(ticketId: string, threadKey: string): void {
-    this.host.repo.atomic(() => this.tickets.subscribe(ticketId, threadKey))
+  subscribe(ticketId: string, threadKey: string, opts: { contextOnly?: boolean } = {}): void {
+    this.host.repo.atomic(() => this.tickets.subscribe(ticketId, threadKey, opts))
+  }
+
+  unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean {
+    return this.host.repo.atomic(() => this.tickets.unsubscribe(ticketId, threadKey, reason))
   }
 
   handback(ticketId: string, triggerId: string, reason: string): boolean {

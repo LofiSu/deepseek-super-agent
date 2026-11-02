@@ -22,7 +22,10 @@ export interface ChannelRef {
   address?: Record<string, string>
 }
 
-/** One immutable event from a source. `text` and `meta` are untrusted. */
+/**
+ * One immutable event from a source. `text` and `meta` are untrusted.
+ * The Engine never reads a decision from `meta`; see `TriggerTrust`.
+ */
 export interface Trigger {
   id: string
   source: string
@@ -30,6 +33,12 @@ export interface Trigger {
   actor: ActorRef
   human: boolean
   addressed?: 'mention' | 'direct'
+  /**
+   * Channel-adapter hint: evaluate this as low-confidence work that stays silent
+   * until a deliver gate commits it. It can make an actionable-looking text
+   * speculative, but it never admits noise and is not read from `meta`.
+   */
+  speculate?: boolean
   at: string
   text: string
   channel?: ChannelRef
@@ -40,12 +49,34 @@ export function threadKey(ref: ThreadRef): string {
   return `${ref.source}:${ref.id}`
 }
 
+/**
+ * Ingress-owned facts for one receive. The Runtime builds this next to the
+ * trigger it just filtered; it is deliberately separate from `trigger.meta`,
+ * which is untrusted and may be set by any channel adapter or caller.
+ */
+export interface TriggerTrust {
+  /** Spill the ingress layer itself created for this trigger. The only grant source. */
+  spillId?: string
+  /** Strength the ingress filter derived. Never copied from `meta.strength`. */
+  strength?: Strength
+  /**
+   * The redacted text the ingress filter actually classified. When the body was
+   * spilled, `trigger.text` is only a summary; the Engine must assess the same
+   * bytes rather than re-filter a truncated prefix.
+   */
+  filterText?: string
+  /** Router shard ids. Computed by the ingress layer, never read from `meta`. */
+  shards?: string[]
+}
+
 export interface Thread {
   key: string
   ref: ThreadRef
   createdAt: string
   lastAt?: string
   subscriptions: string[]
+  /** Per-subscription flags. A contextOnly subscriber does not get a follow-up bypass. */
+  subscriptionMeta?: Record<string, { contextOnly?: boolean; at?: string }>
   correlated: string[]
   pending: string[]
   meta: Record<string, unknown>
@@ -54,6 +85,8 @@ export interface Thread {
 export interface Disposition {
   filtered?: string
   fanout: string[]
+  /** Router shards that matched this trigger. */
+  shards?: string[]
   handbacks?: { ticketId: string; reason: string; at: string }[]
   at: string
 }
@@ -71,6 +104,8 @@ export interface Assignment {
   state: 'pending' | 'running' | 'ended'
   speculative: boolean
   workerSessionId?: string
+  /** Worker mesh node that owns this assignment. Logical placement only. */
+  node?: string
   startedAt?: string
   endedAt?: string
   report?: {
@@ -78,6 +113,8 @@ export interface Assignment {
     text: string
     deliver?: boolean
     verdict?: 'deliver' | 'discard' | 'hold'
+    /** When the report was recorded. A progress report is a heartbeat, not a terminal stop. */
+    at?: string
   }
 }
 
@@ -130,7 +167,7 @@ export interface Collaboration {
 export interface TicketEnd {
   at: string
   outcome: string
-  by: 'executor' | 'human' | 'watchdog'
+  by: 'executor' | 'human' | 'watchdog' | 'router'
 }
 
 export interface Ticket {

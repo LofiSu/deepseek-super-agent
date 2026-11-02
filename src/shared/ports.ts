@@ -51,7 +51,11 @@ export interface RouterPorts {
   receive(trigger: Trigger): ReceiveResult
   decide(triggerId: string, outcome: AssessmentOutcome): Decision
   reply(ticketId: string, text: string, purpose: string): void
-  subscribe(ticketId: string, threadKey: string): void
+  /** End a live ticket and its running assignment. Router-owned. */
+  stop(ticketId: string, reason: string): void
+  subscribe(ticketId: string, threadKey: string, opts?: { contextOnly?: boolean }): void
+  /** Stop following a thread without requeueing a trigger (compare `handback`). */
+  unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean
 }
 
 /**
@@ -64,7 +68,9 @@ export interface WorkerPorts {
     surfaced: boolean
     verdict: 'deliver' | 'discard' | 'hold'
   }
-  subscribe(ticketId: string, threadKey: string): void
+  subscribe(ticketId: string, threadKey: string, opts?: { contextOnly?: boolean }): void
+  /** Stop following a thread without requeueing a trigger (compare `handback`). */
+  unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean
   handback(ticketId: string, triggerId: string, reason: string): boolean
 }
 
@@ -87,7 +93,7 @@ export interface RolePorts {
 }
 
 /** Engine commands that must not run as a worker or a watchdog. */
-export const ROUTER_ONLY_OPS = ['reply', 'decide', 'receive'] as const
+export const ROUTER_ONLY_OPS = ['reply', 'decide', 'receive', 'stop'] as const
 export type RouterOnlyOp = typeof ROUTER_ONLY_OPS[number]
 
 /** Compile-time map so a role's port never gains a router-only command by accident. */

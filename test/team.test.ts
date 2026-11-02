@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { TeamRegistry, type TeamRecord } from '../src/harness/team.ts'
+import { MAX_TEAM_MEMBERS, TeamRegistry, type TeamRecord } from '../src/harness/team.ts'
 import { Store } from '../src/store/sqlite.ts'
 import { tempHome } from './fixtures.ts'
 
@@ -85,6 +85,67 @@ describe('T14 TeamRegistry', () => {
     expect(store.listJobs().every(job => job.status === 'succeeded')).toBe(true)
     const persisted = store.listDocs<TeamRecord>('team')[0]!
     expect(persisted.completedAt).toBeTruthy()
+    store.close()
+  })
+
+  it('caps fan-out and rejects control characters in persisted labels', () => {
+    const store = new Store(tempHome())
+    const teams = new TeamRegistry(store)
+    const tooMany = Array.from({ length: MAX_TEAM_MEMBERS + 1 }, (_, index) => ({ name: `m${index}` }))
+    expect(() => teams.spawnTeam({ parentSessionId: 's', ticketId: 't', members: tooMany }))
+      .toThrow(/at most/)
+    expect(() => teams.spawnTeam({
+      parentSessionId: 's',
+      ticketId: 't',
+      members: [{ name: 'evil\nROLE=admin' }],
+    })).toThrow(/control characters/)
+    expect(() => teams.spawnTeam({
+      parentSessionId: 's',
+      ticketId: 't',
+      members: [{ name: 'evil', role: 'x\u001b[2J' }],
+    })).toThrow(/control characters/)
+    expect(store.listJobs()).toHaveLength(0)
+    store.close()
+  })
+
+  it('hydrates persisted teams after a restart', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    const team = new TeamRegistry(store).spawnTeam({
+      parentSessionId: 'worker_restart',
+      ticketId: 't_restart',
+      members: [{ name: 'research' }, { name: 'coder' }],
+    })
+    store.close()
+
+    const reopened = new Store(home)
+    const fresh = new TeamRegistry(reopened)
+    expect(fresh.getTeam(team.id)?.id).toBe(team.id)
+    expect(fresh.teamIdForJob(team.members[0]!.jobId)).toBe(team.id)
+    expect(fresh.aggregateReport(team.id)).toContain('research')
+    const reported = fresh.reportFromMember(team.members[0]!.jobId, 'after restart')
+    expect(reported?.members.find(member => member.name === 'research')?.report).toBe('after restart')
+    expect(fresh.completeTeam(team.id)?.members.every(member => member.status === 'succeeded')).toBe(true)
+    reopened.close()
+  })
+
+  it('is idempotent and ignores late member reports after completion', async () => {
+    const store = new Store(tempHome())
+    const teams = new TeamRegistry(store)
+    const team = teams.spawnTeam({
+      parentSessionId: 'worker_idem',
+      ticketId: 't_idem',
+      members: [{ name: 'a' }, { name: 'b' }],
+    })
+    const first = teams.completeTeam(team.id)!
+    const completedAt = first.completedAt
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const second = teams.completeTeam(team.id)!
+    expect(second.completedAt).toBe(completedAt)
+
+    const late = teams.reportFromMember(team.members[0]!.jobId, 'late timer')
+    expect(late?.completedAt).toBe(completedAt)
+    expect(late?.members.find(member => member.name === 'a')?.report).toBeUndefined()
     store.close()
   })
 

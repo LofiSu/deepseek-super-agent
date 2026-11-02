@@ -6,7 +6,9 @@ export interface WatchdogRules {
   stuckMsDefault: number
   nudgeBeforeFail: boolean
   failAfterFailedJobs: number
-  reasons: { stale: string; 'failed-jobs': string }
+  reasons: { stale: string; 'failed-jobs': string; 'goal-drift': string }
+  /** Phrases a report can use to admit that it left the ticket's scope. */
+  driftMarkers: string[]
 }
 
 const fallback: WatchdogRules = {
@@ -16,7 +18,9 @@ const fallback: WatchdogRules = {
   reasons: {
     stale: 'watchdog: stuck',
     'failed-jobs': 'watchdog: repeated job failures',
+    'goal-drift': 'watchdog: report left the ticket scope',
   },
+  driftMarkers: ['out of scope', 'unrelated to the ticket', 'different task', 'not what was asked'],
 }
 
 export function loadWatchdogRules(path = join(dirname(fileURLToPath(import.meta.url)), 'rules.json')): WatchdogRules {
@@ -29,7 +33,11 @@ export function loadWatchdogRules(path = join(dirname(fileURLToPath(import.meta.
       reasons: {
         stale: raw.reasons?.stale ?? fallback.reasons.stale,
         'failed-jobs': raw.reasons?.['failed-jobs'] ?? fallback.reasons['failed-jobs'],
+        'goal-drift': raw.reasons?.['goal-drift'] ?? fallback.reasons['goal-drift'],
       },
+      driftMarkers: Array.isArray(raw.driftMarkers)
+        ? raw.driftMarkers.filter((marker): marker is string => typeof marker === 'string' && marker.trim().length > 0)
+        : fallback.driftMarkers,
     }
   } catch {
     return { ...fallback, reasons: { ...fallback.reasons } }

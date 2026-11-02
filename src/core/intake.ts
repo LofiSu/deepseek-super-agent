@@ -10,26 +10,43 @@ import {
   type ThreadRef,
   type Ticket,
   type Trigger,
+  type TriggerTrust,
 } from '../shared/types.ts'
 import type { Host } from './host.ts'
 
 export class Intake {
   constructor(private readonly host: Host) {}
 
-  receive(trigger: Trigger): ReceiveResult {
+  /**
+   * `trust` is the ingress layer's own record for this trigger. It is the only
+   * source of spill grants and strength; fields on `trigger.meta` are ignored
+   * because any adapter could set them.
+   */
+  receive(trigger: Trigger, trust: TriggerTrust = {}): ReceiveResult {
     if (!trigger.threads.length) throw new UserError('A trigger must belong to at least one thread')
     if (this.host.repo.getDoc<Trigger>('trigger', trigger.id)) return 'duplicate'
     const at = this.host.now()
-    const gate = this.host.scope.admit(trigger)
+    const gate = this.host.scope.admit(
+      trust.filterText ? { ...trigger, text: trust.filterText } : trigger,
+    )
+    // Persist engine-authored meta only. Caller meta is data, not a decision.
+    const owned: Trigger = {
+      ...trigger,
+      meta: {
+        label: trigger.text.replace(/\s+/g, ' ').trim().slice(0, 80),
+        ...(trust.strength ? { strength: trust.strength } : {}),
+        ...(trust.spillId ? { spillId: trust.spillId } : {}),
+      },
+    }
     if (!gate.listened) {
-      this.host.repo.putDoc('trigger', trigger.id, trigger)
+      this.host.repo.putDoc('trigger', trigger.id, owned)
       const disposition: Disposition = { filtered: gate.reason, fanout: [], at }
       this.host.repo.putDoc('disposition', trigger.id, disposition)
       this.host.repo.addEvent('trigger.received', { triggerId: trigger.id, result: 'filtered', reason: gate.reason })
       return 'filtered'
     }
 
-    this.host.repo.putDoc('trigger', trigger.id, trigger)
+    this.host.repo.putDoc('trigger', trigger.id, owned)
     const keys = trigger.threads.map(threadKey)
     let primary: Thread | undefined
     const eligible: Ticket[] = []
@@ -41,13 +58,18 @@ export class Intake {
       thread.correlated = [...new Set([...thread.correlated, ...keys.filter(key => key !== thread.key)])]
       // Stop / ignore / unavailable stay on the Eval queue instead of bypassing into the worker.
       if (!commandOf(trigger.text)) {
-        for (const ticketId of [...thread.subscriptions]) {
+        const live: string[] = []
+        for (const ticketId of thread.subscriptions) {
           if (seen.has(ticketId)) continue
           seen.add(ticketId)
           const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
-          if (!ticket || !bypassEligible(ticket, trigger)) continue
+          // Drop stale ids instead of resurrecting an ended ticket on a later follow-up.
+          if (!ticket || ticket.ended) continue
+          live.push(ticketId)
+          if (!bypassEligible(ticket, trigger, thread.subscriptionMeta?.[ticketId])) continue
           eligible.push(ticket)
         }
+        thread.subscriptions = live
       }
       this.host.repo.putDoc('thread', thread.key, thread)
     }
@@ -59,11 +81,11 @@ export class Intake {
         kind: 'trigger',
         triggerId: trigger.id,
         text: trigger.text,
-        spillId: spillOf(trigger),
+        spillId: trust.spillId,
         at,
         human: trigger.human,
       })
-      grantTicketSpill(this.host.repo, spillOf(trigger), winner.id)
+      grantTicketSpill(this.host.repo, trust.spillId, winner.id)
       this.host.repo.putDoc('ticket', winner.id, winner)
     }
 
@@ -78,9 +100,18 @@ export class Intake {
       this.host.repo.putDoc('thread', primary.key, primary)
       this.host.onQueued?.(primary.key, trigger.id, primary.pending)
     }
-    const disposition: Disposition = { fanout, at }
+    const disposition: Disposition = {
+      fanout,
+      ...(trust.shards?.length ? { shards: trust.shards } : {}),
+      at,
+    }
     this.host.repo.putDoc('disposition', trigger.id, disposition)
-    this.host.repo.addEvent('trigger.received', { triggerId: trigger.id, result: 'stored', fanout })
+    this.host.repo.addEvent('trigger.received', {
+      triggerId: trigger.id,
+      result: 'stored',
+      fanout,
+      ...(trust.shards?.length ? { shards: trust.shards } : {}),
+    })
     return 'stored'
   }
 
@@ -104,13 +135,21 @@ export class Intake {
 
 /**
  * Subscription bypass is a human follow-up on a live ticket whose mandate
- * still has scope and has not ended.
+ * still has scope and has not ended. A contextOnly subscription never bypasses.
+ * A different human actor does not silently inherit another person's mandate.
  */
-export function bypassEligible(ticket: Ticket, trigger: Trigger): boolean {
+export function bypassEligible(
+  ticket: Ticket,
+  trigger: Trigger,
+  subscription?: { contextOnly?: boolean },
+): boolean {
   if (!trigger.human) return false
   if (ticket.ended) return false
+  if (subscription?.contextOnly === true) return false
   const scope = ticket.mandate?.scope
-  return typeof scope === 'string' && scope.trim().length > 0
+  if (typeof scope !== 'string' || scope.trim().length === 0) return false
+  const mandateActor = ticket.mandate?.actor?.id
+  return !mandateActor || !trigger.actor.id || mandateActor === trigger.actor.id
 }
 
 /** One subscriber wins: an active assignment outranks a finished one, then the latest activity. */
@@ -149,8 +188,4 @@ function activityAt(ticket: Ticket, assignment: Assignment): string {
   if (assignment.startedAt && assignment.startedAt > at) at = assignment.startedAt
   if (assignment.endedAt && assignment.endedAt > at) at = assignment.endedAt
   return at
-}
-
-function spillOf(trigger: Trigger): string | undefined {
-  return typeof trigger.meta.spillId === 'string' && trigger.meta.spillId ? trigger.meta.spillId : undefined
 }

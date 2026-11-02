@@ -130,11 +130,12 @@ export class Evals {
     return decision
   }
 
-  private stopTicket(ticketId: string): void {
+  private stopTicket(ticketId: string, by: 'human' | 'router' = 'router'): void {
     const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
     if (!ticket) throw new UserError(`unknown ticket ${ticketId}`)
     const now = this.host.now()
-    if (!ticket.ended) ticket.ended = { at: now, outcome: 'stopped', by: 'human' }
+    const wasLive = !ticket.ended
+    if (!ticket.ended) ticket.ended = { at: now, outcome: 'stopped', by }
     const assignment = ticket.assignments.at(-1)
     if (assignment && assignment.state !== 'ended') {
       assignment.state = 'ended'
@@ -147,6 +148,12 @@ export class Evals {
     }
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     this.host.log(`[engine] Evals.stop ticketId=${ticket.id}`)
+    if (!wasLive) return
+    try {
+      this.host.onTicketEnded?.(ticket)
+    } catch (error) {
+      this.host.log(`[hook] hook=ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 }
 

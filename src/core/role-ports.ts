@@ -25,15 +25,24 @@ export function bindRolePorts(engine: Engine): RolePorts {
     reply: (ticketId: string, text: string, purpose: string): void => {
       engine.reply(ticketId, text, purpose)
     },
-    subscribe: (ticketId: string, threadKey: string): void => {
-      engine.subscribe(ticketId, threadKey)
+    stop: (ticketId: string, reason: string): void => {
+      engine.stop(ticketId, reason)
     },
+    subscribe: (ticketId: string, threadKey: string, opts?: { contextOnly?: boolean }): void => {
+      engine.subscribe(ticketId, threadKey, opts)
+    },
+    unsubscribe: (ticketId: string, threadKey: string, reason?: string): boolean => (
+      engine.unsubscribe(ticketId, threadKey, reason)
+    ),
   }
   const workerMethods: Omit<WorkerPorts, typeof rolePortBrand> = {
     report: (ticketId: string, report: WorkerReport) => engine.report(ticketId, report),
-    subscribe: (ticketId: string, threadKey: string): void => {
-      engine.subscribe(ticketId, threadKey)
+    subscribe: (ticketId: string, threadKey: string, opts?: { contextOnly?: boolean }): void => {
+      engine.subscribe(ticketId, threadKey, opts)
     },
+    unsubscribe: (ticketId: string, threadKey: string, reason?: string): boolean => (
+      engine.unsubscribe(ticketId, threadKey, reason)
+    ),
     handback: (ticketId: string, triggerId: string, reason: string): boolean => (
       engine.handback(ticketId, triggerId, reason)
     ),

@@ -31,10 +31,15 @@ function addressed(trigger: Trigger): boolean {
 
 /** Program fast path: source allowlist, mention, keyword, obvious noise. */
 export function fastPath(trigger: Trigger): { pass: boolean; reason: string } {
-  if (trigger.source !== 'im' && trigger.source !== 'github' && trigger.source !== 'cli') {
+  if (
+    trigger.source !== 'im'
+    && trigger.source !== 'github'
+    && trigger.source !== 'cli'
+    && trigger.source !== 'a2a'
+  ) {
     return { pass: false, reason: 'source-not-allowlisted' }
   }
-  if (trigger.meta.speculate === true) return { pass: true, reason: 'speculate-tag' }
+  // No meta-based admission: `meta` is data, never a filter bypass.
   if (addressed(trigger)) return { pass: true, reason: 'mention-or-direct' }
   if (ACTION.test(trigger.text)) return { pass: true, reason: 'keyword' }
   if (NOISE.test(trigger.text) || trigger.text.trim().length < 12) {
@@ -59,9 +64,9 @@ export function ruleClassify(trigger: Trigger): SemanticHit {
     return { pass: true, strength: 'inferred', reason: 'inferred' }
   }
   if (mention) return { pass: true, strength: 'explicit', reason: 'explicit' }
-  if (trigger.meta.speculate === true) {
-    return { pass: true, strength: 'maybe', reason: 'maybe' }
-  }
+  // A channel adapter's speculation hint is a strength, checked after noise so
+  // it can never admit obvious chatter.
+  if (trigger.speculate === true) return { pass: true, strength: 'maybe', reason: 'maybe' }
   return { pass: false, strength: 'inferred', reason: 'no-intent' }
 }
 

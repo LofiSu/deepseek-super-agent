@@ -4,13 +4,15 @@ import type { Metrics } from '../metrics/metrics.ts'
 import type { Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
-import { workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
+import { routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
 import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
 
 export interface HarnessOptions {
   model: Model
+  /** Optional per-role models (Router is usually lighter than the Worker). */
+  models?: Partial<Record<Role, Model>>
   tools: ToolRegistry
   store: Store
   /** Host bookkeeping when a worker session starts. The harness does not hold the Engine. */
@@ -23,6 +25,14 @@ export interface HarnessOptions {
   teams?: TeamRegistry
   /** Unseen human guidance for a Router/Worker turn. Marks it injected for that audience. */
   takeGuidance?: (ticketId: string, audience: 'worker' | 'router') => string[]
+  /** Router shards for a ticket. Default `['router']`; a shard owns one Router session. */
+  routerSessions?: (ticket: Ticket) => string[]
+  /** Logical Worker mesh placement. Released by the host on ticket end. */
+  pickNode?: (ticketId: string) => string | undefined
+  /** Cross-ticket recall lines injected into the Worker task. */
+  memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string }[]
+  /** T45 bake-off baseline: one turn chain, no Router session. */
+  singleSession?: boolean
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
@@ -31,14 +41,25 @@ export class Harness {
   private inflight: Promise<void>[] = []
   private readonly running = new Set<string>()
   private readonly pendingJobs: Promise<void>[] = []
-  private routerReady = false
+  private readonly routersReady = new Set<string>()
 
-  constructor(private readonly opts: HarnessOptions) {}
+  constructor(private readonly opts: HarnessOptions) {
+    const byRole = Object.entries(opts.models ?? {})
+      .filter(([, model]) => model != null)
+      .map(([role, model]) => `${role}=${model.name}`)
+    if (byRole.length) this.opts.log(`[harness] role models ${byRole.join(' ')}`)
+  }
 
-  armRouter(): void {
-    if (this.routerReady) return
-    this.routerReady = true
-    this.opts.log('[harness] RouterSession start session=router role=router')
+  private modelFor(role: Role): Model {
+    return this.opts.models?.[role] ?? this.opts.model
+  }
+
+  armRouter(shard = 'router'): void {
+    if (this.opts.singleSession) return
+    const sessionId = routerSessionId(shard)
+    if (this.routersReady.has(sessionId)) return
+    this.routersReady.add(sessionId)
+    this.opts.log(`[harness] RouterSession start session=${sessionId} role=router`)
   }
 
   launch(ticket: Ticket): Promise<void> {
@@ -50,16 +71,22 @@ export class Harness {
     }
     const sessionId = workerSessionId(ticket.id)
     this.running.add(ticket.id)
-    this.armRouter()
-    this.opts.log(`[harness] dual-layer RouterSession=router WorkerSession=${sessionId} ticketId=${ticket.id}`)
-    this.opts.log(`[harness] WorkerSession start session=${sessionId} ticketId=${ticket.id} role=worker`)
+    const shards = this.opts.singleSession
+      ? []
+      : this.opts.routerSessions?.(ticket) ?? ['default']
+    for (const shard of shards) this.armRouter(shard)
+    this.opts.log(`[harness] dual-layer routers=${shards.map(routerSessionId).join(',') || '-'} WorkerSession=${sessionId} ticketId=${ticket.id}`)
     if (this.running.size >= 2) {
       this.opts.log(`[harness] parallel workers=${this.running.size} sessions=${[...this.running].join(',')}`)
     }
-    const assignment = ticket.assignments.at(-1)
-    if (!assignment) throw new Error(`ticket ${ticket.id} has no assignment`)
-    this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
+    if (!ticket.assignments.at(-1)) throw new Error(`ticket ${ticket.id} has no assignment`)
     const mode = ticket.speculative ? 'speculative' : 'normal'
+    const node = this.opts.pickNode?.(ticket.id)
+    if (node) {
+      this.opts.log(`[mesh] place ticketId=${ticket.id} node=${node}`)
+    } else if (this.opts.pickNode) {
+      this.opts.log(`[mesh] place ticketId=${ticket.id} node=none capacity-full`)
+    }
     const task = [
       'TASK',
       `ticketId=${ticket.id}`,
@@ -69,22 +96,78 @@ export class Harness {
       `brief=${ticket.brief}`,
     ]
     if (ticket.spillId) task.push(`spillId=${ticket.spillId}`)
+    if (node) task.push(`node=${node}`)
+    for (const entry of this.opts.memory?.(ticket) ?? []) {
+      const spill = entry.spillId ? ` spillId=${entry.spillId}` : ''
+      task.push(`memory=${entry.id}${spill} text=${entry.text}`)
+    }
     const routerPrompt = [
       ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
       `ticketId=${ticket.id}`,
+      `triggerId=${ticket.originTriggerId}`,
       `title=${ticket.title}`,
       `mode=${mode}`,
+      'decision=accepted-by-gate',
+      'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
     ].join('\n')
-    const work = Promise.all([
-      this.enqueue('router', () => this.run('router', 'router', undefined, routerPrompt)),
-      this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticket.id, task.join('\n'))),
-    ]).then(() => undefined).finally(() => {
-      this.running.delete(ticket.id)
-    })
+    const startWorker = (): Promise<void> | undefined => {
+      const latest = this.opts.store.isOpen
+        ? this.opts.store.getDoc<Ticket>('ticket', ticket.id)
+        : undefined
+      if (!latest) {
+        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ticket-missing`)
+        return
+      }
+      if (latest.ended) {
+        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=${latest.ended.outcome}`)
+        return
+      }
+      const assignment = latest.assignments.at(-1)
+      if (!assignment) throw new Error(`ticket ${latest.id} has no assignment`)
+      this.opts.log(`[harness] WorkerSession start session=${sessionId} ticketId=${latest.id} role=worker`)
+      this.opts.assignmentStarted(latest.id, assignment.id, sessionId)
+      if (node) {
+        // assignmentStarted wrote the ticket; re-read so the node does not clobber startedAt.
+        const started = this.opts.store.getDoc<Ticket>('ticket', latest.id)
+        const current = started?.assignments.at(-1)
+        if (started && current) {
+          current.node = node
+          this.opts.store.putDoc('ticket', started.id, started)
+          this.opts.store.addEvent('assignment.placed', {
+            ticketId: started.id,
+            assignmentId: current.id,
+            node,
+          })
+        }
+      }
+      return this.enqueue(sessionId, () => this.run(sessionId, 'worker', latest.id, task.join('\n')))
+    }
+    // Sequence point (T06/T08): Router turn(s) complete first. A Router veto
+    // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
+    let chain: Promise<void> = Promise.resolve()
+    if (this.opts.singleSession) {
+      this.opts.log(`[harness] single-session ticketId=${ticket.id}`)
+    } else {
+      for (const shard of shards) {
+        const session = routerSessionId(shard)
+        chain = chain.then(() => this.enqueue(session, () => this.run(
+          session,
+          'router',
+          undefined,
+          `${routerPrompt}\nshard=${shard}`,
+        )))
+      }
+    }
+    const work = chain
+      .then(startWorker)
+      .then(() => undefined)
+      .finally(() => {
+        this.running.delete(ticket.id)
+      })
     return this.track(work)
   }
 
-  deliver(ticketId: string, trigger: Trigger): Promise<void> {
+  deliver(ticketId: string, trigger: Trigger, spillId?: string): Promise<void> {
     const held = this.pauseReason(ticketId)
     if (held) {
       this.opts.log(`[collab] delivery held ticketId=${ticketId} triggerId=${trigger.id} reason=${held}`)
@@ -98,8 +181,9 @@ export class Harness {
     const ticket = this.opts.store.getDoc<Ticket>('ticket', ticketId)
     const mode = ticket?.speculative ? 'speculative' : 'normal'
     const lines = ['FOLLOWUP', `ticketId=${ticketId}`, `mode=${mode}`, `text=${trigger.text}`]
-    const spillId = typeof trigger.meta.spillId === 'string' ? trigger.meta.spillId : ''
-    if (spillId) lines.push(`spillId=${spillId}`)
+    // Engine-owned spill only: the ingress sidecar, or the spill already on the ticket.
+    const owned = spillId ?? ticket?.spillId ?? ''
+    if (owned) lines.push(`spillId=${owned}`)
     const sessionId = workerSessionId(ticketId)
     return this.track(this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticketId, lines.join('\n'))))
   }
@@ -126,7 +210,10 @@ export class Harness {
       : []
     const mode = ticket.speculative ? 'speculative' : 'normal'
     this.running.add(ticket.id)
-    this.armRouter()
+    const shards = this.opts.singleSession
+      ? []
+      : this.opts.routerSessions?.(ticket) ?? ['default']
+    for (const shard of shards) this.armRouter(shard)
     this.opts.log(
       `[harness] WorkerSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
     )
@@ -170,12 +257,30 @@ export class Harness {
       return this.run(session, role, role === 'worker' ? ticket.id : undefined, build(guidance))
     }
 
-    const work = Promise.all([
-      this.enqueue('router', () => guarded('router', 'router', routerPrompt)),
-      this.enqueue(sessionId, () => guarded(sessionId, 'worker', workerPrompt)),
-    ]).then(() => undefined).finally(() => {
-      this.running.delete(ticket.id)
-    })
+    let chain: Promise<void> = Promise.resolve()
+    if (this.opts.singleSession) {
+      this.opts.log(`[harness] single-session resume ticketId=${ticket.id}`)
+    } else {
+      for (const shard of shards) {
+        const session = routerSessionId(shard)
+        chain = chain.then(() => this.enqueue(
+          session,
+          () => guarded(session, 'router', guidance => `${routerPrompt(guidance)}\nshard=${shard}`),
+        ))
+      }
+    }
+    const work = chain
+      .then(() => {
+        const latest = this.opts.store.isOpen
+          ? this.opts.store.getDoc<Ticket>('ticket', ticket.id)
+          : undefined
+        if (!latest || latest.ended) return
+        return this.enqueue(sessionId, () => guarded(sessionId, 'worker', workerPrompt))
+      })
+      .then(() => undefined)
+      .finally(() => {
+        this.running.delete(ticket.id)
+      })
     return this.track(work)
   }
 
@@ -184,6 +289,22 @@ export class Harness {
       setTimeout(() => {
         try {
           if (!this.opts.store.isOpen) {
+            resolve()
+            return
+          }
+          // stop_job marks the row stopped. The timer must not resurrect it.
+          const row = this.opts.store.getJob(job.id)
+          if (!row || row.status !== 'running') {
+            this.opts.log(`[job] async job skipped jobId=${job.id} status=${row?.status ?? 'missing'}`)
+            resolve()
+            return
+          }
+          // A ticket can end (deliver, discard, Router stop, watchdog fail) while a job runs.
+          // Its completion must not start a fresh Worker turn on a finished ticket.
+          const ticket = this.opts.store.getDoc<Ticket>('ticket', job.ticketId)
+          if (!ticket || ticket.ended) {
+            this.opts.store.completeJob(job.id, 'stopped')
+            this.opts.log(`[job] async job skipped jobId=${job.id} ticket=${ticket ? 'ended' : 'missing'}`)
             resolve()
             return
           }
@@ -213,8 +334,21 @@ export class Harness {
   }
 
   routerTurn(prompt: string): Promise<void> {
-    this.armRouter()
-    return this.enqueue('router', () => this.run('router', 'router', undefined, prompt))
+    if (this.opts.singleSession) {
+      this.opts.log('[harness] single-session router turn skipped')
+      return Promise.resolve()
+    }
+    // A report belongs to the ticket's shard, not always the default Router.
+    const ticketId = /^ticketId=(\S+)$/m.exec(prompt)?.[1]
+    const ticket = ticketId && this.opts.store.isOpen
+      ? this.opts.store.getDoc<Ticket>('ticket', ticketId)
+      : undefined
+    const shard = ticket
+      ? (this.opts.routerSessions?.(ticket) ?? ['default'])[0] ?? 'default'
+      : 'default'
+    const session = routerSessionId(shard)
+    this.armRouter(shard)
+    return this.enqueue(session, () => this.run(session, 'router', undefined, prompt))
   }
 
   async watchdogTurn(): Promise<void> {
@@ -288,7 +422,7 @@ export class Harness {
     })
     try {
       await runTurn({
-        model: this.opts.model,
+        model: this.modelFor(role),
         tools: this.opts.tools,
         journal: this.opts.journal,
         log: this.opts.log,
@@ -378,7 +512,19 @@ async function runTurnBody(input: {
     }
     input.log(`[harness] async-react step=${step} session=${input.session.id} role=${input.session.role}`)
     const started = performance.now()
-    const out = await input.model.complete({ role: input.session.role, messages, tools })
+    // A model/transport failure ends this turn cleanly. The assignment stays
+    // running, which is exactly the signal the Watchdog detects (T43).
+    let out: Awaited<ReturnType<Model['complete']>>
+    try {
+      input.metrics.increment('model.call')
+      out = await input.model.complete({ role: input.session.role, messages, tools })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      input.log(`[harness] model error session=${input.session.id} role=${input.session.role} error=${message}`)
+      input.metrics.increment('model.error')
+      input.journal.append(input.session.id, { kind: 'error', content: `model error: ${message}` })
+      return
+    }
     input.metrics.observeModelLatency(performance.now() - started)
     const text = redact(out.text ?? '')
     const calls = (out.toolCalls ?? []).map(toolCall => ({
@@ -423,9 +569,18 @@ async function runTurnBody(input: {
   }
 }
 
+/** Bound the replayed transcript. The full journal stays on disk. */
+const MAX_HISTORY_ENTRIES = 200
+
 function messagesFromJournal(entries: JournalEntry[]): ModelMessage[] {
   const messages: ModelMessage[] = []
-  for (const entry of entries) {
+  let recent = entries.length > MAX_HISTORY_ENTRIES ? entries.slice(-MAX_HISTORY_ENTRIES) : entries
+  if (entries.length > MAX_HISTORY_ENTRIES) {
+    // Never start mid tool-call: begin at the first user message in the slice.
+    const firstUser = recent.findIndex(entry => entry.role === 'user')
+    if (firstUser > 0) recent = recent.slice(firstUser)
+  }
+  for (const entry of recent) {
     if (entry.role !== 'user' && entry.role !== 'assistant' && entry.role !== 'tool') continue
     const message: ModelMessage = {
       role: entry.role,
