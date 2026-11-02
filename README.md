@@ -32,7 +32,7 @@ Two layers.
 
 Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg), one item at a time. Status follows this repo, `pnpm demo`, and `pnpm test`. Task list: [PLAN.md](./PLAN.md) (T01–T51). Where the plan and the code diverge: [docs/REVIEW.md](./docs/REVIEW.md).
 
-`[x]` done and covered. `[~]` partial. `[ ]` not done. Phase-2 opt-in registries land behind `DS_AGENT_PHASE2=1` / `options.phase2` (default off).
+`[x]` done and covered. `[~]` partial. `[ ]` not done. Opt-in extension registries land behind `DS_AGENT_PHASE2=1` / `options.phase2` (default off).
 
 ### §1 Four traits
 
@@ -48,7 +48,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Router stays light.** Workers hold the execution tools. The Router tool set is smaller.
 - [x] **Small model on the Router.** `roleModels.router`. Workers can use a stronger model.
 - [x] **Trigger batching.** Under load, same-Thread Triggers fold into the next Eval. Demo and tests cover it.
-- [~] **Router sharding / multi-layer filter.** Opt-in `RouterShardRegistry` (PLAN T09/T46). Runtime wires only when Phase-2 is enabled.
+- [~] **Router sharding / multi-layer filter.** Opt-in `RouterShardRegistry` (PLAN T09/T46). Runtime wires only when `DS_AGENT_PHASE2=1`.
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
@@ -288,9 +288,9 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # keep the real issues open
 
 `pnpm demo:local` runs the legacy in-memory fixture baseline; it is not the channel acceptance path. `pnpm demo:feishu` exercises the real Feishu message API when `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_CHAT_ID` are set. `pnpm test:live` runs the live-model tests when a key is already in the environment.
 
-## Phase-2 opt-in
+## Opt-in extension domains
 
-Phase-2 helpers (`src/phase2`: router shards, worker mesh, spill-backed long-term memory, product-shell bus, A2A) are off by default and are never consulted by admission or the harness loop. Set `DS_AGENT_PHASE2=1` (or pass `RuntimeOptions.phase2: true`) to construct them; they are then available on `runtime.phase2`.
+Opt-in extension helpers (`src/phase2`: router shards, worker mesh, spill-backed long-term memory, product-shell bus, A2A) are off by default and are never consulted by admission or the harness loop. Set `DS_AGENT_PHASE2=1` (or pass `RuntimeOptions.phase2: true`) to construct them; they are then available on `runtime.phase2`.
 
 ```bash
 DS_AGENT_PHASE2=1 pnpm ds-agent chat "fix the login timeout"
