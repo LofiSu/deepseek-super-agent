@@ -619,8 +619,10 @@ function a2aTrigger(envelope: A2AEnvelope, store: Store, at: string): Trigger | 
     source: 'a2a',
     threads: [{ source: 'a2a', id: thread }],
     actor: { source: 'a2a', id: envelope.from },
-    // A2A has no authenticated human identity in this process. An adapter that
-    // verifies a peer may mark the Trigger human after transport, never the body.
+    // A2A has no authenticated human identity in this process, and this ingress
+    // always produces a non-human Trigger. Peer authentication is external;
+    // attributing a human identity through this path (or by bypassing `ingest`)
+    // is not supported.
     human: false,
     addressed: 'direct',
     at,

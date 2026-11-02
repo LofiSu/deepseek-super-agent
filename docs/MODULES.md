@@ -10,7 +10,7 @@ their owning M module; they are not a separate feature gate.
 | Worker mesh | M1 Harness | `src/harness/mesh.ts` |
 | Long-term memory | M6 Memory | `src/memory/long-term.ts` |
 | Lifecycle events | M3 Engine | `src/core/lifecycle.ts` |
-| A2A | M8 Channels | `src/channels/a2a.ts` |
+| A2A | M8 Channels | `src/channels/a2a.ts`, `src/channels/a2a-transport.ts` |
 
 ```bash
 DS_AGENT_INSTANCE_ID=alpha pnpm ds-agent chat "fix the login timeout"
@@ -116,21 +116,37 @@ a delivered one clears `speculative` and emits `speculate.delivered`.
 ## M8 — channels
 
 `norms.ts` enforces channel formatting; `cli.ts`, `feishu.ts`,
-`github-source.ts`, and `outbox-adapter.ts` are the real adapters. `a2a.ts` is
-the inter-instance channel:
+`github-source.ts`, and `outbox-adapter.ts` are the real adapters. `a2a.ts` and
+`a2a-transport.ts` are the inter-instance channel:
 
 - `A2ARouter` validates non-empty `from`/`to`, serializable bodies, and a 64 KiB
-  cap; `send` assigns `id`/`at` and persists them.
+  UTF-8 byte cap. `send` copies only `{ from, to, body }`, assigns a fresh
+  `id`/`at`, drops caller-supplied `id`/`at` and unknown fields, and persists
+  the normalized envelope. `route` remains the trusted local path.
 - Delivery status is `delivered | unroutable | failed`.
+- `a2a-transport.ts` exports the `A2ATransport` contract: `send(envelope)` may
+  return an `A2ADelivery` or a promise of one, and an optional
+  `receive(listener)` supplies inbound envelopes. A transport moves bytes only;
+  it does not validate, persist, admit, or mint identity.
+- `LocalA2ATransport` is the in-repo reference implementation and test double.
+  It wraps `A2ARouter.send`, so it inherits validation, the 64 KiB UTF-8 byte
+  cap, persistence, and delivery statuses. It is not an authentication boundary.
 - The Runtime registers its instance id as a local recipient. An envelope body
   `{ text, thread? }` (or a plain string) becomes a normal `a2a` source Trigger;
   it still passes the ingress filter and cannot self-admit. `human` is always
-  false here; only an authenticated adapter may construct a human Trigger.
+  false here: the in-repo A2A ingress always produces a non-human Trigger.
+  Attributing a human identity through this contract is not supported, and an
+  adapter must not do it by bypassing ingress through `runtime.ingest` either.
+  Peer authentication is external and fail-closed.
 - `runtime.sendA2A(to, body)` is the outbound API. Cross-process delivery uses
-  the same envelope over an external transport; transport authentication is
+  the same envelope over an external `A2ATransport` implementation; network I/O
+  and peer authentication (mTLS, signed envelopes, bearer tokens, etc.) are
   external. This repo ships no network transport and no peer authentication, so
-  an adapter must add both. Do not expose the local endpoint over an
-  unauthenticated wire.
+  an adapter must add both and hand inbound bytes back through `A2ARouter.send`
+  (which normalizes identity/timestamps and drops unknown fields). Do not expose
+  the local endpoint over an unauthenticated wire. `test/a2a-transport.test.ts`
+  covers the contract, delivery outcomes, validation/cap, persistence, and the
+  non-human boundary.
 
 ## M9 — env
 
