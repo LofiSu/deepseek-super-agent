@@ -18,6 +18,9 @@ cd deepseek-super-agent
 pnpm install
 ```
 
+本仓只按源码使用：没有发布到 npm，没有 `bin`，也没有 `build` 步骤，所以不存在
+`npm install -g ds-agent`。在仓库里用 `pnpm ds-agent ...` 运行 CLI。
+
 `pnpm test` 和 `pnpm demo` 都要一个能打通的 OpenAI 兼容模型。这两条路径不用 MockModel。`pnpm demo:local` 是内存 fixture 冒烟，不是验收路径。
 
 跑 `pnpm test` 之前，先设 `DS_AGENT_API_BASE`、`DS_AGENT_API_KEY`、`DS_AGENT_API_MODEL`。三个里缺哪个，`test` 脚本就填上本机 Magpie 的默认值：地址 `http://127.0.0.1:3425/v1`，密钥 `magpie`，模型 `workbuddy/deepseek-v4.1-flash`。本机没有这个网关，测试就连不上模型。只放一把厂商 Key，比如 `DEEPSEEK_API_KEY`，换不掉这三项。脚本会自己写上 `DS_AGENT_API_BASE` 和 `DS_AGENT_API_KEY`，预设路径看不到那把单独的 Key。

@@ -222,7 +222,7 @@ A subscribed Thread uses `bypass=subscription`. It skips Router Eval and goes to
 
 ## Quick start
 
-Node.js 22+. See `engines` in [package.json](./package.json). The store uses `node:sqlite`. Install [pnpm](https://pnpm.io/).
+Node.js 22+. See `engines` in [package.json](./package.json). The store uses `node:sqlite`. Install [pnpm](https://pnpm.io/). This is a source-only repository: no npm package, no `bin`, no `build`; run `pnpm ds-agent ...` from the checkout.
 
 ```bash
 pnpm install

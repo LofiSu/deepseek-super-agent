@@ -38,7 +38,12 @@ keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
 - `release` frees the slot on every terminal ticket path.
 
 Placement is logical: this process still executes the turn. A remote hands
-transport is an integration concern outside this repo.
+transport is an integration concern outside this repo. Capacity is a placement
+preference, not backpressure: when every node is full, `pickNode` records
+`node=none capacity-full` and the turn still runs — there is no queue, rejection,
+or admission failure. There is also no standalone `serve` command: `Daemon.start()`
+is an in-process timer, and an in-flight turn is not reconstructed after a
+restart. Both are deliberate boundaries, not hidden behavior.
 
 ## M2 — store
 
@@ -57,9 +62,16 @@ is the read-model event bus:
   never holds a Session.
 - The Runtime publishes from `onTicketCreated`/`onTicketEnded` and from
   pause/intervene/resume.
+- History is a bounded ring: the newest 1000 events are kept by default
+  (constructor-configurable, invalid capacities throw). It is **in-memory only**,
+  so a panel can replay the current process but not a process that has exited.
 
-`assessment.ts` is the deterministic Gate; the Router can veto with
-`assess_trigger`. Stop/ignore paths still end the ticket before the Worker chain.
+`policy.ts` is the deterministic Gate: it handles stop/ignore/unavailable
+commands and the configured auto-accept classes, and defers the rest.
+`assessment.ts` then runs the Main Agent, which originates
+`accept`/`ignore`/`stop`/`unavailable` (and `title`/`scope`/`strength` on accept)
+before any Ticket is created. The Gate is rule/policy based; it is not a model
+verdict, and the Main Agent is not consulted when the Gate already decided.
 
 ## M4 — ingress
 
@@ -116,7 +128,9 @@ the inter-instance channel:
   false here; only an authenticated adapter may construct a human Trigger.
 - `runtime.sendA2A(to, body)` is the outbound API. Cross-process delivery uses
   the same envelope over an external transport; transport authentication is
-  external. Do not expose the local endpoint over an unauthenticated wire.
+  external. This repo ships no network transport and no peer authentication, so
+  an adapter must add both. Do not expose the local endpoint over an
+  unauthenticated wire.
 
 ## M9 — env
 
@@ -163,9 +177,9 @@ reads over SQLite.
 ## T51 — security and privacy
 
 In-repo controls: env allowlist, redaction before spill and memory storage,
-`[redacted]` tool output, FileVault names only, optional OS sandbox, spill ACL,
-and untrusted `meta` rejection. Managed credentials and host-level seccomp stay
-external as PLAN §9 says.
+`[redacted]` tool output, FileVault names only, default-on fail-closed OS
+sandbox, spill ACL, and untrusted `meta` rejection. Managed credentials and
+host-level seccomp stay external as PLAN §9 says.
 
 ## Tests
 
@@ -179,7 +193,7 @@ npx vitest run test/runtime-wiring.test.ts         default-path service construc
 npx vitest run test/cli-memory-a2a.test.ts         offline operator views
 npx vitest run test/metrics-curve.test.ts          percentiles + bake-off math
 pnpm typecheck                                     pass
-offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         195 passed, 15 skipped, 34 files
+offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         213 passed, 15 skipped, 35 files
 pnpm test (live Magpie, final tree)                207 passed, 3 skipped, 34 files (431.12 s)
 ```
 
