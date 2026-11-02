@@ -36,7 +36,7 @@ local Magpie gateway and reaches `demo ok (live model)`.
 
 | Item | Why it remains |
 |------|----------------|
-| H2/H5 true process isolation | A worker shell can still read `<stateDir>/ds-agent.db` when the OS sandbox is off. `sandbox-exec`/`bwrap` is opt-in (`DS_AGENT_SANDBOX=1`); macOS `sandbox-exec` cannot subtract a path from a read allow here, so a real boundary needs a default-deny profile or a container. PLAN §9 T51 already lists this as external. Credential values themselves no longer reach spill bodies (H1). |
+| H2/H5 true process isolation | The sandbox can no longer be off: every worker shell is wrapped and fails closed when `sandbox-exec`/`bwrap` is missing. But the wrapper confines writes and network, not reads. macOS `sandbox-exec` still allows broad `file-read*`, and Linux uses `--ro-bind / /`, so a worker can still read `<stateDir>/ds-agent.db`. Read isolation therefore remains open and still needs an external container or default-deny profile. PLAN §9 T51 lists this as external. Credential values themselves no longer reach spill bodies (H1). |
 | H4 full Router assessment | The deterministic Gate still defaults to `accept`; the Router can veto and now sequences the Worker, but it does not originate `accept`/`ignore` for every ordinary message. |
 | M9 full deterministic suite | The pre-existing live suites still assert model tool choices. They are kept as live checks; `pnpm test` requires a model. |
 
