@@ -75,8 +75,10 @@ export class SpillBackedLongTermMemory {
    * Store a note. Dedupe policy: for the same ticket, text that is identical
    * after redaction + normalization (whitespace collapsed, trimmed,
    * case-insensitive) reuses the existing entry, unions its tags, and creates
-   * no second document or spill. Different text (or the same text for another
-   * ticket) is stored as before.
+   * no second document or spill. Only entries with a readable spill body can
+   * match; a zombie entry (missing spill) is never matched against its
+   * truncated summary, so the write creates a fresh, recallable entry instead.
+   * Different text (or the same text for another ticket) is stored as before.
    */
   put(ticketId: string, text: string, opts: { tags?: string[] } = {}): LongTermMemoryEntry {
     if (!ticketId.trim() || !text.trim()) throw new Error('ticketId and text are required')
@@ -92,6 +94,7 @@ export class SpillBackedLongTermMemory {
           tags: normalizeTags([...(existing.tags ?? []), ...wanted]),
         }
         this.store.putDoc('ltm', entry.id, entry)
+        this.prune(entry.id)
         return entry
       }
       const spillId = this.store.putSpill(safe)
@@ -152,8 +155,10 @@ export class SpillBackedLongTermMemory {
    *              then id desc
    *
    * Matching is unchanged: every query word must appear in the body and
-   * requested tags remain an AND filter. The final `id` key makes the order
-   * total and stable when timestamps collide.
+   * requested tags remain an AND filter, compared exactly (trimmed,
+   * case-sensitive). The final `id` key is a lexicographic string comparison,
+   * not numeric recency; it makes the order total and stable when timestamps
+   * collide.
    */
   query(query: LongTermMemoryQuery): LongTermMemoryEntry[] {
     if (!query.ticketId?.trim()) throw new Error('ticketId is required to query memory')
@@ -268,9 +273,13 @@ function normalizeForDedupe(text: string): string {
   return text.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
-/** Compare against the full body; the stored summary may be truncated. */
-function dedupeKeyOf(store: Store, entry: LongTermMemoryEntry): string {
-  return normalizeForDedupe(store.getSpill(entry.spillId) ?? entry.text)
+/**
+ * Compare against the full body only. A missing spill yields `undefined`, so a
+ * zombie entry can never match via its truncated summary.
+ */
+function dedupeKeyOf(store: Store, entry: LongTermMemoryEntry): string | undefined {
+  const body = store.getSpill(entry.spillId)
+  return body == null ? undefined : normalizeForDedupe(body)
 }
 
 function countOccurrences(haystack: string, needle: string): number {
