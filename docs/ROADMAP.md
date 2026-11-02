@@ -477,7 +477,7 @@ the work is already public.
 | P2-2 | Shard arbitration | LofiSu | `feat/shard-arbitration` | #69 | resolved | Precedence documented + tests: priority-desc/registration order, default fallback-only, first shard owns reply + terminal decision; owner resolved from the supplied trigger; idempotent decisions; one ticket/decision per trigger |
 | P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists`, `feat/ingress-adapter-wiring` | #67, #70 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address (Feishu maps `chat_id`); filtered triggers cannot be handed back, assessed, evaluated, or decided into a Ticket; tests cover each rule, env, and resurrection |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
-| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #PR | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 81.51% lines / 81.57% branches / 89.02% functions over 81 files; no threshold |
+| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #71 | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 81.51% lines / 81.57% branches / 89.02% functions over 81 files; no threshold |
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
 | P2-7 | Status banners on review snapshots |  |  |  | todo | Historical banner on each |
 | P2-8 | Email channel decision |  |  |  | todo | PLAN and code agree |
