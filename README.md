@@ -116,7 +116,7 @@ Kept out of M11.
 - [~] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model; no default UI yet
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
 - [~] A2A across instances (§8.3) — always-wired `A2ARouter` (in-process; `runtime.sendA2A`)
-- [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` for secret-named env values of at least 8 characters (shorter values and other names are left as-is) + FileVault `describe()` (names only) + Darwin `sandbox-exec` / Linux `bwrap|unshare` when `DS_AGENT_SANDBOX=1` (§8.4, T51). Host vault/seccomp policy still external.
+- [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` for secret-named env values of at least 8 characters (shorter values and other names are left as-is) + FileVault `describe()` (names only). Every worker bash is wrapped: `sandbox-exec` on macOS, `bwrap` on Linux; a missing wrapper is a hard error with no plain-bash fallback, and network is denied unless the policy allows it. The wrapper confines writes and network, not reads: both platforms still allow broad reads, so process-level read isolation, including the SQLite DB, remains an external/container boundary (§8.4, T51). Host vault/seccomp policy still external.
 
 ### Modules M0–M11
 

@@ -26,9 +26,10 @@ The README marks this `[~]`. It is partial.
 - The child shell gets an allowlist of environment names. Names that look like keys, tokens, or secrets are dropped even if listed.
 - Redaction covers parent env values whose names look like a key, token, secret, password, or credential, and only when the value is at least 8 characters. Those are replaced with `[redacted]` in stdout, stderr, and file reads before they become tool results. A shorter value, or a secret under any other name, stays in the text and can reach the model. Vault values injected into a child are redacted only when they are at least 8 characters as well.
 - `FileVault.describe()` returns names only. The vault file is mode `0600`.
-- `DS_AGENT_SANDBOX=1` wraps bash with `sandbox-exec` on macOS. On Linux it uses `bwrap` or `unshare` for a network namespace. If those tools are missing, bash runs without the wrapper.
+- Every worker `bash` call is wrapped. On macOS the wrapper is `sandbox-exec`; on Linux it is `bwrap` (CI installs bubblewrap). If the wrapper is missing, the command fails with a hard error; there is no plain-bash fallback. `DS_AGENT_SANDBOX` no longer changes this.
+- The wrapper confines writes to the workspace and denies network access unless the policy allows it. It does **not** provide read confidentiality: macOS allows broad `file-read*` and Linux uses `--ro-bind / /`, so a worker can still read `<stateDir>/ds-agent.db`. Process-level read isolation remains an external/container boundary.
 
-Host vault policy and a host seccomp policy stay outside this repo. Treat `DS_AGENT_SANDBOX=1` as that light wrapper.
+Host vault policy and a host seccomp policy stay outside this repo.
 
 ## Who speaks
 

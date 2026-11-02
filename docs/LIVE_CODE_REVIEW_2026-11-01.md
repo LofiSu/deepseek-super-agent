@@ -129,6 +129,8 @@ Three side effects are outside the rollback:
 
 **Grade High.** The workdir pattern is the right shape and the deliver/discard tests pass, but it is not a boundary a model cannot cross. Use an OS sandbox (the repo already has `sandbox-exec`/`bwrap` wrappers in `src/env/seccomp.ts` but `DS_AGENT_SANDBOX` is opt-in and off by default), reject commands by execution policy rather than string matching, and settle on every terminal path (`Engine.report`, watchdog fail, job stop).
 
+> Follow-up (2026-11-02): #44 made the OS wrapper mandatory and fail-closed (`sandbox-exec` on macOS, `bwrap` on Linux). Read isolation remains open because the wrapper does not confine reads.
+
 ### H3. Shell timeout does not release the worker turn
 
 **Code + measurement.** `LocalEnv` passes `timeout` to `spawn` and resolves on `close`:
@@ -183,6 +185,8 @@ const work = Promise.all([
 **Reproduced.** A sentinel spill was written, the store was closed (WAL checkpointed), and a worker shell ran `grep -a -o '<sentinel>' ../../ds-agent.db*`; it returned the sentinel. The ACL is an application-layer check on `read_object`, not a process boundary. Combined with C1's `meta.spillId` grant, the tool-level ACL is not sufficient to keep one ticket's spill out of another ticket's worker.
 
 **Grade High.** Move the database outside the workspace root (or make the workspace a different mount), and make `bash` read-only outside its workspace when the ticket is not the grant owner; `DS_AGENT_SANDBOX=1` is not the default.
+
+> Follow-up (2026-11-02): #44 makes every worker shell use the OS wrapper and fails closed when it is missing. Read isolation remains open: macOS `file-read*` and Linux `--ro-bind / /` are still broad, so the worker can still read `<stateDir>/ds-agent.db`.
 
 ## Medium
 
