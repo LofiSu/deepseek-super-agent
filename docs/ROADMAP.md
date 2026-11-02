@@ -81,7 +81,7 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | **M1 harness** | done | `src/harness/loop.ts` (Router-before-Worker sequence at `145-160`, async jobs, batch window), `session.ts`, `model.ts`, `tools.ts`, `daemon.ts`, `machines.ts`, `team.ts`, `mesh.ts`; `test/job.test.ts`, `team-harness.test.ts`, `daemon-machines.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | Worker-mesh capacity is a logical placement rule in one process: `pickNode` records the least-loaded node and logs `capacity-full`, but still runs the turn — there is no queue, rejection, or backpressure (P1-3, documented in `docs/MODULES.md`). No standalone `serve` daemon: `Daemon.start()` is an in-process timer and an in-flight turn is not reconstructed after restart (P1-6). |
 | **M2 store** | done | `src/store/sqlite.ts` (`node:sqlite` at `:3`, `ds-agent.db` at `:16`), `schema.ts`, `spill.ts`, document/spill upsert; `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` (reopen) | No migration/version table; `node:sqlite` is experimental and needs Node ≥22. The §10 file-tree contradiction was resolved by #56: the plan now describes the real `sqlite.ts`/`schema.ts`/`spill.ts` tree. |
 | **M3 engine** | done | `src/core/engine.ts`, `intake.ts`, `policy.ts`, `assessment.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `subscribe.ts`, `collab.ts`, `lifecycle.ts`; `test/domain-alignment.test.ts`, `subscription.test.ts`, `speculate.test.ts`, `mid-task-collab.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | P1-2 is resolved by #39: the deterministic `gateTriggers` handles commands and the configured auto-accept classes, and deferred triggers go to `assessWithMainAgent`, which originates `accept`/`ignore`/`stop`/`unavailable` (with `title`/`scope`/`strength`) before any Ticket exists. The gate remains rule/policy based by design; it is not a model verdict. |
-| **M4 ingress** | partial | `src/ingress/filter.ts`, `shards.ts`, `thread.ts`, `batch.ts`; `test/filter.test.ts`, `router-shards.test.ts`, `runtime-integration.test.ts` | Fast Path is source + mention + keyword + noise; no actor allowlist, group/chat allowlist, or drop-self (old H8 residue). Slow Path is `ruleClassify` for both Mock and `HttpOpenAI` (`src/harness/model.ts:167-169`); it does **not** call the live model, contrary to `README.md:64` (C8). |
+| **M4 ingress** | partial | `src/ingress/filter.ts`, `shards.ts`, `thread.ts`, `batch.ts`; `test/filter.test.ts`, `router-shards.test.ts`, `runtime-integration.test.ts` | Fast Path is source + T16 admission (actor allowlist, group/chat allowlist read from `trigger.channel.address.group`, drop-self deny) + mention + keyword + noise; `test/filter.test.ts` covers each rule and the runtime env wiring. Admission is not authentication: a channel adapter must still verify its peer, and `meta` is never read. Slow Path is deterministic `ruleClassify` for both Mock and `HttpOpenAI` and is documented as such (#60); a model-backed policy is still open (P2-4). |
 | **M5 subscribe** | done | `src/core/subscribe.ts`, `intake.ts` fan-out; `test/subscription.test.ts`, `hardening.test.ts` (contextOnly, unsubscribe) | `handback` is not exposed as a CLI action. The tests cover unsubscribe but not the full requeue-and-drop lifecycle as an operator flow. |
 | **M6 memory** | partial | `src/memory/recall.ts`, `acl.ts`, `long-term.ts`; `src/store/sqlite.ts` (`deleteSpill`); `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` | Recall is word-AND substring matching over a spill, not semantic or multi-hop. Retention landed in #54: `maxEntries`/`maxAgeDays` prune inside the same transaction as `put`/`remember`, `forget` deletes the spill and grants, and `DS_AGENT_MEMORY_MAX_ENTRIES`/`DS_AGENT_MEMORY_MAX_AGE_DAYS` configure it (defaults 1000/90). Remaining: dedupe beyond per-ticket upsert, semantic search, month-scale story. `README.md:115` still says "not month-scale"; that part is accurate. |
 | **M7 speculate** | done | `src/speculate/silent.ts`, `gate.ts`; `test/speculate.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | The gate is a clause-local keyword heuristic, documented as a stand-in (`docs/HARDENING_2026-11-01.md:25`). It is not a model verdict; a real value judgment remains open. |
@@ -379,8 +379,15 @@ cap; MODULES documents the recall formula.
 **P2-2. Shard arbitration:** define precedence and reply ownership when multiple
 shards match; add a test. Acceptance: at most one terminal decision per trigger
 unless explicitly documented.
-**P2-3. Fast-path allowlists:** actor/group/drop-self rules from T16;
-acceptance: `test/filter.test.ts` covers each rule.
+**P2-3. Fast-path allowlists:** actor/group/drop-self rules from T16.
+Status: resolved by #TBD. `AdmissionRules` runs on the fast path before
+mention/keyword, so an @-mention cannot bypass a deny rule. The group id comes
+from `trigger.channel.address.group`, never `meta`; a missing group is denied
+while the list is active. These are admission filters, not authentication.
+Configure with `RuntimeOptions.admission` or the comma-separated
+`DS_AGENT_ACTOR_ALLOWLIST` / `DS_AGENT_GROUP_ALLOWLIST` / `DS_AGENT_DROP_SELF`
+variables; explicit options win, and unset lists leave admission unchanged.
+Acceptance: `test/filter.test.ts` covers each rule plus runtime env wiring.
 **P2-4. Slow-path live policy:** optional model policy behind a flag, or keep
 the rule classifier and remove "can call a model" from README. Acceptance: one
 of the two is true and tested.
@@ -418,7 +425,7 @@ the work is already public.
 | P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 | resolved | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
 | P2-1 | LTM retention/ranking |  | `feat/ltm-retention` | #54 | partially resolved | Retention 1000/90 + spill cleanup landed; ranking/dedupe still open |
 | P2-2 | Shard arbitration |  |  |  | todo | Precedence documented + test |
-| P2-3 | Fast-path allowlists |  |  |  | todo | Actor/group/drop-self tests |
+| P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists` | #TBD | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address; tests cover each rule + env |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
 | P2-5 | Coverage + lint in CI |  |  |  | todo | Scripts exist; policy documented |
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |

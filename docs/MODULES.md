@@ -80,6 +80,19 @@ computed from the ingress-owned `TriggerTrust`, never from `trigger.meta`.
 `shards.ts` adds ordered predicates over `source`, `thread`, `actor`, `human`,
 and `text`; comma joins with AND.
 
+`filter.ts` also owns the T16 admission rules (`AdmissionRules`): an actor
+allowlist, a group/chat allowlist, and a drop-self deny list. They run on the
+fast path before mention/keyword, so a denied trigger cannot be admitted by an
+@-mention. The group id comes from the channel address
+(`trigger.channel.address.group`); `trigger.meta` is never consulted, and a
+missing group is denied while the group list is active. These are admission
+filters, not authentication: a channel adapter must still verify its peer.
+Configure with `RuntimeOptions.admission` or the comma-separated
+`DS_AGENT_ACTOR_ALLOWLIST`, `DS_AGENT_GROUP_ALLOWLIST`, and
+`DS_AGENT_DROP_SELF` variables; explicit options win, empty entries are
+ignored, and unset lists leave the fast path unchanged. Active rules are
+logged once at `Runtime.create` as `[ingress] admission ...`.
+
 - `RouterShardRegistry.route(trigger)` returns every matching non-default shard
   in priority order, or `['default']`.
 - The shard list is stored in `TriggerTrust.shards` and `Disposition.shards`.
