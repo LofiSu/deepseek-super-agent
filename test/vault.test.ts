@@ -39,14 +39,12 @@ describe('T51 vault + Store/Env boundary', () => {
     expect(wrapped.argv.join(' ')).toContain('(deny network*)')
   })
 
-  it('uses available Linux no-network wrapper and falls back when none exists', () => {
+  it('uses bwrap on Linux and fails closed when it is unavailable', () => {
     const policy = { enabled: true, allowNetwork: false }
     expect(wrapBashCommand('echo hi', policy, { platform: 'linux', available: bin => bin === 'bwrap' }).argv)
       .toContain('--unshare-net')
-    expect(wrapBashCommand('echo hi', policy, { platform: 'linux', available: bin => bin === 'unshare' }).argv)
-      .toEqual(['unshare', '--net', '--', 'bash', '-c', 'echo hi'])
-    expect(wrapBashCommand('echo hi', policy, { platform: 'linux', available: () => false }).wrapped)
-      .toBe(false)
+    expect(() => wrapBashCommand('echo hi', policy, { platform: 'linux', available: () => false }))
+      .toThrow(/bubblewrap/)
   })
 
   it('enforces Store/Env boundary', () => {

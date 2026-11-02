@@ -95,7 +95,11 @@ export class LocalEnv implements EnvPort {
       throw new UserError('speculative command leaves the isolated workdir')
     }
     const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
-    const wrapped = wrapBashCommand(command, { ...this.sandbox, writableRoots: [cwd] })
+    const wrapped = wrapBashCommand(command, {
+      ...this.sandbox,
+      writableRoots: [cwd],
+      allowNetwork: isolated ? false : this.sandbox.allowNetwork,
+    })
     const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
       const [bin, ...args] = wrapped.argv
       // detached: the shell leads its own process group, so a timeout can kill the
@@ -175,6 +179,9 @@ export class LocalEnv implements EnvPort {
 
   private shellEnv(cwd: string, isolated: boolean): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...this.childEnv }
+    // Startup files can leak host state into a sandboxed shell and pollute stderr.
+    delete env.BASH_ENV
+    delete env.ENV
     if (this.vault && this.vaultNames.length > 0) {
       Object.assign(env, this.vault.resolveForChild(this.vaultNames))
     }
