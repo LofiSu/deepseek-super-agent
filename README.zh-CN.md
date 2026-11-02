@@ -12,7 +12,9 @@ CLI：`ds-agent` · MIT
 
 LofiSu × Grokbot（CoderBot）。
 
-[灵感来源](#灵感来源) · [能力清单](#能力清单) · [架构](#架构) · [快速开始](#快速开始) · [Demo](#demo) · [模型配置](#模型配置) · [致谢](#致谢) · [许可](#许可)
+[文档](docs/zh/index.md) · [灵感来源](#灵感来源) · [能力清单](#能力清单) · [架构](#架构) · [快速开始](#快速开始) · [Demo](#demo) · [模型配置](#模型配置) · [致谢](#致谢) · [许可](#许可)
+
+更短的几页，事实相同：[安装](docs/zh/install.md)、[架构](docs/zh/architecture.md)、[安全](docs/zh/safety.md)。[English](docs/index.md)。
 
 ## 这是什么
 
@@ -110,7 +112,7 @@ LofiSu × Grokbot（CoderBot）。
 - [~] 脱离 Session 的产品交互壳（§8.2）— opt-in `ProductShellBus`
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— opt-in `A2ARouter`（进程内）
-- [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` + FileVault `describe()`（仅名字）+ Darwin `sandbox-exec` / Linux `bwrap|unshare`（`DS_AGENT_SANDBOX=1`）（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
+- [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` 只覆盖名字像密钥、且至少 8 个字符的环境变量（更短的值、以及其他名字，会原样留下）+ FileVault `describe()`（仅名字）+ Darwin `sandbox-exec` / Linux `bwrap|unshare`（`DS_AGENT_SANDBOX=1`）（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
 
 ### 模块对照（M0–M11）
 
@@ -217,14 +219,20 @@ Node.js 22+（见 [package.json](./package.json) 的 `engines`，用到 `node:sq
 
 ```bash
 pnpm install
+export DS_AGENT_API_BASE=https://api.deepseek.com
+export DS_AGENT_API_KEY=sk-...
+export DS_AGENT_API_MODEL=deepseek-flash
 pnpm test
 gh auth login            # 真实 GitHub Source / Outbox
+export DS_AGENT_GH_REPO=your-account/your-writable-repo
 pnpm demo
 ```
 
-`pnpm test` 与 `pnpm demo` 均要求真实模型，默认套件禁止 MockModel。`pnpm demo` 只走真实信道：通过 `gh api` 创建/读取真实 GitHub issue，并把回复发成真实 issue comment；没有 fake IM/GitHub 回退。`pnpm demo:local` 是内存 fixture 冒烟基线，不是验收路径。Feishu 配置与 `pnpm demo:feishu` 见 [docs/REAL_CHANNELS.md](./docs/REAL_CHANNELS.md)。
+`pnpm test` 和 `pnpm demo` 都要真实模型，默认套件禁止 MockModel。跑 `pnpm test` 之前先设 `DS_AGENT_API_BASE`、`DS_AGENT_API_KEY`、`DS_AGENT_API_MODEL`。三个里缺哪个，`test` 脚本就填上本机 Magpie 的默认值（地址 `http://127.0.0.1:3425/v1`，密钥 `magpie`，模型 `workbuddy/deepseek-v4.1-flash`）。只放一把厂商 Key 换不掉这三项，因为脚本会自己写上 `DS_AGENT_API_BASE` 和 `DS_AGENT_API_KEY`。
 
-一把厂商 Key，或者同时设置 `DS_AGENT_API_BASE` 与 `DS_AGENT_API_KEY`，会走 HttpOpenAI。只设置其中一个会报错退出。
+`pnpm demo` 只走真实信道：通过 `gh api` 创建、读取真实 GitHub issue，并把回复发成真实 issue comment。没有 fake IM/GitHub 回退。`DS_AGENT_GH_REPO` 要指到你能写的仓库。不设的话是 `LofiSu/deepseek-super-agent`。关 issue 只是收尾：每个场景正事做完才关，关闭失败会被忽略，中途抛错或提前 return 也会把已经建好的 issue 留着。`DS_AGENT_GH_KEEP=1` 是故意不关。跑完看一眼还有没有带着 `ds-agent-demo` 标签、仍然开着的 issue。`pnpm demo:local` 是内存 fixture 冒烟基线，不是验收路径。Feishu 配置与 `pnpm demo:feishu` 见 [docs/REAL_CHANNELS.md](./docs/REAL_CHANNELS.md)。
+
+`pnpm demo` 和 `pnpm ds-agent chat` 不会套用 `test` 脚本那套 Magpie 默认值。这两条要成对设置 `DS_AGENT_API_BASE` 和 `DS_AGENT_API_KEY`，或者只设一把厂商 Key。这一对只设其中一个会报错退出。
 
 实况 demo 用 DeepSeek V4.1 Flash。API 模型名是 `deepseek-flash`。用 `DS_AGENT_API_*` 配置：
 
@@ -244,6 +252,7 @@ pnpm ds-agent chat "fix the login timeout"
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
 export DS_AGENT_API_KEY=magpie
 export DS_AGENT_API_MODEL=deepseek/deepseek-flash
+export DS_AGENT_GH_REPO=your-account/your-writable-repo
 pnpm demo
 ```
 
@@ -269,7 +278,7 @@ pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 | `02-spill-github` | 一个真实 issue 正文 + 两条真实 comment | Router 回复写成 issue comment |
 | `03-watchdog-github` | 一个真实 GitHub issue | acknowledgement issue comment |
 
-每次运行在 `DS_AGENT_GH_REPO`（默认 `LofiSu/deepseek-super-agent`）创建新 issue，等待真实 Magpie/DeepSeek 模型，发布真实 comment，再通过 GitHub API 重新读取 comment 作为验收证据。默认运行后关闭 issue；`DS_AGENT_GH_KEEP=1` 保留。日志与 JSON 证据在 `/tmp/ds-agent-live-e2e-logs/demos/`。
+每次运行在 `DS_AGENT_GH_REPO`（默认 `LofiSu/deepseek-super-agent`）创建新 issue，等待真实模型，发布真实 comment，再通过 GitHub API 重新读取 comment 作为验收证据。关 issue 只是收尾：场景正事做完才关，关闭失败会被忽略，中途抛错或提前 return 会把已经建好的 issue 留着。`DS_AGENT_GH_KEEP=1` 是故意不关。跑完看一眼还有没有带着 `ds-agent-demo` 标签、仍然开着的 issue。日志与 JSON 证据在 `/tmp/ds-agent-live-e2e-logs/demos/`。
 
 ```bash
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
@@ -332,7 +341,7 @@ pnpm test
 pnpm demo          # 真实 GitHub issue/comment + 真实模型
 ```
 
-未设置环境变量时由 `test/setup-live.ts` 填入 Magpie 默认值。E2E 日志目录：`/tmp/ds-agent-live-e2e-logs/`；真实信道 demo 日志与证据：`/tmp/ds-agent-live-e2e-logs/demos/`。
+`pnpm test` 会在 Vitest 启动前，把缺的 `DS_AGENT_API_*` 填成上面这套 Magpie 默认值。`test/setup-live.ts` 只在变量仍然空着时做同样的事，CI 上不做。只放一把厂商 Key 换不掉这三项。E2E 日志目录：`/tmp/ds-agent-live-e2e-logs/`；真实信道 demo 日志与证据：`/tmp/ds-agent-live-e2e-logs/demos/`。
 
 ## 许可
 
