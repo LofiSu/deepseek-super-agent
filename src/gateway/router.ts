@@ -12,26 +12,33 @@ interface FailureState {
 }
 
 /**
- * Picks provider candidates for a model and tracks failures with an exponential
- * cooldown, so the gateway falls back to a healthy provider and stops hammering
- * a dead one.
+ * Picks provider candidates for a model (or a routing alias), tracks failures
+ * with an exponential cooldown, and rotates provider API keys round-robin.
  */
 export class GatewayRouter {
   private readonly failures = new Map<string, FailureState>()
+  private readonly keyCursor = new Map<string, number>()
+  private readonly aliases: Record<string, string[]>
 
   constructor(
     private readonly providers: readonly GatewayProvider[],
     private readonly defaultModel?: string,
     private readonly now: () => number = () => Date.now(),
-  ) {}
+    aliases: Record<string, string[]> = {},
+  ) {
+    this.aliases = aliases
+  }
 
-  /** De-duplicated model catalog across providers, for GET /v1/models. */
+  /** De-duplicated model catalog (provider models + routing aliases) for GET /v1/models. */
   listModels(): { id: string; provider: string }[] {
     const seen = new Map<string, string>()
     for (const provider of this.providers) {
       for (const model of provider.models ?? []) {
         if (!seen.has(model)) seen.set(model, provider.id)
       }
+    }
+    for (const alias of Object.keys(this.aliases)) {
+      if (!seen.has(alias)) seen.set(alias, 'alias')
     }
     return [...seen].map(([id, provider]) => ({ id, provider }))
   }
@@ -49,20 +56,31 @@ export class GatewayRouter {
     })
   }
 
-  /** Ordered providers to try for a requested model. Never empty if providers exist. */
+  /** Ordered providers to try for a requested model or alias. */
   candidates(modelInput?: string): RouteCandidate[] {
     const requested = modelInput?.trim() || this.defaultModel?.trim() || ''
-    // Explicit "provider/model" prefix pins the provider.
-    const slash = requested.indexOf('/')
-    if (slash > 0) {
-      const providerId = requested.slice(0, slash)
-      const provider = this.providers.find(item => item.id === providerId)
-      if (provider) return [{ provider, model: requested.slice(slash + 1) }]
+    const alias = this.aliases[requested]
+    if (alias && alias.length > 0) {
+      const expanded: RouteCandidate[] = []
+      for (const entry of alias) {
+        for (const candidate of this.resolveOne(entry)) {
+          if (!expanded.some(item => item.provider.id === candidate.provider.id && item.model === candidate.model)) {
+            expanded.push(candidate)
+          }
+        }
+      }
+      if (expanded.length > 0) return expanded
     }
-    const ordered = this.ordered()
-    const matching = ordered.filter(provider => !provider.models?.length || provider.models.includes(requested))
-    const chosen = matching.length > 0 ? matching : ordered
-    return chosen.map(provider => ({ provider, model: requested || provider.models?.[0] || '' }))
+    return this.resolveOne(requested)
+  }
+
+  /** Round-robin credential for a provider (spreads rate limits across keys). */
+  pickKey(provider: GatewayProvider): string {
+    const keys = provider.apiKeys?.length ? provider.apiKeys : provider.apiKey ? [provider.apiKey] : []
+    if (keys.length === 0) return ''
+    const cursor = this.keyCursor.get(provider.id) ?? 0
+    this.keyCursor.set(provider.id, cursor + 1)
+    return keys[cursor % keys.length]!
   }
 
   recordFailure(providerId: string): void {
@@ -75,6 +93,20 @@ export class GatewayRouter {
 
   recordSuccess(providerId: string): void {
     this.failures.delete(providerId)
+  }
+
+  private resolveOne(requested: string): RouteCandidate[] {
+    // Explicit "provider/model" prefix pins the provider.
+    const slash = requested.indexOf('/')
+    if (slash > 0) {
+      const providerId = requested.slice(0, slash)
+      const provider = this.providers.find(item => item.id === providerId)
+      if (provider) return [{ provider, model: requested.slice(slash + 1) }]
+    }
+    const ordered = this.ordered()
+    const matching = ordered.filter(provider => !provider.models?.length || provider.models.includes(requested))
+    const chosen = matching.length > 0 ? matching : ordered
+    return chosen.map(provider => ({ provider, model: requested || provider.models?.[0] || '' }))
   }
 
   /** Healthy providers first (by priority), then cooled-down ones as a last resort. */

@@ -1,7 +1,9 @@
 export {
+  gatewayAliasesFromEnv,
   gatewayProvidersFromEnv,
   providerBaseUrl,
   upstreamUrl,
+  type GatewayAuth,
   type GatewayConfig,
   type GatewayProvider,
 } from './config.ts'

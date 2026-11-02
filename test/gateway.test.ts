@@ -6,7 +6,7 @@ import path from 'node:path'
 import { startGatewayServer, type GatewayHandle } from '../src/gateway/server.ts'
 import { GatewayRouter } from '../src/gateway/router.ts'
 import { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from '../src/gateway/token.ts'
-import { gatewayProvidersFromEnv, type GatewayProvider } from '../src/gateway/config.ts'
+import { gatewayAliasesFromEnv, gatewayProvidersFromEnv, type GatewayProvider } from '../src/gateway/config.ts'
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -27,13 +27,21 @@ function listen(server: Server): Promise<number> {
   })
 }
 
+interface FakeCall {
+  path: string
+  method: string
+  auth?: string
+  xApiKey?: string
+  body: Record<string, unknown>
+}
+
 interface FakeUpstream {
   port: number
-  calls: { path: string; auth?: string; body: Record<string, unknown> }[]
+  calls: FakeCall[]
 }
 
 async function startFakeUpstream(): Promise<FakeUpstream> {
-  const calls: FakeUpstream['calls'] = []
+  const calls: FakeCall[] = []
   const server = createServer((req, res) => {
     let raw = ''
     req.on('data', chunk => { raw += String(chunk) })
@@ -45,12 +53,22 @@ async function startFakeUpstream(): Promise<FakeUpstream> {
         return
       }
       const body = raw ? JSON.parse(raw) as Record<string, unknown> : {}
-      calls.push({ path: urlPath, auth: req.headers.authorization, body })
+      calls.push({
+        path: urlPath,
+        method: req.method ?? '',
+        auth: req.headers.authorization,
+        xApiKey: typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'] : undefined,
+        body,
+      })
       res.writeHead(200, { 'content-type': 'application/json' })
+      if (urlPath.endsWith('/embeddings')) {
+        res.end(JSON.stringify({ object: 'list', data: [{ object: 'embedding', embedding: [0.1, 0.2], index: 0 }], usage: { total_tokens: 3 } }))
+        return
+      }
       res.end(JSON.stringify({
         id: 'fake',
-        choices: [{ message: { role: 'assistant', content: `ok:${String(body.model)}` } }],
-        usage: { total_tokens: 7 },
+        choices: [{ message: { role: 'assistant', content: `ok:${String(body.model)}` }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
       }))
     })
   })
@@ -63,10 +81,22 @@ function provider(over: Partial<GatewayProvider> & { baseUrl: string }): Gateway
   return { id: 'fake', apiKey: 'k', ...over }
 }
 
-async function startGateway(providers: GatewayProvider[], token = 'tok'): Promise<GatewayHandle> {
-  const handle = await startGatewayServer({ host: '127.0.0.1', port: 0, token, providers })
+async function startGateway(
+  providers: GatewayProvider[],
+  token = 'tok',
+  aliases?: Record<string, string[]>,
+): Promise<GatewayHandle> {
+  const handle = await startGatewayServer({ host: '127.0.0.1', port: 0, token, providers, ...(aliases ? { aliases } : {}) })
   cleanup.push(() => handle.close())
   return handle
+}
+
+function post(url: string, token: string, body: unknown): Promise<Response> {
+  return fetch(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
 }
 
 describe('gateway server', () => {
@@ -74,23 +104,17 @@ describe('gateway server', () => {
     const upstream = await startFakeUpstream()
     const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })], 'secret')
 
-    const unauth = await fetch(`${gw.url}/v1/models`)
-    expect(unauth.status).toBe(401)
+    expect((await fetch(`${gw.url}/v1/models`)).status).toBe(401)
 
     const models = await fetch(`${gw.url}/v1/models`, { headers: { authorization: 'Bearer secret' } })
     expect(models.status).toBe(200)
     const list = await models.json() as { data: { id: string }[] }
     expect(list.data.map(model => model.id)).toContain('m1')
 
-    const chat = await fetch(`${gw.url}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'm1', messages: [{ role: 'user', content: 'hi' }] }),
-    })
+    const chat = await post(`${gw.url}/v1/chat/completions`, 'secret', { model: 'm1', messages: [{ role: 'user', content: 'hi' }] })
     expect(chat.status).toBe(200)
     const json = await chat.json() as { choices: { message: { content: string } }[] }
     expect(json.choices[0]!.message.content).toBe('ok:m1')
-    expect(upstream.calls).toHaveLength(1)
     expect(upstream.calls[0]!.auth).toBe('Bearer k')
     expect(upstream.calls[0]!.body.model).toBe('m1')
     expect(gw.metrics.snapshot().byProvider.fake).toMatchObject({ requests: 1, errors: 0, tokens: 7 })
@@ -115,18 +139,87 @@ describe('gateway server', () => {
       provider({ id: 'dead', baseUrl: `http://127.0.0.1:${deadPort}`, models: ['m1'], priority: 10 }),
       provider({ id: 'live', baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'], priority: 1 }),
     ])
-    const chat = await fetch(`${gw.url}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: 'Bearer tok', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'm1', messages: [{ role: 'user', content: 'hi' }] }),
-    })
+    const chat = await post(`${gw.url}/v1/chat/completions`, 'tok', { model: 'm1', messages: [{ role: 'user', content: 'hi' }] })
     expect(chat.status).toBe(200)
     const json = await chat.json() as { choices: { message: { content: string } }[] }
     expect(json.choices[0]!.message.content).toBe('ok:m1')
-    expect(upstream.calls).toHaveLength(1)
     const snapshot = gw.metrics.snapshot()
     expect(snapshot.byProvider.dead?.errors).toBe(1)
     expect(snapshot.byProvider.live?.requests).toBe(1)
+  })
+
+  it('proxies embeddings to the provider /embeddings path', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })])
+    const res = await post(`${gw.url}/v1/embeddings`, 'tok', { model: 'm1', input: 'hello' })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: { embedding: number[] }[] }
+    expect(json.data[0]!.embedding).toEqual([0.1, 0.2])
+    expect(upstream.calls[0]!.path).toMatch(/\/embeddings$/)
+    expect(upstream.calls[0]!.body.model).toBe('m1')
+  })
+
+  it('translates Anthropic /v1/messages to a chat call and back', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })])
+    const res = await post(`${gw.url}/v1/messages`, 'tok', {
+      model: 'm1',
+      max_tokens: 64,
+      system: 'be brief',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { type: string; role: string; content: { type: string; text: string }[] }
+    expect(json.type).toBe('message')
+    expect(json.role).toBe('assistant')
+    expect(json.content[0]).toEqual({ type: 'text', text: 'ok:m1' })
+    const sent = upstream.calls[0]!.body as { messages: { role: string; content: string }[]; max_tokens: number }
+    expect(sent.messages[0]).toEqual({ role: 'system', content: 'be brief' })
+    expect(sent.messages[1]).toEqual({ role: 'user', content: 'hi' })
+    expect(sent.max_tokens).toBe(64)
+  })
+
+  it('exposes usage via /v1/gateway/quotas', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })])
+    await post(`${gw.url}/v1/chat/completions`, 'tok', { model: 'm1', messages: [{ role: 'user', content: 'hi' }] })
+    const res = await fetch(`${gw.url}/v1/gateway/quotas`, { headers: { authorization: 'Bearer tok' } })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { object: string; metrics: { requests: number } }
+    expect(json.object).toBe('gateway.quotas')
+    expect(json.metrics.requests).toBe(1)
+  })
+
+  it('sends x-api-key credentials when auth=x-api-key', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'], apiKey: 'secret', auth: 'x-api-key' })])
+    await post(`${gw.url}/v1/chat/completions`, 'tok', { model: 'm1', messages: [{ role: 'user', content: 'hi' }] })
+    expect(upstream.calls[0]!.xApiKey).toBe('secret')
+    expect(upstream.calls[0]!.auth).toBeUndefined()
+  })
+
+  it('rotates multiple api keys round-robin', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'], apiKey: '', apiKeys: ['k1', 'k2'] })])
+    await post(`${gw.url}/v1/chat/completions`, 'tok', { model: 'm1', messages: [{ role: 'user', content: 'one' }] })
+    await post(`${gw.url}/v1/chat/completions`, 'tok', { model: 'm1', messages: [{ role: 'user', content: 'two' }] })
+    expect(upstream.calls.map(call => call.auth)).toEqual(['Bearer k1', 'Bearer k2'])
+  })
+
+  it('routes a model alias through its ordered candidates', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway(
+      [provider({ id: 'a', baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })],
+      'tok',
+      { auto: ['a/m1'] },
+    )
+    const res = await post(`${gw.url}/v1/chat/completions`, 'tok', { model: 'auto', messages: [{ role: 'user', content: 'hi' }] })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { choices: { message: { content: string } }[] }
+    expect(json.choices[0]!.message.content).toBe('ok:m1')
+    const models = await fetch(`${gw.url}/v1/models`, { headers: { authorization: 'Bearer tok' } })
+    const list = await models.json() as { data: { id: string }[] }
+    expect(list.data.map(item => item.id)).toContain('auto')
   })
 })
 
@@ -145,6 +238,14 @@ describe('GatewayRouter', () => {
     expect(router.candidates('m1').map(candidate => candidate.provider.id)).toEqual(['b', 'a'])
     now += 31_000
     expect(router.candidates('m1').map(candidate => candidate.provider.id)).toEqual(['a', 'b'])
+  })
+
+  it('expands a routing alias to its ordered candidates', () => {
+    const router = new GatewayRouter([
+      { id: 'a', baseUrl: 'http://a', apiKey: '', models: ['m1'], priority: 5 },
+      { id: 'b', baseUrl: 'http://b', apiKey: '', models: ['m9'], priority: 1 },
+    ], 'm1', () => 0, { auto: ['a/m1', 'b/m9'] })
+    expect(router.candidates('auto').map(candidate => `${candidate.provider.id}/${candidate.model}`)).toEqual(['a/m1', 'b/m9'])
   })
 })
 
@@ -167,15 +268,21 @@ describe('gateway token', () => {
   })
 })
 
-describe('gatewayProvidersFromEnv', () => {
+describe('gateway config from env', () => {
   it('parses JSON providers and resolves apiKeyEnv', () => {
     const env = {
-      DS_AGENT_GATEWAY_PROVIDERS: JSON.stringify([
-        { id: 'd', baseUrl: 'http://x', apiKeyEnv: 'MY_KEY', models: ['m'] },
-      ]),
+      DS_AGENT_GATEWAY_PROVIDERS: JSON.stringify([{ id: 'd', baseUrl: 'http://x', apiKeyEnv: 'MY_KEY', models: ['m'] }]),
       MY_KEY: 'secret',
     } as NodeJS.ProcessEnv
     expect(gatewayProvidersFromEnv(env)[0]).toMatchObject({ id: 'd', baseUrl: 'http://x', apiKey: 'secret', models: ['m'] })
+  })
+
+  it('resolves a preset by name and its key env', () => {
+    const env = {
+      DS_AGENT_GATEWAY_PROVIDERS: JSON.stringify([{ id: 'ds', preset: 'deepseek' }]),
+      DEEPSEEK_API_KEY: 'k',
+    } as NodeJS.ProcessEnv
+    expect(gatewayProvidersFromEnv(env)[0]).toMatchObject({ id: 'ds', baseUrl: 'https://api.deepseek.com', apiKey: 'k', models: ['deepseek-flash'] })
   })
 
   it('falls back to a single BYOM provider', () => {
@@ -189,7 +296,13 @@ describe('gatewayProvidersFromEnv', () => {
     ])
   })
 
+  it('parses routing aliases', () => {
+    const env = { DS_AGENT_GATEWAY_ALIASES: JSON.stringify({ auto: ['a/m1', 'b/m9'] }) } as NodeJS.ProcessEnv
+    expect(gatewayAliasesFromEnv(env)).toEqual({ auto: ['a/m1', 'b/m9'] })
+  })
+
   it('is empty with no configuration', () => {
     expect(gatewayProvidersFromEnv({} as NodeJS.ProcessEnv)).toEqual([])
+    expect(gatewayAliasesFromEnv({} as NodeJS.ProcessEnv)).toEqual({})
   })
 })

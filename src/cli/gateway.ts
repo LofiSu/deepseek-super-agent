@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { gatewayProvidersFromEnv } from '../gateway/config.ts'
+import { gatewayAliasesFromEnv, gatewayProvidersFromEnv } from '../gateway/config.ts'
 import { startGatewayServer } from '../gateway/server.ts'
 import { gatewayTokenPath, loadOrCreateGatewayToken } from '../gateway/token.ts'
 
@@ -31,14 +31,23 @@ export async function runGatewayCommand(home: string): Promise<void> {
   const defaultModel = process.env.DS_AGENT_GATEWAY_MODEL?.trim()
     || process.env.DS_AGENT_API_MODEL?.trim()
     || providers[0]?.models?.[0]
+  const aliases = gatewayAliasesFromEnv()
 
-  const handle = await startGatewayServer({ host, port, token, providers, ...(defaultModel ? { defaultModel } : {}) })
+  const handle = await startGatewayServer({
+    host,
+    port,
+    token,
+    providers,
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(Object.keys(aliases).length ? { aliases } : {}),
+  })
   fs.mkdirSync(home, { recursive: true })
   const info = {
     url: handle.url,
     tokenPath: gatewayTokenPath(home),
     providers: providers.map(provider => provider.id),
     defaultModel: defaultModel ?? null,
+    aliases: Object.keys(aliases),
   }
   fs.writeFileSync(path.join(home, 'gateway.json'), `${JSON.stringify(info, null, 2)}\n`)
 
@@ -46,6 +55,7 @@ export async function runGatewayCommand(home: string): Promise<void> {
   console.log(`  token:     ${handle.token}`)
   console.log(`  saved:     ${gatewayTokenPath(home)} (0600) + ${path.join(home, 'gateway.json')}`)
   console.log(`  providers: ${providers.map(provider => provider.id).join(', ')}${defaultModel ? `  defaultModel=${defaultModel}` : ''}`)
+  if (Object.keys(aliases).length) console.log(`  aliases:   ${Object.keys(aliases).join(', ')}`)
   console.log(`  point ds-agent at it:  export DS_AGENT_GATEWAY_URL=${handle.url}`)
 
   const shutdown = (): void => {

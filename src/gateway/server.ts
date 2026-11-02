@@ -56,9 +56,8 @@ interface ForwardResult {
 const MAX_BODY_BYTES = 10 * 1024 * 1024
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
-  const body = JSON.stringify(payload)
   res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(body)
+  res.end(JSON.stringify(payload))
 }
 
 function sendRaw(res: ServerResponse, status: number, body: string, contentType: string): void {
@@ -88,35 +87,105 @@ function authorized(req: IncomingMessage, token: string): boolean {
   return (req.headers.authorization ?? '') === `Bearer ${token}`
 }
 
+/** How the credential reaches the upstream (bearer / x-api-key / custom header). */
+function authHeaders(provider: GatewayProvider, key: string): Record<string, string> {
+  if (provider.auth === 'none') return {}
+  if (provider.auth === 'x-api-key') return key ? { 'x-api-key': key } : {}
+  if (provider.auth === 'header' && provider.authHeader) return key ? { [provider.authHeader]: key } : {}
+  return key ? { authorization: `Bearer ${key}` } : {}
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.map(block => {
+      if (typeof block === 'string') return block
+      const typed = block as { type?: string; text?: unknown }
+      return typed?.type === 'text' ? String(typed.text ?? '') : ''
+    }).join('')
+  }
+  return ''
+}
+
+/** Minimal Anthropic Messages request -> OpenAI chat request translation (text only). */
+function anthropicToOpenAI(body: Record<string, unknown>): Record<string, unknown> {
+  const messages: { role: string; content: string }[] = []
+  const system = body.system
+  if (typeof system === 'string' && system.trim()) {
+    messages.push({ role: 'system', content: system })
+  } else if (Array.isArray(system)) {
+    const joined = system.map(block => (typeof block === 'string' ? block : String((block as { text?: unknown })?.text ?? ''))).join('\n').trim()
+    if (joined) messages.push({ role: 'system', content: joined })
+  }
+  for (const message of Array.isArray(body.messages) ? body.messages as Record<string, unknown>[] : []) {
+    if (!message || typeof message !== 'object') continue
+    messages.push({ role: message.role === 'assistant' ? 'assistant' : 'user', content: textOf(message.content) })
+  }
+  const out: Record<string, unknown> = { model: typeof body.model === 'string' ? body.model : '', messages }
+  for (const key of ['max_tokens', 'temperature', 'top_p', 'stop']) {
+    if (body[key] != null) out[key] = body[key]
+  }
+  return out
+}
+
+/** Minimal OpenAI chat response -> Anthropic Messages response translation. */
+function openAIToAnthropic(json: unknown, model: string): Record<string, unknown> {
+  const record = (json ?? {}) as {
+    id?: string
+    choices?: { message?: { content?: unknown }; finish_reason?: string }[]
+    usage?: { prompt_tokens?: number; completion_tokens?: number }
+  }
+  const choice = record.choices?.[0]
+  const stopMap: Record<string, string> = { stop: 'end_turn', length: 'max_tokens', tool_calls: 'tool_use', content_filter: 'end_turn' }
+  return {
+    id: record.id ?? `msg_${Date.now()}`,
+    type: 'message',
+    role: 'assistant',
+    model,
+    content: [{ type: 'text', text: textOf(choice?.message?.content) }],
+    stop_reason: choice?.finish_reason ? (stopMap[choice.finish_reason] ?? 'end_turn') : 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: record.usage?.prompt_tokens ?? 0, output_tokens: record.usage?.completion_tokens ?? 0 },
+  }
+}
+
 /**
- * Start an OpenAI-compatible gateway. Endpoints:
- * - `GET /health`            (no auth) — providers + cooldowns
- * - `GET /v1/models`         — aggregated catalog
- * - `POST /v1/chat/completions` — routed upstream call, with fallback
+ * Start the gateway. Endpoints:
+ * - `GET  /health`              (no auth) — providers + cooldowns + metrics
+ * - `GET  /v1/models`           — model catalog + routing aliases
+ * - `GET  /v1/gateway/quotas`   — usage/quota snapshot
+ * - `POST /v1/chat/completions` — OpenAI chat (JSON + SSE)
+ * - `POST /v1/responses`        — OpenAI Responses (pass-through)
+ * - `POST /v1/messages`         — Anthropic Messages (translated to chat)
+ * - `POST /v1/embeddings`       — embeddings (pass-through)
  */
 export async function startGatewayServer(config: GatewayConfig): Promise<GatewayHandle> {
-  const router = new GatewayRouter(config.providers, config.defaultModel)
+  const router = new GatewayRouter(config.providers, config.defaultModel, () => Date.now(), config.aliases ?? {})
   const metrics = new GatewayMetrics()
 
   const forward = async (
     provider: GatewayProvider,
+    path: string,
     body: Record<string, unknown>,
     model: string,
     stream: boolean,
     clientRes: ServerResponse,
+    key: string,
   ): Promise<'streamed' | ForwardResult> => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), provider.timeoutMs ?? 60_000)
     try {
-      const response = await fetch(upstreamUrl(provider, '/chat/completions'), {
+      const payload: Record<string, unknown> = { ...body, model }
+      if (path.endsWith('/chat/completions') || path.endsWith('/responses')) payload.stream = stream
+      const response = await fetch(upstreamUrl(provider, path), {
         method: 'POST',
         signal: controller.signal,
         headers: {
           'content-type': 'application/json',
-          ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}),
+          ...authHeaders(provider, key),
           ...(provider.headers ?? {}),
         },
-        body: JSON.stringify({ ...body, model, stream }),
+        body: JSON.stringify(payload),
       })
       const contentType = response.headers.get('content-type') ?? 'application/json'
       if (stream && response.ok && contentType.includes('text/event-stream') && response.body) {
@@ -147,6 +216,109 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     }
   }
 
+  /** Try each candidate provider; fall back on 5xx/429/network, return the winning result. */
+  const routeForward = async (
+    res: ServerResponse,
+    upstreamPath: string,
+    body: Record<string, unknown>,
+    stream: boolean,
+    modelInput: string | undefined,
+  ): Promise<'streamed' | ForwardResult> => {
+    const candidates = router.candidates(modelInput)
+    if (candidates.length === 0) {
+      return { status: 503, body: JSON.stringify({ error: { message: 'no upstream provider configured' } }), contentType: 'application/json' }
+    }
+    const errors: string[] = []
+    for (const candidate of candidates) {
+      const started = Date.now()
+      const key = router.pickKey(candidate.provider)
+      try {
+        const result = await forward(candidate.provider, upstreamPath, body, candidate.model, stream, res, key)
+        const latency = Date.now() - started
+        if (result === 'streamed') {
+          router.recordSuccess(candidate.provider.id)
+          metrics.record(candidate.provider.id, latency, true)
+          return 'streamed'
+        }
+        if (result.status >= 500 || result.status === 429) {
+          router.recordFailure(candidate.provider.id)
+          metrics.record(candidate.provider.id, latency, false, result.usage)
+          errors.push(`${candidate.provider.id}: ${result.status} ${result.body.slice(0, 200)}`)
+          continue
+        }
+        router.recordSuccess(candidate.provider.id)
+        metrics.record(candidate.provider.id, latency, true, result.usage)
+        return result
+      } catch (error) {
+        router.recordFailure(candidate.provider.id)
+        metrics.record(candidate.provider.id, Date.now() - started, false)
+        errors.push(`${candidate.provider.id}: ${error instanceof Error ? error.message : String(error)}`)
+        continue
+      }
+    }
+    return { status: 502, body: JSON.stringify({ error: { message: 'all upstream providers failed', details: errors } }), contentType: 'application/json' }
+  }
+
+  const readJson = async (req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> => {
+    const raw = await readBody(req)
+    try {
+      return JSON.parse(raw || '{}') as Record<string, unknown>
+    } catch {
+      sendJson(res, 400, { error: { message: 'request body is not valid JSON' } })
+      return undefined
+    }
+  }
+  const modelOf = (body: Record<string, unknown>): string | undefined =>
+    typeof body.model === 'string' ? body.model : undefined
+
+  const handleChat = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const body = await readJson(req, res)
+    if (!body) return
+    const result = await routeForward(res, '/chat/completions', body, body.stream === true, modelOf(body))
+    if (result !== 'streamed') sendRaw(res, result.status, result.body, result.contentType)
+  }
+
+  const handleEmbeddings = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const body = await readJson(req, res)
+    if (!body) return
+    const result = await routeForward(res, '/embeddings', body, false, modelOf(body))
+    if (result !== 'streamed') sendRaw(res, result.status, result.body, result.contentType)
+  }
+
+  const handleResponses = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const body = await readJson(req, res)
+    if (!body) return
+    const result = await routeForward(res, '/responses', body, body.stream === true, modelOf(body))
+    if (result !== 'streamed') sendRaw(res, result.status, result.body, result.contentType)
+  }
+
+  const handleMessages = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const body = await readJson(req, res)
+    if (!body) return
+    const chatBody = anthropicToOpenAI(body)
+    const model = typeof chatBody.model === 'string' ? chatBody.model : undefined
+    const result = await routeForward(res, '/chat/completions', chatBody, false, model)
+    if (result === 'streamed') return
+    if (result.status >= 400) {
+      sendRaw(res, result.status, result.body, result.contentType)
+      return
+    }
+    try {
+      sendJson(res, 200, openAIToAnthropic(JSON.parse(result.body), model ?? 'unknown'))
+    } catch {
+      sendRaw(res, result.status, result.body, result.contentType)
+    }
+  }
+
+  const handleQuotas = (_req: IncomingMessage, res: ServerResponse): void => {
+    sendJson(res, 200, {
+      object: 'gateway.quotas',
+      generatedAt: new Date().toISOString(),
+      providers: router.providersState(),
+      metrics: metrics.snapshot(),
+    })
+  }
+
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://gateway.local')
     if (url.pathname === '/health' && req.method === 'GET') {
@@ -164,59 +336,27 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       })
       return
     }
+    if (url.pathname === '/v1/gateway/quotas' && req.method === 'GET') {
+      handleQuotas(req, res)
+      return
+    }
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
       await handleChat(req, res)
       return
     }
+    if (url.pathname === '/v1/embeddings' && req.method === 'POST') {
+      await handleEmbeddings(req, res)
+      return
+    }
+    if (url.pathname === '/v1/responses' && req.method === 'POST') {
+      await handleResponses(req, res)
+      return
+    }
+    if (url.pathname === '/v1/messages' && req.method === 'POST') {
+      await handleMessages(req, res)
+      return
+    }
     sendJson(res, 404, { error: { message: `not found: ${req.method ?? 'GET'} ${url.pathname}` } })
-  }
-
-  const handleChat = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const raw = await readBody(req)
-    let body: Record<string, unknown>
-    try {
-      body = JSON.parse(raw || '{}') as Record<string, unknown>
-    } catch {
-      sendJson(res, 400, { error: { message: 'request body is not valid JSON' } })
-      return
-    }
-    const stream = body.stream === true
-    const requestedModel = typeof body.model === 'string' ? body.model : undefined
-    const candidates = router.candidates(requestedModel)
-    if (candidates.length === 0) {
-      sendJson(res, 503, { error: { message: 'no upstream provider configured' } })
-      return
-    }
-    const errors: string[] = []
-    for (const candidate of candidates) {
-      const started = Date.now()
-      try {
-        const result = await forward(candidate.provider, body, candidate.model, stream, res)
-        const latency = Date.now() - started
-        if (result === 'streamed') {
-          router.recordSuccess(candidate.provider.id)
-          metrics.record(candidate.provider.id, latency, true)
-          return
-        }
-        // Retry another provider only for upstream faults; surface client errors as-is.
-        if (result.status >= 500 || result.status === 429) {
-          router.recordFailure(candidate.provider.id)
-          metrics.record(candidate.provider.id, latency, false, result.usage)
-          errors.push(`${candidate.provider.id}: ${result.status} ${result.body.slice(0, 200)}`)
-          continue
-        }
-        router.recordSuccess(candidate.provider.id)
-        metrics.record(candidate.provider.id, latency, true, result.usage)
-        sendRaw(res, result.status, result.body, result.contentType)
-        return
-      } catch (error) {
-        router.recordFailure(candidate.provider.id)
-        metrics.record(candidate.provider.id, Date.now() - started, false)
-        errors.push(`${candidate.provider.id}: ${error instanceof Error ? error.message : String(error)}`)
-        continue
-      }
-    }
-    sendJson(res, 502, { error: { message: 'all upstream providers failed', details: errors } })
   }
 
   const server = createServer((req, res) => {
