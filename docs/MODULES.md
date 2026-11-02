@@ -32,6 +32,24 @@ and no imports from higher modules.
 Worker task. `session.ts` maps a shard to `router:<shard>` (the default shard
 keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
 
+- Matching shards run their Router turns sequentially in `route` order. The
+  **first** shard is the ticket's reply owner: `routerTurn` opens that shard's
+  session, and only that session may call `reply_user`, `assess_trigger`
+  (stop/unavailable), or `stop_worker` (`src/harness/tools.ts`).
+- Ownership is resolved from the trigger named by the call. A supplied
+  `triggerId` and `ticketId` must agree (`ticket.originTriggerId === triggerId`),
+  and a missing ticket or disposition is rejected instead of falling back to
+  default. Ticket-scoped calls (`reply_user`, `stop_worker`) use the ticket's
+  origin trigger; every Ticket has one.
+- `Evals.decide` is idempotent per trigger for terminal outcomes
+  (`stop`, `ignore`, `unavailable`). An earlier `accept` may precede the first
+  terminal decision (the Gate accepted, then the Router vetoed), but repeated
+  terminals return the existing Decision and write no new row.
+- Every shard session shares the same Ticket and Thread. A later shard cannot
+  create a second Ticket, reply, or emit a second terminal decision for the same
+  trigger. A report follow-up always goes to the owner, never to the second
+  shard or the default Router.
+
 - `pickNode(ticketId)` is least-loaded and stable for a ticket.
 - The chosen node is written to `Assignment.node`, the `assignment.placed`
   event, and the Worker task prompt (`node=`).
@@ -113,9 +131,26 @@ ignored, and unset lists leave the fast path unchanged. Active rules are
 logged once at `Runtime.create` as `[ingress] admission ...`.
 
 - `RouterShardRegistry.route(trigger)` returns every matching non-default shard
-  in priority order, or `['default']`.
-- The shard list is stored in `TriggerTrust.shards` and `Disposition.shards`.
-- The Harness runs one Router session per matching shard, then starts the Worker.
+  ordered by `priority` descending, then registration order.
+- `default` is a fallback only: it is returned (as the whole list) when no
+  non-default shard matches; it is never appended to a match list, and its
+  `priority` is ignored.
+- The first id in the ordered list is the arbitration winner. It is the ticket's
+  reply owner and the only shard session that may emit a terminal decision
+  (`reply_user`, `assess_trigger` stop/unavailable, `stop_worker` in
+  `src/harness/tools.ts`). Ownership is resolved from the trigger named by the
+  call, and a mismatched trigger/ticket pair or missing disposition is rejected.
+- `Evals.decide` records at most one terminal decision
+  (`stop`/`ignore`/`unavailable`) per trigger. An `accept` may precede the first
+  terminal decision, but repeated terminal calls return the existing Decision
+  and write nothing. Because all shard sessions share one Ticket/Thread, one
+  trigger produces at most one terminal Router decision and one reply path.
+- The shard list is stored in `TriggerTrust.shards` and `Disposition.shards`;
+  the ordered matches are stored as-is (no `default` appended).
+- The Harness runs one Router session per matching shard, in order, then starts
+  the Worker.
+- Shards are routing metadata for Router sessions, not multi-process placement:
+  every shard's session runs in this process.
 - Configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`.
   Malformed JSON is logged and ignored, leaving the default shard.
 
@@ -264,8 +299,8 @@ host-level seccomp stay external as PLAN §9 says.
 ## Tests
 
 ```text
-npx vitest run test/runtime-integration.test.ts   8 tests: shards, mesh, memory, lifecycle, A2A, bake-off
-npx vitest run test/router-shards.test.ts          route/priority/filter contracts
+npx vitest run test/runtime-integration.test.ts   13 tests: shards/arbitration/ownership, mesh, memory, lifecycle, A2A, bake-off
+npx vitest run test/router-shards.test.ts         7 tests: route/priority/registration/fallback contracts
 npx vitest run test/worker-mesh.test.ts            capacity/least-loaded/release
 npx vitest run test/long-term-memory.test.ts       persistence, ACL, redaction
 npx vitest run test/lifecycle-a2a.test.ts          lifecycle bus + envelope delivery
@@ -273,7 +308,7 @@ npx vitest run test/runtime-wiring.test.ts         default-path service construc
 npx vitest run test/cli-memory-a2a.test.ts         offline operator views
 npx vitest run test/metrics-curve.test.ts          percentiles + bake-off math
 pnpm typecheck                                     pass
-offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         213 passed, 15 skipped, 35 files
+offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         273 passed, 15 skipped, 41 files
 pnpm test (live Magpie, final tree)                207 passed, 3 skipped, 34 files (431.12 s)
 ```
 
