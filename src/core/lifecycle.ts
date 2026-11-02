@@ -10,7 +10,15 @@ export interface LifecycleEvent {
  */
 export class LifecycleBus {
   readonly history: LifecycleEvent[] = []
+  private readonly maxEvents: number
   private readonly listeners = new Map<string, Set<(event: LifecycleEvent) => void>>()
+
+  constructor(maxEvents = 1000) {
+    if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) {
+      throw new Error('LifecycleBus maxEvents must be a positive integer')
+    }
+    this.maxEvents = maxEvents
+  }
 
   subscribe(kind: string, listener: (event: LifecycleEvent) => void): () => void {
     let listeners = this.listeners.get(kind)
@@ -27,6 +35,9 @@ export class LifecycleBus {
 
   publish(event: LifecycleEvent): LifecycleEvent {
     this.history.push(event)
+    if (this.history.length > this.maxEvents) {
+      this.history.splice(0, this.history.length - this.maxEvents)
+    }
     for (const listener of this.listeners.get(event.kind) ?? []) listener(event)
     return event
   }
