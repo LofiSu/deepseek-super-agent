@@ -20,6 +20,7 @@
 | 2026-11-02 | `7f1c9a1` (#44) | Rebased again after #44, #46, and #51 merged; P0-1/P0-2/P0-3 resolved, P1-8 resolved, and all current-state claims re-audited. |
 | 2026-11-02 | `ab90eae` | Re-audited after #53 (credential sentinel) and #54 (LTM retention) merged; P0-5 resolved, M6/P2-1 updated. |
 | 2026-11-02 | `30bea75` | #55 sandbox docs and #56 PLAN §4/§10 merged; P1-10 resolved; P0-4 remaining §1.4 fix opened as #58. |
+| 2026-11-02 | `f57fd2b` | #57 bounded lifecycle history and #58 PLAN §1.4 stack correction merged; P0-4 and P1-4 resolved. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -229,7 +230,7 @@ documentation (P1-10), not enforcement.
 ### P0 — top open gaps
 
 **P0-4. Re-freeze the interface contract.**
-Status: §4/§10 resolved by #56 (`30bea75`); §1.4 stack correction in review as #58.
+Status: resolved by #56 (`30bea75`) and #58 (`f57fd2b`).
 Evidence: `PLAN.md:280` freezes `SessionRole`; `PLAN.md:342` freezes
 `Assignment.status`; `PLAN.md:538` freezes `Harness.injectJobResult`;
 `src/shared/types.ts:1` defines `Role`, `:5` adds `maybe`, `:104` uses
@@ -369,7 +370,7 @@ the work is already public.
 | P0-1 | Land refactor + MODULES/HARDENING |  | `refactor/m0-m11-modules` | #40 (`4b919bd`) | resolved | Merged; `src/phase2` gone; domain tests run in CI |
 | P0-2 | Remove stale opt-in docs |  | `docs/module-boundaries` | #41 (`a38ea81`), #51 (`3e04e82`) | resolved | Only the two explicit negations in `PLAN.md` remain |
 | P0-3 | Fix `MODULES.md` demo runner |  | `docs/m11-demo-runner-fix` | #46 (`0d9ec20`) | resolved | Points at `src/cli/demos/run.ts` |
-| P0-4 | Re-freeze PLAN §4/§10 contract |  | `docs/plan-contract`, `docs/plan-stack` | #56 (`30bea75`), #58 | in review (§1.4) | Plan matches `src/shared` and the real tree, or says illustrative; typecheck green |
+| P0-4 | Re-freeze PLAN §4/§10 contract |  | `docs/plan-contract`, `docs/plan-stack` | #56 (`30bea75`), #58 (`f57fd2b`) | resolved | Plan matches `src/shared` and the real tree, or says illustrative; §1.4 matches Node 22/node:sqlite; typecheck green |
 | P0-5 | Credential sentinel test across store/journal/prompt/tool |  | `test/credential-sentinel` | #53 (`d5135f6`) | resolved | Sentinel absent from all SQLite tables, session JSONL, tool results, and captured model requests; Worker port/tool calls throw |
 | P1-1 | Real-channel acceptance job/checklist |  |  |  | todo | `workflow_dispatch` or release evidence for `pnpm demo` + Feishu |
 | P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | in review (spill-trust fix requested) | Router originates decisions, or docs say veto-only |
