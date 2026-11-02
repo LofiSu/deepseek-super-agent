@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { gatewayAliasesFromEnv, gatewayProvidersFromEnv } from '../gateway/config.ts'
+import { gatewayFromSources } from '../gateway/config-file.ts'
 import { startGatewayServer } from '../gateway/server.ts'
 import { gatewayTokenPath, loadOrCreateGatewayToken } from '../gateway/token.ts'
 
@@ -21,17 +21,17 @@ export async function runGatewayCommand(home: string): Promise<void> {
   if (!Number.isFinite(port) || port < 0 || port > 65535) throw new Error(`invalid gateway port: ${port}`)
   const host = flag('host') ?? process.env.DS_AGENT_GATEWAY_HOST ?? '127.0.0.1'
   const token = loadOrCreateGatewayToken(home, flag('token') ?? process.env.DS_AGENT_GATEWAY_TOKEN)
-  const providers = gatewayProvidersFromEnv()
+  const { providers, aliases, defaultModel: fileDefault, source } = gatewayFromSources(home)
   if (providers.length === 0) {
     throw new Error(
-      'no providers configured: set DS_AGENT_GATEWAY_PROVIDERS (JSON array) '
-      + 'or DS_AGENT_API_BASE + DS_AGENT_API_KEY',
+      'no providers configured: run `pnpm ds-agent setup` to write gateway.config.json, '
+      + 'or set DS_AGENT_GATEWAY_PROVIDERS / DS_AGENT_API_BASE + DS_AGENT_API_KEY',
     )
   }
   const defaultModel = process.env.DS_AGENT_GATEWAY_MODEL?.trim()
     || process.env.DS_AGENT_API_MODEL?.trim()
+    || fileDefault
     || providers[0]?.models?.[0]
-  const aliases = gatewayAliasesFromEnv()
 
   const handle = await startGatewayServer({
     host,
@@ -54,7 +54,7 @@ export async function runGatewayCommand(home: string): Promise<void> {
   console.log(`ds-agent gateway listening on ${handle.url}`)
   console.log(`  token:     ${handle.token}`)
   console.log(`  saved:     ${gatewayTokenPath(home)} (0600) + ${path.join(home, 'gateway.json')}`)
-  console.log(`  providers: ${providers.map(provider => provider.id).join(', ')}${defaultModel ? `  defaultModel=${defaultModel}` : ''}`)
+  console.log(`  providers: ${providers.map(provider => provider.id).join(', ')}${defaultModel ? `  defaultModel=${defaultModel}` : ''}  (source=${source})`)
   if (Object.keys(aliases).length) console.log(`  aliases:   ${Object.keys(aliases).join(', ')}`)
   console.log(`  point ds-agent at it:  export DS_AGENT_GATEWAY_URL=${handle.url}`)
 

@@ -112,6 +112,15 @@ function normalizeProvider(input: GatewayProviderInput, env: NodeJS.ProcessEnv, 
 }
 
 /**
+ * Normalize a raw provider array (from a config file or env JSON). Exported so
+ * the config-file loader and env loader share one code path.
+ */
+export function gatewayProvidersFromInput(inputs: unknown, env: NodeJS.ProcessEnv = process.env): GatewayProvider[] {
+  if (!Array.isArray(inputs)) throw new Error('providers must be a JSON array')
+  return inputs.map((item, index) => normalizeProvider(item as GatewayProviderInput, env, index))
+}
+
+/**
  * Build the provider list from `DS_AGENT_GATEWAY_PROVIDERS` (a JSON array).
  * With no JSON, fall back to the single BYOM provider in
  * `DS_AGENT_API_BASE` + `DS_AGENT_API_KEY`.
@@ -125,8 +134,7 @@ export function gatewayProvidersFromEnv(env: NodeJS.ProcessEnv = process.env): G
     } catch {
       throw new Error('DS_AGENT_GATEWAY_PROVIDERS is not valid JSON')
     }
-    if (!Array.isArray(parsed)) throw new Error('DS_AGENT_GATEWAY_PROVIDERS must be a JSON array')
-    return parsed.map((item, index) => normalizeProvider(item as GatewayProviderInput, env, index))
+    return gatewayProvidersFromInput(parsed, env)
   }
   const baseUrl = env.DS_AGENT_API_BASE?.trim()
   const apiKey = env.DS_AGENT_API_KEY?.trim()
