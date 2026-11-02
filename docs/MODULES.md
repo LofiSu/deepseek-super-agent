@@ -137,8 +137,9 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `chat`, `emit`,
 `metrics`, `memory`, `a2a`, `pause`, `intervene`, `resume`, `collab`, `team`,
-and `teams`. `src/cli/demo.ts` drives the acceptance scenarios against the real
-GitHub/Feishu channels and a live model. `src/cli/bakeoff.ts` compares the
+and `teams`. `src/cli/demos/run.ts` drives the acceptance scenarios against the
+real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
+fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the
 dual-layer path with `RuntimeOptions.singleSession`.
 
 `ds-agent memory [--limit N]` prints persisted long-term memories;
