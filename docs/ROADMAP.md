@@ -78,7 +78,7 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | Module | Status | Evidence | Gap |
 |--------|--------|----------|-----|
 | **M0 shared** | done | `src/shared/types.ts`, `ports.ts`, `events.ts`, `boundary.ts`; `test/ports.test.ts`; `npx tsc --noEmit` passes; `PLAN.md` §4.1 current-contract table | No contract gap after #56/#58: PLAN §4 is marked a historical sketch, §4.1 matches `Role`/`Strength`/`Assignment.state` and the real `Harness` methods, and §10 matches the tree. `node:sqlite` still requires Node ≥22. |
-| **M1 harness** | done | `src/harness/loop.ts` (Router-before-Worker sequence at `145-160`, async jobs, batch window), `session.ts`, `model.ts`, `tools.ts`, `daemon.ts`, `machines.ts`, `team.ts`, `mesh.ts`; `test/job.test.ts`, `team-harness.test.ts`, `daemon-machines.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | Worker-mesh capacity is a logical placement rule in one process: `pickNode` records the least-loaded node and logs `capacity-full`, but still runs the turn — there is no queue, rejection, or backpressure (P1-3, documented in `docs/MODULES.md`). No standalone `serve` daemon: `Daemon.start()` is an in-process timer and an in-flight turn is not reconstructed after restart (P1-6). |
+| **M1 harness** | done | `src/harness/loop.ts` (Router-before-Worker sequence at `145-160`, async jobs, batch window), `session.ts`, `model.ts`, `tools.ts`, `daemon.ts`, `machines.ts`, `team.ts`, `mesh.ts`; `test/job.test.ts`, `team-harness.test.ts`, `daemon-machines.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | Worker-mesh capacity is a logical placement rule in one process: `pickNode` records the least-loaded node and logs `capacity-full`, but still runs the turn — there is no queue, rejection, or backpressure (P1-3, documented in `docs/MODULES.md`). `ds-agent serve` wraps the in-process `Daemon` timer over persisted state (no inbound channel loop) with SIGINT/SIGTERM drain and exit 0; an in-flight turn is still not reconstructed after restart (P1-6). |
 | **M2 store** | done | `src/store/sqlite.ts` (`node:sqlite` at `:3`, `ds-agent.db` at `:16`), `schema.ts`, `spill.ts`, document/spill upsert; `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` (reopen) | No migration/version table; `node:sqlite` is experimental and needs Node ≥22. The §10 file-tree contradiction was resolved by #56: the plan now describes the real `sqlite.ts`/`schema.ts`/`spill.ts` tree. |
 | **M3 engine** | done | `src/core/engine.ts`, `intake.ts`, `policy.ts`, `assessment.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `subscribe.ts`, `collab.ts`, `lifecycle.ts`; `test/domain-alignment.test.ts`, `subscription.test.ts`, `speculate.test.ts`, `mid-task-collab.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | P1-2 is resolved by #39: the deterministic `gateTriggers` handles commands and the configured auto-accept classes, and deferred triggers go to `assessWithMainAgent`, which originates `accept`/`ignore`/`stop`/`unavailable` (with `title`/`scope`/`strength`) before any Ticket exists. The gate remains rule/policy based by design; it is not a model verdict. |
 | **M4 ingress** | partial | `src/ingress/filter.ts`, `shards.ts`, `thread.ts`, `batch.ts`; `test/filter.test.ts`, `router-shards.test.ts`, `runtime-integration.test.ts` | Fast Path is source + T16 admission (actor allowlist, group/chat allowlist read from `trigger.channel.address.group`, drop-self deny) + mention + keyword + noise; `test/filter.test.ts` covers each rule and the runtime env wiring. No shipped adapter populates `address.group` yet, so the group list is opt-in after the adapter supplies it. Admission is not authentication: a channel adapter must still verify its peer, and `meta` is never read. Slow Path is deterministic `ruleClassify` for both Mock and `HttpOpenAI` and is documented as such (#60); a model-backed policy is still open (P2-4). |
@@ -88,7 +88,7 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | **M8 channels** | done | `src/channels/norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `a2a.ts`, `a2a-transport.ts`; `test/channels-feishu.test.ts`, `channels-github-source.test.ts`, `outbox.test.ts`, `lifecycle-a2a.test.ts`, `a2a-transport.test.ts`; real demos in `src/cli/demos/*` | Real-channel acceptance is operator-only: `test/demos-real-channels.test.ts` is skipped offline (3 tests), and `pnpm demo` needs `gh auth` plus a live model. There is no email adapter (the plan calls it optional). |
 | **M9 env** | partial | `src/env/local-env.ts`, `sanitize.ts`, `vault.ts`, `seccomp.ts` (`sandboxEnabledFromEnv` returns true); `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `live-modules.test.ts`, `credential-sentinel.test.ts` | #44 made the sandbox default-on and fail-closed: a missing `sandbox-exec`/`bwrap` throws. Host vault/seccomp policy is still external. Credential non-leakage now has a single sentinel test (#53) covering SQLite tables, session JSONL, tool results, replies/outbox, and captured model request bodies, plus Worker port/tool rejection. #55 corrected the user-facing pages and historical reviews; this audit also fixed the remaining "optional OS sandbox" line in the `docs/MODULES.md` T51 section. C15/P1-10 are resolved. Host read isolation remains external. |
 | **M10 watchdog** | partial | `src/watchdog/watchdog.ts`, `rules.ts`, `rules.json`, `health.ts`; `test/health.test.ts`, `daemon-machines.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | Goal-drift detection is marker-based ("a running report that says it left the scope"), not a general NL comparison. `PLAN.md` T43–T44 ask for NL rules; `README.md:100` already calls this "thin". |
-| **M11 CLI / demo** | partial | `src/cli/main.ts` (init/tasks/status/health/chat/emit/metrics/memory/a2a/pause/intervene/resume/collab/team/teams), `src/cli/demos/run.ts`, `src/cli/bakeoff.ts`; `test/cli-memory-a2a.test.ts`, `mid-task-collab.test.ts`, `live-demo.test.ts`, `live-e2e.test.ts` | `pnpm demo` (real GitHub issues/comments) is not in the automatic PR gate; it runs through the manual `acceptance.yml` dispatch and needs an operator with `gh auth`. `package.json` has no `bin`, no `build`, and `tsconfig` is `noEmit`, so the `PLAN.md` §10 `dist/cli.js` bin does not exist. No `serve` command. The `MODULES.md` runner claim is fixed by #46. |
+| **M11 CLI / demo** | partial | `src/cli/main.ts` (init/tasks/status/health/serve/chat/emit/metrics/memory/a2a/pause/intervene/resume/collab/team/teams), `src/cli/demos/run.ts`, `src/cli/bakeoff.ts`; `test/cli-memory-a2a.test.ts`, `cli-serve.test.ts`, `mid-task-collab.test.ts`, `live-demo.test.ts`, `live-e2e.test.ts` | `pnpm demo` (real GitHub issues/comments) is not in the automatic PR gate; it runs through the manual `acceptance.yml` dispatch and needs an operator with `gh auth`. `package.json` has no `bin`, no `build`, and `tsconfig` is `noEmit`, so the `PLAN.md` §10 `dist/cli.js` bin does not exist. `serve` runs the daemon timer over persisted state (no inbound channel loop) with clean SIGINT/SIGTERM shutdown; restart replay remains a boundary (P1-6). The `MODULES.md` runner claim is fixed by #46. |
 
 ## 3. Functional-domain matrix (PLAN §9)
 
@@ -330,13 +330,24 @@ not supported, including by bypassing ingress via `runtime.ingest`. Do not expos
 the local endpoint unauthenticated.
 
 **P1-6. Standalone daemon / `serve` and in-flight resume.**
-Status: open (documented boundary). `Daemon` is an in-process timer; there is no
-`serve` command and no in-flight turn reconstruction. `docs/MODULES.md` now says
-so. PLAN's persistent-store claims (T36/T38/T40) are satisfied — ended
-Ticket/Session state is readable after restart — but they do not promise replay
-of an interrupted turn. Still open: a `serve` command with SIGTERM handling and
-resume of unfinished jobs/sessions if that product behavior is wanted.
-Suggested workstream: harness agent, `feat/daemon-serve`.
+Status: partially resolved (serve landed). `ds-agent serve` creates one Runtime,
+starts the in-process `Daemon` timer over persisted SQLite state, logs a ready
+line, and stays alive until SIGINT or SIGTERM. It starts no inbound channel loop,
+so triggers written by a separate `emit`/`chat` process are not picked up. The
+model is resolved once at `Runtime.create`, so credentials added later require a
+restart. With no provider key the idle daemon falls back to MockModel and leaves
+Gate-deferred assessments queued for a live-model start. `chat` and `serve` may
+run on MockModel; `demo`/`retry`/`resume` require a live model.
+The first signal drains `Runtime.finish()` (Main Agent assessments, Harness jobs,
+the daemon timer, SQLite) and exits 0; a second signal force-exits 1 if the drain
+hangs. `finish()` stops the daemon and closes SQLite even when a drain step
+rejects. `test/cli-serve.test.ts` covers key-free startup, a concurrent health
+read, deferred work left intact for a live-model start, exit 0 on SIGTERM and
+SIGINT, and a writable SQLite file afterward.
+Remaining boundary: an in-flight turn is still not reconstructed after restart.
+A killed process's unfinished jobs/sessions are not replayed; `docs/MODULES.md`
+states this and no product surface claims replay. Restart replay remains a
+product decision.
 
 **P1-7. Decide the packaging story.**
 Status: resolved as a source-only decision. `package.json` deliberately has no
@@ -418,7 +429,7 @@ the work is already public.
 | P1-3 | Mesh capacity enforcement |  |  |  | accepted boundary (documented) | Placement is logical; no queue/backpressure. `docs/MODULES.md` says so |
 | P1-4 | Lifecycle replayability |  | `feat/lifecycle-history-cap` | #57 | resolved (current-process replay only) | Bounded history (default 1000) + test; no persistence claim |
 | P1-5 | A2A transport interface + auth note |  | `a2a-transport` | #65 | resolved (contract + local double) | In-process contract + local double now exist: `A2ATransport` + `LocalA2ATransport` in `src/channels/a2a-transport.ts`, tests in `test/a2a-transport.test.ts`. Remaining external boundary: network transport + peer authentication must be supplied by an adapter |
-| P1-6 | `ds-agent serve` + in-flight resume |  |  |  | open (documented boundary) | In-process timer only; no restart resume. Docs state the boundary; serve command still missing |
+| P1-6 | `ds-agent serve` + in-flight resume |  | `daemon-serve` | #66 | partially resolved (serve; no restart replay) | `serve` runs the daemon timer over persisted state (no inbound channel loop), drains on SIGINT/SIGTERM, exits 0; second signal forces 1. In-flight turn is still not reconstructed after restart |
 | P1-7 | Packaging decision |  |  |  | resolved (source-only) | No `bin`/`build`; install docs say source-only via `pnpm` |
 | P1-8 | Fail-closed filesystem sandbox |  | `fix/env-fail-closed-sandbox` | #44 | resolved | Missing wrapper throws; CI installs `bubblewrap` |
 | P1-9 | Reproduce live reference run |  |  |  | partially reproduced | 3/3 previously red live files pass; full run hit provider 429, not assertion failures |

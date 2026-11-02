@@ -106,6 +106,7 @@ function help(): void {
   pnpm ds-agent retry <ticketId> # new Assignment on the same Ticket
   pnpm ds-agent status
   pnpm ds-agent health
+  pnpm ds-agent serve            # daemon timer over persisted state; SIGINT/SIGTERM drain
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
@@ -128,7 +129,16 @@ Worker-internal teams (persisted in SQLite, offline reads):
 pause freezes Router/Worker turns, reports, and outbound replies.
 intervene records guidance and pauses by default, so the note lands before more work.
 resume clears the pause and continues with the unseen guidance in the next turn.
-resume needs a live model; pause/intervene/collab/team/teams are offline.
+demo/retry/resume need a live model; chat may use MockModel.
+pause/intervene/collab/team/teams are offline.
+
+serve starts the in-process watchdog/daemon timer over persisted SQLite state. It
+has no inbound channel loop: triggers written by a separate emit/chat process are
+not picked up. The model is fixed at Runtime.create, so mount credentials before
+starting and restart to change them. With no provider key the idle daemon uses
+MockModel, and Gate-deferred assessments stay queued for a live-model start.
+The first SIGINT/SIGTERM drains through Runtime.finish() (assessments, jobs,
+daemon timer, SQLite) and exits 0; a second signal force-exits 1 if it hangs.
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
 Section 7 counters are written to <stateDir>/metrics.json and printed by metrics.
@@ -162,6 +172,78 @@ async function withRuntime(
       runtime.store.close()
     }
   }
+}
+
+/**
+ * Daemon timer over persisted SQLite state: one Runtime for the process lifetime.
+ *
+ * Scope: starts the in-process watchdog/daemon timer and, when a live model is
+ * configured, assesses Gate-deferred threads already in SQLite at startup. It
+ * starts no inbound channel loop, so triggers written by a separate `emit`/`chat`
+ * process are never picked up. The model is resolved once at Runtime.create;
+ * changing credentials requires a restart. A keyless process falls back to
+ * MockModel and leaves deferred assessments queued for a live-model start.
+ * chat and serve may run on MockModel; demo/retry/resume require a live model.
+ *
+ * Shutdown is signal-driven. The first SIGINT/SIGTERM runs Runtime.finish(), which
+ * waits for Main Agent assessments and Harness jobs, stops the Daemon timer, and
+ * closes SQLite before exiting 0. A second signal force-exits 1 in case a live
+ * turn or finish() itself hangs. In-flight turns are not reconstructed after a
+ * restart; that boundary is documented in docs/MODULES.md.
+ */
+async function serve(home: string): Promise<void> {
+  const runtime = Runtime.create({
+    home,
+    jobDelayMs: 20,
+    watchdogIntervalMs: 60_000,
+  })
+  const canAssess = runtime.model.name !== 'MockModel'
+  let stopping = false
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (stopping) {
+      runtime.log.info(`[serve] second signal=${signal}; force exit`)
+      process.exit(1)
+    }
+    stopping = true
+    runtime.log.info(`[serve] shutdown signal=${signal}; draining (send again to force exit)`)
+    void runtime.finish()
+      .then(() => {
+        runtime.log.info('[serve] stopped')
+        // Let the event loop drain so buffered stdout is flushed; the daemon
+        // timer is stopped, so nothing keeps the process alive.
+        process.exitCode = 0
+      })
+      .catch(error => {
+        console.error(`[serve] shutdown failed: ${error instanceof Error ? error.message : String(error)}`)
+        // Runtime.finish() releases both on its own, but keep shutdown safe if
+        // a future finish() path rejects before it reaches that block.
+        runtime.daemon.stop()
+        if (runtime.store.isOpen) {
+          try {
+            runtime.store.close()
+          } catch {
+            // The signal path is already failing; preserve the exit code.
+          }
+        }
+        process.exitCode = 1
+      })
+  }
+  // Install handlers before start() so a signal cannot race the ready line.
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+  try {
+    runtime.start({ assessPending: canAssess })
+  } catch (error) {
+    await runtime.finish().catch(() => undefined)
+    throw error
+  }
+  if (!canAssess) {
+    runtime.log.info('[serve] MockModel: deferred assessments left queued until a live-model start')
+  }
+  runtime.log.info(`ds-agent serve ready home=${home} pid=${process.pid} model=${runtime.model.name}`)
+  // Keep the CLI promise pending; the daemon timer keeps the process alive and a
+  // signal handler exits after the drain.
+  await new Promise<void>(() => undefined)
 }
 
 async function main(): Promise<void> {
@@ -227,6 +309,10 @@ async function main(): Promise<void> {
     } finally {
       store.close()
     }
+    return
+  }
+  if (cmd === 'serve') {
+    await serve(home)
     return
   }
   if (cmd === 'metrics') {

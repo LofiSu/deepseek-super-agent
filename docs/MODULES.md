@@ -41,9 +41,25 @@ Placement is logical: this process still executes the turn. A remote hands
 transport is an integration concern outside this repo. Capacity is a placement
 preference, not backpressure: when every node is full, `pickNode` records
 `node=none capacity-full` and the turn still runs — there is no queue, rejection,
-or admission failure. There is also no standalone `serve` command: `Daemon.start()`
-is an in-process timer, and an in-flight turn is not reconstructed after a
-restart. Both are deliberate boundaries, not hidden behavior.
+or admission failure.
+
+`ds-agent serve` runs the in-process watchdog/daemon timer over persisted SQLite
+state and owns one Runtime for the process lifetime. It starts no inbound channel
+loop, so triggers written by a separate `emit`/`chat` process are not picked up.
+The model is resolved once at `Runtime.create`; changing credentials requires a
+restart. With no provider key it falls back to MockModel, and Gate-deferred
+assessments stay queued for a live-model start (they run at startup only when a
+live model is configured). `chat` and `serve` may run on MockModel;
+`demo`/`retry`/`resume` require a live model.
+
+On the first SIGINT/SIGTERM, `serve` calls `Runtime.finish()` — settling Main
+Agent assessments and Harness jobs, stopping the daemon timer, and closing SQLite
+— then exits 0. A second signal force-exits 1 if that drain hangs. `finish()`
+stops the daemon and closes SQLite even when a drain step rejects.
+
+Restart replay remains a boundary: an in-flight turn is not reconstructed after a
+restart, and unfinished jobs/sessions are not replayed. This is deliberate and
+documented, not hidden behavior.
 
 ## M2 — store
 
@@ -185,12 +201,14 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 ## M11 — CLI and demo
 
-`src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `chat`, `emit`,
-`metrics`, `memory`, `a2a`, `pause`, `intervene`, `resume`, `collab`, `team`,
-and `teams`. `src/cli/demos/run.ts` drives the acceptance scenarios against the
+`src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `serve`, `chat`,
+`emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`, `resume`, `collab`,
+`team`, and `teams`. `src/cli/demos/run.ts` drives the acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the
-dual-layer path with `RuntimeOptions.singleSession`.
+dual-layer path with `RuntimeOptions.singleSession`. `serve` runs the daemon
+timer over persisted state, has no inbound channel loop, and fixes its model at
+startup.
 
 `ds-agent memory [--limit N]` prints persisted long-term memories;
 `ds-agent a2a [--limit N]` prints persisted A2A envelopes. Both are offline

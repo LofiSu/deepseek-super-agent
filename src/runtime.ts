@@ -417,9 +417,14 @@ export class Runtime {
 
   private assessments = new Set<Promise<void>>()
   private assessingThreads = new Set<string>()
+  /**
+   * A keyless serve process must not assess deferred human work with MockModel:
+   * an invalid assessment commits `unavailable` and clears the thread queue.
+   */
+  private assessmentsEnabled = true
 
   private assessPending(): void {
-    if (!this.store.isOpen) return
+    if (!this.assessmentsEnabled || !this.store.isOpen) return
     for (const thread of this.store.listDocs<Thread>('thread')) {
       if (!thread.deferred || !thread.pending.length || this.assessingThreads.has(thread.key)) continue
       this.assessingThreads.add(thread.key)
@@ -450,10 +455,18 @@ export class Runtime {
     }
   }
 
-  start(): void {
+  /**
+   * Start the daemon timer. `assessPending: false` also disables every later
+   * assessment path (including `onAssessmentNeeded` from flushEvals), so a
+   * MockModel process leaves Gate-deferred work queued instead of consuming it.
+   */
+  start(options: { assessPending?: boolean } = {}): void {
+    this.assessmentsEnabled = options.assessPending !== false
     this.daemon.start()
-    // Resume Gate-deferred work left in SQLite by a previous process.
-    this.assessPending()
+    if (this.assessmentsEnabled) {
+      // Resume Gate-deferred work left in SQLite by a previous process.
+      this.assessPending()
+    }
   }
 
   /** Wait until every in-flight Main Agent assessment has committed. */
@@ -628,16 +641,41 @@ export class Runtime {
 
   /** Wait for assessments and jobs, stop the daemon, and close SQLite. */
   async finish(): Promise<void> {
-    await this.assessmentsSettled()
-    this.flushEvals()
-    await this.harness.jobsSettled()
-    this.daemon.stop()
-    try {
-      this.metrics.flush()
-    } finally {
-      // A failed metrics write must not leave SQLite open for other finish() callers.
-      if (this.store.isOpen) this.store.close()
+    let failure: unknown
+    let failed = false
+    const remember = (error: unknown): void => {
+      // Preserve the first failure instead of masking a drain error with a
+      // later metrics/close error.
+      if (failed) return
+      failed = true
+      failure = error
     }
+    try {
+      await this.assessmentsSettled()
+      this.flushEvals()
+      await this.harness.jobsSettled()
+    } catch (error) {
+      remember(error)
+    } finally {
+      // The daemon timer and SQLite handle must be released even when a drain
+      // step rejects; otherwise the process stays alive after a failed shutdown.
+      this.daemon.stop()
+      try {
+        this.metrics.flush()
+      } catch (error) {
+        remember(error)
+      } finally {
+        // A failed metrics write must not leave SQLite open for other finish() callers.
+        if (this.store.isOpen) {
+          try {
+            this.store.close()
+          } catch (error) {
+            remember(error)
+          }
+        }
+      }
+    }
+    if (failed) throw failure
   }
 }
 
