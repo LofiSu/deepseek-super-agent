@@ -23,6 +23,23 @@ describe('Lifecycle bus', () => {
     bus.publish({ kind: 'b', payload: 2 })
     expect(bus.snapshot(1)).toEqual([{ kind: 'b', payload: 2 }])
   })
+
+  it('caps history and keeps the newest events', () => {
+    const bus = new LifecycleBus(2)
+    const first = { kind: 'a', payload: 1 }
+    const second = { kind: 'b', payload: 2 }
+    const third = { kind: 'c', payload: 3 }
+    bus.publish(first)
+    bus.publish(second)
+    bus.publish(third)
+    expect(bus.history).toEqual([second, third])
+    expect(bus.snapshot(10)).toEqual([second, third])
+  })
+
+  it('rejects a non-positive capacity', () => {
+    expect(() => new LifecycleBus(0)).toThrow(/maxEvents/)
+    expect(() => new LifecycleBus(-1)).toThrow(/maxEvents/)
+  })
 })
 
 describe('A2A', () => {
