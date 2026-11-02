@@ -1,12 +1,13 @@
 import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { githubTrigger } from '../src/channels/github.ts'
 import { imTrigger } from '../src/channels/im.ts'
-import { emptySnapshot, readMetrics } from '../src/metrics/metrics.ts'
+import { emptySnapshot, Metrics, metricsPath, readMetrics } from '../src/metrics/metrics.ts'
 import type { Runtime } from '../src/runtime.ts'
 import type { Ticket } from '../src/shared/types.ts'
-import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
+import { freshRuntime, settleWithDeadline, shutdown, tempHome } from './fixtures.ts'
 
 let runtime: Runtime | undefined
 
@@ -18,6 +19,25 @@ afterEach(async () => {
 describe('section 7 metrics', () => {
   it('returns zeros when the state dir has no metrics file', () => {
     expect(readMetrics(path.join('/tmp', 'ds-agent-metrics-missing'))).toEqual(emptySnapshot())
+  })
+
+  it('coalesces hot-path writes, writes atomically, and merges another process', () => {
+    const home = tempHome()
+    const first = new Metrics(home)
+    const second = new Metrics(home)
+    first.increment('ingress.admit')
+    first.increment('ingress.admit')
+    expect(fs.existsSync(metricsPath(home))).toBe(false)
+    first.flush()
+    expect(fs.readdirSync(home).some(name => name.endsWith('.tmp'))).toBe(false)
+    expect(readMetrics(home).counters['ingress.admit']).toBe(2)
+
+    second.increment('ingress.drop')
+    second.flush()
+    first.flush()
+    const merged = readMetrics(home)
+    expect(merged.counters['ingress.admit']).toBe(2)
+    expect(merged.counters['ingress.drop']).toBe(1)
   })
 
   it('counts ingress, eval, bypass, speculate, watchdog, and model latency', async () => {
@@ -61,10 +81,26 @@ describe('section 7 metrics', () => {
       createdAt: '2020-01-01T00:00:00.000Z',
     })
     runtime.watchdog.tick()
-    const ticket = runtime.store.listDocs<Ticket>('ticket').find(item => !item.speculative)
-    expect(ticket).toBeTruthy()
-    runtime.engine.report(ticket!.id, { kind: 'failed', text: 'watchdog: stuck', deliver: false })
     const donor = runtime.store.listDocs<Ticket>('ticket')[0]!
+    expect(donor).toBeTruthy()
+    // A worker self-report must not count as a watchdog failure; only the
+    // watchdog surface does.
+    runtime.store.putDoc('ticket', 'ticket_worker_failed_probe', {
+      ...donor,
+      id: 'ticket_worker_failed_probe',
+      speculative: false,
+      ended: undefined,
+      assignments: [{ id: 'asg_worker_probe', state: 'running', speculative: false }],
+    })
+    runtime.engine.report('ticket_worker_failed_probe', { kind: 'failed', text: 'worker gave up', deliver: false })
+    runtime.store.putDoc('ticket', 'ticket_watchdog_probe', {
+      ...donor,
+      id: 'ticket_watchdog_probe',
+      speculative: false,
+      ended: undefined,
+      assignments: [{ id: 'asg_watchdog_probe', state: 'running', speculative: false }],
+    })
+    runtime.engine.watchdogFail('ticket_watchdog_probe', 'watchdog: stuck')
     runtime.store.putDoc('ticket', 'ticket_discard_probe', {
       ...donor,
       id: 'ticket_discard_probe',
@@ -74,6 +110,7 @@ describe('section 7 metrics', () => {
     })
     runtime.engine.report('ticket_discard_probe', { kind: 'dropped', text: 'not valuable', deliver: false })
 
+    runtime.metrics.flush()
     const snap = runtime.metrics.snapshot()
     // Deterministic counters: ingress, eval, and the two reports forced above.
     expect(snap.counters).toMatchObject({
@@ -87,7 +124,9 @@ describe('section 7 metrics', () => {
       'speculate.discard': 1,
       'watchdog.idle': 1,
       'watchdog.nudge': 1,
-      'watchdog.fail': 0,
+      // Only the explicit watchdog probe counts here; the worker failure above
+      // is recorded as executor.fail instead.
+      'watchdog.fail': 1,
       'model.error': 0,
     })
     // These depend on what the live model chose to do in this run.

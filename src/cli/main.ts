@@ -276,7 +276,7 @@ async function main(): Promise<void> {
     for (const session of sessions) console.log(`  ${sessionLine(session)}`)
     console.log(`jobs ${jobs.length}`)
     for (const job of jobs) console.log(`  ${jobLine(job)}`)
-    console.log(`tickets ${store.listDocs<Ticket>('ticket').length}`)
+    console.log(`tickets ${visibleTickets(store.listDocs<Ticket>('ticket')).length}`)
     store.close()
     return
   }

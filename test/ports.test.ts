@@ -260,6 +260,42 @@ describe('worker cannot reply', () => {
     expect(runtime.store.listReplies()).toHaveLength(0)
   })
 
+  it('refuses a worker report aimed at another ticket', async () => {
+    runtime = freshRuntime()
+    for (const [id, thread] of [['trg_a', 'topic/a'], ['trg_b', 'topic/b']] as const) {
+      runtime.engine.receive(imTrigger({
+        id,
+        thread,
+        text: `@ds-agent please fix the login timeout in ${thread}`,
+      }))
+    }
+    const decisions = runtime.engine.evaluateDue()
+    expect(decisions).toHaveLength(2)
+    const [first, second] = decisions
+    if (!first?.ticketId || !second?.ticketId) throw new Error('expected two tickets')
+    const tools = new ToolRegistry({
+      store: runtime.store,
+      ports: bindRolePorts(runtime.engine),
+      env: new LocalEnv(`${runtime.home}/workspaces`),
+      metrics: runtime.metrics,
+      redact: (text: string) => text,
+      log: () => undefined,
+      scheduleJob: () => undefined,
+      routerTurn: async () => undefined,
+    })
+    const before = runtime.store.getDoc<Ticket>('ticket', second.ticketId)
+    await expect(tools.invoke(
+      {
+        id: 'call_cross',
+        name: 'report_to_router',
+        args: { ticketId: second.ticketId, kind: 'failed', text: 'hijacked', deliver: true },
+      },
+      { sessionId: `worker_${first.ticketId}`, role: 'worker', ticketId: first.ticketId },
+    )).rejects.toThrow(/does not match this session/)
+    expect(runtime.store.getDoc<Ticket>('ticket', second.ticketId)).toEqual(before)
+    expect(runtime.store.getDoc<Ticket>('ticket', second.ticketId)?.ended).toBeUndefined()
+  })
+
   it('lets the watchdog fail a ticket without sending a reply', async () => {
     runtime = freshRuntime()
     runtime.engine.receive(imTrigger({

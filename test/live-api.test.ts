@@ -65,6 +65,36 @@ describe('resolveLiveApi', () => {
     expect(required.name).toBe('HttpOpenAI')
   })
 
+  it('honors provider-specific base and model overrides', () => {
+    expect(resolveLiveApi({
+      OPENAI_API_KEY: 'k',
+      OPENAI_BASE_URL: 'https://azure-proxy.example/v1',
+      OPENAI_MODEL: 'gpt-proxy',
+    })).toEqual({
+      provider: 'openai',
+      base: 'https://azure-proxy.example/v1',
+      apiKey: 'k',
+      model: 'gpt-proxy',
+    })
+    expect(resolveLiveApi({
+      DEEPSEEK_API_KEY: 'k',
+      DEEPSEEK_API_BASE: 'https://deepseek.internal/v1',
+      DEEPSEEK_MODEL: 'deepseek-internal',
+    })).toMatchObject({ base: 'https://deepseek.internal/v1', model: 'deepseek-internal' })
+    // A DS_AGENT_PROVIDER preset keeps its overrides too.
+    expect(resolveLiveApi({
+      DS_AGENT_PROVIDER: 'openai',
+      OPENAI_API_KEY: 'k',
+      OPENAI_API_BASE: 'https://gateway.example/v1',
+    })).toMatchObject({ provider: 'openai', base: 'https://gateway.example/v1' })
+    // The generic model variables still outrank provider-specific ones.
+    expect(resolveLiveApi({
+      OPENAI_API_KEY: 'k',
+      OPENAI_MODEL: 'provider-model',
+      DS_AGENT_MODEL: 'generic-model',
+    })?.model).toBe('generic-model')
+  })
+
   it('prefers DS_AGENT_API_MODEL, then DS_AGENT_MODEL', () => {
     expect(resolveLiveApi({
       DS_AGENT_API_BASE: 'https://api.deepseek.com',

@@ -314,16 +314,25 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
       }),
       roles: ['worker'],
       run: guard('worker', 'report_to_router', async (args, ctx) => {
-        const ticketId = String(args.ticketId ?? ctx.ticketId ?? '')
+        // A worker may only report on the ticket its session owns. Never trust
+        // the model-supplied id over the harness context.
+        if (!ctx.ticketId) throw new UserError('report_to_router needs a ticket')
+        const requested = args.ticketId == null ? '' : String(args.ticketId)
+        if (requested && requested !== ctx.ticketId) {
+          throw new UserError(`report_to_router ticketId ${requested} does not match this session`)
+        }
+        const ticketId = ctx.ticketId
         const deliver = args.deliver === true
         const text = String(args.text ?? '').replace(/\n/g, ' ')
         const kind = String(args.kind ?? (deliver ? 'ready' : 'progress'))
         const result = ports.report(ticketId, { kind, text, deliver })
         settleSpeculation(env, ctx.sessionId, result.verdict)
         if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${ctx.sessionId}`)
-        const prompt = ['REPORT', `deliver=${deliver ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
+        // The gate, not the model, decides whether the router may speak.
+        const announced = result.verdict === 'deliver'
+        const prompt = ['REPORT', `deliver=${announced ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
         await deps.routerTurn(prompt)
-        return { ...result, deliver }
+        return { ...result, deliver: announced }
       }),
     },
     {
@@ -533,9 +542,14 @@ function ticketOf(store: Store, ctx: { ticketId?: string }): Ticket | undefined 
 /** Speculative mutations stay in a scratch workdir, or are refused when isolation is unavailable. */
 function mutableMode(store: Store, env: EnvPort, ctx: { ticketId?: string }): EnvRunOptions {
   const ticket = ticketOf(store, ctx)
+  // A worker turn can outlive its ticket (watchdog failure, human stop, discard).
+  // It must not keep mutating the durable workspace after that.
+  if (ticket?.ended) throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome})`)
   if (!ticket?.speculative) return { isolated: false }
-  if (ticket.ended) throw new UserError('speculative assignment was discarded')
-  if (!env.discardIsolated) throw new UserError('speculative workers are read-only without an isolated workdir')
+  // Delivery is only safe when scratch can be promoted as well as discarded.
+  if (!env.discardIsolated || !env.promoteIsolated) {
+    throw new UserError('speculative workers are read-only without an isolated workdir')
+  }
   return { isolated: true }
 }
 

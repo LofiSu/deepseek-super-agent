@@ -14,6 +14,9 @@ export interface ReportResult {
 
 const TERMINAL = new Set(['ready', 'failed', 'dropped'])
 
+/** Who is reporting. Only the watchdog counts toward `watchdog.fail`. */
+export type ReportOrigin = 'worker' | 'watchdog'
+
 export class Assignments {
   private readonly gate: DeliverGate
 
@@ -34,10 +37,11 @@ export class Assignments {
   }
 
   /**
-   * Record a worker report. User-facing text is sent by the router, not here.
+   * Record a report. User-facing text is sent by the router, not here.
    * A speculative discard ends the assignment and the ticket with no outbound copy.
+   * Reports on an ended ticket never rewrite it.
    */
-  report(ticketId: string, report: WorkerReport): ReportResult {
+  report(ticketId: string, report: WorkerReport, origin: ReportOrigin = 'worker'): ReportResult {
     const ticket = this.must(ticketId)
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
@@ -60,11 +64,23 @@ export class Assignments {
       })
       return { surfaced: false, verdict: 'hold' }
     }
+    if (ticket.ended) {
+      // A late worker report must never reopen or rewrite an ended ticket.
+      // The watchdog failing an already-ended ticket is a no-op, not an error.
+      if (origin === 'watchdog') {
+        this.host.log(`[watchdog] ticket already ended ticketId=${ticket.id} outcome=${ticket.ended.outcome}`)
+        return { surfaced: false, verdict: 'hold' }
+      }
+      throw new UserError(`ticket ${ticketId} has already ended (${ticket.ended.outcome})`)
+    }
     const wasSpeculative = ticket.speculative
     const terminal = TERMINAL.has(report.kind)
     let verdict: SurfaceVerdict = 'hold'
-    if (wasSpeculative && terminal) verdict = this.gate.evaluate({ ticket, report })
-    else if (!wasSpeculative && report.deliver === true) verdict = 'deliver'
+    if (wasSpeculative && (terminal || report.deliver === true)) {
+      verdict = this.gate.evaluate({ ticket, report })
+    } else if (!wasSpeculative && report.deliver === true) {
+      verdict = 'deliver'
+    }
     assignment.report = {
       kind: report.kind,
       text: report.text,
@@ -72,8 +88,11 @@ export class Assignments {
       verdict,
       at: this.host.now(),
     }
-    // A failed Executor report is not a Watchdog failure. Keep the metric honest.
-    if (report.kind === 'failed') this.host.metrics.increment('executor.fail')
+    // A failed Executor report is not a Watchdog failure. Keep both metrics honest.
+    if (report.kind === 'failed') {
+      if (origin === 'watchdog') this.host.metrics.increment('watchdog.fail')
+      else this.host.metrics.increment('executor.fail')
+    }
 
     if (wasSpeculative && verdict === 'hold') {
       this.host.repo.putDoc('ticket', ticket.id, ticket)

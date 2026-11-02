@@ -32,16 +32,19 @@ const NEGATIVE = /\b(nothing|no change|unable|could not|cannot|not valuable|wont
 const POSITIVE = /\b(ready|fixed|fix|reproduced|reproduce|valuable|found|resolved|patch|passing|passed)\b/i
 
 /**
- * Clause-local verdict: a negative clause wins inside itself ("could not fix"),
- * but a later positive clause wins overall ("could not reproduce, but fixed it").
- * Still a heuristic stand-in for the plan's value signal; see docs/REVIEW.md.
+ * Clause-local verdict: a negative clause cannot commit a report on its own
+ * ("could not reproduce"), but a negative that follows a positive clause is
+ * incidental and must not veto it ("fixed the flake; could not reproduce it
+ * on main"). A negative-first report is still a discard. This is a heuristic
+ * stand-in for the plan's value signal; see docs/REVIEW.md.
  */
 function valuable(text: string): boolean {
   const clauses = text.split(/[.;!?\n]+/).map(clause => clause.trim()).filter(Boolean)
   let sawPositive = false
   for (const clause of clauses) {
-    if (NEGATIVE.test(clause) && !POSITIVE.test(clause)) return false
-    if (NEGATIVE.test(clause) && POSITIVE.test(clause)) continue
+    // A negative wins inside its clause even when an incidental positive word
+    // appears ("nothing found worth changing"); earlier positives still count.
+    if (NEGATIVE.test(clause)) return sawPositive
     if (POSITIVE.test(clause)) sawPositive = true
   }
   return sawPositive
@@ -53,8 +56,9 @@ export class HeuristicDeliverGate implements DeliverGate {
     const { ticket, report } = input
     if (report.kind === 'dropped' || report.kind === 'failed') return 'discard'
     if (!ticket.speculative) return report.deliver === false ? 'discard' : 'deliver'
-    if (report.kind !== 'ready') return 'discard'
+    // An explicit deliver vote can surface an interim (non-terminal) report too.
     if (report.deliver === true) return 'deliver'
+    if (report.kind !== 'ready') return 'discard'
     return valuable(report.text) ? 'deliver' : 'discard'
   }
 }

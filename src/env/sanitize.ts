@@ -34,6 +34,30 @@ export function secretValues(env: NodeJS.ProcessEnv): string[] {
   return [...new Set(found)].sort((a, b) => b.length - a.length)
 }
 
+/**
+ * Credential shapes that are recognisable without knowing the source file.
+ * This covers the common case where a worker `cat`s a credentials file: the
+ * value was never in our environment, so `secretValues` cannot know it.
+ * It is defense in depth, not a guarantee for arbitrary secret formats.
+ */
+const CREDENTIAL_PATTERNS: readonly RegExp[] = [
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\b(?:aws_secret_access_key|aws_access_key_id|aws_session_token)\s*=\s*\S+/gi,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
+]
+
+export function redactCredentialPatterns(text: string): string {
+  let out = text
+  for (const pattern of CREDENTIAL_PATTERNS) {
+    out = out.replace(pattern, '[redacted]')
+  }
+  return out
+}
+
 export function redactSecrets(text: string, secrets: readonly string[]): string {
   const ordered = [...new Set(secrets)]
     .filter(secret => secret.length >= MIN_SECRET_LENGTH)
@@ -43,7 +67,7 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
     if (!out.includes(secret)) continue
     out = out.split(secret).join('[redacted]')
   }
-  return out
+  return redactCredentialPatterns(out)
 }
 
 export function allowlistedEnv(

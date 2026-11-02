@@ -80,6 +80,15 @@ export class Engine {
     this.host.repo.atomic(() => { this.assignments.retry(ticketId, reason) })
   }
 
+  /** Watchdog-only failure. Separate from worker reports so `watchdog.fail` stays accurate. */
+  watchdogFail(ticketId: string, reason: string): ReportResult {
+    return this.host.repo.atomic(() => this.assignments.report(ticketId, {
+      kind: 'failed',
+      text: reason,
+      deliver: false,
+    }, 'watchdog'))
+  }
+
   /** Freeze a live ticket. Router turns, Worker turns, reports, and replies stop. */
   pause(ticketId: string, input: PauseInput = {}): PauseOutcome {
     return this.host.repo.atomic(() => this.collaborations.pause(ticketId, input))

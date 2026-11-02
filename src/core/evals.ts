@@ -200,9 +200,13 @@ export class Evals {
   private stopTicket(ticketId: string, by: 'human' | 'router' = 'router'): void {
     const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
     if (!ticket) throw new UserError(`unknown ticket ${ticketId}`)
+    const wasSpeculative = ticket.speculative && !ticket.ended
     const now = this.host.now()
     const wasLive = !ticket.ended
-    if (!ticket.ended) ticket.ended = { at: now, outcome: 'stopped', by }
+    if (!ticket.ended) {
+      ticket.ended = { at: now, outcome: 'stopped', by }
+      this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome: 'stopped' })
+    }
     const assignment = ticket.assignments.at(-1)
     if (assignment && assignment.state !== 'ended') {
       assignment.state = 'ended'
@@ -212,6 +216,14 @@ export class Evals {
         assignmentId: assignment.id,
         kind: 'stop',
       })
+    }
+    if (wasSpeculative) {
+      // A stopped speculative ticket never delivered, so its scratch workdir
+      // must not outlive it. Show it as a normal stopped ticket afterwards.
+      ticket.speculative = false
+      for (const item of ticket.assignments) item.speculative = false
+      this.host.discardScratch?.(ticket.id)
+      this.host.log(`[speculate] stop discarded scratch ticketId=${ticket.id}`)
     }
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     this.host.log(`[engine] Evals.stop ticketId=${ticket.id}`)

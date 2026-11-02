@@ -41,6 +41,24 @@ describe('secret redaction', () => {
     expect(redactSecrets(`a ${secret} b ${secret}`, [secret])).toBe('a [redacted] b [redacted]')
   })
 
+  it('redacts recognisable credentials read from files', () => {
+    const body = [
+      '[default]',
+      'aws_access_key_id = AKIAABCDEFGHIJKLMNOP',
+      'aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      'token=ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+      '-----BEGIN RSA PRIVATE KEY-----',
+      'MIIEowIBAAKCAQEA',
+      '-----END RSA PRIVATE KEY-----',
+    ].join('\n')
+    const clean = redactSecrets(body, [])
+    expect(clean).not.toContain('AKIAABCDEFGHIJKLMNOP')
+    expect(clean).not.toContain('wJalrXUtnFEMI')
+    expect(clean).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+    expect(clean).not.toContain('MIIEowIBAAKCAQEA')
+    expect(clean).toContain('[redacted]')
+  })
+
   it('never returns API key values from LocalEnv tool output', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-env-'))
     dirs.push(root)

@@ -217,10 +217,18 @@ export class LocalEnv implements EnvPort {
  * not an OS boundary: it rejects parent/home escapes and any absolute path,
  * including one that follows a quote or sits inside a language string
  * (`open('/tmp/x','w')`), which the previous whitespace-only rule missed.
+ * Shell expansion (`$(...)`, `${...}`, backticks) is rejected too, since the
+ * expanded text is not visible to this check.
  * A real boundary still requires the OS sandbox (PLAN §9 T51).
  */
+const SHELL_SUBSTITUTION = /\$\(|\$\{|`/
+// Match path segments, not substrings: a regex like `a..b` is not an escape.
+const PARENT_SEGMENT = /(?:^|[\s/\\'"=])\.\.(?:$|[\s/\\'"])/
+const HOME_SEGMENT = /(?:^|[\s/\\'"=])~(?:$|[\s/\\'"])/
+
 function leavesWorkdir(command: string): boolean {
-  if (command.includes('..') || command.includes('~')) return true
+  if (SHELL_SUBSTITUTION.test(command)) return true
+  if (PARENT_SEGMENT.test(command) || HOME_SEGMENT.test(command)) return true
   if (/\$(?:\{)?HOME\b/.test(command)) return true
   return /(?:^|[^\w.-])\/(?!\*)/.test(command)
 }

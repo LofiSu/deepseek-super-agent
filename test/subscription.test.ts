@@ -266,6 +266,13 @@ describe('subscription bypass rules', () => {
     expect(arbitrateSubscribers([newerEnded, newerPending])?.id).toBe(newerPending.id)
     expect(arbitrateSubscribers([])).toBeUndefined()
   })
+
+  it('breaks a full tie by natural id order, not lexicographic order', () => {
+    const nine = sampleTicket('ticket_9', { createdAt: '2026-10-31T00:00:00.000Z' })
+    const ten = sampleTicket('ticket_10', { createdAt: '2026-10-31T00:00:00.000Z' })
+    expect(arbitrateSubscribers([nine, ten])?.id).toBe('ticket_10')
+    expect(arbitrateSubscribers([ten, nine])?.id).toBe('ticket_10')
+  })
 })
 
 function sampleTicket(id: string, overrides: Partial<Ticket> = {}): Ticket {

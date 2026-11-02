@@ -86,6 +86,32 @@ describe('DeliverGate', () => {
     expect(gate.evaluate({ ticket: plain, report: { kind: 'ready', text: 'ok', deliver: true } })).toBe('deliver')
   })
 
+  it('does not let incidental negative words veto successful work', () => {
+    expect(gate.evaluate({
+      ticket: speculative,
+      report: { kind: 'ready', text: 'fixed the flake; could not reproduce it on main', deliver: false },
+    })).toBe('deliver')
+    expect(gate.evaluate({
+      ticket: speculative,
+      report: { kind: 'ready', text: 'fixed the login timeout; nothing else was touched', deliver: false },
+    })).toBe('deliver')
+    expect(gate.evaluate({
+      ticket: speculative,
+      report: { kind: 'ready', text: 'nothing found worth changing', deliver: false },
+    })).toBe('discard')
+  })
+
+  it('lets an explicit deliver vote surface an interim report', () => {
+    expect(gate.evaluate({
+      ticket: speculative,
+      report: { kind: 'progress', text: 'found the root cause', deliver: true },
+    })).toBe('deliver')
+    expect(gate.evaluate({
+      ticket: speculative,
+      report: { kind: 'progress', text: 'still looking', deliver: false },
+    })).toBe('discard')
+  })
+
   it('keeps speculative replies silent until deliver is true', () => {
     expect(maySurface(true, undefined)).toBe(false)
     expect(maySurface(true, false)).toBe(false)
@@ -153,6 +179,20 @@ describe('speculative discard', () => {
     expect(store.listEvents().some(event => event.type === 'ticket.resumed')).toBe(false)
   })
 
+  it('surfaces an interim speculative report that explicitly delivers', () => {
+    const { store, engine } = openStore()
+    const ticketId = speculativeTicket(engine, store, 'trg_interim')
+    const result = engine.report(ticketId, {
+      kind: 'progress',
+      text: 'found the root cause',
+      deliver: true,
+    })
+    expect(result).toEqual({ surfaced: true, verdict: 'deliver' })
+    const ticket = store.getDoc<Ticket>('ticket', ticketId)!
+    expect(ticket.speculative).toBe(false)
+    expect(ticket.ended).toBeUndefined()
+  })
+
   it('commits a valuable ready report and then allows the reply', () => {
     const { store, engine } = openStore()
     const ticketId = speculativeTicket(engine, store, 'trg_value')
@@ -168,6 +208,84 @@ describe('speculative discard', () => {
 
     engine.reply(ticketId, 'Fixed the timeout.', 'result')
     expect(store.listReplies().map(reply => reply.purpose)).toEqual(['result'])
+  })
+})
+
+describe('ended tickets', () => {
+  it('rejects a late worker report instead of rewriting the ended outcome', () => {
+    const { store, engine } = openStore()
+    const ticketId = speculativeTicket(engine, store, 'trg_late')
+    expect(engine.report(ticketId, { kind: 'ready', text: 'fixed the timeout', deliver: true }).verdict).toBe('deliver')
+    expect(store.getDoc<Ticket>('ticket', ticketId)?.ended?.outcome).toBe('ready')
+
+    expect(() => engine.report(ticketId, { kind: 'ready', text: 'fixed it again', deliver: true }))
+      .toThrow(/already ended/)
+    const ticket = store.getDoc<Ticket>('ticket', ticketId)!
+    expect(ticket.ended?.outcome).toBe('ready')
+    expect(ticket.assignments[0]?.report?.text).toBe('fixed the timeout')
+  })
+
+  it('treats a watchdog failure on an ended ticket as a no-op', () => {
+    const { store, engine } = openStore()
+    const ticketId = speculativeTicket(engine, store, 'trg_watchdog_late')
+    engine.report(ticketId, { kind: 'ready', text: 'fixed the timeout', deliver: true })
+    expect(engine.watchdogFail(ticketId, 'stuck')).toEqual({ surfaced: false, verdict: 'hold' })
+    expect(store.getDoc<Ticket>('ticket', ticketId)?.ended?.outcome).toBe('ready')
+  })
+
+  it('refuses mutations from a normal ticket that has already ended', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    open.push(store)
+    const engine = new Engine(hostFor(store, []))
+    engine.receive(imTrigger({
+      id: 'trg_normal',
+      thread: 'topic/ended',
+      text: '@ds-agent please fix the login timeout',
+      at: '2026-10-31T00:00:00.000Z',
+    }))
+    const ticketId = engine.evaluateDue()[0]!.ticketId!
+    const sessionId = workerSessionId(ticketId)
+    engine.assignmentStarted(ticketId, store.getDoc<Ticket>('ticket', ticketId)!.assignments[0]!.id, sessionId)
+    engine.report(ticketId, { kind: 'ready', text: 'fixed', deliver: true })
+    const tools = new ToolRegistry({
+      store,
+      ports: bindRolePorts(engine),
+      env: new LocalEnv(path.join(home, 'workspaces')),
+      metrics: new Metrics(path.dirname(store.path)),
+      redact: (text: string) => text,
+      log: () => {},
+      scheduleJob: () => {},
+      routerTurn: async () => {},
+    })
+    await expect(tools.invoke(
+      { id: 'w', name: 'write_file', args: { path: 'late.txt', body: 'nope' } },
+      ctx(ticketId),
+    )).rejects.toThrow(/has ended/)
+    expect(fs.existsSync(path.join(home, 'workspaces', sessionId, 'late.txt'))).toBe(false)
+  })
+
+  it('discards speculative scratch and emits ticket.ended when the router stops it', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    open.push(store)
+    const env = new LocalEnv(path.join(home, 'workspaces'))
+    const engine = new Engine({
+      ...hostFor(store, []),
+      discardScratch: ticketId => env.discardIsolated?.(workerSessionId(ticketId)),
+    })
+    const ticketId = speculativeTicket(engine, store, 'trg_stop')
+    const scratch = path.join(home, 'workspaces', 'speculative', workerSessionId(ticketId))
+    fs.mkdirSync(scratch, { recursive: true })
+    fs.writeFileSync(path.join(scratch, 'work.txt'), 'scratch')
+
+    engine.decide('trg_stop', { kind: 'stop', ticketId, reason: 'human stopped it' })
+
+    expect(fs.existsSync(scratch)).toBe(false)
+    const ticket = store.getDoc<Ticket>('ticket', ticketId)!
+    expect(ticket.ended).toMatchObject({ outcome: 'stopped', by: 'router' })
+    expect(ticket.speculative).toBe(false)
+    expect(store.listEvents().some(event => event.type === 'ticket.ended')).toBe(true)
   })
 })
 
@@ -209,6 +327,17 @@ describe('speculative workdir', () => {
     await expect(env.bash(sessionId, 'echo hi > /tmp/ds-agent-speculative-escape', { isolated: true }))
       .rejects.toThrow(/isolated workdir/)
     expect(fs.existsSync('/tmp/ds-agent-speculative-escape')).toBe(false)
+
+    // Quoted absolute paths and shell expansion must not slip past the guard.
+    await expect(env.bash(sessionId, "cat '/etc/passwd'", { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    await expect(env.bash(sessionId, 'echo pwned > ${PWD%/*}/leak.txt', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    await expect(env.bash(sessionId, 'echo pwned > $(dirname "$PWD")/leak.txt', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    // Incidental dots are not a parent-directory traversal.
+    const grep = await env.bash(sessionId, "printf 'a..b' | grep 'a..b'", { isolated: true })
+    expect(grep.code).toBe(0)
 
     const listed = await tools.invoke(
       { id: 'l', name: 'list_tasks', args: {} },
@@ -307,6 +436,41 @@ describe('speculative workdir', () => {
       { id: 'b', name: 'bash', args: { command: 'echo leaked' } },
       ctx(ticketId),
     )).rejects.toThrow(/read-only/)
+    await expect(tools.invoke(
+      { id: 'w', name: 'write_file', args: { path: 'notes.txt', body: 'leaked' } },
+      ctx(ticketId),
+    )).rejects.toThrow(/read-only/)
+    expect(mutations).toBe(0)
+  })
+
+  it('refuses speculative mutation when scratch can be discarded but not promoted', async () => {
+    const { store, engine } = openStore()
+    const ticketId = speculativeTicket(engine, store, 'trg_no_promote')
+    let mutations = 0
+    const env: EnvPort = {
+      async bash() {
+        mutations += 1
+        return { code: 0, stdout: '', stderr: '' }
+      },
+      async writeFile() {
+        mutations += 1
+        return '/tmp/should-not-write'
+      },
+      async readFile() {
+        return ''
+      },
+      discardIsolated() {},
+    }
+    const tools = new ToolRegistry({
+      store,
+      ports: bindRolePorts(engine),
+      env,
+      metrics: new Metrics(path.dirname(store.path)),
+      redact: (text: string) => text,
+      log: () => {},
+      scheduleJob: () => {},
+      routerTurn: async () => {},
+    })
     await expect(tools.invoke(
       { id: 'w', name: 'write_file', args: { path: 'notes.txt', body: 'leaked' } },
       ctx(ticketId),

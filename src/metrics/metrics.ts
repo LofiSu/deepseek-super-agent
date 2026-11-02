@@ -120,11 +120,23 @@ export function formatMetricsJson(stateDir: string): string {
   return JSON.stringify(readMetrics(stateDir), null, 2)
 }
 
+function cloneSnapshot(snapshot: MetricsSnapshot): MetricsSnapshot {
+  const clone: MetricsSnapshot = {
+    counters: { ...snapshot.counters },
+    modelLatencyMs: { ...snapshot.modelLatencyMs },
+  }
+  if (snapshot.curveSamples) clone.curveSamples = [...snapshot.curveSamples]
+  return clone
+}
+
 export class Metrics {
   readonly file: string
   private readonly counters: Record<MetricName, number>
   private latency: ModelLatencyMs
   private curve: number[] | undefined
+  /** Last snapshot this process wrote or read. Used to merge other processes' increments. */
+  private baseline: MetricsSnapshot
+  private timer: NodeJS.Immediate | null = null
 
   constructor(stateDir: string) {
     fs.mkdirSync(stateDir, { recursive: true })
@@ -133,12 +145,13 @@ export class Metrics {
     this.counters = loaded.counters
     this.latency = loaded.modelLatencyMs
     this.curve = loaded.curveSamples
+    this.baseline = cloneSnapshot(loaded)
   }
 
   increment(name: MetricName, by = 1): void {
     if (!Number.isFinite(by) || by <= 0) return
     this.counters[name] += by
-    this.flush()
+    this.scheduleFlush()
   }
 
   observeModelLatency(ms: number): void {
@@ -152,6 +165,9 @@ export class Metrics {
       sample,
       DEFAULT_CURVE_SAMPLE_LIMIT,
     ).curveSamples
+    // Latency observations are rare (one per model turn) and upstream callers
+    // read metrics.json right after recording, so persist them synchronously.
+    // Counter increments remain coalesced.
     this.flush()
   }
 
@@ -164,7 +180,62 @@ export class Metrics {
     return snapshot
   }
 
+  /**
+   * Coalesce hot-path increments into one write per event-loop turn.
+   * `flush()` remains synchronous and atomic for callers that need the file now.
+   */
+  private scheduleFlush(): void {
+    if (this.timer) return
+    this.timer = setImmediate(() => {
+      this.timer = null
+      try {
+        this.flush()
+      } catch {
+        // A transient write failure must not crash the daemon. The next metric
+        // increment schedules another attempt; explicit flush() still throws.
+      }
+    })
+  }
+
   flush(): void {
-    fs.writeFileSync(this.file, `${JSON.stringify(this.snapshot(), null, 2)}\n`)
+    if (this.timer) {
+      clearImmediate(this.timer)
+      this.timer = null
+    }
+    this.mergeDisk()
+    const next = this.snapshot()
+    const temp = `${this.file}.${process.pid}.tmp`
+    try {
+      fs.writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`)
+      // rename is atomic on the same filesystem: readers see the old or new file,
+      // never a half-written one.
+      fs.renameSync(temp, this.file)
+      this.baseline = cloneSnapshot(next)
+    } catch (error) {
+      try {
+        fs.rmSync(temp, { force: true })
+      } catch {
+        // Best effort cleanup; the original error matters more.
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Fold in counters written by another process since our last flush.
+   * Counters and latency counts are monotonic, so deltas merge cleanly.
+   */
+  private mergeDisk(): void {
+    const disk = readMetrics(path.dirname(this.file))
+    for (const name of METRIC_NAMES) {
+      const delta = disk.counters[name] - this.baseline.counters[name]
+      if (delta > 0) this.counters[name] += delta
+    }
+    const countDelta = disk.modelLatencyMs.count - this.baseline.modelLatencyMs.count
+    if (countDelta > 0) {
+      this.latency.count += countDelta
+      this.latency.sum += Math.max(0, disk.modelLatencyMs.sum - this.baseline.modelLatencyMs.sum)
+      if (disk.modelLatencyMs.max > this.latency.max) this.latency.max = disk.modelLatencyMs.max
+    }
   }
 }
