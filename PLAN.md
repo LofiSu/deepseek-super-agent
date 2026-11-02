@@ -40,14 +40,14 @@
 | 自研 thinnest Harness（Session 日志、async ReAct、OpenAI 兼容、角色工具、daemon） | 生产 Feishu IM Source + GitHub Source（禁止 fake IM / fake GitHub 作为验收） |
 | 原型领域语义：Intake / Evals / Tickets / Assignments / Replies | Cordis 插件树、DSH Session API 兼容层 |
 | SQLite + Spill、Watchdog Session、Speculative gate | Web Panel |
-| MockModel 默认可跑 demo；BYOM `DS_AGENT_API_*` | 跨进程 A2A 传输 / 真多机 mesh（扩展 / 互操作；本进程内已常驻） |
+| BYOM `DS_AGENT_API_*`；`demo` / `test` 默认走 live 模型，Mock 仅限 fixture | 跨进程 A2A 传输 / 真多机 mesh（扩展 / 互操作；本进程内已常驻） |
 | MIT OSS，`pnpm demo` 验收博客能力 | §7 实验指标（可选 M12，不挡开源） |
 
 ### 1.4 技术栈冻结
 
-- Runtime: Node ≥ 20 · TypeScript · `pnpm`
-- DB: `better-sqlite3`（或 `node:sqlite` 若可用）单文件 `<stateDir>/ds-agent.sqlite`
-- 测试: `vitest` · 默认 `MockModel`
+- Runtime: Node ≥ 22（`node:sqlite` 要求）· TypeScript · `pnpm`
+- DB: `node:sqlite` 单文件 `<stateDir>/ds-agent.db`
+- 测试: `vitest` · 默认 live 模型（`DS_AGENT_API_*`）；MockModel 仅用于 `DS_AGENT_ALLOW_MOCK_FIXTURE=1` 的离线 CI
 - 无 `@deepseek-ai/dsh*`、无 `cordis`、无 `@cordisjs/*`
 
 ---
