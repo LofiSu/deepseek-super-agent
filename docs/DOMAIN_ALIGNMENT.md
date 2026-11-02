@@ -32,7 +32,7 @@
 现在：
 - `src/core/policy.ts` 的 `gateTriggers()` 负责确定性准入：命令、explicit、bot、speculative、inferred、observe 模式。
 - 无法确定时返回 `defer`，Thread 保持 `pending`，由 `Runtime.assessPending()` 调用 `assessWithMainAgent()`。
-- Main Agent 返回 `accept` 时必须给出 `title`、`scope`、`strength`；`Tickets.create` 用它们写 Mandate。
+- Main Agent 返回 `accept` 时，prompt 要求给出 `title`、`scope`、`strength`；解析器把三者当作可选，缺省时 `Tickets.create` 回退到消息 label / title。有值时用它们写 Mandate。
 - `unavailable` 会记录 Decision，不会静默接单。
 
 ### 2.2 Subscription 只传上下文，不授权
@@ -105,7 +105,6 @@
 4. **Policy 是代码常量，不是可编辑的版本化实体**。`Policy.version` 目前只有默认值，没有 Store 表与管理界面。
 5. **Subscription 仍是数组缓存**。`Thread.subscriptions` / `Ticket.threadKeys` 与 `subscriptions` 表并存，尚未收敛为单一关系表。
 6. **Panel 是 CLI，不是 Web**。文章里的 Panel 是界面概念；本仓只实现了只读视图。
-7. **预存在的测试失败**：`test/sanitize.test.ts`（LocalEnv 环境输出）与 `test/speculate.test.ts` 的 scratch workdir 隔离断言，和本次领域对齐无关，属于之前的沙箱改动遗留。
 
 ## 4. 验收
 

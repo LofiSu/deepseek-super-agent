@@ -1,12 +1,18 @@
 # Plan audit and living roadmap
 
 > Status: living document · First audit: 2026-11-02 against `8f8e104` ·
-> Revised: 2026-11-02 against `7f1c9a1` · Repo: `LofiSu/deepseek-super-agent`
+> Revised: 2026-11-02 against `e4ea8e9` · Repo: `LofiSu/deepseek-super-agent`
 >
-> Sources for current-state claims: `origin/main` at `7f1c9a1` (`PLAN.md`,
+> Sources for current-state claims: `origin/main` at `e4ea8e9` (`PLAN.md`,
 > `README.md`, `README.zh-CN.md`, `docs/install.md`, `docs/zh/install.md`,
 > `docs/MODULES.md`, `docs/HARDENING_2026-11-01.md`), `src/`, `test/`,
-> `package.json`, `.github/workflows/ci.yml`, and the `gh` PR history.
+> `package.json`, `.github/workflows/`, and the `gh` PR history.
+>
+> **History note.** On 2026-11-02 `main` was rewritten to drop the merged
+> Mermaid-docs commit #42 (`f036790`), then again to drop non-owner
+> `Co-Authored-By` trailers. Every commit from #41 onward was renumbered. SHAs
+> in the revision history are provenance only; the work board keys off stable PR
+> numbers, not SHAs.
 >
 > This file is **read-only evidence plus a plan**. It does not edit `PLAN.md`,
 > `README.md`, `README.zh-CN.md`, or `docs/MODULES.md`.
@@ -21,14 +27,15 @@
 | 2026-11-02 | `ab90eae` | Re-audited after #53 (credential sentinel) and #54 (LTM retention) merged; P0-5 resolved, M6/P2-1 updated. |
 | 2026-11-02 | `30bea75` | #55 sandbox docs and #56 PLAN §4/§10 merged; P1-10 resolved; P0-4 remaining §1.4 fix opened as #58. |
 | 2026-11-02 | `f57fd2b` | #57 bounded lifecycle history and #58 PLAN §1.4 stack correction merged; P0-4 and P1-4 resolved. |
+| 2026-11-02 | `e4ea8e9` | Post-rewrite re-audit after #39, #60, and #61: P1-2, P1-1/P1-7 (docs), and the slow-path/README claims resolved; C15/C12/C14 rows corrected. The board uses PR numbers; the rows above keep the SHAs observed at the time. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
-**#40** (`4b919bd`), README/PLAN alignment is **#41** (`a38ea81`), the
-`MODULES.md` runner fix is **#46** (`0d9ec20`), the remaining opt-in reference
-cleanup is **#51** (`3e04e82`), and the fail-closed sandbox is **#44**
-(`7f1c9a1`). #42 (`f036790`) is the Mermaid docs fix. There were no open PRs
-when the initial audit started.
+**#40**, README/PLAN alignment is **#41**, the `MODULES.md` runner fix is
+**#46**, the remaining opt-in reference cleanup is **#51**, and the fail-closed
+sandbox is **#44**. #42 (`f036790`) was the Mermaid docs fix; it was
+dropped by the 2026-11-02 history rewrite. There were no open PRs when the
+initial audit started.
 
 ## 0. What changed since the first audit
 
@@ -48,11 +55,11 @@ refactor. **That refactor has merged as #40 (`4b919bd`).** On current `main`:
   intentional negations in `PLAN.md:883,1056`.
 - The filesystem sandbox is now **default-on and fail-closed** (#44): a missing
   `sandbox-exec`/`bwrap` throws instead of silently running unsandboxed bash.
-  The wrapper confines writes and network, not reads. Docs that still described
-  the old opt-in flag are corrected in #55 (C15).
+  The wrapper confines writes and network, not reads. The docs that still
+  described the old opt-in flag were corrected by #55; C15 is resolved.
 
 The §2/§3 matrices keep audit-time observations where useful, but every
-**current-state** claim below was re-checked against `7f1c9a1`.
+**current-state** claim below was re-checked against `e4ea8e9`.
 
 ## 1. Status legend
 
@@ -70,28 +77,28 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 
 | Module | Status | Evidence | Gap |
 |--------|--------|----------|-----|
-| **M0 shared** | done | `src/shared/types.ts`, `ports.ts`, `events.ts`, `boundary.ts`; `test/ports.test.ts`; `npx tsc --noEmit` passes | `PLAN.md` §4 still freezes old shapes: `SessionRole` (`PLAN.md:280`) vs `Role` (`src/shared/types.ts:1`), `Assignment.status` (`PLAN.md:342`) vs `Assignment.state` (`src/shared/types.ts:104`), and a `Harness.injectJobResult` (`PLAN.md:538`) that does not exist. `PLAN.md` §10 lists files that do not exist. This is P0-4. |
-| **M1 harness** | done | `src/harness/loop.ts` (Router-before-Worker sequence at `145-160`, async jobs, batch window), `session.ts`, `model.ts`, `tools.ts`, `daemon.ts`, `machines.ts`, `team.ts`, `mesh.ts`; `test/job.test.ts`, `team-harness.test.ts`, `daemon-machines.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | No standalone `serve` daemon: `Daemon.start()` is an in-process timer; an in-flight turn is not reconstructed after restart. `PLAN.md` §5 M1 asks for process keepalive and resume of unfinished Session/Jobs. This is P1-6. |
-| **M2 store** | done | `src/store/sqlite.ts` (`node:sqlite` at `:3`, `ds-agent.db` at `:16`), `schema.ts`, `spill.ts`, document/spill upsert; `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` (reopen) | No migration/version table; `node:sqlite` is experimental and needs Node ≥22. `PLAN.md` §10 names `db.ts`/`repos.ts`/`migrate.ts`, which do not exist (P0-4). |
-| **M3 engine** | partial | `src/core/engine.ts`, `intake.ts`, `evals.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `subscribe.ts`, `collab.ts`, `lifecycle.ts`, `assessment.ts`; `test/subscription.test.ts`, `speculate.test.ts`, `mid-task-collab.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | The deterministic Gate still defaults to `accept` (`src/core/assessment.ts:31-41`). The Router can veto through `assess_trigger`, but it does not originate `ignore`/`unavailable` for ordinary messages. This is the remaining half of old H4 and part of T06; PR #39 is rebasing the domain alignment work. This is P1-2. |
+| **M0 shared** | done | `src/shared/types.ts`, `ports.ts`, `events.ts`, `boundary.ts`; `test/ports.test.ts`; `npx tsc --noEmit` passes; `PLAN.md` §4.1 current-contract table | No contract gap after #56/#58: PLAN §4 is marked a historical sketch, §4.1 matches `Role`/`Strength`/`Assignment.state` and the real `Harness` methods, and §10 matches the tree. `node:sqlite` still requires Node ≥22. |
+| **M1 harness** | done | `src/harness/loop.ts` (Router-before-Worker sequence at `145-160`, async jobs, batch window), `session.ts`, `model.ts`, `tools.ts`, `daemon.ts`, `machines.ts`, `team.ts`, `mesh.ts`; `test/job.test.ts`, `team-harness.test.ts`, `daemon-machines.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | Worker-mesh capacity is a logical placement rule in one process: `pickNode` records the least-loaded node and logs `capacity-full`, but still runs the turn — there is no queue, rejection, or backpressure (P1-3, documented in `docs/MODULES.md`). No standalone `serve` daemon: `Daemon.start()` is an in-process timer and an in-flight turn is not reconstructed after restart (P1-6). |
+| **M2 store** | done | `src/store/sqlite.ts` (`node:sqlite` at `:3`, `ds-agent.db` at `:16`), `schema.ts`, `spill.ts`, document/spill upsert; `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` (reopen) | No migration/version table; `node:sqlite` is experimental and needs Node ≥22. The §10 file-tree contradiction was resolved by #56: the plan now describes the real `sqlite.ts`/`schema.ts`/`spill.ts` tree. |
+| **M3 engine** | done | `src/core/engine.ts`, `intake.ts`, `policy.ts`, `assessment.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `subscribe.ts`, `collab.ts`, `lifecycle.ts`; `test/domain-alignment.test.ts`, `subscription.test.ts`, `speculate.test.ts`, `mid-task-collab.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | P1-2 is resolved by #39: the deterministic `gateTriggers` handles commands and the configured auto-accept classes, and deferred triggers go to `assessWithMainAgent`, which originates `accept`/`ignore`/`stop`/`unavailable` (with `title`/`scope`/`strength`) before any Ticket exists. The gate remains rule/policy based by design; it is not a model verdict. |
 | **M4 ingress** | partial | `src/ingress/filter.ts`, `shards.ts`, `thread.ts`, `batch.ts`; `test/filter.test.ts`, `router-shards.test.ts`, `runtime-integration.test.ts` | Fast Path is source + mention + keyword + noise; no actor allowlist, group/chat allowlist, or drop-self (old H8 residue). Slow Path is `ruleClassify` for both Mock and `HttpOpenAI` (`src/harness/model.ts:167-169`); it does **not** call the live model, contrary to `README.md:64` (C8). |
 | **M5 subscribe** | done | `src/core/subscribe.ts`, `intake.ts` fan-out; `test/subscription.test.ts`, `hardening.test.ts` (contextOnly, unsubscribe) | `handback` is not exposed as a CLI action. The tests cover unsubscribe but not the full requeue-and-drop lifecycle as an operator flow. |
 | **M6 memory** | partial | `src/memory/recall.ts`, `acl.ts`, `long-term.ts`; `src/store/sqlite.ts` (`deleteSpill`); `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` | Recall is word-AND substring matching over a spill, not semantic or multi-hop. Retention landed in #54: `maxEntries`/`maxAgeDays` prune inside the same transaction as `put`/`remember`, `forget` deletes the spill and grants, and `DS_AGENT_MEMORY_MAX_ENTRIES`/`DS_AGENT_MEMORY_MAX_AGE_DAYS` configure it (defaults 1000/90). Remaining: dedupe beyond per-ticket upsert, semantic search, month-scale story. `README.md:115` still says "not month-scale"; that part is accurate. |
 | **M7 speculate** | done | `src/speculate/silent.ts`, `gate.ts`; `test/speculate.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | The gate is a clause-local keyword heuristic, documented as a stand-in (`docs/HARDENING_2026-11-01.md:25`). It is not a model verdict; a real value judgment remains open. |
 | **M8 channels** | done | `src/channels/norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `a2a.ts`; `test/channels-feishu.test.ts`, `channels-github-source.test.ts`, `outbox.test.ts`, `lifecycle-a2a.test.ts`; real demos in `src/cli/demos/*` | Real-channel acceptance is operator-only: `test/demos-real-channels.test.ts` is skipped offline (3 tests), and `pnpm demo` needs `gh auth` plus a live model. There is no email adapter (the plan calls it optional). |
-| **M9 env** | partial | `src/env/local-env.ts`, `sanitize.ts`, `vault.ts`, `seccomp.ts` (`sandboxEnabledFromEnv` returns true); `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `live-modules.test.ts`, `credential-sentinel.test.ts` | #44 made the sandbox default-on and fail-closed: a missing `sandbox-exec`/`bwrap` throws. Host vault/seccomp policy is still external. Credential non-leakage now has a single sentinel test (#53) covering SQLite tables, session JSONL, tool results, replies/outbox, and captured model request bodies, plus Worker port/tool rejection. The docs still describe the old opt-in (C15); PR #55 corrects them (P1-10). |
+| **M9 env** | partial | `src/env/local-env.ts`, `sanitize.ts`, `vault.ts`, `seccomp.ts` (`sandboxEnabledFromEnv` returns true); `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `live-modules.test.ts`, `credential-sentinel.test.ts` | #44 made the sandbox default-on and fail-closed: a missing `sandbox-exec`/`bwrap` throws. Host vault/seccomp policy is still external. Credential non-leakage now has a single sentinel test (#53) covering SQLite tables, session JSONL, tool results, replies/outbox, and captured model request bodies, plus Worker port/tool rejection. #55 corrected the user-facing pages and historical reviews; this audit also fixed the remaining "optional OS sandbox" line in the `docs/MODULES.md` T51 section. C15/P1-10 are resolved. Host read isolation remains external. |
 | **M10 watchdog** | partial | `src/watchdog/watchdog.ts`, `rules.ts`, `rules.json`, `health.ts`; `test/health.test.ts`, `daemon-machines.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | Goal-drift detection is marker-based ("a running report that says it left the scope"), not a general NL comparison. `PLAN.md` T43–T44 ask for NL rules; `README.md:100` already calls this "thin". |
-| **M11 CLI / demo** | partial | `src/cli/main.ts` (init/tasks/status/health/chat/emit/metrics/memory/a2a/pause/intervene/resume/collab/team/teams), `src/cli/demos/run.ts`, `src/cli/bakeoff.ts`; `test/cli-memory-a2a.test.ts`, `mid-task-collab.test.ts`, `live-demo.test.ts`, `live-e2e.test.ts` | `pnpm demo` (real GitHub issues/comments) is not in CI and needs an operator with `gh auth`. `package.json` has no `bin`, no `build`, and `tsconfig` is `noEmit`, so the `PLAN.md` §10 `dist/cli.js` bin does not exist. No `serve` command. The `MODULES.md` runner claim is fixed by #46. |
+| **M11 CLI / demo** | partial | `src/cli/main.ts` (init/tasks/status/health/chat/emit/metrics/memory/a2a/pause/intervene/resume/collab/team/teams), `src/cli/demos/run.ts`, `src/cli/bakeoff.ts`; `test/cli-memory-a2a.test.ts`, `mid-task-collab.test.ts`, `live-demo.test.ts`, `live-e2e.test.ts` | `pnpm demo` (real GitHub issues/comments) is not in the automatic PR gate; it runs through the manual `acceptance.yml` dispatch and needs an operator with `gh auth`. `package.json` has no `bin`, no `build`, and `tsconfig` is `noEmit`, so the `PLAN.md` §10 `dist/cli.js` bin does not exist. No `serve` command. The `MODULES.md` runner claim is fixed by #46. |
 
 ## 3. Functional-domain matrix (PLAN §9)
 
 | Domain | Status | Evidence | Gap |
 |--------|--------|----------|-----|
-| **评测与指标** (T45) | done | `src/metrics/metrics.ts`, `curve.ts`, `bakeoff.ts`, `batching-bench.ts`; `src/cli/bakeoff.ts`; `test/metrics.test.ts`, `metrics-curve.test.ts`, `batching-bench.test.ts`, `runtime-integration.test.ts` | Counters, `curveSamples`, `model.call`, `compareBakeoff`, and `pnpm bench:bakeoff` exist. A live bake-off is a manual measurement (needs a model key); it is not a CI gate. `docs/MODULES.md:179` claims 207 passed / 3 skipped on a live Magpie run; unverified in this audit (P1-9). |
+| **评测与指标** (T45) | done | `src/metrics/metrics.ts`, `curve.ts`, `bakeoff.ts`, `batching-bench.ts`; `src/cli/bakeoff.ts`; `test/metrics.test.ts`, `metrics-curve.test.ts`, `batching-bench.test.ts`, `runtime-integration.test.ts` | Counters, `curveSamples`, `model.call`, `compareBakeoff`, and `pnpm bench:bakeoff` exist. A live bake-off is a manual measurement (needs a model key); it is not a CI gate. `docs/MODULES.md:197` claims 207 passed / 3 skipped on a live Magpie run; unverified in this audit (P1-9). |
 | **扩展** — Router shards (T46) | done | `src/ingress/shards.ts`; `Disposition.shards` in `src/shared/types.ts:85-91`; `Runtime.create` registers `DS_AGENT_SHARDS` (`src/runtime.ts:151-166`); `Harness.launch` runs one Router session per shard (`src/harness/loop.ts:74-77,145-160`); `test/router-shards.test.ts`, `runtime-integration.test.ts` | Arbitration between multiple matching shards is undefined: every shard turn runs, and a stop ends the ticket, but two shards can both call `reply_user`. Add a documented precedence/merge rule and a test (P2-2). |
 | **扩展** — Worker mesh (T47) | partial | `src/harness/mesh.ts`; `Assignment.node` in `src/shared/types.ts:102-120`; placement event in `src/harness/loop.ts:84-89,129-141`; `test/worker-mesh.test.ts`, `runtime-integration.test.ts` | Placement is logical and single-process. When capacity is full, `launch` logs `node=none capacity-full` and still runs the Worker; there is no queue, rejection, or backpressure. Cross-host transport is external, which is acceptable, but capacity enforcement is not. This is P1-3. |
 | **长期记忆** (T48) | partial | `src/memory/long-term.ts`; write on terminal ticket in `src/runtime.ts:201-216`; recall injection in `src/runtime.ts:274-282`; `test/long-term-memory.test.ts`, `runtime-integration.test.ts` | One redacted entry per ticket, keyword AND recall, three results. #54 added retention (count/age, default 1000 entries / 90 days, 0 disables) with transactional spill+grant cleanup and configurable env; dedupe beyond per-ticket upsert, semantic search, and the month-scale story remain open (P2-1 is now partially resolved). Documented as partial in `README.md:115`. |
-| **产品层** (T49) | external boundary + partial | `src/core/lifecycle.ts` (`LifecycleBus`, `subscribe`, `snapshot`); lifecycle publishing in `src/runtime.ts:190-216,432-469`; `ds-agent memory` / `ds-agent a2a` in `src/cli/main.ts:204-231`; `test/lifecycle-a2a.test.ts`, `cli-memory-a2a.test.ts`, `runtime-integration.test.ts` | The in-repo contract is done; the actual panel is another repository (PLAN §9 T49). The bus is in-memory and unbounded: `LifecycleBus.history` grows without a cap and does not survive restart, so a panel cannot replay an earlier process. Bound it and/or persist events (P1-4). |
+| **产品层** (T49) | external boundary + partial | `src/core/lifecycle.ts` (`LifecycleBus`, `subscribe`, `snapshot`); lifecycle publishing in `src/runtime.ts:190-216,432-469`; `ds-agent memory` / `ds-agent a2a` in `src/cli/main.ts:204-231`; `test/lifecycle-a2a.test.ts`, `cli-memory-a2a.test.ts`, `runtime-integration.test.ts` | The in-repo contract is done; the actual panel is another repository (PLAN §9 T49). P1-4 is resolved by #57: `LifecycleBus.history` is a bounded 1000-event ring (configurable, keep-newest) with tests. It is still in-memory, so a panel can replay only the current process; persistence is a documented boundary, not implemented. |
 | **互操作** (T50) | external boundary + partial | `src/channels/a2a.ts`; `Runtime.sendA2A` and local recipient in `src/runtime.ts:319-328,390-395`; `test/lifecycle-a2a.test.ts`, `runtime-integration.test.ts` | Validation, 64 KiB cap, persistence, `delivered\|unroutable\|failed`, and a filtered `a2a` Trigger exist. There is no cross-process transport and no authentication; an adapter must add both. Document the adapter contract and never expose the local endpoint unauthenticated (P1-5). |
 | **安全与隐私** (T51) | external boundary + partial | `src/env/sanitize.ts` (allowlist, secret redaction), `vault.ts`, `seccomp.ts`; `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `credential-sentinel.test.ts` | In-repo: env allowlist, spill redaction, `[redacted]` output, FileVault names only, default-on fail-closed OS sandbox (#44), spill ACL, untrusted `meta` rejection, and a single sentinel test across SQLite/journal/tool results/model requests plus Worker port/tool rejection (#53). External: host-level vault/seccomp, true host read isolation (the wrapper confines writes/network only), and provider `Authorization` header/vault values not covered by the offline sentinel. Sandbox docs corrected by #55. |
 
@@ -109,11 +116,12 @@ The project can be called complete only when **all** of these are true.
 4. No open Critical/High finding from `docs/REVIEW.md` remains unclassified.
    Each is fixed, downgraded with evidence, or listed as an external boundary.
 5. `PLAN.md` §4 interfaces and §10 file tree match `src/shared` and the real
-   tree, or the contract is rewritten to say it is a design sketch. **Open:
-   P0-4.**
+   tree, or the contract is rewritten to say it is a design sketch. **Resolved
+   by #56/#58 (P0-4).**
 6. The build/package story is decided: either a working `build` + `bin` +
    `dist`, or an explicit "source-only via `pnpm`/`tsx`" statement in README and
-   `package.json`. **Open: P1-7.**
+   `package.json`. **Resolved as source-only (P1-7); the statement is in both
+   READMEs and both install pages.**
 
 ### 4.2 Tests
 
@@ -121,7 +129,7 @@ The project can be called complete only when **all** of these are true.
    green, with no live key, on every PR. New domain tests must run, not skip.
 2. Live reference run: `pnpm test` green on a documented model/gateway, with the
    date, model id, pass/skip counts, and transcript path recorded.
-   `docs/MODULES.md:179` claims 207 passed / 3 skipped; reproduce it (P1-9).
+   `docs/MODULES.md:197` claims 207 passed / 3 skipped; reproduce it (P1-9).
 3. Real-channel acceptance: `pnpm demo` (real GitHub issues + comments) and
    `pnpm demo:feishu` run on a release candidate, with artifacts under
    `/tmp/ds-agent-live-e2e-logs/`. A green offline suite is not a substitute.
@@ -168,7 +176,7 @@ These must be documented as external, with an interface and a security note:
 
 ## 5. Documentation contradictions
 
-Status is against current `main` (`7f1c9a1`). Resolved rows are kept so readers
+Status is against current `main` (`e4ea8e9`). Resolved rows are kept so readers
 can see what changed.
 
 | # | Claim | Location at audit time | Current reality | Status |
@@ -180,23 +188,20 @@ can see what changed.
 | C5 | Worker mesh, long-term memory, and A2A are opt-in and "not consulted by admission or the harness loop". | `README.md:114-118,302`; `PLAN.md:889-892` | `pickNode` is called in `Harness.launch` (`src/harness/loop.ts:84`); `SpillBackedLongTermMemory.remember/query` is called on ticket end and launch (`src/runtime.ts:201,274`); `A2ARouter` is registered as a local recipient (`src/runtime.ts:319`). | resolved (#40, #41) |
 | C6 | The full dual-layer vs one-Session bake-off is still open. | `README.md:107` | `compareBakeoff` (`src/metrics/bakeoff.ts`) and `pnpm bench:bakeoff` (`src/cli/bakeoff.ts`) exist; `test/metrics-curve.test.ts` and `test/runtime-integration.test.ts:194-217` cover the code path. What remains is the live measurement. | remaining (wording) |
 | C7 | T45 "计数已做；端到端曲线未做". | `PLAN.md:1053` | `curveSamples` persist in `metrics.json` and are summarized by `summarizeCurve` (`src/metrics/curve.ts`); `test/metrics-curve.test.ts` covers persistence, legacy files, and percentiles. | resolved (#40) |
-| C8 | Slow Path "can call a model". | `README.md:64`; `README.zh-CN.md:64` | Both `MockModel.classify` and `HttpOpenAI.classify` call `ruleClassify` (`src/harness/model.ts:89,167`; `src/ingress/filter.ts`). No admission decision is sent to the model. | remaining |
-| C9 | Tests default to `MockModel`. | `PLAN.md:50` | The default suite refuses `MockModel`: `test/fixtures.ts:11-24` throws unless `DS_AGENT_ALLOW_MOCK_FIXTURE=1`; `README.md:235` documents the live requirement. | remaining |
-| C10 | Runtime is Node ≥20. | `PLAN.md:48` | `package.json:8-10` requires Node ≥22; `src/store/sqlite.ts:3` uses `node:sqlite`. | remaining |
+| C8 | Slow Path "can call a model". | `README.md:64`; `README.zh-CN.md:64` | Both `MockModel.classify` and `HttpOpenAI.classify` call `ruleClassify` (`src/harness/model.ts:89,167`; `src/ingress/filter.ts`); no admission decision is sent to the model. #60 rewrote the README to say the shipped classifier is deterministic and a model-backed policy classifier is not wired. | resolved (#60) |
+| C9 | Tests default to `MockModel`. | `PLAN.md:50` | The default suite refuses `MockModel`: `test/fixtures.ts:11-24` throws unless `DS_AGENT_ALLOW_MOCK_FIXTURE=1`; `README.md:235` documents the live requirement. #58 corrected PLAN to "default live, Mock only for fixture-gated offline CI". | resolved (#58) |
+| C10 | Runtime is Node ≥20. | `PLAN.md:48` | `package.json:8-10` requires Node ≥22; `src/store/sqlite.ts:3` uses `node:sqlite`. #58 corrected PLAN §1.4 to Node ≥ 22. | resolved (#58) |
 | C11 | Real Feishu/GitHub sources are out of scope before M11. | `PLAN.md:39-40` | M8 ships `src/channels/feishu.ts` (webhook parser + polling source) and `src/channels/github-source.ts`; `README.md:275-298` makes real channels the acceptance path. | remaining (stale boundary table) |
-| C12 | PLAN §4 freezes `SessionRole`, `Assignment.status`, and a `Harness.injectJobResult` API that the code does not have. | `PLAN.md:280,342,538` | `src/shared/types.ts:1` defines `Role`; `:5` adds `maybe` to `Strength`; `:104` uses `Assignment.state`; no `injectJobResult`. | remaining (P0-4) |
+| C12 | PLAN §4 freezes `SessionRole`, `Assignment.status`, and a `Harness.injectJobResult` API that the code does not have. | `PLAN.md:280,342,538` | `src/shared/types.ts:1` defines `Role`; `:5` adds `maybe` to `Strength`; `:104` uses `Assignment.state`; no `injectJobResult`. #56 marks §4 as a historical sketch and adds the §4.1 current-contract table. | resolved (#56, #58) |
 | C13 | `docs/MODULES.md` says `src/cli/demo.ts` drives the real-channel acceptance scenarios. | `docs/MODULES.md:140-141` | `pnpm demo` points at `src/cli/demos/run.ts`; `src/cli/demo.ts` is the offline fixture baseline. Fixed by #46. | resolved (#46) |
-| C14 | PLAN says the DB is `better-sqlite3` or `node:sqlite` in `ds-agent.sqlite`. | `PLAN.md:49` | `src/store/sqlite.ts:3,16` uses `node:sqlite` and `ds-agent.db`. | remaining (minor, P0-4 scope) |
-| C15 | The OS sandbox is opt-in via `DS_AGENT_SANDBOX=1`, and bash falls back to unsandboxed execution when the wrapper is missing. | `README.md:119`; `README.zh-CN.md:115`; `docs/MODULES.md:126`; `docs/safety.md:29,31`; `docs/zh/safety.md:30,32`; `docs/HARDENING_2026-11-01.md:39`; `docs/LIVE_CODE_REVIEW_2026-11-01.md:130,185` | #44 made sandboxing default-on and fail-closed: `sandboxEnabledFromEnv` returns true and `wrapBashCommand` throws if `sandbox-exec`/`bwrap` is missing. Explicit `enabled: false` is only a test/embedding opt-out. | remaining (P1-10) |
+| C14 | PLAN says the DB is `better-sqlite3` or `node:sqlite` in `ds-agent.sqlite`. | `PLAN.md:49` | `src/store/sqlite.ts:3,16` uses `node:sqlite` and `ds-agent.db`. #58 corrected PLAN §1.4. | resolved (#58) |
+| C15 | The OS sandbox is opt-in via `DS_AGENT_SANDBOX=1`, and bash falls back to unsandboxed execution when the wrapper is missing. | `README.md:119`; `README.zh-CN.md:115`; `docs/MODULES.md:126`; `docs/safety.md:29,31`; `docs/zh/safety.md:30,32`; `docs/HARDENING_2026-11-01.md:39`; `docs/LIVE_CODE_REVIEW_2026-11-01.md:130,185` | #44 made sandboxing default-on and fail-closed: `sandboxEnabledFromEnv` returns true and `wrapBashCommand` throws if `sandbox-exec`/`bwrap` is missing. Explicit `enabled: false` is only a test/embedding opt-out. #55 corrected every doc listed here. | resolved (#55) |
 
 Doc hygiene, not false claims:
 
-- `PLAN.md` §10 still lists `src/app/runtime.ts`, `ids.ts`, `roles.ts`,
-  `jobs.ts`, `db.ts`, `repos.ts`, `migrate.ts`, `part.ts`, `policy.ts`,
-  `fast-path.ts`, `slow-path.ts`, `inline.ts`, `spill-bridge.ts`,
-  `read-object.ts`, `graph.ts`, `local.ts`, `prepare.ts`, `timer.ts`,
-  `detect.ts`, and `actions.ts`. None exist. Update the tree or mark it
-  illustrative (P0-4).
+- Audit-time §10 listed files that do not exist (`src/app/runtime.ts`, `db.ts`,
+  `repos.ts`, `migrate.ts`, and others). #56 corrected §10 to the real tree, so
+  this is no longer a contradiction.
 - `docs/REVIEW.md`, `docs/LIVE_CODE_REVIEW_2026-11-01.md`, and
   `docs/ARCHITECTURE_REVIEW.zh.md` are snapshots. `ARCHITECTURE_REVIEW.zh.md`
   now has a status note via #51; the other two should get the same banner.
@@ -205,38 +210,37 @@ Doc hygiene, not false claims:
 
 ### Resolved since the first audit
 
-**P0-1. Land the refactor — resolved by #40 (`4b919bd`).**
+**P0-1. Land the refactor — resolved by #40.**
 `src/phase2/` is gone, the new services and tests are tracked, and
 `docs/MODULES.md` + `docs/HARDENING_2026-11-01.md` are on `main`.
 
-**P0-2. Remove the stale opt-in documentation — resolved by #41 (`a38ea81`)
-and #51 (`3e04e82`).**
+**P0-2. Remove the stale opt-in documentation — resolved by #41 and #51.**
 `PLAN.md` and both READMEs were aligned in #41; `docs/install.md:62`,
 `docs/zh/install.md:63`, `docs/ARCHITECTURE_REVIEW.zh.md:7,17`, and
 `docs/CODE_REVIEW_METHOD.md:52` were fixed in #51. The only remaining matches
 are the two explicit negations in `PLAN.md:883,1056`.
 
 **P0-3. Put `docs/MODULES.md` on `main` and fix the runner claim — resolved by
-#46 (`0d9ec20`).**
+#46.**
 The file is tracked and points at `src/cli/demos/run.ts`. Test-count
 reproducibility moved to P1-9.
 
-**P1-8. Fail closed when no filesystem sandbox is available — resolved by #44
-(`7f1c9a1`).**
+**P1-8. Fail closed when no filesystem sandbox is available — resolved by
+#44.**
 `sandboxEnabledFromEnv` is true by default and `wrapBashCommand` throws when the
-platform wrapper is missing; CI installs `bubblewrap`. The remaining work is
-documentation (P1-10), not enforcement.
+platform wrapper is missing; CI installs `bubblewrap`. The documentation half
+(P1-10) was resolved by #55.
 
 ### P0 — top open gaps
 
 **P0-4. Re-freeze the interface contract.**
-Status: resolved by #56 (`30bea75`) and #58 (`f57fd2b`).
-Evidence: `PLAN.md:280` freezes `SessionRole`; `PLAN.md:342` freezes
-`Assignment.status`; `PLAN.md:538` freezes `Harness.injectJobResult`;
+Status: resolved by #56 and #58.
+At audit time, `PLAN.md:280` froze `SessionRole`; `PLAN.md:342` froze
+`Assignment.status`; `PLAN.md:538` froze `Harness.injectJobResult`;
 `src/shared/types.ts:1` defines `Role`, `:5` adds `maybe`, `:104` uses
-`Assignment.state`, and no `injectJobResult` exists. `PLAN.md:49` also names
+`Assignment.state`, and no `injectJobResult` exists. `PLAN.md:49` also named
 `better-sqlite3`/`ds-agent.sqlite`, while the code uses `node:sqlite` and
-`ds-agent.db`. `PLAN.md` §10 lists files that do not exist.
+`ds-agent.db`. `PLAN.md` §10 listed files that do not exist.
 Acceptance: PLAN §4 either matches `src/shared/types.ts`/`ports.ts` or is
 renamed "illustrative"; §10 matches the real tree; `npx tsc --noEmit` stays
 green; a short contract test or doc check catches future drift.
@@ -245,7 +249,7 @@ corrects §10; PR #58 corrects §1.4 (`node:sqlite`, `ds-agent.db`, Node ≥ 22,
 live-model default) and the §1 MockModel/demo row.
 
 **P0-5. Prove credential non-leakage on every path.**
-Status: resolved by #53 (`d5135f6`), with documented coverage limits.
+Status: resolved by #53, with documented coverage limits.
 Evidence: `test/credential-sentinel.test.ts` injects a unique sentinel via
 `DS_AGENT_API_KEY`, drives a ticket through `Runtime` with a capturing model,
 and asserts absence from every SQLite table found via `sqlite_master` (messages,
@@ -260,64 +264,78 @@ Acceptance met; keep the limits visible.
 ### P1 — needed for a defensible "complete"
 
 **P1-1. Automate or formally checklist the real-channel acceptance.**
-Status: operator-only. `test/demos-real-channels.test.ts` skips 3 tests offline;
-`.github/workflows/ci.yml` runs `pnpm demo:local` (fixture smoke), not
-`pnpm demo`.
-Acceptance: a `workflow_dispatch` job (or a release checklist with attached
-logs) runs `pnpm demo` with a scoped `gh` token and a model key, uploads
-`/tmp/ds-agent-live-e2e-logs/demos/`, and fails on a missing provider comment id.
-Suggested workstream: CI/release agent, new branch `ci/real-channel-acceptance`.
+Status: resolved by #61. `.github/workflows/acceptance.yml` is a
+manual `workflow_dispatch` job that takes a ref, model base/id, and target repo;
+requires `DS_AGENT_API_KEY`/`DEEPSEEK_API_KEY` and accepts `DS_AGENT_GH_TOKEN`
+(falling back to the workflow's `GITHUB_TOKEN`); installs
+`bubblewrap`; runs the live `pnpm test` suite and `pnpm demo`; and uploads the
+logs as artifacts. `test/demos-real-channels.test.ts` still skips its 3 tests
+offline, and the job remains operator-dispatched rather than a PR gate, because
+it needs live credentials and a writable repo.
+Acceptance: the workflow exists and fails closed on missing credentials; the
+remaining evidence step is a dated live run (P1-9).
 
 **P1-2. Finish the Router assessment or downgrade the claim.**
-Status: open. PR #39 (`fix/domain-alignment-article`) is rebasing and targets
-Eval/Subscription/Mandate alignment. The Gate still accepts by default
-(`src/core/assessment.ts:31-41`); the Router can only veto.
-Acceptance: either the Router can emit `ignore`/`accept`/`unavailable` for
-ordinary triggers with a test, or PLAN T06/§2.3 and README say "Gate accepts;
-Router vetoes" and remove the stronger claim.
-Suggested workstream: harness agent + PR #39 author.
+Status: resolved by #39. The pipeline is now Gate → Main Agent
+assessment → Mandate/Ticket → Executor. `gateTriggers` handles commands and the
+configured auto-accept classes; when it defers, `assessWithMainAgent`
+(`src/core/assessment.ts`) emits `accept`/`ignore`/`stop`/`unavailable`; the
+prompt asks for `title`/`scope`/`strength`, and the parser accepts them as
+optional (title falls back to the message label, scope to the title).
+Subscription carries context without
+granting authority, failed/blocked/waiting reports end only the Assignment, and
+replies route back to the originating Thread. `test/domain-alignment.test.ts`
+locks the path, including the spill-grant origin check.
+Acceptance met. The deterministic Gate is still rule/policy based by design; it
+is not a model verdict.
 
 **P1-3. Enforce mesh capacity.**
-Status: open. `src/harness/loop.ts:84-89` logs `capacity-full` and still runs.
-Acceptance: a test proves one of: the ticket queues until a slot frees, or it is
-rejected with a domain event/outcome. Choose one and document it in MODULES.
-Suggested workstream: harness agent, `feat/mesh-backpressure`.
+Status: accepted as a documented design boundary (not enforced). `pickNode`
+logs `capacity-full` and the turn still runs. `docs/MODULES.md` now says
+explicitly that capacity is a placement preference, with no queue, rejection, or
+backpressure. Enforcing it would be a new scheduler contract, not a bug fix.
+Remaining option: add a queue/reject mode with a domain outcome and test if that
+contract is wanted.
 
 **P1-4. Make the lifecycle read model replayable.**
-Status: open. `LifecycleBus.history` is unbounded and in-memory
-(`src/core/lifecycle.ts`).
-Acceptance: a bounded ring buffer plus optional SQLite persistence, or an
-explicit "current-process only" note in MODULES and the T49 row; snapshot
-survives a restart if persistence is chosen.
-Suggested workstream: product/engine agent, `feat/lifecycle-persistence`.
+Status: resolved by #57, with an explicit current-process boundary.
+`LifecycleBus.history` is now a bounded ring (default 1000, keep-newest;
+configurable, invalid capacities throw) and `test/lifecycle-a2a.test.ts` covers
+the cap. Events are still not persisted, so the T49 row and `docs/MODULES.md`
+state that a panel can replay only the current process. SQLite persistence
+remains a documented non-goal; nothing in the product claims restart replay.
 
 **P1-5. Define the A2A adapter contract and authentication note.**
-Status: open. In-process only (`src/channels/a2a.ts`).
-Acceptance: an exported `A2ATransport` interface (send/receive) and a test
-double; MODULES states that an adapter must authenticate the peer before
-constructing a human Trigger. Do not expose the local endpoint unauthenticated.
+Status: open (external adapter). In-process only (`src/channels/a2a.ts`).
+`docs/MODULES.md` now states that this repo ships no network transport and no
+peer authentication, and that an adapter must add both and authenticate before
+constructing a human Trigger. Still missing: an exported `A2ATransport`
+interface and a test double. Do not expose the local endpoint unauthenticated.
 Suggested workstream: interop agent, `feat/a2a-transport`.
 
 **P1-6. Standalone daemon / `serve` and in-flight resume.**
-Status: open. `Daemon` is an in-process timer; no `serve` command; no in-flight
-turn reconstruction.
-Acceptance: `ds-agent serve` starts the timer, handles SIGTERM, and resumes
-unfinished jobs/sessions from SQLite; or PLAN M1/M11/T38–T40 are downgraded to
-"scheduler only" and README says so.
+Status: open (documented boundary). `Daemon` is an in-process timer; there is no
+`serve` command and no in-flight turn reconstruction. `docs/MODULES.md` now says
+so. PLAN's persistent-store claims (T36/T38/T40) are satisfied — ended
+Ticket/Session state is readable after restart — but they do not promise replay
+of an interrupted turn. Still open: a `serve` command with SIGTERM handling and
+resume of unfinished jobs/sessions if that product behavior is wanted.
 Suggested workstream: harness agent, `feat/daemon-serve`.
 
 **P1-7. Decide the packaging story.**
-Status: open. `package.json` has no `bin`, no `build`; `tsconfig` is `noEmit`.
-PLAN §10 promises `bin: dist/cli.js`.
-Acceptance: either `pnpm build` emits `dist/cli.js` and `npm pack` exposes the
-`ds-agent` bin, or PLAN/README state "source-only, run with `pnpm ds-agent`".
-Suggested workstream: release agent, `chore/packaging`.
+Status: resolved as a source-only decision. `package.json` deliberately has no
+`bin`, no `build`; `tsconfig` is `noEmit`. The repo is consumed from source with
+`pnpm`/`tsx` (`pnpm ds-agent`), not installed from npm. `docs/install.md`,
+`docs/zh/install.md`, and the README now say so, and PLAN §10 no longer promises
+a `dist/cli.js` binary. Publishing an npm package would be a new product
+decision, not a missing implementation of M0–M11.
 
 **P1-9. Reproduce the live reference run.**
-Status: partially reproduced, still open. `docs/MODULES.md:179` claims 207
-passed / 3 skipped on a live Magpie run (431.12 s). On `7f1c9a1`, the previously
-red live tests `job`, `ports`, and `metrics` pass together (13/13, 90.48 s). A
-full `pnpm test` on `7f1c9a1` reached 206 passed / 3 skipped with 2 failures that
+Status: partially reproduced, still open. `docs/MODULES.md:197` claims 207
+passed / 3 skipped on a live Magpie run (431.12 s). On the pre-rewrite #44 tree
+(`7f1c9a1`), the previously red live tests `job`, `ports`, and `metrics` pass
+together (13/13, 90.48 s). A full `pnpm test` on that tree reached 206 passed /
+3 skipped with 2 failures that
 were both upstream provider 429s (`live-modules` model call; `metrics` saw
 `model.error: 3` instead of 0), not product assertions. Re-run with a healthy
 provider quota and record the dated counts; update `docs/MODULES.md` if the
@@ -325,8 +343,8 @@ reference number changes.
 Suggested workstream: release agent, `ci/live-reference-run`.
 
 **P1-10. Correct the sandbox documentation after #44.**
-Status: resolved by #55 (`bd8836d`).
-Evidence: `README.md:119`, `README.zh-CN.md:115`, `docs/MODULES.md:126`,
+Status: resolved by #55.
+Evidence: `README.md:119`, `README.zh-CN.md:115`, `docs/MODULES.md:139-141`,
 `docs/safety.md:29,31`, `docs/zh/safety.md:30,32`,
 `docs/HARDENING_2026-11-01.md:39`, `docs/LIVE_CODE_REVIEW_2026-11-01.md:130,185`
 (the last three are historical snapshots; add a status note rather than rewrite
@@ -367,22 +385,22 @@ the work is already public.
 
 | ID | Task | Owner | Branch | PR | Status | Acceptance |
 |----|------|-------|--------|----|--------|------------|
-| P0-1 | Land refactor + MODULES/HARDENING |  | `refactor/m0-m11-modules` | #40 (`4b919bd`) | resolved | Merged; `src/phase2` gone; domain tests run in CI |
-| P0-2 | Remove stale opt-in docs |  | `docs/module-boundaries` | #41 (`a38ea81`), #51 (`3e04e82`) | resolved | Only the two explicit negations in `PLAN.md` remain |
-| P0-3 | Fix `MODULES.md` demo runner |  | `docs/m11-demo-runner-fix` | #46 (`0d9ec20`) | resolved | Points at `src/cli/demos/run.ts` |
-| P0-4 | Re-freeze PLAN §4/§10 contract |  | `docs/plan-contract`, `docs/plan-stack` | #56 (`30bea75`), #58 (`f57fd2b`) | resolved | Plan matches `src/shared` and the real tree, or says illustrative; §1.4 matches Node 22/node:sqlite; typecheck green |
-| P0-5 | Credential sentinel test across store/journal/prompt/tool |  | `test/credential-sentinel` | #53 (`d5135f6`) | resolved | Sentinel absent from all SQLite tables, session JSONL, tool results, and captured model requests; Worker port/tool calls throw |
-| P1-1 | Real-channel acceptance job/checklist |  |  |  | todo | `workflow_dispatch` or release evidence for `pnpm demo` + Feishu |
-| P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | in review (spill-trust fix requested) | Router originates decisions, or docs say veto-only |
-| P1-3 | Mesh capacity enforcement |  |  |  | todo | Queue or reject on capacity-full, with test |
-| P1-4 | Lifecycle replayability |  | `feat/lifecycle-history-cap` | #57 | in review | Bounded history (default 1000) + test; persistence remains a current-process note |
-| P1-5 | A2A transport interface + auth note |  |  |  | todo | `A2ATransport` + test double; auth requirement documented |
-| P1-6 | `ds-agent serve` + in-flight resume |  |  |  | todo | Serve works, SIGTERM clean, resume tested, or docs downgraded |
-| P1-7 | Packaging decision |  |  |  | todo | Working `bin`/`build`, or explicit source-only note |
-| P1-8 | Fail-closed filesystem sandbox |  | `fix/env-fail-closed-sandbox` | #44 (`7f1c9a1`) | resolved | Missing wrapper throws; CI installs `bubblewrap` |
+| P0-1 | Land refactor + MODULES/HARDENING |  | `refactor/m0-m11-modules` | #40 | resolved | Merged; `src/phase2` gone; domain tests run in CI |
+| P0-2 | Remove stale opt-in docs |  | `docs/module-boundaries` | #41, #51 | resolved | Only the two explicit negations in `PLAN.md` remain |
+| P0-3 | Fix `MODULES.md` demo runner |  | `docs/m11-demo-runner-fix` | #46 | resolved | Points at `src/cli/demos/run.ts` |
+| P0-4 | Re-freeze PLAN §4/§10 contract |  | `docs/plan-contract`, `docs/plan-stack` | #56, #58 | resolved | Plan matches `src/shared` and the real tree, or says illustrative; §1.4 matches Node 22/node:sqlite; typecheck green |
+| P0-5 | Credential sentinel test across store/journal/prompt/tool |  | `test/credential-sentinel` | #53 | resolved | Sentinel absent from all SQLite tables, session JSONL, tool results, and captured model requests; Worker port/tool calls throw |
+| P1-1 | Real-channel acceptance job/checklist |  | `ci/real-channel-acceptance` | #61 | resolved (manual dispatch) | `workflow_dispatch` runs live `pnpm test` + `pnpm demo`, fails on missing credentials, uploads logs |
+| P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | resolved | Main Agent originates `accept`/`ignore`/`stop`/`unavailable`; domain-alignment test green |
+| P1-3 | Mesh capacity enforcement |  |  |  | accepted boundary (documented) | Placement is logical; no queue/backpressure. `docs/MODULES.md` says so |
+| P1-4 | Lifecycle replayability |  | `feat/lifecycle-history-cap` | #57 | resolved (current-process replay only) | Bounded history (default 1000) + test; no persistence claim |
+| P1-5 | A2A transport interface + auth note |  |  |  | open (external adapter) | In-process only; adapter must add transport + auth. Docs state the requirement; interface/test still missing |
+| P1-6 | `ds-agent serve` + in-flight resume |  |  |  | open (documented boundary) | In-process timer only; no restart resume. Docs state the boundary; serve command still missing |
+| P1-7 | Packaging decision |  |  |  | resolved (source-only) | No `bin`/`build`; install docs say source-only via `pnpm` |
+| P1-8 | Fail-closed filesystem sandbox |  | `fix/env-fail-closed-sandbox` | #44 | resolved | Missing wrapper throws; CI installs `bubblewrap` |
 | P1-9 | Reproduce live reference run |  |  |  | partially reproduced | 3/3 previously red live files pass; full run hit provider 429, not assertion failures |
-| P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 (`bd8836d`) | resolved | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
-| P2-1 | LTM retention/ranking |  | `feat/ltm-retention` | #54 (`ab90eae`) | partially resolved | Retention 1000/90 + spill cleanup landed; ranking/dedupe still open |
+| P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 | resolved | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
+| P2-1 | LTM retention/ranking |  | `feat/ltm-retention` | #54 | partially resolved | Retention 1000/90 + spill cleanup landed; ranking/dedupe still open |
 | P2-2 | Shard arbitration |  |  |  | todo | Precedence documented + test |
 | P2-3 | Fast-path allowlists |  |  |  | todo | Actor/group/drop-self tests |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
@@ -390,7 +408,7 @@ the work is already public.
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
 | P2-7 | Status banners on review snapshots |  |  |  | todo | Historical banner on each |
 | P2-8 | Email channel decision |  |  |  | todo | PLAN and code agree |
-| R-1 | This audit | planning-review agent | `docs/roadmap` | #43 | in review | File merged; board updated when gaps move |
+| R-1 | This audit | planning-review agent | `docs/roadmap` | #43 | resolved | File merged; board updated when gaps move |
 
 ## 8. Verification log
 
@@ -404,25 +422,21 @@ npx tsc --noEmit                                      pass
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  195 passed, 15 skipped, 34 files, 2.32 s
 ```
 
-### Current main (`7f1c9a1`, rebased PR head)
+### Current main (`e4ea8e9`, re-checked 2026-11-02)
 
 ```text
 npx tsc --noEmit                                      pass
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  196 passed, 15 skipped, 35 files, 2.04 s
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  213 passed, 15 skipped, 35 files, 2.13 s
 ```
-
-CI run `41381516075` on `7f1c9a1` reports the same offline counts
-(196 passed / 15 skipped / 35 files). Earlier runs: `a38ea81`
-(run `41380824017`) and `4b919bd` (run `41380704034`) report
-195 passed / 15 skipped / 34 files, before #44 added
-`test/local-env-timeout.test.ts`.
 
 The 15 skipped tests are the live/real-channel suites:
 `demos-real-channels.test.ts` (3), `live-demo.test.ts` (3), `live-e2e.test.ts`
 (7), `team-live.test.ts` (2). `live-modules.test.ts` runs under
-`DS_AGENT_ALLOW_MOCK_FIXTURE=1` and passed.
+`DS_AGENT_ALLOW_MOCK_FIXTURE=1` and passed. The earlier CI run `41381516075` on
+the pre-rewrite #44 tree reported 196 passed / 15 skipped / 35 files; #39, #53,
+#54, #57, #60, and the docs PRs account for the additional 17 offline tests.
 
-`docs/MODULES.md:179` claims a **live** Magpie run of 207 passed / 3 skipped
+`docs/MODULES.md:197` claims a **live** Magpie run of 207 passed / 3 skipped
 (431.12 s). That is a different configuration from the offline gate: the live
 suite runs the 15 normally-skipped tests. It was not reproduced in this audit
 (no live key), so treat 207/3 as unverified. The offline CI evidence is 196/15.

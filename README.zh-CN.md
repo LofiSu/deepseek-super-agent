@@ -218,7 +218,7 @@ Channel ──► Ingress (Fast/Slow → Thread key)
 
 ## 快速开始
 
-Node.js 22+（见 [package.json](./package.json) 的 `engines`，用到 `node:sqlite`），[pnpm](https://pnpm.io/)。
+Node.js 22+（见 [package.json](./package.json) 的 `engines`，用到 `node:sqlite`），[pnpm](https://pnpm.io/)。本仓只按源码使用：没有 npm 包、没有 `bin`、没有 `build`，在仓库里运行 `pnpm ds-agent ...`。
 
 ```bash
 pnpm install

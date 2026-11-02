@@ -298,10 +298,10 @@ flowchart TB
 |------|----------|----------|
 | `Role` | `src/shared/types.ts:1` | `'router' \| 'worker' \| 'watchdog'`；没有 `SessionRole`。 |
 | `Strength` | `src/shared/types.ts:5` | `'explicit' \| 'inferred' \| 'maybe'`（含 `maybe`）。 |
-| `Assignment.state` | `src/shared/types.ts:102`（字段 :104） | `'pending' \| 'running' \| 'ended'`；没有 `Assignment.status`/`AssignmentStatus`。另有 `workerSessionId?`、`node?`、`startedAt?`、`endedAt?`、内联 `report?`。 |
+| `Assignment.state` | `src/shared/types.ts:128`（字段 :130） | `'pending' \| 'running' \| 'ended'`；没有 `Assignment.status`/`AssignmentStatus`。另有 `workerSessionId?`、`node?`、`startedAt?`、`endedAt?`、内联 `report?`。 |
 | `ReceiveResult` / `DecisionKind` | `src/shared/types.ts:3` / `:7` | `'stored' \| 'duplicate' \| 'filtered'`；`'accept' \| 'ignore' \| 'stop' \| 'unavailable'`。 |
 | `TriggerTrust` | `src/shared/types.ts:57` | ingress 持有的事实（`spillId`、`strength`、`filterText`、`shards`）；绝不从 `trigger.meta` 读取。 |
-| `Trigger` / `Thread` / `Mandate` / `Assignment` / `Ticket` / `Decision` | `src/shared/types.ts:29` / `:72` / `:94` / `:102` / `:173` / `:191` | 领域文档形状；`Ticket` 内联 `assignments`，没有独立 `Report`/`ReportKind` 导出。 |
+| `Trigger` / `Thread` / `Mandate` / `Assignment` / `Ticket` / `Decision` | `src/shared/types.ts:29` / `:72` / `:94` / `:128` / `:173` / `:191` | 领域文档形状；`Ticket` 内联 `assignments`，没有独立 `Report`/`ReportKind` 导出。 |
 | `DomainEventName` | `src/shared/events.ts:1` | 见下方事件名清单；没有 `DomainEvents`，也没有 `thread.unsubscribed`。 |
 | `RouterPorts` / `WorkerPorts` / `WatchdogPorts` | `src/shared/ports.ts:49` / `:65` / `:81` | `reply(ticketId, text, purpose)`、`decide(...): Decision`；Worker/Watchdog 端口在类型和 Proxy 运行时都没有 `reply`/`decide`/`receive`（调用抛 `worker cannot reply` 等）。 |
 | `Harness` | `src/harness/loop.ts:39` | `armRouter(shard?)` :57 · `launch(ticket)` :65 · `deliver(ticketId, trigger, spillId?)` :170 · `resume(ticket)` :195 · `scheduleJob({id, sessionId, ticketId})` :287 · `routerTurn(prompt)` :336 · `watchdogTurn()` :354 · `drain()` :364 · `jobsSettled()` :375。没有 `ensureSession`/`start`/`stop`/`runTurn` 方法。 |
@@ -985,6 +985,8 @@ deepseek-super-agent/
       stage.ts
       reasons.ts
       assessment.ts
+      policy.ts
+      panel.ts
       collab.ts
       host.ts
       lifecycle.ts
