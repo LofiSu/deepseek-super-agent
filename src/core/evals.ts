@@ -2,43 +2,67 @@ import { nextBatch } from '../ingress/batch.ts'
 import { UserError } from '../shared/errors.ts'
 import type { AssessmentOutcome } from '../shared/ports.ts'
 import { threadKey, type Decision, type DecisionKind, type Strength, type Thread, type Ticket, type Trigger } from '../shared/types.ts'
-import { assessTriggers } from './assessment.ts'
 import type { Host } from './host.ts'
 import { arbitrateSubscribers } from './intake.ts'
+import { DEFAULT_POLICY, gateTriggers, type Policy } from './policy.ts'
 import type { Tickets } from './tickets.ts'
 
 export class Evals {
-  constructor(private readonly host: Host, private readonly tickets: Tickets) {}
+  constructor(
+    private readonly host: Host,
+    private readonly tickets: Tickets,
+    private readonly policy: Policy = DEFAULT_POLICY,
+  ) {}
 
   /**
-   * Sequence point: every pending batch is assessed before any ticket is opened.
-   * ignore, stop, and unavailable do not create a ticket and do not start a worker.
+   * Deterministic Eval. It accepts only what Policy can decide without an LLM.
+   * A `defer` keeps the Triggers queued and asks the Main Agent to assess them.
    */
   evaluateDue(): Decision[] {
     const decisions: Decision[] = []
     const due = this.host.repo.listDocs<Thread>('thread').filter(thread => thread.pending.length > 0)
     for (const thread of due) {
       const ids = nextBatch(thread.pending)
-      thread.pending = []
       const triggers = ids
         .map(id => this.host.repo.getDoc<Trigger>('trigger', id))
         .filter((trigger): trigger is Trigger => trigger != null)
       if (!triggers.length) {
+        thread.pending = thread.pending.filter(id => !ids.includes(id))
+        thread.deferred = false
         this.host.repo.putDoc('thread', thread.key, thread)
         continue
       }
       const primary = triggers.find(trigger => trigger.addressed) ?? triggers[0]!
       const strength = strengthOf(primary)
-      const evalId = this.host.repo.nextId('eval')
-      this.host.log(`[engine] Evals.batch thread=${thread.key} size=${ids.length} triggerIds=${ids.join(',')}`)
-      this.host.repo.addEvent('eval.started', { evalId, threadKey: thread.key, triggerIds: ids, strength })
       const live = arbitrateSubscribers(
         this.host.repo.listDocs<Ticket>('ticket').filter(ticket =>
           thread.subscriptions.includes(ticket.id) && ticket.ended == null),
       )
-      const outcome = assessTriggers(triggers, live)
+      const outcome = gateTriggers(triggers, live, this.policy)
+      if (outcome.kind === 'defer') {
+        this.host.log(`[engine] Evals.defer thread=${thread.key} reason=${outcome.reason}`)
+        thread.deferred = true
+        this.host.repo.addEvent('eval.deferred', { threadKey: thread.key, triggerIds: ids, reason: outcome.reason })
+        this.host.repo.putDoc('thread', thread.key, thread)
+        this.host.onAssessmentNeeded?.(thread.key)
+        continue
+      }
+      thread.deferred = false
+      thread.pending = thread.pending.filter(id => !ids.includes(id))
+      const evalId = this.host.repo.nextId('eval')
+      this.host.log(`[engine] Evals.batch thread=${thread.key} size=${ids.length} triggerIds=${ids.join(',')}`)
+      this.host.repo.addEvent('eval.started', { evalId, threadKey: thread.key, triggerIds: ids, strength })
       if (outcome.kind === 'accept') {
-        const decision = this.tickets.create({ thread, triggers, primary, strength, evalId })
+        const decision = this.tickets.create({
+          thread,
+          triggers,
+          primary,
+          strength: outcome.strength ?? strength,
+          evalId,
+          reason: outcome.reason,
+          policyVersion: this.policy.version,
+          rules: outcome.rules,
+        })
         this.host.repo.putDoc('thread', thread.key, thread)
         decisions.push(decision)
         continue
@@ -58,6 +82,44 @@ export class Evals {
       this.host.repo.putDoc('thread', thread.key, thread)
     }
     return decisions
+  }
+
+  /** Commit the assessed snapshot only if every trigger is still queued together. */
+  commitAssessed(key: string, ids: string[], outcome: AssessmentOutcome): Decision | undefined {
+    const thread = this.host.repo.getDoc<Thread>('thread', key)
+    if (!thread || ids.length === 0 || ids.some(id => !thread.pending.includes(id))) return undefined
+    const triggers = ids.map(id => this.host.repo.getDoc<Trigger>('trigger', id))
+    if (triggers.some(trigger => !trigger)) return undefined
+    const batch = triggers as Trigger[]
+    thread.pending = thread.pending.filter(id => !ids.includes(id))
+    thread.deferred = false
+    const primary = batch.find(trigger => trigger.addressed) ?? batch[0]!
+    const strength = strengthOf(primary)
+    const evalId = this.host.repo.nextId('eval')
+    this.host.log(`[engine] Evals.batch thread=${key} size=${ids.length} triggerIds=${ids.join(',')}`)
+    this.host.repo.addEvent('eval.started', { evalId, threadKey: key, triggerIds: ids, strength })
+    if (outcome.kind === 'accept') {
+      const decision = this.tickets.create({
+        thread,
+        triggers: batch,
+        primary,
+        strength: outcome.strength ?? strength,
+        evalId,
+        reason: outcome.reason,
+        title: outcome.title,
+        scope: outcome.scope,
+        policyVersion: outcome.policyVersion ?? this.policy.version,
+        rules: outcome.rules,
+        speculative: outcome.speculative,
+      })
+      this.host.repo.putDoc('thread', key, thread)
+      return decision
+    }
+    if (outcome.kind === 'stop') this.tickets.stop(outcome.ticketId, outcome.reason)
+    const decision = this.record({ thread, triggers: batch, strength, evalId, kind: outcome.kind, reason: outcome.reason,
+      ticketId: outcome.kind === 'stop' ? outcome.ticketId : undefined })
+    this.host.repo.putDoc('thread', key, thread)
+    return decision
   }
 
   private record(input: {
@@ -106,9 +168,14 @@ export class Evals {
         thread,
         triggers: [trigger],
         primary: trigger,
-        strength,
+        strength: outcome.strength ?? strength,
         evalId,
         reason: outcome.reason,
+        title: outcome.title,
+        scope: outcome.scope,
+        policyVersion: outcome.policyVersion ?? this.policy.version,
+        rules: outcome.rules,
+        speculative: outcome.speculative,
       })
     }
     this.host.repo.putDoc('thread', thread.key, thread)
