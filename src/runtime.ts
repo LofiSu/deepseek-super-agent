@@ -58,6 +58,44 @@ export interface RuntimeOptions {
   routerShards?: RouterShard[]
   /** T45 bake-off baseline: run one Worker chain with no Router turn. */
   singleSession?: boolean
+  /**
+   * Long-term memory retention. Overrides `DS_AGENT_MEMORY_MAX_ENTRIES` /
+   * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
+   */
+  memoryRetention?: MemoryRetention
+}
+
+export interface MemoryRetention {
+  maxEntries?: number
+  maxAgeDays?: number
+}
+
+/** Conservative defaults: bound index growth without dropping recent history. */
+export const DEFAULT_MEMORY_MAX_ENTRIES = 1000
+export const DEFAULT_MEMORY_MAX_AGE_DAYS = 90
+
+/**
+ * Parse `DS_AGENT_MEMORY_MAX_ENTRIES` / `DS_AGENT_MEMORY_MAX_AGE_DAYS` as
+ * non-negative integers. Empty, non-numeric, negative, or non-integer values
+ * fall back to the documented defaults (1000 entries, 90 days). `0` disables
+ * that dimension. Programmatic `memoryRetention` overrides win.
+ */
+export function memoryRetentionFromEnv(
+  env: NodeJS.ProcessEnv,
+  override: MemoryRetention = {},
+): Required<MemoryRetention> {
+  return {
+    maxEntries: override.maxEntries
+      ?? parseNonNegativeInt(env.DS_AGENT_MEMORY_MAX_ENTRIES, DEFAULT_MEMORY_MAX_ENTRIES),
+    maxAgeDays: override.maxAgeDays
+      ?? parseNonNegativeInt(env.DS_AGENT_MEMORY_MAX_AGE_DAYS, DEFAULT_MEMORY_MAX_AGE_DAYS),
+  }
+}
+
+function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (raw == null || raw.trim() === '') return fallback
+  const value = Number(raw)
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback
 }
 
 class RedactingLogger extends Logger {
@@ -165,7 +203,10 @@ export class Runtime {
     }
     for (const shard of opts.routerShards ?? []) routerShards.register(shard)
     const workerMesh = new WorkerMeshRegistry([{ id: instanceId, capacity: meshCapacity }])
-    const longTermMemory = new SpillBackedLongTermMemory(store, redact)
+    // Retention keeps the durable index bounded: 1000 entries / 90 days by
+    // default, with 0 disabling either dimension.
+    const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
+    const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
     const lifecycle = new LifecycleBus()
     const a2aRouter = new A2ARouter(store)
     log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} shards=${routerShards.list().length}`)

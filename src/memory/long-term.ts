@@ -12,6 +12,24 @@ export interface LongTermMemoryQuery {
 
 export type LongTermMemoryKind = 'note' | 'ticket'
 
+/**
+ * Retention for the durable index. Either dimension is disabled by 0 or by
+ * omitting it; `undefined` is not "keep everything by accident" for callers
+ * such as the Runtime, which supplies conservative defaults.
+ */
+export interface LongTermMemoryRetention {
+  /** Keep at most this many entries (oldest pruned first). 0 disables. */
+  maxEntries?: number
+  /** Delete entries older than this many days. 0 disables. */
+  maxAgeDays?: number
+}
+
+export interface LongTermMemoryOptions extends LongTermMemoryRetention {
+  /** Injectable clock for deterministic age/count pruning tests. */
+  now?: () => Date
+}
+
+
 export interface LongTermMemoryEntry {
   id: string
   ticketId: string
@@ -31,11 +49,27 @@ const SUMMARY_CHARS = 160
  * alone is never a capability.
  */
 export class SpillBackedLongTermMemory {
+  /** Effective limits (0 means that dimension is disabled). */
+  readonly retention: Readonly<{ maxEntries: number; maxAgeDays: number }>
+  private readonly redact: (text: string) => string
+  private readonly clock: () => Date
+
+  constructor(store: Store, options?: LongTermMemoryOptions)
+  constructor(store: Store, redact?: (text: string) => string, options?: LongTermMemoryOptions)
   constructor(
     private readonly store: Store,
     /** Applied before anything is written, including caller-supplied `put` text. */
-    private readonly redact: (text: string) => string = text => text,
-  ) {}
+    redactOrOptions: ((text: string) => string) | LongTermMemoryOptions = text => text,
+    options: LongTermMemoryOptions = {},
+  ) {
+    const retention = typeof redactOrOptions === 'function' ? options : redactOrOptions
+    this.redact = typeof redactOrOptions === 'function' ? redactOrOptions : text => text
+    this.retention = Object.freeze({
+      maxEntries: normalizeLimit(retention.maxEntries),
+      maxAgeDays: normalizeLimit(retention.maxAgeDays),
+    })
+    this.clock = retention.now ?? (() => new Date())
+  }
 
   put(ticketId: string, text: string, opts: { tags?: string[] } = {}): LongTermMemoryEntry {
     if (!ticketId.trim() || !text.trim()) throw new Error('ticketId and text are required')
@@ -47,12 +81,13 @@ export class SpillBackedLongTermMemory {
         ticketId,
         spillId,
         text: summarize(safe),
-        createdAt: new Date().toISOString(),
+        createdAt: this.clock().toISOString(),
         kind: 'note',
         tags: normalizeTags(opts.tags),
       }
       this.store.putDoc('ltm', entry.id, entry)
       grantTicketSpill(this.store, spillId, ticketId)
+      this.prune(entry.id)
       return entry
     })
   }
@@ -76,12 +111,13 @@ export class SpillBackedLongTermMemory {
         ticketId: ticket.id,
         spillId,
         text: summarize(text),
-        createdAt: existing?.createdAt ?? new Date().toISOString(),
+        createdAt: existing?.createdAt ?? this.clock().toISOString(),
         kind: 'ticket',
         tags: normalizeTags([...ticket.threadKeys, ...ticket.channels.map(channel => channel.source)]),
       }
       this.store.putDoc('ltm', id, entry)
       grantTicketSpill(this.store, spillId, ticket.id)
+      this.prune(entry.id)
       return entry
     })
   }
@@ -112,12 +148,65 @@ export class SpillBackedLongTermMemory {
       .slice(0, Math.max(0, Math.floor(limit)))
   }
 
+  /** Drop the index entry and its body (spill + grants) in one transaction. */
   forget(id: string): boolean {
     const entry = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
     if (!entry) return false
-    this.store.deleteDoc?.('ltm', id)
+    this.store.atomic(() => {
+      this.store.deleteDoc('ltm', id)
+      this.store.deleteSpill(entry.spillId)
+    })
     return true
   }
+
+  /**
+   * Runs inside the caller's `store.atomic()` transaction. The entry that was
+   * just written/upserted is never removed by its own retention pass, even
+   * when its preserved `createdAt` would otherwise age it out.
+   */
+  private prune(protectedId: string): void {
+    const { maxEntries, maxAgeDays } = this.retention
+    if (maxEntries <= 0 && maxAgeDays <= 0) return
+    const entries = this.store.listDocs<LongTermMemoryEntry>('ltm')
+    if (entries.length <= 1) return
+    const indexById = new Map(entries.map((entry, index) => [entry.id, index]))
+    const doomed = new Set<string>()
+    if (maxAgeDays > 0) {
+      const cutoff = this.clock().getTime() - maxAgeDays * 86_400_000
+      for (const entry of entries) {
+        if (entry.id === protectedId) continue
+        const createdAt = Date.parse(entry.createdAt)
+        if (Number.isFinite(createdAt) && createdAt < cutoff) doomed.add(entry.id)
+      }
+    }
+    if (maxEntries > 0) {
+      const survivors = entries.filter(entry => !doomed.has(entry.id))
+      const hasProtected = survivors.some(entry => entry.id === protectedId)
+      // Newest first; equal timestamps fall back to insertion order (rowid).
+      const ranked = survivors
+        .filter(entry => entry.id !== protectedId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)
+          || (indexById.get(b.id) ?? 0) - (indexById.get(a.id) ?? 0))
+      const quota = Math.max(0, maxEntries - (hasProtected ? 1 : 0))
+      for (const entry of ranked.slice(quota)) doomed.add(entry.id)
+    }
+    const oldestFirst = [...doomed].sort((a, b) => {
+      const byTime = (entries[indexById.get(a)!]?.createdAt ?? '').localeCompare(
+        entries[indexById.get(b)!]?.createdAt ?? '',
+      )
+      return byTime || (indexById.get(a) ?? 0) - (indexById.get(b) ?? 0)
+    })
+    for (const id of oldestFirst) {
+      this.store.deleteDoc('ltm', id)
+      const spillId = entries[indexById.get(id)!]?.spillId
+      if (spillId) this.store.deleteSpill(spillId)
+    }
+  }
+}
+
+function normalizeLimit(value: number | undefined): number {
+  const limit = Math.floor(value ?? 0)
+  return Number.isFinite(limit) && limit > 0 ? limit : 0
 }
 
 function summarize(text: string): string {

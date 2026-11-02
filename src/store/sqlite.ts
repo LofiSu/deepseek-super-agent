@@ -215,6 +215,14 @@ export class Store {
     ).run(id, body, new Date().toISOString())
   }
 
+  /** Delete a spill body and every grant that pointed at it, in one transaction. */
+  deleteSpill(id: string): void {
+    this.atomic(() => {
+      this.db.prepare('DELETE FROM spill_grants WHERE spill_id = ?').run(id)
+      this.db.prepare('DELETE FROM spills WHERE id = ?').run(id)
+    })
+  }
+
   grantSpill(spillId: string, grantee: string): void {
     this.db.prepare(
       'INSERT INTO spill_grants(spill_id, grantee) VALUES(?, ?) ON CONFLICT(spill_id, grantee) DO NOTHING',
