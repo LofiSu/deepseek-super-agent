@@ -1,6 +1,7 @@
 export type DomainEventName =
   | 'trigger.received'
   | 'eval.started'
+  | 'eval.deferred'
   | 'decision.recorded'
   | 'ticket.created'
   | 'ticket.paused'
@@ -8,6 +9,7 @@ export type DomainEventName =
   | 'ticket.ended'
   | 'assignment.started'
   | 'assignment.ended'
+  | 'assignment.retried'
   | 'thread.subscribed'
   | 'trigger.requeued'
   | 'subscription.removed'

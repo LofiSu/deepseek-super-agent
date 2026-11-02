@@ -57,7 +57,7 @@ describe.skipIf(!hasLive)('live Magpie DeepSeek E2E', () => {
     expect(logged).toMatch(/Tickets\.create|Assignments\.start|Intake\.receive/)
     // User-facing purpose or any router/worker activity
     expect(
-      /purpose=(acknowledgement|result)|reply_user|RouterSession|WorkerSession|HttpOpenAI/.test(logged)
+      /purpose=(acknowledgement|result)|reply_user|MainSession|ExecutorSession|HttpOpenAI/.test(logged)
       || runtime.store.listMessages().length > 0,
     ).toBe(true)
   }, 180_000)

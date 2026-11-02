@@ -10,6 +10,23 @@
 
 本文档是并行 coding agents 的**只读契约**：改契约须先改本文再改代码。
 
+## 0. 领域对齐（优先阅读）
+
+本仓后续以《从零打造 Personal Agent（三）：从 DeepSeek Super-agent 看主动服务的设计模式》的领域模型为准；原先按另一篇博客写的 Router/Worker 词汇只保留为内部兼容标识。完整偏差清单与修正记录见 [`docs/DOMAIN_ALIGNMENT.md`](./docs/DOMAIN_ALIGNMENT.md)。
+
+| 本仓标识 | 文章语义 | 约定 |
+|---|---|---|
+| `role='router'` | **Main Agent / Main Session** | 负责 Gate 之后的 Assessment、接单、路由与对外回复 |
+| `role='worker'` | **Executor / Executor Session** | 在 Mandate 范围内执行 Assignment，向 Main Agent 报告 |
+| `Evals` | **Eval**（Gate + Assessment → Decision） | 确定性 Gate 先行；无法确定时 `defer` 给 Main Agent |
+| `Thread.subscriptions` + `Subscription` | **Subscription**（Ticket ↔ Thread 多对多） | 只传上下文、不增加授权；`contextOnly` 不唤醒 |
+| `Ticket.threadKeys` | Subscription 的缓存视图 | 权威关系仍以 Ticket + Thread 记录为准 |
+| `Assignments` | **Assignment**（Ticket ↔ Executor 实例） | 重试 = 同一 Ticket 上的新 Assignment |
+| `Replies` / `outbox` | **Outbox** | 结果先入队；失败重试；幂等键去重 |
+| `ticketStage` / `executionView` | **Panel / Execution** | 状态来自 Ticket 事实，不来自模型自述 |
+
+**结论：** 领域写入仍只经 Engine；Harness 不持有领域规则；Panel 只读；Executor 不能 `reply/decide/receive`。
+
 ---
 
 ## 1. 目标 / 边界 / 免责

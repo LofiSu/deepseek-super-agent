@@ -170,7 +170,7 @@ describe('control plane (M1/M2/H4/M6/M8)', () => {
     }))
     await runtime.drain()
     expect(runtime.log.text()).toContain('worker skipped')
-    expect(runtime.log.text()).not.toContain('WorkerSession start')
+    expect(runtime.log.text()).not.toContain('ExecutorSession start')
     expect(tickets(runtime)[0]?.ended?.outcome).toBe('stopped')
   })
 
