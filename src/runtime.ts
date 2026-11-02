@@ -593,8 +593,12 @@ export class Runtime {
     this.flushEvals()
     await this.harness.jobsSettled()
     this.daemon.stop()
-    this.metrics.flush()
-    if (this.store.isOpen) this.store.close()
+    try {
+      this.metrics.flush()
+    } finally {
+      // A failed metrics write must not leave SQLite open for other finish() callers.
+      if (this.store.isOpen) this.store.close()
+    }
   }
 }
 

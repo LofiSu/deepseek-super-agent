@@ -57,6 +57,31 @@ describe('secret redaction', () => {
     expect(clean).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
     expect(clean).not.toContain('MIIEowIBAAKCAQEA')
     expect(clean).toContain('[redacted]')
+    expect(redactSecrets('key sk-abcdefghijklmnopqrst', [])).not.toContain('sk-abcdefghijklmnopqrst')
+  })
+
+  it('redacts truncated keys, temporary AWS keys, and AWS CLI JSON', () => {
+    const truncated = redactSecrets([
+      '-----BEGIN PRIVATE KEY-----',
+      'MIIEowIBAAKCAQEAtruncated',
+    ].join('\n'), [])
+    expect(truncated).not.toContain('MIIEowIBAAKCAQEAtruncated')
+
+    const asia = redactSecrets('key=ASIAABCDEFGHIJKLMNOP', [])
+    expect(asia).not.toContain('ASIAABCDEFGHIJKLMNOP')
+
+    const json = redactSecrets(JSON.stringify({
+      AccessKeyId: 'ASIAABCDEFGHIJKLMNOP',
+      SecretAccessKey: 'abc123secret',
+      SessionToken: 'tok-987',
+    }), [])
+    expect(json).not.toContain('abc123secret')
+    expect(json).not.toContain('tok-987')
+    expect(json).not.toContain('ASIAABCDEFGHIJKLMNOP')
+
+    // An empty assignment must not consume the next line's field name.
+    const empty = redactSecrets('aws_access_key_id = \naws_secret_access_key = SECRETVALUE', [])
+    expect(empty).not.toContain('SECRETVALUE')
   })
 
   it('never returns API key values from LocalEnv tool output', async () => {

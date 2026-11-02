@@ -93,7 +93,9 @@ function sqliteTables(dbPath: string): { name: string; rows: unknown[] }[] {
 
 describe('credential sentinel non-leakage (P0-5/D13)', () => {
   it('never persists or sends a DS_AGENT_API_KEY sentinel through a ticket', async () => {
-    const sentinel = `sk-sentinel-${randomUUID()}`
+    // Deliberately not shaped like a known credential pattern: this test must
+    // fail if exact-value/env redaction stops working.
+    const sentinel = `sentinel-${randomUUID()}`
     const model = new CapturingMockModel()
     const runtime = runtimeFor(model, sentinel)
     const padding = 'The deploy log repeats the leaked value in CI output. '.repeat(4)
@@ -198,7 +200,9 @@ describe('credential sentinel non-leakage (P0-5/D13)', () => {
   })
 
   it('does not expose reply/decide/receive tools or ports to the Worker role', () => {
-    const sentinel = `sk-sentinel-${randomUUID()}`
+    // Deliberately not shaped like a known credential pattern: this test must
+    // fail if exact-value/env redaction stops working.
+    const sentinel = `sentinel-${randomUUID()}`
     const runtime = runtimeFor(new CapturingMockModel(), sentinel)
     const tools = new ToolRegistry({
       store: runtime.store,

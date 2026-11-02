@@ -46,6 +46,16 @@ export class Assignments {
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
     if (ticket.ended?.by === 'human') return { surfaced: false, verdict: 'hold' }
+    if (ticket.ended) {
+      // A late worker report must never reopen or rewrite an ended ticket,
+      // even when an earlier stop left a pause in place.
+      // The watchdog failing an already-ended ticket is a no-op, not an error.
+      if (origin === 'watchdog') {
+        this.host.log(`[watchdog] ticket already ended ticketId=${ticket.id} outcome=${ticket.ended.outcome}`)
+        return { surfaced: false, verdict: 'hold' }
+      }
+      throw new UserError(`ticket ${ticketId} has already ended (${ticket.ended.outcome})`)
+    }
     if (ticket.collab?.paused) {
       assignment.report = {
         kind: report.kind,
@@ -63,15 +73,6 @@ export class Assignments {
         pausedAt: ticket.collab.paused.at,
       })
       return { surfaced: false, verdict: 'hold' }
-    }
-    if (ticket.ended) {
-      // A late worker report must never reopen or rewrite an ended ticket.
-      // The watchdog failing an already-ended ticket is a no-op, not an error.
-      if (origin === 'watchdog') {
-        this.host.log(`[watchdog] ticket already ended ticketId=${ticket.id} outcome=${ticket.ended.outcome}`)
-        return { surfaced: false, verdict: 'hold' }
-      }
-      throw new UserError(`ticket ${ticketId} has already ended (${ticket.ended.outcome})`)
     }
     const wasSpeculative = ticket.speculative
     const terminal = TERMINAL.has(report.kind)

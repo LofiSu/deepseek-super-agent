@@ -223,8 +223,11 @@ export class LocalEnv implements EnvPort {
  */
 const SHELL_SUBSTITUTION = /\$\(|\$\{|`/
 // Match path segments, not substrings: a regex like `a..b` is not an escape.
-const PARENT_SEGMENT = /(?:^|[\s/\\'"=])\.\.(?:$|[\s/\\'"])/
-const HOME_SEGMENT = /(?:^|[\s/\\'"=])~(?:$|[\s/\\'"])/
+// Any non-word/non-path character delimits a segment, including shell
+// operators (`cd ..;`, `..&&`), so operators cannot hide a parent step.
+const PARENT_SEGMENT = /(?:^|[^\w.-])\.\.(?:$|[^\w.-])/
+// `~` and named-user `~alice` both expand outside the scratch HOME.
+const HOME_SEGMENT = /(?:^|[^\w.-])~/
 
 function leavesWorkdir(command: string): boolean {
   if (SHELL_SUBSTITUTION.test(command)) return true

@@ -40,20 +40,25 @@ export function secretValues(env: NodeJS.ProcessEnv): string[] {
  * value was never in our environment, so `secretValues` cannot know it.
  * It is defense in depth, not a guarantee for arbitrary secret formats.
  */
-const CREDENTIAL_PATTERNS: readonly RegExp[] = [
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /\b(?:aws_secret_access_key|aws_access_key_id|aws_session_token)\s*=\s*\S+/gi,
-  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
-  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
+const CREDENTIAL_PATTERNS: readonly { pattern: RegExp; replacement: string }[] = [
+  // A truncated block must not leave key material behind, and the `|$`
+  // alternative keeps a header with no end marker a single linear scan.
+  { pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g, replacement: '[redacted]' },
+  { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, replacement: '[redacted]' },
+  // Horizontal whitespace only: an empty assignment must not consume the next line.
+  { pattern: /\b(?:aws_secret_access_key|aws_access_key_id|aws_session_token)[ \t]*=[ \t]*\S*/gi, replacement: '[redacted]' },
+  // `aws configure export-credentials` JSON fields.
+  { pattern: /\b(AccessKeyId|SecretAccessKey|SessionToken)\b("?\s*:\s*")[^"\s,}]+/g, replacement: '$1$2[redacted]' },
+  { pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, replacement: '[redacted]' },
+  { pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, replacement: '[redacted]' },
+  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: '[redacted]' },
+  { pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g, replacement: '[redacted]' },
 ]
 
 export function redactCredentialPatterns(text: string): string {
   let out = text
-  for (const pattern of CREDENTIAL_PATTERNS) {
-    out = out.replace(pattern, '[redacted]')
+  for (const { pattern, replacement } of CREDENTIAL_PATTERNS) {
+    out = out.replace(pattern, replacement)
   }
   return out
 }

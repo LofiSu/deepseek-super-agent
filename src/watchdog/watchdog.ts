@@ -1,4 +1,3 @@
-import type { WorkerReport } from '../core/assignments.ts'
 import type { JournalEntry, SessionJournal } from '../harness/session.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
@@ -75,7 +74,8 @@ export function driftAssignments(tickets: Ticket[], rules: WatchdogRules): Stuck
 }
 
 export interface WatchdogControl {
-  report(ticketId: string, report: WorkerReport): {
+  /** Watchdog-originated failure, so `watchdog.fail` is not confused with executor failures. */
+  watchdogFail(ticketId: string, reason: string): {
     surfaced: boolean
     verdict: 'deliver' | 'discard' | 'hold'
   }
@@ -183,7 +183,7 @@ export class Watchdog {
   private fail(hit: StuckAssignment): void {
     this.nudged.delete(hit.assignmentId)
     const text = hit.reason === 'failed-jobs' ? this.rules.reasons['failed-jobs'] : this.rules.reasons.stale
-    const result = this.opts.engine.report(hit.ticketId, { kind: 'failed', text, deliver: false })
+    const result = this.opts.engine.watchdogFail(hit.ticketId, text)
     // A watchdog fail is a terminal path: roll back the speculative workdir too.
     this.opts.settle?.(hit.sessionId, result.verdict)
     this.opts.store.addEvent('watchdog.fail', {

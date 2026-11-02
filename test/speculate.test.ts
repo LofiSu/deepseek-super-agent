@@ -233,6 +233,29 @@ describe('ended tickets', () => {
     expect(store.getDoc<Ticket>('ticket', ticketId)?.ended?.outcome).toBe('ready')
   })
 
+  it('rejects a late report even when a stop left a pause in place', () => {
+    const { store, engine } = openStore()
+    const ticketId = speculativeTicket(engine, store, 'trg_paused_stop')
+    engine.pause(ticketId, { reason: 'human review' })
+    engine.stop(ticketId, 'stop_worker')
+
+    expect(() => engine.report(ticketId, { kind: 'ready', text: 'late', deliver: true }))
+      .toThrow(/already ended/)
+    const ticket = store.getDoc<Ticket>('ticket', ticketId)!
+    expect(ticket.assignments[0]?.report?.text).not.toBe('late')
+    expect(ticket.ended?.outcome).toBe('stopped')
+  })
+
+  it('holds a reply for a stopped ticket that never passed the gate', () => {
+    const { store, engine } = openStore()
+    const ticketId = speculativeTicket(engine, store, 'trg_stopped_reply')
+    engine.stop(ticketId, 'stop_worker')
+
+    engine.reply(ticketId, 'Work finished.', 'result')
+    expect(store.listReplies()).toHaveLength(0)
+    expect(store.listEvents().some(event => event.type === 'collab.reply_held')).toBe(true)
+  })
+
   it('refuses mutations from a normal ticket that has already ended', async () => {
     const home = tempHome()
     const store = new Store(home)
@@ -287,6 +310,36 @@ describe('ended tickets', () => {
     expect(ticket.speculative).toBe(false)
     expect(store.listEvents().some(event => event.type === 'ticket.ended')).toBe(true)
   })
+
+  it('cleans scratch on every stop path and survives cleanup failures', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    open.push(store)
+    const env = new LocalEnv(path.join(home, 'workspaces'))
+    let throwOnCleanup = false
+    const engine = new Engine({
+      ...hostFor(store, []),
+      discardScratch: ticketId => {
+        if (throwOnCleanup) throw new Error('rm failed')
+        env.discardIsolated?.(workerSessionId(ticketId))
+      },
+    })
+
+    // The stop_worker path goes through Engine.stop -> Tickets.stop.
+    const first = speculativeTicket(engine, store, 'trg_stop_tool')
+    const firstScratch = path.join(home, 'workspaces', 'speculative', workerSessionId(first))
+    fs.mkdirSync(firstScratch, { recursive: true })
+    engine.stop(first, 'stop_worker')
+    expect(fs.existsSync(firstScratch)).toBe(false)
+    expect(store.getDoc<Ticket>('ticket', first)?.speculative).toBe(false)
+
+    // A failing recursive delete must not roll back the committed stop.
+    throwOnCleanup = true
+    const second = speculativeTicket(engine, store, 'trg_stop_throws')
+    expect(() => engine.decide('trg_stop_throws', { kind: 'stop', ticketId: second, reason: 'stop' }))
+      .not.toThrow()
+    expect(store.getDoc<Ticket>('ticket', second)?.ended?.outcome).toBe('stopped')
+  })
 })
 
 describe('speculative workdir', () => {
@@ -334,6 +387,14 @@ describe('speculative workdir', () => {
     await expect(env.bash(sessionId, 'echo pwned > ${PWD%/*}/leak.txt', { isolated: true }))
       .rejects.toThrow(/isolated workdir/)
     await expect(env.bash(sessionId, 'echo pwned > $(dirname "$PWD")/leak.txt', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    // Shell operators delimit segments, so `..;` is still a parent step.
+    await expect(env.bash(sessionId, 'cd ..; cd ..; cat w2/secret.txt', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    await expect(env.bash(sessionId, 'cd .. && cat w2/secret.txt', { isolated: true }))
+      .rejects.toThrow(/isolated workdir/)
+    // Named-user tilde expansion ignores the isolated HOME.
+    await expect(env.bash(sessionId, 'cd ~alice; cat .ssh/config', { isolated: true }))
       .rejects.toThrow(/isolated workdir/)
     // Incidental dots are not a parent-directory traversal.
     const grep = await env.bash(sessionId, "printf 'a..b' | grep 'a..b'", { isolated: true })

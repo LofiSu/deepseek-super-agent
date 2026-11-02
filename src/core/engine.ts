@@ -131,6 +131,18 @@ export class Engine {
         })
         return
       }
+      // A stopped or discarded ticket never passed the delivery gate. Stopping
+      // clears `speculative` for visibility, so check the end state directly.
+      if (ticket.ended && (ticket.ended.outcome === 'stopped' || ticket.ended.outcome === 'discarded')) {
+        this.host.log(`[engine] reply held ticketId=${ticket.id} purpose=${purpose} ended=${ticket.ended.outcome}`)
+        this.host.repo.addEvent('collab.reply_held', {
+          ticketId: ticket.id,
+          purpose,
+          reason: 'ended',
+          outcome: ticket.ended.outcome,
+        })
+        return
+      }
       const deliver = ticket.speculative ? false : undefined
       if (!maySurface(ticket.speculative, deliver)) {
         this.host.log(`[speculate] reply held ticketId=${ticket.id} purpose=${purpose}`)

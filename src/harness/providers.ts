@@ -113,7 +113,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     base: 'https://api.anthropic.com/v1',
     defaultModel: 'claude-opus-5-5',
     keyEnv: ['ANTHROPIC_API_KEY'],
-    baseEnv: ['ANTHROPIC_API_BASE', 'ANTHROPIC_BASE_URL'],
+    // `ANTHROPIC_BASE_URL` is the native (non-OpenAI-compatible) base; only the
+    // explicit API base may override the OpenAI-compatible preset endpoint.
+    baseEnv: ['ANTHROPIC_API_BASE'],
     modelEnv: ['ANTHROPIC_MODEL'],
     aliases: ['claude'],
   },

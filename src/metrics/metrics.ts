@@ -120,6 +120,18 @@ export function formatMetricsJson(stateDir: string): string {
   return JSON.stringify(readMetrics(stateDir), null, 2)
 }
 
+const LOCK_RETRY_MS = 5
+const LOCK_TIMEOUT_MS = 5_000
+const STALE_LOCK_MS = 3_000
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === code
+}
+
 function cloneSnapshot(snapshot: MetricsSnapshot): MetricsSnapshot {
   const clone: MetricsSnapshot = {
     counters: { ...snapshot.counters },
@@ -136,6 +148,8 @@ export class Metrics {
   private curve: number[] | undefined
   /** Last snapshot this process wrote or read. Used to merge other processes' increments. */
   private baseline: MetricsSnapshot
+  /** Samples recorded since the last successful flush, for cross-process merging. */
+  private readonly pendingSamples: number[] = []
   private timer: NodeJS.Immediate | null = null
 
   constructor(stateDir: string) {
@@ -160,6 +174,7 @@ export class Metrics {
     this.latency.sum += sample
     this.latency.last = sample
     if (sample > this.latency.max) this.latency.max = sample
+    this.pendingSamples.push(sample)
     this.curve = recordLatencySample(
       { counters: this.counters, modelLatencyMs: this.latency, curveSamples: this.curve },
       sample,
@@ -202,22 +217,63 @@ export class Metrics {
       clearImmediate(this.timer)
       this.timer = null
     }
-    this.mergeDisk()
-    const next = this.snapshot()
-    const temp = `${this.file}.${process.pid}.tmp`
-    try {
-      fs.writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`)
-      // rename is atomic on the same filesystem: readers see the old or new file,
-      // never a half-written one.
-      fs.renameSync(temp, this.file)
-      this.baseline = cloneSnapshot(next)
-    } catch (error) {
+    // The lock makes the whole read-modify-replace sequence atomic across
+    // processes, not just each individual file operation.
+    this.withFileLock(() => {
+      this.mergeDisk()
+      const next = this.snapshot()
+      const temp = `${this.file}.${process.pid}.tmp`
       try {
-        fs.rmSync(temp, { force: true })
-      } catch {
-        // Best effort cleanup; the original error matters more.
+        fs.writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`)
+        // rename is atomic on the same filesystem: readers see the old or new file,
+        // never a half-written one.
+        fs.renameSync(temp, this.file)
+        this.baseline = cloneSnapshot(next)
+        this.pendingSamples.length = 0
+      } catch (error) {
+        try {
+          fs.rmSync(temp, { force: true })
+        } catch {
+          // Best effort cleanup; the original error matters more.
+        }
+        throw error
       }
-      throw error
+    })
+  }
+
+  /** Cross-process mutex around one merge-and-replace. Synchronous by design. */
+  private withFileLock<T>(fn: () => T): T {
+    const lock = `${this.file}.lock`
+    const deadline = Date.now() + LOCK_TIMEOUT_MS
+    for (;;) {
+      try {
+        const fd = fs.openSync(lock, 'wx')
+        fs.writeSync(fd, String(process.pid))
+        fs.closeSync(fd)
+        break
+      } catch (error) {
+        if (!isErrno(error, 'EEXIST')) throw error
+        try {
+          // A crashed writer leaves the lock behind; only an old one is stale.
+          if (Date.now() - fs.statSync(lock).mtimeMs > STALE_LOCK_MS) {
+            fs.rmSync(lock, { force: true })
+            continue
+          }
+        } catch {
+          continue
+        }
+        if (Date.now() >= deadline) throw new Error(`metrics lock timeout: ${lock}`)
+        sleepSync(LOCK_RETRY_MS)
+      }
+    }
+    try {
+      return fn()
+    } finally {
+      try {
+        fs.rmSync(lock, { force: true })
+      } catch {
+        // The next writer treats an old lock file as stale.
+      }
     }
   }
 
@@ -236,6 +292,21 @@ export class Metrics {
       this.latency.count += countDelta
       this.latency.sum += Math.max(0, disk.modelLatencyMs.sum - this.baseline.modelLatencyMs.sum)
       if (disk.modelLatencyMs.max > this.latency.max) this.latency.max = disk.modelLatencyMs.max
+      // No local observation since the last flush: the disk's sample is newer.
+      if (this.pendingSamples.length === 0) this.latency.last = disk.modelLatencyMs.last
+      // Another process persisted samples we have not written. Keep them and
+      // append our own pending ones instead of overwriting with a stale curve.
+      if (disk.curveSamples) {
+        let merged = [...disk.curveSamples]
+        for (const sample of this.pendingSamples) {
+          merged = recordLatencySample(
+            { counters: this.counters, modelLatencyMs: this.latency, curveSamples: merged },
+            sample,
+            DEFAULT_CURVE_SAMPLE_LIMIT,
+          ).curveSamples!
+        }
+        this.curve = merged
+      }
     }
   }
 }

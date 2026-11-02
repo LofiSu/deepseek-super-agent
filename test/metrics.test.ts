@@ -29,7 +29,7 @@ describe('section 7 metrics', () => {
     first.increment('ingress.admit')
     expect(fs.existsSync(metricsPath(home))).toBe(false)
     first.flush()
-    expect(fs.readdirSync(home).some(name => name.endsWith('.tmp'))).toBe(false)
+    expect(fs.readdirSync(home).some(name => name.endsWith('.tmp') || name.endsWith('.lock'))).toBe(false)
     expect(readMetrics(home).counters['ingress.admit']).toBe(2)
 
     second.increment('ingress.drop')
@@ -38,6 +38,30 @@ describe('section 7 metrics', () => {
     const merged = readMetrics(home)
     expect(merged.counters['ingress.admit']).toBe(2)
     expect(merged.counters['ingress.drop']).toBe(1)
+  })
+
+  it('merges persisted latency samples and the last value from another instance', () => {
+    const home = tempHome()
+    const reader = new Metrics(home)
+    const writer = new Metrics(home)
+    writer.observeModelLatency(40)
+
+    reader.increment('ingress.admit')
+    reader.flush()
+
+    const merged = readMetrics(home)
+    expect(merged.modelLatencyMs).toEqual({ count: 1, sum: 40, max: 40, last: 40 })
+    expect(merged.curveSamples).toEqual([40])
+    expect(merged.counters['ingress.admit']).toBe(1)
+  })
+
+  it('closes the store when metrics flushing fails during finish', async () => {
+    runtime = freshRuntime()
+    const rt = runtime
+    rt.metrics.flush = () => { throw new Error('disk full') }
+    await expect(rt.finish()).rejects.toThrow('disk full')
+    expect(rt.store.isOpen).toBe(false)
+    runtime = undefined
   })
 
   it('counts ingress, eval, bypass, speculate, watchdog, and model latency', async () => {
