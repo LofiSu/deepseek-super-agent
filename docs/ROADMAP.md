@@ -380,7 +380,7 @@ cap; MODULES documents the recall formula.
 shards match; add a test. Acceptance: at most one terminal decision per trigger
 unless explicitly documented.
 **P2-3. Fast-path allowlists:** actor/group/drop-self rules from T16.
-Status: resolved by #TBD. `AdmissionRules` runs on the fast path before
+Status: resolved by #67. `AdmissionRules` runs on the fast path before
 mention/keyword, so an @-mention cannot bypass a deny rule. The group id comes
 from `trigger.channel.address.group`, never `meta`; a missing group is denied
 while the list is active. These are admission filters, not authentication.
@@ -425,7 +425,7 @@ the work is already public.
 | P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 | resolved | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
 | P2-1 | LTM retention/ranking |  | `feat/ltm-retention` | #54 | partially resolved | Retention 1000/90 + spill cleanup landed; ranking/dedupe still open |
 | P2-2 | Shard arbitration |  |  |  | todo | Precedence documented + test |
-| P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists` | #TBD | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address; tests cover each rule + env |
+| P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists` | #67 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address; tests cover each rule + env |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
 | P2-5 | Coverage + lint in CI |  |  |  | todo | Scripts exist; policy documented |
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
