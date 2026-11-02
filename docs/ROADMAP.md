@@ -19,6 +19,7 @@
 | 2026-11-02 | `a38ea81` (#41) | Rebased after #40 and #41 merged; P0-1/P0-2 narrowed. |
 | 2026-11-02 | `7f1c9a1` (#44) | Rebased again after #44, #46, and #51 merged; P0-1/P0-2/P0-3 resolved, P1-8 resolved, and all current-state claims re-audited. |
 | 2026-11-02 | `ab90eae` | Re-audited after #53 (credential sentinel) and #54 (LTM retention) merged; P0-5 resolved, M6/P2-1 updated. |
+| 2026-11-02 | `30bea75` | #55 sandbox docs and #56 PLAN §4/§10 merged; P1-10 resolved; P0-4 remaining §1.4 fix opened as #58. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -228,7 +229,7 @@ documentation (P1-10), not enforcement.
 ### P0 — top open gaps
 
 **P0-4. Re-freeze the interface contract.**
-Status: in review — PR #56 (`docs/plan-contract`).
+Status: §4/§10 resolved by #56 (`30bea75`); §1.4 stack correction in review as #58.
 Evidence: `PLAN.md:280` freezes `SessionRole`; `PLAN.md:342` freezes
 `Assignment.status`; `PLAN.md:538` freezes `Harness.injectJobResult`;
 `src/shared/types.ts:1` defines `Role`, `:5` adds `maybe`, `:104` uses
@@ -239,7 +240,8 @@ Acceptance: PLAN §4 either matches `src/shared/types.ts`/`ports.ts` or is
 renamed "illustrative"; §10 matches the real tree; `npx tsc --noEmit` stays
 green; a short contract test or doc check catches future drift.
 PR #56 marks §4 as a historical sketch with a current-contract table and
-corrects §10; `PLAN.md:49` still needs the `node:sqlite`/`ds-agent.db` fix.
+corrects §10; PR #58 corrects §1.4 (`node:sqlite`, `ds-agent.db`, Node ≥ 22,
+live-model default) and the §1 MockModel/demo row.
 
 **P0-5. Prove credential non-leakage on every path.**
 Status: resolved by #53 (`d5135f6`), with documented coverage limits.
@@ -322,7 +324,7 @@ reference number changes.
 Suggested workstream: release agent, `ci/live-reference-run`.
 
 **P1-10. Correct the sandbox documentation after #44.**
-Status: in review — PR #55 (`docs/fail-closed-sandbox`).
+Status: resolved by #55 (`bd8836d`).
 Evidence: `README.md:119`, `README.zh-CN.md:115`, `docs/MODULES.md:126`,
 `docs/safety.md:29,31`, `docs/zh/safety.md:30,32`,
 `docs/HARDENING_2026-11-01.md:39`, `docs/LIVE_CODE_REVIEW_2026-11-01.md:130,185`
@@ -331,8 +333,8 @@ history).
 Acceptance: user-facing docs say sandboxing is default-on and fails closed when
 `sandbox-exec`/`bwrap` is absent; explicit opt-out is described as test/embedding
 only; the historical reviews get a status note; read isolation is not overclaimed.
-PR #55 covers all of these, adds the `bwrap`/`sandbox-exec` requirement to both
-install pages, and states that writes/network are confined but reads are not.
+PR #55 covered all of these, added the `bwrap`/`sandbox-exec` requirement to both
+install pages, and stated that writes/network are confined but reads are not.
 
 ### P2 — quality and scale
 
@@ -367,18 +369,18 @@ the work is already public.
 | P0-1 | Land refactor + MODULES/HARDENING |  | `refactor/m0-m11-modules` | #40 (`4b919bd`) | resolved | Merged; `src/phase2` gone; domain tests run in CI |
 | P0-2 | Remove stale opt-in docs |  | `docs/module-boundaries` | #41 (`a38ea81`), #51 (`3e04e82`) | resolved | Only the two explicit negations in `PLAN.md` remain |
 | P0-3 | Fix `MODULES.md` demo runner |  | `docs/m11-demo-runner-fix` | #46 (`0d9ec20`) | resolved | Points at `src/cli/demos/run.ts` |
-| P0-4 | Re-freeze PLAN §4/§10 contract |  | `docs/plan-contract` | #56 | in review | Plan matches `src/shared` and the real tree, or says illustrative; typecheck green |
+| P0-4 | Re-freeze PLAN §4/§10 contract |  | `docs/plan-contract`, `docs/plan-stack` | #56 (`30bea75`), #58 | in review (§1.4) | Plan matches `src/shared` and the real tree, or says illustrative; typecheck green |
 | P0-5 | Credential sentinel test across store/journal/prompt/tool |  | `test/credential-sentinel` | #53 (`d5135f6`) | resolved | Sentinel absent from all SQLite tables, session JSONL, tool results, and captured model requests; Worker port/tool calls throw |
 | P1-1 | Real-channel acceptance job/checklist |  |  |  | todo | `workflow_dispatch` or release evidence for `pnpm demo` + Feishu |
 | P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | in review (spill-trust fix requested) | Router originates decisions, or docs say veto-only |
 | P1-3 | Mesh capacity enforcement |  |  |  | todo | Queue or reject on capacity-full, with test |
-| P1-4 | Lifecycle replayability |  |  |  | todo | Bounded/persisted bus or explicit current-process note |
+| P1-4 | Lifecycle replayability |  | `feat/lifecycle-history-cap` | #57 | in review | Bounded history (default 1000) + test; persistence remains a current-process note |
 | P1-5 | A2A transport interface + auth note |  |  |  | todo | `A2ATransport` + test double; auth requirement documented |
 | P1-6 | `ds-agent serve` + in-flight resume |  |  |  | todo | Serve works, SIGTERM clean, resume tested, or docs downgraded |
 | P1-7 | Packaging decision |  |  |  | todo | Working `bin`/`build`, or explicit source-only note |
 | P1-8 | Fail-closed filesystem sandbox |  | `fix/env-fail-closed-sandbox` | #44 (`7f1c9a1`) | resolved | Missing wrapper throws; CI installs `bubblewrap` |
 | P1-9 | Reproduce live reference run |  |  |  | partially reproduced | 3/3 previously red live files pass; full run hit provider 429, not assertion failures |
-| P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 | in review | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
+| P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 (`bd8836d`) | resolved | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
 | P2-1 | LTM retention/ranking |  | `feat/ltm-retention` | #54 (`ab90eae`) | partially resolved | Retention 1000/90 + spill cleanup landed; ranking/dedupe still open |
 | P2-2 | Shard arbitration |  |  |  | todo | Precedence documented + test |
 | P2-3 | Fast-path allowlists |  |  |  | todo | Actor/group/drop-self tests |
