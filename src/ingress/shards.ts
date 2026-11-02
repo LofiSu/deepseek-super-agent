@@ -5,7 +5,10 @@ export interface RouterShard {
   id: string
   /** `source:github,thread:pr/7` — comma joins predicates with AND. Default shard has no filter. */
   filter?: string
-  /** Higher runs first in `route`. Default shard is always the fallback, regardless of priority. */
+  /**
+   * Higher runs first in `route`; ties keep registration order. The default
+   * shard is always the fallback, regardless of this value.
+   */
   priority?: number
 }
 
@@ -16,8 +19,22 @@ interface ShardEntry {
 }
 
 /**
- * Router sharding (T09/T46): every matching non-default shard is returned in
- * priority order; a miss falls back to the default shard.
+ * Router sharding (T09/T46).
+ *
+ * Precedence: every matching non-default shard is returned, ordered by
+ * `priority` descending and then by registration order. `default` is a
+ * fallback only: it is returned when no other shard matches and is never
+ * appended to a match list. `priority` on the default shard is ignored.
+ *
+ * Arbitration (P2-2): the first id in the returned list is the reply owner.
+ * `Harness.routerTurn` targets that shard's session, and only that session may
+ * call `reply_user`, `assess_trigger` stop/unavailable, or `stop_worker`.
+ * All matching shards run their Router sessions against the same Ticket and
+ * Thread; a shard cannot create a second Ticket or emit a second terminal
+ * decision for one trigger.
+ *
+ * Shards are routing metadata, not multi-process placement: every shard's
+ * session runs in this process.
  */
 export class RouterShardRegistry {
   private readonly shards = new Map<string, ShardEntry>()
@@ -47,9 +64,14 @@ export class RouterShardRegistry {
     return [...this.shards.values()].map(entry => ({ id: entry.id, priority: entry.priority }))
   }
 
+  /**
+   * Ordered matches. A matching non-default shard always wins over `default`,
+   * and the first element is the ticket's reply owner.
+   */
   route(trigger: Trigger): string[] {
     const matches = [...this.shards.values()]
-      // Stable sort: priority first, then registration order.
+      // Stable sort: priority first, then registration order. `default` never
+      // participates in the match list; it is the whole-list fallback below.
       .map((entry, index) => ({ entry, index }))
       .filter(({ entry }) => entry.id !== 'default' && entry.matcher(trigger))
       .sort((a, b) => b.entry.priority - a.entry.priority || a.index - b.index)

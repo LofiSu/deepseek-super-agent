@@ -4,10 +4,10 @@ import { readSpillFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
-import type { Role, Ticket } from '../shared/types.ts'
+import type { Disposition, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
-import { workerSessionId } from './session.ts'
+import { routerSessionId, workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 import { MAX_TEAM_MEMBERS, type TeamRegistry } from './team.ts'
 
@@ -73,7 +73,7 @@ export class ToolRegistry {
     const { store, log, metrics } = deps
     this.tools = [
       listTasks(store),
-      ...mainAgentTools(deps.ports.router, { log }),
+      ...mainAgentTools(deps.ports.router, { store, log }),
       ...executorTools(deps.ports.worker, {
         store,
         env: deps.env,
@@ -124,12 +124,38 @@ function listTasks(store: Store): ToolDef {
   }
 }
 
+/**
+ * Shard arbitration (P2-2): the first shard in `Disposition.shards` is the
+ * ticket's reply owner. Every matching shard runs its own Router session, but
+ * only that session may speak to the user or end the ticket, so a trigger has
+ * at most one terminal decision and one reply path.
+ */
+function assertShardOwner(
+  store: Store,
+  sessionId: string,
+  ticketId?: string,
+  triggerId?: string,
+): void {
+  const ticket = ticketId ? store.getDoc<Ticket>('ticket', ticketId) : undefined
+  const dispositionKey = ticket?.originTriggerId ?? triggerId
+  if (!dispositionKey) return
+  const disposition = store.getDoc<Disposition>('disposition', dispositionKey)
+  const shard = disposition?.shards?.[0] ?? 'default'
+  const owner = routerSessionId(shard)
+  if (sessionId !== owner) {
+    throw new UserError(
+      `router shard session ${sessionId} does not own ticket ${ticketId ?? '-'} (owner=${owner}); `
+      + 'only the first matching shard may reply or decide',
+    )
+  }
+}
+
 /** Main Agent tools close over Route-level ports. That is the only session allowed to speak. */
 function mainAgentTools(
   ports: RolePortFor<'router'>,
-  deps: { log: (line: string) => void },
+  deps: { store: Store; log: (line: string) => void },
 ): ToolDef[] {
-  const { log } = deps
+  const { store, log } = deps
   return [
     {
       name: 'create_worker',
@@ -146,8 +172,9 @@ function mainAgentTools(
       description: 'Stop a ticket and end its running assignment.',
       parameters: schema({ ticketId: { type: 'string' } }),
       roles: ['router'],
-      run: guard('router', 'stop_worker', async args => {
+      run: guard('router', 'stop_worker', async (args, ctx) => {
         const ticketId = String(args.ticketId ?? '')
+        assertShardOwner(store, ctx.sessionId, ticketId)
         // Actually end the work; a log line alone told the model a lie.
         ports.stop(ticketId, 'router stop_worker')
         log(`[harness] stop_worker ticketId=${ticketId}`)
@@ -164,8 +191,9 @@ function mainAgentTools(
         thread: { type: 'string', description: 'Thread key (source:id). Defaults to the Ticket channel.' },
       }),
       roles: ['router'],
-      run: guard('router', 'reply_user', async args => {
+      run: guard('router', 'reply_user', async (args, ctx) => {
         const ticketId = String(args.ticketId ?? '')
+        assertShardOwner(store, ctx.sessionId, ticketId)
         const text = String(args.text ?? '')
         const purpose = String(args.purpose ?? 'result')
         const thread = typeof args.thread === 'string' && args.thread ? args.thread : undefined
@@ -210,7 +238,7 @@ function mainAgentTools(
         reason: { type: 'string' },
       }),
       roles: ['router'],
-      run: guard('router', 'assess_trigger', async args => {
+      run: guard('router', 'assess_trigger', async (args, ctx) => {
         const triggerId = String(args.triggerId ?? '')
         const kind = String(args.kind ?? '')
         const reason = String(args.reason ?? 'router-assessment')
@@ -218,11 +246,13 @@ function mainAgentTools(
         if (kind === 'stop') {
           const ticketId = String(args.ticketId ?? '')
           if (!ticketId) throw new UserError('assess_trigger stop needs a ticketId')
+          assertShardOwner(store, ctx.sessionId, ticketId, triggerId)
           const decision = ports.decide(triggerId, { kind: 'stop', ticketId, reason })
           log(`[harness] router veto ticketId=${ticketId} triggerId=${triggerId} reason=${reason}`)
           return { decision: decision.kind, ticketId: decision.ticketId }
         }
         if (kind === 'unavailable') {
+          assertShardOwner(store, ctx.sessionId, String(args.ticketId ?? '') || undefined, triggerId)
           const decision = ports.decide(triggerId, { kind: 'unavailable', reason })
           return { decision: decision.kind }
         }
