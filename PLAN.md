@@ -1,4 +1,4 @@
-# ds-agent 完整可落地技术方案（M0–M11 + opt-in 扩展域）
+# ds-agent 完整可落地技术方案（M0–M11 + 常驻功能域）
 
 > 独立 MIT 实现。自研最薄 Harness + 原型领域语义移植。**不依赖** DeepSeek Harness / Cordis。
 >
@@ -40,7 +40,7 @@
 | 自研 thinnest Harness（Session 日志、async ReAct、OpenAI 兼容、角色工具、daemon） | 生产 Feishu IM Source + GitHub Source（禁止 fake IM / fake GitHub 作为验收） |
 | 原型领域语义：Intake / Evals / Tickets / Assignments / Replies | Cordis 插件树、DSH Session API 兼容层 |
 | SQLite + Spill、Watchdog Session、Speculative gate | Web Panel |
-| MockModel 默认可跑 demo；BYOM `DS_AGENT_API_*` | Router sharding / Worker mesh / A2A（扩展 / 互操作，opt-in） |
+| MockModel 默认可跑 demo；BYOM `DS_AGENT_API_*` | 跨进程 A2A 传输 / 真多机 mesh（扩展 / 互操作；本进程内已常驻） |
 | MIT OSS，`pnpm demo` 验收博客能力 | §7 实验指标（可选 M12，不挡开源） |
 
 ### 1.4 技术栈冻结
@@ -225,7 +225,7 @@ flowchart TB
 | T06 | Router = Sequence Point | §2 | M1 | Router tools 默认无 bash（`ROUTER_TOOLS` 白名单）；批 Triggers 进一轮 |
 | T07 | Router 轻模型 | §2 | M1 | `roleModels.router` 默认小模型 / Mock |
 | T08 | Trigger batching during LLM round | §2 | M3+M1 | `Evals.evaluateDue` 合并同 Thread 积压；Router turn 开始时 drain inbox |
-| T09 | Future Router sharding / multi-filter | §2/§8 | 扩展 | `[~]` opt-in `RouterShardRegistry`（不进 Runtime） |
+| T09 | Future Router sharding / multi-filter | §2/§8 | 扩展 | `[~]` `RouterShardRegistry`（Runtime 常驻；`DS_AGENT_SHARDS` / `routerShards` 配置） |
 | T10 | Worker 隔离 / 最强模型 | §2 | M1+M9 | Worker Session + LocalEnv；`roleModels.worker` |
 | T11 | Worker 无直接用户 I/O | §2 | M8+M3 | Outbound 仅经 `RouterPorts.reply`；WorkerPorts 无 `reply`/`decide`/`receive`（类型 + 运行时） |
 | T12 | Worker 向 Router 报告 | §2 | M3 | `Assignments.report` → DomainEvents → Router inbox |
@@ -262,11 +262,11 @@ flowchart TB
 | T43 | Infra faults + task progress / goal drift | §6 | M10 | health + stalled Assignment + NL drift check |
 | T44 | NL maintainability prompts/rules | §6 | M10 | `prompts/watchdog.md`；规则 YAML/JSON |
 | T45 | §7 实验指标 | §7 | M12 | counters + optional `curveSamples` / `summarizeCurve`（T45） |
-| T46 | §8 Router sharding | §8 | 扩展 | 同 T09 opt-in registry |
-| T47 | §8 Worker mesh | §8 | 扩展 | `[~]` opt-in `WorkerMeshRegistry` |
-| T48 | §8 Long-term memory | §8 | 长期记忆 | `[~]` opt-in `SpillBackedLongTermMemory` |
-| T49 | §8 Product UX without Session | §8 | 产品层 | `[~]` opt-in `ProductShellBus` |
-| T50 | §8 A2A | §8 | 互操作 | `[~]` opt-in `A2ARouter` |
+| T46 | §8 Router sharding | §8 | 扩展 | 同 T09；registry 常驻 Runtime |
+| T47 | §8 Worker mesh | §8 | 扩展 | `[~]` `WorkerMeshRegistry`（Runtime 常驻；`DS_AGENT_MESH_CAPACITY`） |
+| T48 | §8 Long-term memory | §8 | 长期记忆 | `[~]` `SpillBackedLongTermMemory`（Runtime 常驻；终止 Ticket 写一条） |
+| T49 | §8 Product UX without Session | §8 | 产品层 | `[~]` `LifecycleBus`（Runtime 常驻读取模型；默认 UI 仍未做） |
+| T50 | §8 A2A | §8 | 互操作 | `[~]` `A2ARouter`（Runtime 常驻；`runtime.sendA2A`） |
 | T51 | §8 Security/privacy；credential never in context | §8 | M0+M9 | Env 变量描述可进 prompt；**值永不**；vault 外置 |
 
 ---
@@ -878,18 +878,18 @@ pnpm install && pnpm test && pnpm demo
 
 ---
 
-## 9. 功能域：评测与指标、扩展、长期记忆、产品层、互操作、安全与隐私（opt-in）
+## 9. 功能域：评测与指标、扩展、长期记忆、产品层、互操作、安全与隐私（Runtime 常驻服务）
 
-以下功能域默认关闭，由 `DS_AGENT_PHASE2=1` 或 `RuntimeOptions.phase2: true` 启用。编号沿用 §3 任务矩阵（T45–T51），不另设一套 ID。
+以下功能域按所属 M 模块常驻装配：Runtime 每次启动都会构造这些服务，不再有 `DS_AGENT_PHASE2` / `RuntimeOptions.phase2` 总开关。编号沿用 §3 任务矩阵（T45–T51），不另设一套 ID。
 
 | ID | 功能域 | 项 | 说明 | 实现 / 接口 |
 |----|--------|----|------|--------------|
 | T45 | 评测与指标 | §7 实验指标 | 计数 + optional latency curveSamples | `<stateDir>/metrics.json` · `ds-agent metrics` · `summarizeCurve` |
-| T46 | 扩展 | Router sharding / multi-filter | opt-in registry；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `RouterShardRegistry` |
-| T47 | 扩展 | Worker mesh | opt-in capacity registry；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `WorkerMeshRegistry` |
-| T48 | 长期记忆 | Long-term memory | Spill-backed opt-in LTM；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `SpillBackedLongTermMemory` |
-| T49 | 产品层 | Product UX without Session | 无会话产品壳 / 面板 | 另仓 |
-| T50 | 互操作 | A2A | opt-in envelope router；`DS_AGENT_PHASE2=1` 时挂到 `runtime.phase2`，默认不接线 | `A2ARouter` |
+| T46 | 扩展 | Router sharding / multi-filter | registry 常驻 Runtime；`DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在 | `RouterShardRegistry` |
+| T47 | 扩展 | Worker mesh | capacity registry 常驻 Runtime；`DS_AGENT_MESH_CAPACITY` / `RuntimeOptions.meshCapacity` | `WorkerMeshRegistry` |
+| T48 | 长期记忆 | Long-term memory | Spill-backed LTM 常驻 Runtime；终止 Ticket 写入并按标题召回 | `SpillBackedLongTermMemory` |
+| T49 | 产品层 | Product UX without Session | 无会话读取模型 `LifecycleBus` 常驻 Runtime；默认 UI 仍在另仓 | `core/lifecycle.ts` |
+| T50 | 互操作 | A2A | envelope router 常驻 Runtime；`runtime.sendA2A`；跨进程传输外置 | `A2ARouter` |
 | T51 | 安全与隐私 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | allowlist + redact 已落地；vault / seccomp 仍外置 |
 
 ---
@@ -1053,4 +1053,4 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 | §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
 | §8 未决 | T46–T51 + mid-task collab + T14 Team | T51 白名单+脱敏；中途 pause/intervene/resume（#31）；Team persist+CLI+e2e（#34） | `env/sanitize.ts` · `core/collab.ts` · `harness/team.ts` | vault/seccomp 仍外置 |
 
-**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与扩展域 opt-in registries（T09/T46–T50）已落地；Runtime 默认路径仍不自动启用这些扩展域（仅 `DS_AGENT_PHASE2=1` 或 `RuntimeOptions.phase2: true` 时构造并挂到 `runtime.phase2`）。
+**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与扩展域服务（T09/T46–T50）已落地；这些服务现在由 Runtime 默认路径常驻装配（`runtime.routerShards` / `workerMesh` / `longTermMemory` / `lifecycle` / `a2aRouter`），不再有 `DS_AGENT_PHASE2` 或 `RuntimeOptions.phase2` 总开关。

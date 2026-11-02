@@ -34,7 +34,7 @@ LofiSu × Grokbot（CoderBot）。
 
 对照微信文 [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg) **逐条**落地。状态以本仓代码 + `pnpm demo` / `pnpm test` 为准；完整任务矩阵见 [PLAN.md](./PLAN.md)（T01–T51）。计划与正在跑的代码哪里不一致，见 [docs/REVIEW.md](./docs/REVIEW.md)。
 
-图例：`[x]` 已有实现并通过 demo/测试路径验证 · `[~]` 有骨架或部分能力 · `[ ]` 未做。可选扩展域注册表默认关闭，需 `DS_AGENT_PHASE2=1` / `options.phase2`。
+图例：`[x]` 已有实现并通过 demo/测试路径验证 · `[~]` 有骨架或部分能力 · `[ ]` 未做。扩展域按所属模块常驻 Runtime，不再有总开关：Router 分片、Worker mesh、长期记忆、生命周期事件、A2A 每次启动都会装配。模块对照见 [docs/MODULES.md](./docs/MODULES.md)。
 
 ### §1 四特质
 
@@ -50,12 +50,12 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Router 不直接干重活** — Worker 挂执行工具；Router 工具集更窄
 - [x] **Router 可用轻量模型** — `roleModels.router` / Mock；Worker 可配强模型
 - [x] **Trigger 批处理（拥堵时合并进下一轮）** — 同 Thread Eval batch；demo/测试覆盖
-- [~] **Router 水平切分 / 多层过滤** — opt-in `RouterShardRegistry`（PLAN T09/T46）；仅 `DS_AGENT_PHASE2=1` 时挂到 Runtime
+- [~] **Router 水平切分 / 多层过滤** — `RouterShardRegistry` 常驻 Runtime（PLAN T09/T46）；用 `DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
 - [x] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team`/`team_status`/`complete_team` → member job → `TEAM_MEMBER_DONE` → 汇总报告；team 行持久化到 SQLite，`ds-agent team`/`teams` 可离线查看。Router 只见父 Assignment 报告（T14；unit + harness + live e2e）
-- [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；opt-in `ProductShellBus`（T15/T49），非默认 UI
+- [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；`LifecycleBus` 常驻提供读取模型（T15/T49），暂无默认 UI
 
 ### §3 事件驱动
 
@@ -107,11 +107,11 @@ LofiSu × Grokbot（CoderBot）。
 
 ### §8 未决问题（明确不做进 M11）
 
-- [~] Router 扩展 / Worker 直连拓扑（§8.1）— opt-in `RouterShardRegistry` + `WorkerMeshRegistry`
-- [~] 跨 Ticket 长记忆（§8.1）— opt-in `SpillBackedLongTermMemory`（尚未到跨月）
-- [~] 脱离 Session 的产品交互壳（§8.2）— opt-in `ProductShellBus`
+- [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime（放置是逻辑的，远端传输外置）
+- [~] 跨 Ticket 长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime（尚未到跨月）
+- [~] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；暂无默认 UI
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
-- [~] A2A 跨实例（§8.3）— opt-in `A2ARouter`（进程内）
+- [~] A2A 跨实例（§8.3）— `A2ARouter` 常驻 Runtime（进程内；`runtime.sendA2A`）
 - [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` 只覆盖名字像密钥、且至少 8 个字符的环境变量（更短的值、以及其他名字，会原样留下）+ FileVault `describe()`（仅名字）+ Darwin `sandbox-exec` / Linux `bwrap|unshare`（`DS_AGENT_SANDBOX=1`）（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
 
 ### 模块对照（M0–M11）

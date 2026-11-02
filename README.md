@@ -34,7 +34,7 @@ Two layers.
 
 Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg), one item at a time. Status follows this repo, `pnpm demo`, and `pnpm test`. Task list: [PLAN.md](./PLAN.md) (T01–T51). Where the plan and the code diverge: [docs/REVIEW.md](./docs/REVIEW.md).
 
-`[x]` done and covered. `[~]` partial. `[ ]` not done. Opt-in extension registries land behind `DS_AGENT_PHASE2=1` / `options.phase2` (default off).
+`[x]` done and covered. `[~]` partial. `[ ]` not done. Extension domains are always-wired Runtime services, not an opt-in gate: router shards, Worker mesh, long-term memory, lifecycle events, and A2A are assembled on every run. See [docs/MODULES.md](./docs/MODULES.md).
 
 ### §1 Four traits
 
@@ -50,12 +50,12 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Router stays light.** Workers hold the execution tools. The Router tool set is smaller.
 - [x] **Small model on the Router.** `roleModels.router`. Workers can use a stronger model.
 - [x] **Trigger batching.** Under load, same-Thread Triggers fold into the next Eval. Demo and tests cover it.
-- [~] **Router sharding / multi-layer filter.** Opt-in `RouterShardRegistry` (PLAN T09/T46). Runtime wires only when `DS_AGENT_PHASE2=1`.
+- [~] **Router sharding / multi-layer filter.** `RouterShardRegistry` is always wired into the Runtime (PLAN T09/T46). Configure with `DS_AGENT_SHARDS` or `RuntimeOptions.routerShards`; the default shard always exists.
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
 - [x] **Subagent / Team inside a Worker.** Async jobs + `spawn_team`/`team_status`/`complete_team` → member jobs → `TEAM_MEMBER_DONE` → aggregate report. Team rows persist in SQLite and `ds-agent team`/`teams` inspect them offline. Router only sees the parent Assignment report (T14; unit + harness + live e2e).
-- [~] **One UI, many topics.** Several Tickets can exist at once. Opt-in `ProductShellBus` exists; not the default UI (T15/T49).
+- [~] **One UI, many topics.** Several Tickets can exist at once. `LifecycleBus` is always wired as a read model; there is no default UI yet (T15/T49).
 
 ### §3 Event-driven
 
@@ -111,11 +111,11 @@ Article evals. They do not block the release.
 
 Kept out of M11.
 
-- [~] Router scale-out / Worker-direct topology (§8.1) — opt-in `RouterShardRegistry` + `WorkerMeshRegistry`
-- [~] Memory that spans tickets (§8.1) — opt-in `SpillBackedLongTermMemory` (not month-scale yet)
-- [~] A product shell that is not a Session (§8.2) — opt-in `ProductShellBus`
+- [~] Router scale-out / Worker-direct topology (§8.1) — always-wired `RouterShardRegistry` + `WorkerMeshRegistry` (placement is logical; a remote transport is external)
+- [~] Memory that spans tickets (§8.1) — always-wired `SpillBackedLongTermMemory` (not month-scale yet)
+- [~] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model; no default UI yet
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
-- [~] A2A across instances (§8.3) — opt-in `A2ARouter` (in-process)
+- [~] A2A across instances (§8.3) — always-wired `A2ARouter` (in-process; `runtime.sendA2A`)
 - [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` for secret-named env values of at least 8 characters (shorter values and other names are left as-is) + FileVault `describe()` (names only) + Darwin `sandbox-exec` / Linux `bwrap|unshare` when `DS_AGENT_SANDBOX=1` (§8.4, T51). Host vault/seccomp policy still external.
 
 ### Modules M0–M11
@@ -297,12 +297,21 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # keep the real issues open
 
 `pnpm demo:local` runs the legacy in-memory fixture baseline; it is not the channel acceptance path. `pnpm demo:feishu` exercises the real Feishu message API when `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_CHAT_ID` are set. `pnpm test:live` runs the live-model tests when a key is already in the environment.
 
-## Opt-in extension domains
+## Extension domains
 
-Opt-in extension helpers (`src/phase2`: router shards, worker mesh, spill-backed long-term memory, product-shell bus, A2A) are off by default and are never consulted by admission or the harness loop. Set `DS_AGENT_PHASE2=1` (or pass `RuntimeOptions.phase2: true`) to construct them; they are then available on `runtime.phase2`.
+The functional domains keep the T45–T51 ids: evaluation and metrics, extensions, long-term memory, product layer, interop, and security and privacy. The extension services are no longer behind a feature flag; `Runtime.create` always constructs them:
+
+- `runtime.routerShards` — `src/ingress/shards.ts`; configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`. The default shard always exists.
+- `runtime.workerMesh` — `src/harness/mesh.ts`; `DS_AGENT_MESH_CAPACITY` or `RuntimeOptions.meshCapacity`.
+- `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket.
+- `runtime.lifecycle` — `src/core/lifecycle.ts`; read-model events for panels and CLI views.
+- `runtime.a2aRouter` / `runtime.sendA2A` — `src/channels/a2a.ts`; the Runtime registers its instance as the local recipient.
+
+`DS_AGENT_INSTANCE_ID` sets the local A2A address and mesh node id. See [docs/MODULES.md](./docs/MODULES.md) for the module reference.
 
 ```bash
-DS_AGENT_PHASE2=1 pnpm ds-agent chat "fix the login timeout"
+DS_AGENT_INSTANCE_ID=alpha pnpm ds-agent chat "fix the login timeout"
+DS_AGENT_SHARDS='[{"id":"github","filter":"source:github"}]' pnpm ds-agent chat "CI failed"
 ```
 
 ## Models
