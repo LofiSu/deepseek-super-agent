@@ -122,9 +122,13 @@ the inter-instance channel:
 
 `local-env.ts` confines work to `<stateDir>/workspaces`, caps output, and kills
 the process group on timeout. `sanitize.ts` keeps credential values out of tool
-output and prompts. `vault.ts` exposes FileVault names only. `seccomp.ts` adds
-optional `sandbox-exec` / `bwrap|unshare` when `DS_AGENT_SANDBOX=1`; a real
-host boundary still needs a default-deny profile or a container.
+output and prompts. `vault.ts` exposes FileVault names only. `seccomp.ts` wraps
+every worker bash: `sandbox-exec` on macOS, `bwrap` on Linux; a missing wrapper
+is a hard error, never a plain-bash fallback. `DS_AGENT_SANDBOX` no longer
+changes the policy. The wrapper confines writes and network (denied unless the
+policy allows it), but not reads: macOS allows broad `file-read*` and Linux uses
+`--ro-bind / /`, so the host read boundary (including the SQLite DB) remains
+external and needs a container or default-deny profile.
 
 ## M10 — watchdog
 

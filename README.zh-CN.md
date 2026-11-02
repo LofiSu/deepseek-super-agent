@@ -112,7 +112,7 @@ LofiSu × Grokbot（CoderBot）。
 - [~] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；暂无默认 UI
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— `A2ARouter` 常驻 Runtime（进程内；`runtime.sendA2A`）
-- [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` 只覆盖名字像密钥、且至少 8 个字符的环境变量（更短的值、以及其他名字，会原样留下）+ FileVault `describe()`（仅名字）+ Darwin `sandbox-exec` / Linux `bwrap|unshare`（`DS_AGENT_SANDBOX=1`）（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
+- [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` 只覆盖名字像密钥、且至少 8 个字符的环境变量（更短的值、以及其他名字，会原样留下）+ FileVault `describe()`（仅名字）。每个 Worker bash 都包沙箱：macOS 用 `sandbox-exec`，Linux 用 `bwrap`；wrapper 不存在就直接报错，不会退回普通 bash；默认拒绝网络，除非策略放行。沙箱只限制写入和网络，不限制读取：两个平台仍允许大范围读取，进程级读隔离（包括 SQLite DB）仍要靠外部容器边界（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
 
 ### 模块对照（M0–M11）
 

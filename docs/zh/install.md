@@ -62,6 +62,8 @@ pnpm ds-agent metrics
 
 这些扩展服务由 Runtime 常驻装配：Router 分片、Worker mesh、长期记忆、生命周期总线和 A2A 每次启动都会构造，没有 opt-in 开关。用 `DS_AGENT_SHARDS`、`DS_AGENT_MESH_CAPACITY`、`DS_AGENT_INSTANCE_ID` 配置；逐项说明见 [docs/MODULES.md]({{ site.repository_url }}/blob/main/docs/MODULES.md)。
 
+Worker 的 `bash` 需要 macOS 上的 `sandbox-exec` 或 Linux 上的 `bwrap`；wrapper 不存在会直接报错，CI 会安装 bubblewrap。
+
 关掉这些 issue 只是收尾。每个场景都是正事做完才调 `closeGithubIssues`。关闭请求失败会被忽略，issue 还开着，demo 也不会因此判失败。场景中途抛错，或者在这次调用之前就 return，已经建出来的 issue 也会留着：后面的 `createIssue` 可能在前面几条已经建好之后失败；watchdog 场景在 issue 没有 trigger 时直接返回；spill 场景缺 trigger 时也直接返回。`DS_AGENT_GH_KEEP=1` 是故意不关。跑完去仓库里看一眼，还有没有带着 `ds-agent-demo` 标签、仍然开着的 issue。
 
 飞书怎么配，看仓库里的 [docs/REAL_CHANNELS.md]({{ site.repository_url }}/blob/main/docs/REAL_CHANNELS.md)。
