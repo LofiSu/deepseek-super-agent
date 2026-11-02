@@ -18,6 +18,7 @@
 | 2026-11-02 | `8f8e104` (#37) | Initial audit of the frozen `45c6619` tree plus its uncommitted refactor. |
 | 2026-11-02 | `a38ea81` (#41) | Rebased after #40 and #41 merged; P0-1/P0-2 narrowed. |
 | 2026-11-02 | `7f1c9a1` (#44) | Rebased again after #44, #46, and #51 merged; P0-1/P0-2/P0-3 resolved, P1-8 resolved, and all current-state claims re-audited. |
+| 2026-11-02 | `ab90eae` | Re-audited after #53 (credential sentinel) and #54 (LTM retention) merged; P0-5 resolved, M6/P2-1 updated. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -45,7 +46,8 @@ refactor. **That refactor has merged as #40 (`4b919bd`).** On current `main`:
   intentional negations in `PLAN.md:883,1056`.
 - The filesystem sandbox is now **default-on and fail-closed** (#44): a missing
   `sandbox-exec`/`bwrap` throws instead of silently running unsandboxed bash.
-  Documentation still says the old opt-in flag (C15).
+  The wrapper confines writes and network, not reads. Docs that still described
+  the old opt-in flag are corrected in #55 (C15).
 
 The §2/§3 matrices keep audit-time observations where useful, but every
 **current-state** claim below was re-checked against `7f1c9a1`.
@@ -72,10 +74,10 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | **M3 engine** | partial | `src/core/engine.ts`, `intake.ts`, `evals.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `subscribe.ts`, `collab.ts`, `lifecycle.ts`, `assessment.ts`; `test/subscription.test.ts`, `speculate.test.ts`, `mid-task-collab.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | The deterministic Gate still defaults to `accept` (`src/core/assessment.ts:31-41`). The Router can veto through `assess_trigger`, but it does not originate `ignore`/`unavailable` for ordinary messages. This is the remaining half of old H4 and part of T06; PR #39 is rebasing the domain alignment work. This is P1-2. |
 | **M4 ingress** | partial | `src/ingress/filter.ts`, `shards.ts`, `thread.ts`, `batch.ts`; `test/filter.test.ts`, `router-shards.test.ts`, `runtime-integration.test.ts` | Fast Path is source + mention + keyword + noise; no actor allowlist, group/chat allowlist, or drop-self (old H8 residue). Slow Path is `ruleClassify` for both Mock and `HttpOpenAI` (`src/harness/model.ts:167-169`); it does **not** call the live model, contrary to `README.md:64` (C8). |
 | **M5 subscribe** | done | `src/core/subscribe.ts`, `intake.ts` fan-out; `test/subscription.test.ts`, `hardening.test.ts` (contextOnly, unsubscribe) | `handback` is not exposed as a CLI action. The tests cover unsubscribe but not the full requeue-and-drop lifecycle as an operator flow. |
-| **M6 memory** | partial | `src/memory/recall.ts`, `acl.ts`, `long-term.ts`; `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` | Recall is word-AND substring matching over a spill, not semantic or multi-hop. No retention policy or size cap for the `ltm` table. `README.md:115` admits "not month-scale"; the code matches that partial claim. |
+| **M6 memory** | partial | `src/memory/recall.ts`, `acl.ts`, `long-term.ts`; `src/store/sqlite.ts` (`deleteSpill`); `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` | Recall is word-AND substring matching over a spill, not semantic or multi-hop. Retention landed in #54: `maxEntries`/`maxAgeDays` prune inside the same transaction as `put`/`remember`, `forget` deletes the spill and grants, and `DS_AGENT_MEMORY_MAX_ENTRIES`/`DS_AGENT_MEMORY_MAX_AGE_DAYS` configure it (defaults 1000/90). Remaining: dedupe beyond per-ticket upsert, semantic search, month-scale story. `README.md:115` still says "not month-scale"; that part is accurate. |
 | **M7 speculate** | done | `src/speculate/silent.ts`, `gate.ts`; `test/speculate.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | The gate is a clause-local keyword heuristic, documented as a stand-in (`docs/HARDENING_2026-11-01.md:25`). It is not a model verdict; a real value judgment remains open. |
 | **M8 channels** | done | `src/channels/norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `a2a.ts`; `test/channels-feishu.test.ts`, `channels-github-source.test.ts`, `outbox.test.ts`, `lifecycle-a2a.test.ts`; real demos in `src/cli/demos/*` | Real-channel acceptance is operator-only: `test/demos-real-channels.test.ts` is skipped offline (3 tests), and `pnpm demo` needs `gh auth` plus a live model. There is no email adapter (the plan calls it optional). |
-| **M9 env** | partial | `src/env/local-env.ts`, `sanitize.ts`, `vault.ts`, `seccomp.ts` (`sandboxEnabledFromEnv` returns true); `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `live-modules.test.ts` | #44 made the sandbox default-on and fail-closed: a missing `sandbox-exec`/`bwrap` throws. Host vault/seccomp policy is still external, and the docs still describe the old `DS_AGENT_SANDBOX=1` opt-in (C15, P1-10). Credential redaction is tested for spill bodies, not every session/prompt path (P0-5). |
+| **M9 env** | partial | `src/env/local-env.ts`, `sanitize.ts`, `vault.ts`, `seccomp.ts` (`sandboxEnabledFromEnv` returns true); `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `live-modules.test.ts`, `credential-sentinel.test.ts` | #44 made the sandbox default-on and fail-closed: a missing `sandbox-exec`/`bwrap` throws. Host vault/seccomp policy is still external. Credential non-leakage now has a single sentinel test (#53) covering SQLite tables, session JSONL, tool results, replies/outbox, and captured model request bodies, plus Worker port/tool rejection. The docs still describe the old opt-in (C15); PR #55 corrects them (P1-10). |
 | **M10 watchdog** | partial | `src/watchdog/watchdog.ts`, `rules.ts`, `rules.json`, `health.ts`; `test/health.test.ts`, `daemon-machines.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | Goal-drift detection is marker-based ("a running report that says it left the scope"), not a general NL comparison. `PLAN.md` T43–T44 ask for NL rules; `README.md:100` already calls this "thin". |
 | **M11 CLI / demo** | partial | `src/cli/main.ts` (init/tasks/status/health/chat/emit/metrics/memory/a2a/pause/intervene/resume/collab/team/teams), `src/cli/demos/run.ts`, `src/cli/bakeoff.ts`; `test/cli-memory-a2a.test.ts`, `mid-task-collab.test.ts`, `live-demo.test.ts`, `live-e2e.test.ts` | `pnpm demo` (real GitHub issues/comments) is not in CI and needs an operator with `gh auth`. `package.json` has no `bin`, no `build`, and `tsconfig` is `noEmit`, so the `PLAN.md` §10 `dist/cli.js` bin does not exist. No `serve` command. The `MODULES.md` runner claim is fixed by #46. |
 
@@ -86,10 +88,10 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | **评测与指标** (T45) | done | `src/metrics/metrics.ts`, `curve.ts`, `bakeoff.ts`, `batching-bench.ts`; `src/cli/bakeoff.ts`; `test/metrics.test.ts`, `metrics-curve.test.ts`, `batching-bench.test.ts`, `runtime-integration.test.ts` | Counters, `curveSamples`, `model.call`, `compareBakeoff`, and `pnpm bench:bakeoff` exist. A live bake-off is a manual measurement (needs a model key); it is not a CI gate. `docs/MODULES.md:179` claims 207 passed / 3 skipped on a live Magpie run; unverified in this audit (P1-9). |
 | **扩展** — Router shards (T46) | done | `src/ingress/shards.ts`; `Disposition.shards` in `src/shared/types.ts:85-91`; `Runtime.create` registers `DS_AGENT_SHARDS` (`src/runtime.ts:151-166`); `Harness.launch` runs one Router session per shard (`src/harness/loop.ts:74-77,145-160`); `test/router-shards.test.ts`, `runtime-integration.test.ts` | Arbitration between multiple matching shards is undefined: every shard turn runs, and a stop ends the ticket, but two shards can both call `reply_user`. Add a documented precedence/merge rule and a test (P2-2). |
 | **扩展** — Worker mesh (T47) | partial | `src/harness/mesh.ts`; `Assignment.node` in `src/shared/types.ts:102-120`; placement event in `src/harness/loop.ts:84-89,129-141`; `test/worker-mesh.test.ts`, `runtime-integration.test.ts` | Placement is logical and single-process. When capacity is full, `launch` logs `node=none capacity-full` and still runs the Worker; there is no queue, rejection, or backpressure. Cross-host transport is external, which is acceptable, but capacity enforcement is not. This is P1-3. |
-| **长期记忆** (T48) | partial | `src/memory/long-term.ts`; write on terminal ticket in `src/runtime.ts:201-216`; recall injection in `src/runtime.ts:274-282`; `test/long-term-memory.test.ts`, `runtime-integration.test.ts` | One redacted entry per ticket, keyword AND recall, three results. No retention, dedupe beyond per-ticket upsert, semantic search, or month-scale story. Documented as partial in `README.md:115`; keep it that way until the scale work lands (P2-1). |
+| **长期记忆** (T48) | partial | `src/memory/long-term.ts`; write on terminal ticket in `src/runtime.ts:201-216`; recall injection in `src/runtime.ts:274-282`; `test/long-term-memory.test.ts`, `runtime-integration.test.ts` | One redacted entry per ticket, keyword AND recall, three results. #54 added retention (count/age, default 1000 entries / 90 days, 0 disables) with transactional spill+grant cleanup and configurable env; dedupe beyond per-ticket upsert, semantic search, and the month-scale story remain open (P2-1 is now partially resolved). Documented as partial in `README.md:115`. |
 | **产品层** (T49) | external boundary + partial | `src/core/lifecycle.ts` (`LifecycleBus`, `subscribe`, `snapshot`); lifecycle publishing in `src/runtime.ts:190-216,432-469`; `ds-agent memory` / `ds-agent a2a` in `src/cli/main.ts:204-231`; `test/lifecycle-a2a.test.ts`, `cli-memory-a2a.test.ts`, `runtime-integration.test.ts` | The in-repo contract is done; the actual panel is another repository (PLAN §9 T49). The bus is in-memory and unbounded: `LifecycleBus.history` grows without a cap and does not survive restart, so a panel cannot replay an earlier process. Bound it and/or persist events (P1-4). |
 | **互操作** (T50) | external boundary + partial | `src/channels/a2a.ts`; `Runtime.sendA2A` and local recipient in `src/runtime.ts:319-328,390-395`; `test/lifecycle-a2a.test.ts`, `runtime-integration.test.ts` | Validation, 64 KiB cap, persistence, `delivered\|unroutable\|failed`, and a filtered `a2a` Trigger exist. There is no cross-process transport and no authentication; an adapter must add both. Document the adapter contract and never expose the local endpoint unauthenticated (P1-5). |
-| **安全与隐私** (T51) | external boundary + partial | `src/env/sanitize.ts` (allowlist, secret redaction), `vault.ts`, `seccomp.ts`; `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts` | In-repo: env allowlist, spill redaction, `[redacted]` output, FileVault names only, default-on fail-closed OS sandbox (#44), spill ACL, untrusted `meta` rejection. External: host-level vault/seccomp and true host isolation. Sandbox docs still describe the old opt-in (C15); credential probes are incomplete (P0-5). |
+| **安全与隐私** (T51) | external boundary + partial | `src/env/sanitize.ts` (allowlist, secret redaction), `vault.ts`, `seccomp.ts`; `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `credential-sentinel.test.ts` | In-repo: env allowlist, spill redaction, `[redacted]` output, FileVault names only, default-on fail-closed OS sandbox (#44), spill ACL, untrusted `meta` rejection, and a single sentinel test across SQLite/journal/tool results/model requests plus Worker port/tool rejection (#53). External: host-level vault/seccomp, true host read isolation (the wrapper confines writes/network only), and provider `Authorization` header/vault values not covered by the offline sentinel. Sandbox docs corrected by #55. |
 
 ## 4. Definition of done (the whole project)
 
@@ -124,7 +126,9 @@ The project can be called complete only when **all** of these are true.
 4. Security probes are automated: a sentinel credential value must not appear in
    any session event, prompt, tool result, spill, or journal; a Worker call to
    `reply`/`decide`/`receive` must throw; a speculative ticket must be absent
-   from `visibleTickets` until the gate delivers. **Open: P0-5.**
+   from `visibleTickets` until the gate delivers. **Satisfied by #53**, except
+   the provider `Authorization` header, external transports, and vault-injected
+   values, which stay documented limits.
 5. Capacity and failure paths have tests: mesh capacity-full behavior, A2A
    failure, shard arbitration, batch > 1, watchdog fail, resume after restart.
 
@@ -223,8 +227,8 @@ documentation (P1-10), not enforcement.
 
 ### P0 — top open gaps
 
-**P0-4. Re-freeze the interface contract (unchanged).**
-Status: open, in progress.
+**P0-4. Re-freeze the interface contract.**
+Status: in review — PR #56 (`docs/plan-contract`).
 Evidence: `PLAN.md:280` freezes `SessionRole`; `PLAN.md:342` freezes
 `Assignment.status`; `PLAN.md:538` freezes `Harness.injectJobResult`;
 `src/shared/types.ts:1` defines `Role`, `:5` adds `maybe`, `:104` uses
@@ -234,20 +238,21 @@ Evidence: `PLAN.md:280` freezes `SessionRole`; `PLAN.md:342` freezes
 Acceptance: PLAN §4 either matches `src/shared/types.ts`/`ports.ts` or is
 renamed "illustrative"; §10 matches the real tree; `npx tsc --noEmit` stays
 green; a short contract test or doc check catches future drift.
-Suggested workstream: docs + shared-module owner, new branch
-`docs/re-freeze-contract`.
+PR #56 marks §4 as a historical sketch with a current-contract table and
+corrects §10; `PLAN.md:49` still needs the `node:sqlite`/`ds-agent.db` fix.
 
-**P0-5. Prove credential non-leakage on every path (unchanged).**
-Status: open, in progress.
-Evidence: `test/hardening.test.ts:73-86` proves spill-body redaction; the plan's
-D13 probe asks for prompt/session assembly. `LocalEnv` redacts stdout/stderr and
-the Logger redacts, but there is no single sentinel test across store messages,
-journal, tool results, and model requests.
-Acceptance: one offline test sets a sentinel key, runs a worker that echoes it,
-and asserts the sentinel is absent from every `store.listMessages`, JSONL
-journal line, tool result, and captured model request. Also assert `WorkerPorts`
-rejects `reply`/`decide`/`receive`.
-Suggested workstream: security agent, new branch `test/credential-probes`.
+**P0-5. Prove credential non-leakage on every path.**
+Status: resolved by #53 (`d5135f6`), with documented coverage limits.
+Evidence: `test/credential-sentinel.test.ts` injects a unique sentinel via
+`DS_AGENT_API_KEY`, drives a ticket through `Runtime` with a capturing model,
+and asserts absence from every SQLite table found via `sqlite_master` (messages,
+documents, spills, events, replies, outbox, sessions, jobs, artifacts), the
+session JSONL, spill bodies, persisted tool results, the runtime log, and every
+captured model request body. It also asserts Worker tool/port rejection.
+Limits: the provider `Authorization` header necessarily carries the credential;
+external Feishu/GitHub transports and vault-injected values are not covered by
+this offline test.
+Acceptance met; keep the limits visible.
 
 ### P1 — needed for a defensible "complete"
 
@@ -306,16 +311,18 @@ Acceptance: either `pnpm build` emits `dist/cli.js` and `npm pack` exposes the
 Suggested workstream: release agent, `chore/packaging`.
 
 **P1-9. Reproduce the live reference run.**
-Status: open. `docs/MODULES.md:179` claims 207 passed / 3 skipped on a live
-Magpie run (431.12 s). This audit has no live key and did not reproduce it. The
-offline CI gate reports 196 passed / 15 skipped / 35 files on `7f1c9a1`.
-Acceptance: a dated live run with the model id, pass/skip counts, and transcript
-path; update `docs/MODULES.md` if the number changes.
+Status: partially reproduced, still open. `docs/MODULES.md:179` claims 207
+passed / 3 skipped on a live Magpie run (431.12 s). On `7f1c9a1`, the previously
+red live tests `job`, `ports`, and `metrics` pass together (13/13, 90.48 s). A
+full `pnpm test` on `7f1c9a1` reached 206 passed / 3 skipped with 2 failures that
+were both upstream provider 429s (`live-modules` model call; `metrics` saw
+`model.error: 3` instead of 0), not product assertions. Re-run with a healthy
+provider quota and record the dated counts; update `docs/MODULES.md` if the
+reference number changes.
 Suggested workstream: release agent, `ci/live-reference-run`.
 
 **P1-10. Correct the sandbox documentation after #44.**
-Status: open. The code is default-on/fail-closed, but the docs still describe
-`DS_AGENT_SANDBOX=1` as an opt-in and say bash falls back unsandboxed.
+Status: in review — PR #55 (`docs/fail-closed-sandbox`).
 Evidence: `README.md:119`, `README.zh-CN.md:115`, `docs/MODULES.md:126`,
 `docs/safety.md:29,31`, `docs/zh/safety.md:30,32`,
 `docs/HARDENING_2026-11-01.md:39`, `docs/LIVE_CODE_REVIEW_2026-11-01.md:130,185`
@@ -323,8 +330,9 @@ Evidence: `README.md:119`, `README.zh-CN.md:115`, `docs/MODULES.md:126`,
 history).
 Acceptance: user-facing docs say sandboxing is default-on and fails closed when
 `sandbox-exec`/`bwrap` is absent; explicit opt-out is described as test/embedding
-only; the historical reviews get a status note.
-Suggested workstream: docs agent, `docs/sandbox-defaults`.
+only; the historical reviews get a status note; read isolation is not overclaimed.
+PR #55 covers all of these, adds the `bwrap`/`sandbox-exec` requirement to both
+install pages, and states that writes/network are confined but reads are not.
 
 ### P2 — quality and scale
 
@@ -359,19 +367,19 @@ the work is already public.
 | P0-1 | Land refactor + MODULES/HARDENING |  | `refactor/m0-m11-modules` | #40 (`4b919bd`) | resolved | Merged; `src/phase2` gone; domain tests run in CI |
 | P0-2 | Remove stale opt-in docs |  | `docs/module-boundaries` | #41 (`a38ea81`), #51 (`3e04e82`) | resolved | Only the two explicit negations in `PLAN.md` remain |
 | P0-3 | Fix `MODULES.md` demo runner |  | `docs/m11-demo-runner-fix` | #46 (`0d9ec20`) | resolved | Points at `src/cli/demos/run.ts` |
-| P0-4 | Re-freeze PLAN §4/§10 contract |  |  |  | in progress | Plan matches `src/shared` and the real tree, or says illustrative; typecheck green |
-| P0-5 | Credential sentinel test across store/journal/prompt/tool |  |  |  | in progress | Sentinel absent everywhere; Worker port calls throw |
+| P0-4 | Re-freeze PLAN §4/§10 contract |  | `docs/plan-contract` | #56 | in review | Plan matches `src/shared` and the real tree, or says illustrative; typecheck green |
+| P0-5 | Credential sentinel test across store/journal/prompt/tool |  | `test/credential-sentinel` | #53 (`d5135f6`) | resolved | Sentinel absent from all SQLite tables, session JSONL, tool results, and captured model requests; Worker port/tool calls throw |
 | P1-1 | Real-channel acceptance job/checklist |  |  |  | todo | `workflow_dispatch` or release evidence for `pnpm demo` + Feishu |
-| P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | in progress (rebasing) | Router originates decisions, or docs say veto-only |
+| P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | in review (spill-trust fix requested) | Router originates decisions, or docs say veto-only |
 | P1-3 | Mesh capacity enforcement |  |  |  | todo | Queue or reject on capacity-full, with test |
 | P1-4 | Lifecycle replayability |  |  |  | todo | Bounded/persisted bus or explicit current-process note |
 | P1-5 | A2A transport interface + auth note |  |  |  | todo | `A2ATransport` + test double; auth requirement documented |
 | P1-6 | `ds-agent serve` + in-flight resume |  |  |  | todo | Serve works, SIGTERM clean, resume tested, or docs downgraded |
 | P1-7 | Packaging decision |  |  |  | todo | Working `bin`/`build`, or explicit source-only note |
 | P1-8 | Fail-closed filesystem sandbox |  | `fix/env-fail-closed-sandbox` | #44 (`7f1c9a1`) | resolved | Missing wrapper throws; CI installs `bubblewrap` |
-| P1-9 | Reproduce live reference run |  |  |  | todo | Dated live run matches `MODULES.md:179` or updates it |
-| P1-10 | Correct sandbox docs to default-on/fail-closed |  |  |  | todo | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in |
-| P2-1 | LTM retention/ranking |  |  |  | todo | Cap + recall formula test |
+| P1-9 | Reproduce live reference run |  |  |  | partially reproduced | 3/3 previously red live files pass; full run hit provider 429, not assertion failures |
+| P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 | in review | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
+| P2-1 | LTM retention/ranking |  | `feat/ltm-retention` | #54 (`ab90eae`) | partially resolved | Retention 1000/90 + spill cleanup landed; ranking/dedupe still open |
 | P2-2 | Shard arbitration |  |  |  | todo | Precedence documented + test |
 | P2-3 | Fast-path allowlists |  |  |  | todo | Actor/group/drop-self tests |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
