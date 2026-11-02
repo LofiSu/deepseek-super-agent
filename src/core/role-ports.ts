@@ -22,8 +22,8 @@ export function bindRolePorts(engine: Engine): RolePorts {
   const routerMethods: Omit<RouterPorts, typeof rolePortBrand> = {
     receive: (trigger: Trigger): ReceiveResult => engine.receive(trigger),
     decide: (triggerId: string, outcome: AssessmentOutcome) => engine.decide(triggerId, outcome),
-    reply: (ticketId: string, text: string, purpose: string): void => {
-      engine.reply(ticketId, text, purpose)
+    reply: (ticketId: string, text: string, purpose: string, threadKey?: string): void => {
+      engine.reply(ticketId, text, purpose, threadKey)
     },
     stop: (ticketId: string, reason: string): void => {
       engine.stop(ticketId, reason)

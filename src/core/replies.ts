@@ -6,20 +6,20 @@ import type { Host } from './host.ts'
 export class Replies {
   constructor(private readonly host: Host) {}
 
-  acknowledge(ticket: Ticket): void {
-    this.send(ticket, `Acknowledged “${ticket.title}”. Working on it.`, 'acknowledgement')
+  acknowledge(ticket: Ticket, threadKey?: string): void {
+    this.send(ticket, `Acknowledged “${ticket.title}”. Working on it.`, 'acknowledgement', threadKey)
   }
 
   answer(ticket: Ticket, text: string): void {
     this.send(ticket, text, 'result')
   }
 
-  send(ticket: Ticket, text: string, purpose: string): void {
+  send(ticket: Ticket, text: string, purpose: string, threadKey?: string): void {
     if (!maySurface(ticket.speculative, ticket.speculative ? false : undefined)) {
       this.host.log(`[speculate] reply held ticketId=${ticket.id} purpose=${purpose}`)
       return
     }
-    const ref = ticket.channels[0]
+    const ref = channelFor(ticket, threadKey)
     const channel = ref?.source ?? 'cli'
     const thread = ref?.thread ?? 'local'
     const target = ref?.address ?? {}
@@ -54,10 +54,25 @@ export class Replies {
       target,
       text: rendered,
       status: 'pending',
+      idempotencyKey: row.id,
+      attempts: 0,
       createdAt,
     })
     this.host.log(`[channel] norm=${channel} ticketId=${ticket.id} purpose=${purpose}`)
     this.host.log(`[reply] purpose=${purpose} ticketId=${ticket.id} channel=${channel} thread=${thread} text=${rendered.replace(/\s+/g, ' ')}`)
     this.host.log(`[outbox] enqueue outboxId=${outboxId} replyId=${row.id} channel=${channel} thread=${thread} ticketId=${ticket.id}`)
   }
+}
+
+/**
+ * A reply belongs to the Thread that produced the input, not to whichever
+ * Channel happened to be first on the Ticket. `threadKey` is `source:id`.
+ */
+function channelFor(ticket: Ticket, threadKey?: string): Ticket['channels'][number] | undefined {
+  if (!threadKey) return ticket.channels[0]
+  const split = threadKey.indexOf(':')
+  const source = split < 0 ? undefined : threadKey.slice(0, split)
+  const id = split < 0 ? threadKey : threadKey.slice(split + 1)
+  return ticket.channels.find(ref => ref.thread === id && (source == null || ref.source === source))
+    ?? ticket.channels[0]
 }

@@ -69,24 +69,46 @@ export interface TriggerTrust {
   shards?: string[]
 }
 
+/**
+ * Many-to-many Ticket ↔ Thread relation. A subscription only supplies context;
+ * it never widens the Ticket's Mandate.
+ *
+ * `contextOnly` keeps a Ticket aware of a Thread without waking an ended Ticket
+ * and without turning a human follow-up into Executor work.
+ */
+export interface Subscription {
+  threadKey: string
+  ticketId: string
+  contextOnly?: boolean
+  createdAt: string
+}
+
 export interface Thread {
   key: string
   ref: ThreadRef
   createdAt: string
   lastAt?: string
+  /** Ticket ids subscribed to this Thread. `contextOnly` is a subset. */
   subscriptions: string[]
   /** Per-subscription flags. A contextOnly subscriber does not get a follow-up bypass. */
   subscriptionMeta?: Record<string, { contextOnly?: boolean; at?: string }>
+  /** Subscribed Ticket ids that may read context but must not be woken. */
+  contextOnly?: string[]
   correlated: string[]
   pending: string[]
+  /** Gate deferred this Thread; the next step is a Main Agent assessment. */
+  deferred?: boolean
   meta: Record<string, unknown>
 }
 
 export interface Disposition {
   filtered?: string
+  /** Tickets that received this Trigger as actionable input and were woken. */
   fanout: string[]
   /** Router shards that matched this trigger. */
   shards?: string[]
+  /** Tickets that received this Trigger as context only. */
+  context?: string[]
   handbacks?: { ticketId: string; reason: string; at: string }[]
   at: string
 }
@@ -94,9 +116,13 @@ export interface Disposition {
 export interface Mandate {
   strength: Strength
   policyVersion: string
+  /** Authorized work scope from Eval. Expanding it requires a new Ticket. */
   scope: string
   actor: ActorRef
+  /** `addressed` | `followup` | `admission` | `bot` | `speculative` */
   basis: string
+  /** Enabled Policy rule ids used for this admission. */
+  rules?: string[]
 }
 
 export interface Assignment {
@@ -115,12 +141,15 @@ export interface Assignment {
     verdict?: 'deliver' | 'discard' | 'hold'
     /** When the report was recorded. A progress report is a heartbeat, not a terminal stop. */
     at?: string
+    /** Set when the Executor needs a human answer before continuing. */
+    question?: string
   }
 }
 
 export interface TicketInput {
   id: string
-  kind: 'trigger' | 'text' | 'job'
+  /** `context` never wakes the Executor; it is background for the next turn. */
+  kind: 'trigger' | 'text' | 'job' | 'context'
   triggerId?: string
   text?: string
   spillId?: string
@@ -177,6 +206,8 @@ export interface Ticket {
   spillId?: string
   mandate: Mandate
   threadKeys: string[]
+  /** Subset of threadKeys whose messages are context-only for this Ticket. */
+  contextOnlyThreads?: string[]
   channels: ChannelRef[]
   inputs: TicketInput[]
   assignments: Assignment[]
@@ -225,7 +256,11 @@ export interface OutboxRow {
   /** Delivery address copied from `ChannelRef.address` (repo/issue or chat_id/message_id). */
   target: Record<string, string>
   text: string
-  status: 'pending' | 'sent' | 'failed'
+  status: 'pending' | 'sending' | 'sent' | 'failed'
+  /** Stable key the remote channel can use to deduplicate a retried send. */
+  idempotencyKey?: string
+  attempts?: number
+  nextAttemptAt?: string
   externalId?: string
   error?: string
   createdAt: string

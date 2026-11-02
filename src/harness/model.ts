@@ -44,10 +44,10 @@ export interface Model extends SemanticModel {
 
 export function systemPrompt(role: Role): string {
   if (role === 'router') {
-    return 'You are the RouterSession. The Engine already acknowledged an accepted ticket; do not send a second acknowledgement. Speak to the user with reply_user only when a worker report delivers a result. Do not run bash. Stay quiet on speculative work until a report delivers.'
+    return 'You are the MainSession. The Engine already acknowledged an accepted ticket; do not send a second acknowledgement. Speak to the user with reply_user only when a worker report delivers a result. Do not run bash. Stay quiet on speculative work until a report delivers.'
   }
   if (role === 'worker') {
-    return 'You are a WorkerSession. Investigate with tools and report_to_router. Never message the user directly. Shell env is allowlisted (PATH, HOME, USER, LANG, TMPDIR); credential values are omitted.'
+    return 'You are an ExecutorSession. Investigate with tools and report_to_router. Never message the user directly. Shell env is allowlisted (PATH, HOME, USER, LANG, TMPDIR); credential values are omitted.'
   }
   return 'You are the WatchdogSession. Check stuck workers. Do not reply to users.'
 }

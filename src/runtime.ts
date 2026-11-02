@@ -7,7 +7,10 @@ import type {
   PauseOutcome,
   ResumeOutcome,
 } from './core/collab.ts'
+import { assessWithMainAgent } from './core/assessment.ts'
 import { Engine } from './core/engine.ts'
+import { arbitrateSubscribers } from './core/intake.ts'
+import { withSessionRole } from './core/session-role.ts'
 import { bindRolePorts } from './core/role-ports.ts'
 import type { Host } from './core/host.ts'
 import { LocalEnv } from './env/local-env.ts'
@@ -28,7 +31,7 @@ import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
 import { Logger } from './shared/log.ts'
-import type { Disposition, ReceiveResult, Ticket, Trigger, TriggerTrust } from './shared/types.ts'
+import type { Disposition, ReceiveResult, Thread, Ticket, Trigger, TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
 import { settleSpeculation } from './speculate/silent.ts'
@@ -314,6 +317,8 @@ export class Runtime {
       redact,
       batchWindowMs: opts.batchWindowMs ?? 0,
     })
+    // Gate-deferred work goes to the Main Agent, not to an automatic accept.
+    host.onAssessmentNeeded = () => runtime.assessPending()
     // Local A2A endpoint: an envelope addressed to this instance becomes a normal,
     // untrusted Trigger and goes through the same ingress filter.
     a2aRouter.register(instanceId, envelope => {
@@ -329,8 +334,54 @@ export class Runtime {
     return runtime
   }
 
+  private assessments = new Set<Promise<void>>()
+  private assessingThreads = new Set<string>()
+
+  private assessPending(): void {
+    if (!this.store.isOpen) return
+    for (const thread of this.store.listDocs<Thread>('thread')) {
+      if (!thread.deferred || !thread.pending.length || this.assessingThreads.has(thread.key)) continue
+      this.assessingThreads.add(thread.key)
+      const work = Promise.resolve().then(async () => {
+        // The snapshot is taken when the queued Router turn starts, coalescing same-tick ingress.
+        const current = this.store.getDoc<Thread>('thread', thread.key)
+        const ids = [...(current?.pending ?? [])]
+        if (!ids.length) return
+        const triggers = ids.map(id => this.store.getDoc<Trigger>('trigger', id))
+          .filter((trigger): trigger is Trigger => trigger != null)
+        const live = arbitrateSubscribers(this.store.listDocs<Ticket>('ticket').filter(ticket =>
+          current!.subscriptions.includes(ticket.id) && !ticket.ended))
+        const outcome = await assessWithMainAgent(this.model, triggers, live)
+        if (!this.store.isOpen) return
+        const decision = withSessionRole('router', () => this.engine.commitAssessed(thread.key, ids, outcome))
+        if (decision?.kind === 'accept' && decision.ticketId) {
+          const ticket = this.store.getDoc<Ticket>('ticket', decision.ticketId)
+          if (ticket) this.harness.launch(ticket)
+        }
+      }).catch(error => {
+        this.log.info(`[engine] Router assessment failed thread=${thread.key} error=${String(error)}`)
+      }).finally(() => {
+        this.assessingThreads.delete(thread.key)
+        this.assessments.delete(work)
+        if (this.store.isOpen) this.assessPending()
+      })
+      this.assessments.add(work)
+    }
+  }
+
   start(): void {
     this.daemon.start()
+    // Resume Gate-deferred work left in SQLite by a previous process.
+    this.assessPending()
+  }
+
+  /** Wait until every in-flight Main Agent assessment has committed. */
+  async assessmentsSettled(): Promise<void> {
+    for (let wave = 0; wave < 40; wave += 1) {
+      if (this.assessments.size === 0) return
+      await Promise.allSettled([...this.assessments])
+    }
+    throw new Error('main-agent assessments did not settle')
   }
 
   /**
@@ -472,6 +523,14 @@ export class Runtime {
     return this.engine.collaboration(ticketId)
   }
 
+  /** New Assignment on the same Ticket, then launch its Executor session. */
+  async retry(ticketId: string, reason = 'retry'): Promise<Ticket | undefined> {
+    this.engine.retryTicket(ticketId, reason)
+    const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
+    if (ticket && !ticket.ended) await this.harness.launch(ticket)
+    return ticket
+  }
+
   watchdogTurn(): Promise<void> {
     return this.harness.watchdogTurn()
   }
@@ -486,8 +545,9 @@ export class Runtime {
     await this.harness.jobsSettled()
   }
 
-  /** Wait for jobs, stop the daemon, and close SQLite. */
+  /** Wait for assessments and jobs, stop the daemon, and close SQLite. */
   async finish(): Promise<void> {
+    await this.assessmentsSettled()
     this.flushEvals()
     await this.harness.jobsSettled()
     this.daemon.stop()

@@ -46,7 +46,7 @@ describe('subscription bypass', () => {
     await runtime.finish()
   })
 
-  it('reject-non-human: a bot trigger on a subscribed thread does not bypass', async () => {
+  it('bot/CI context reaches the existing Ticket and still becomes a new-work candidate', async () => {
     runtime = freshRuntime()
     expect(runtime.ingest(imTrigger({
       id: 'trg_login',
@@ -65,11 +65,14 @@ describe('subscription bypass', () => {
       actor: { source: 'github', id: 'ci-bot' },
     })).toBe('stored')
 
+    // A bot event is context for the live Ticket (it does not wake its Executor),
+    // and it independently enters Eval as a new-work candidate.
     const disposition = runtime.store.getDoc<Disposition>('disposition', 'trg_ci')
     expect(disposition?.fanout).toEqual([])
+    expect(disposition?.context).toEqual([original.id])
     expect(runtime.log.text()).not.toContain('bypass=subscription')
     const kept = runtime.store.getDoc<Ticket>('ticket', original.id)
-    expect(kept?.inputs.some(input => input.triggerId === 'trg_ci')).toBe(false)
+    expect(kept?.inputs.some(input => input.triggerId === 'trg_ci' && input.kind === 'context')).toBe(true)
     expect(kept?.ended).toBeUndefined()
     expect(runtime.store.listDocs<Ticket>('ticket')).toHaveLength(2)
     await runtime.finish()
@@ -162,7 +165,7 @@ describe('subscription bypass', () => {
     await runtime.finish()
   })
 
-  it('arbitration: one human follow-up reaches the active subscriber, otherwise the most recent', async () => {
+  it('many-to-many: every live subscriber receives the same human follow-up', async () => {
     let clock = Date.parse('2026-10-31T00:00:00.000Z')
     runtime = freshRuntime({ now: () => new Date(clock += 1000).toISOString() })
     expect(runtime.ingest(imTrigger({
@@ -187,18 +190,16 @@ describe('subscription bypass', () => {
       thread: 'topic/shared',
       text: '@ds-agent login still 500, the timeout is back',
     }))).toBe('stored')
-    expect(runtime.store.getDoc<Disposition>('disposition', 'trg_recent')?.fanout).toEqual([newer!.id])
+    const fanout = runtime.store.getDoc<Disposition>('disposition', 'trg_recent')?.fanout ?? []
+    expect(fanout.sort()).toEqual([older!.id, newer!.id].sort())
     expect(runtime.log.text()).toContain(`bypass=subscription ticketId=${newer!.id}`)
-    expect(runtime.log.text()).not.toContain(`bypass=subscription ticketId=${older!.id}`)
-    expect(runtime.store.getDoc<Ticket>('ticket', older!.id)?.inputs.some(input => input.triggerId === 'trg_recent')).toBe(false)
+    expect(runtime.log.text()).toContain(`bypass=subscription ticketId=${older!.id}`)
+    expect(runtime.store.getDoc<Ticket>('ticket', older!.id)?.inputs.some(input => input.triggerId === 'trg_recent')).toBe(true)
+    expect(runtime.store.getDoc<Ticket>('ticket', newer!.id)?.inputs.some(input => input.triggerId === 'trg_recent')).toBe(true)
 
-    const bumped = runtime.store.getDoc<Ticket>('ticket', newer!.id)!
-    bumped.assignments = bumped.assignments.map(assignment => ({
-      ...assignment,
-      state: 'ended',
-      endedAt: '2026-10-31T00:00:09.000Z',
-    }))
-    runtime.store.putDoc('ticket', bumped.id, bumped)
+    const ended = runtime.store.getDoc<Ticket>('ticket', newer!.id)!
+    ended.ended = { at: '2026-10-31T00:00:09.000Z', outcome: 'ready', by: 'executor' }
+    runtime.store.putDoc('ticket', ended.id, ended)
     expect(runtime.ingest(imTrigger({
       id: 'trg_active',
       thread: 'topic/shared',

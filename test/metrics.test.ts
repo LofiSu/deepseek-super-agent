@@ -81,8 +81,13 @@ describe('section 7 metrics', () => {
       'ingress.drop': 1,
       'eval.accept': 2,
       'bypass.fanout': 1,
+      'bypass.context': 0,
+      'executor.fail': 1,
+      'speculate.deliver': 1,
       'speculate.discard': 1,
-      'watchdog.fail': 1,
+      'watchdog.idle': 1,
+      'watchdog.nudge': 1,
+      'watchdog.fail': 0,
       'model.error': 0,
     })
     // These depend on what the live model chose to do in this run.

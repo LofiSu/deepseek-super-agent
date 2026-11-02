@@ -59,7 +59,7 @@ export class Harness {
     const sessionId = routerSessionId(shard)
     if (this.routersReady.has(sessionId)) return
     this.routersReady.add(sessionId)
-    this.opts.log(`[harness] RouterSession start session=${sessionId} role=router`)
+    this.opts.log(`[harness] MainSession start session=${sessionId} role=router`)
   }
 
   launch(ticket: Ticket): Promise<void> {
@@ -75,7 +75,7 @@ export class Harness {
       ? []
       : this.opts.routerSessions?.(ticket) ?? ['default']
     for (const shard of shards) this.armRouter(shard)
-    this.opts.log(`[harness] dual-layer routers=${shards.map(routerSessionId).join(',') || '-'} WorkerSession=${sessionId} ticketId=${ticket.id}`)
+    this.opts.log(`[harness] dual-layer routers=${shards.map(routerSessionId).join(',') || '-'} ExecutorSession=${sessionId} ticketId=${ticket.id}`)
     if (this.running.size >= 2) {
       this.opts.log(`[harness] parallel workers=${this.running.size} sessions=${[...this.running].join(',')}`)
     }
@@ -124,7 +124,7 @@ export class Harness {
       }
       const assignment = latest.assignments.at(-1)
       if (!assignment) throw new Error(`ticket ${latest.id} has no assignment`)
-      this.opts.log(`[harness] WorkerSession start session=${sessionId} ticketId=${latest.id} role=worker`)
+      this.opts.log(`[harness] ExecutorSession start session=${sessionId} ticketId=${latest.id} role=worker`)
       this.opts.assignmentStarted(latest.id, assignment.id, sessionId)
       if (node) {
         // assignmentStarted wrote the ticket; re-read so the node does not clobber startedAt.
@@ -215,7 +215,7 @@ export class Harness {
       : this.opts.routerSessions?.(ticket) ?? ['default']
     for (const shard of shards) this.armRouter(shard)
     this.opts.log(
-      `[harness] WorkerSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
+      `[harness] ExecutorSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
     )
     if (assignment.state === 'pending') {
       this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
@@ -476,8 +476,8 @@ async function runTurnBody(input: {
   pause?: () => string | undefined
 }): Promise<void> {
   const label = input.session.role === 'router'
-    ? 'RouterSession'
-    : input.session.role === 'worker' ? 'WorkerSession' : 'WatchdogSession'
+    ? 'MainSession'
+    : input.session.role === 'worker' ? 'ExecutorSession' : 'WatchdogSession'
   const redact = input.redact
   input.log(`[harness] ${label} turn session=${input.session.id}`)
   const pausedAtStart = input.pause?.()

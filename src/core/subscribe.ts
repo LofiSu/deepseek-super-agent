@@ -19,6 +19,7 @@ export function handback(host: Host, ticketId: string, triggerId: string, reason
   const thread = host.repo.getDoc<Thread>('thread', key)
   if (thread) {
     thread.subscriptions = thread.subscriptions.filter(id => id !== ticketId)
+    thread.contextOnly = (thread.contextOnly ?? []).filter(id => id !== ticketId)
     if (!thread.pending.includes(triggerId)) thread.pending.push(triggerId)
     host.repo.putDoc('thread', key, thread)
     host.onQueued?.(key, triggerId, thread.pending)
@@ -27,6 +28,7 @@ export function handback(host: Host, ticketId: string, triggerId: string, reason
   const ticket = host.repo.getDoc<Ticket>('ticket', ticketId)
   if (ticket) {
     ticket.threadKeys = ticket.threadKeys.filter(item => item !== key)
+    ticket.contextOnlyThreads = (ticket.contextOnlyThreads ?? []).filter(item => item !== key)
     host.repo.putDoc('ticket', ticketId, ticket)
   }
 

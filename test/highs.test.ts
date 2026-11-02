@@ -44,7 +44,7 @@ describe('gate and assessment', () => {
     const text = runtime.log.text()
     expect(text).toContain('[engine] Evals.ignore')
     expect(text).not.toContain('Tickets.create')
-    expect(text).not.toContain('WorkerSession')
+    expect(text).not.toContain('ExecutorSession')
     expect(text).not.toContain('Assignments.start')
   })
 
@@ -60,7 +60,7 @@ describe('gate and assessment', () => {
     expect(decision?.kind).toBe('unavailable')
     expect(decision?.reason).toBe('assessor-unavailable')
     expect(runtime.log.text()).toContain('[engine] Evals.unavailable')
-    expect(runtime.log.text()).not.toContain('WorkerSession')
+    expect(runtime.log.text()).not.toContain('ExecutorSession')
   })
 
   it('stops the live ticket instead of bypassing or opening another', async () => {
@@ -130,8 +130,10 @@ describe('watchdog tick', () => {
 
     runtime.watchdog.tick()
     const failed = runtime.store.getDoc<Ticket>('ticket', ticket.id)!
-    expect(failed.ended).toMatchObject({ outcome: 'failed', by: 'watchdog' })
+    // Watchdog fails the Assignment, not the Ticket. The Ticket can be retried.
+    expect(failed.ended).toBeUndefined()
     expect(failed.assignments[0]?.state).toBe('ended')
+    expect(failed.assignments[0]?.report?.kind).toBe('failed')
     expect(runtime.log.text()).toContain('[watchdog] fail ticketId=ticket_stuck')
     expect(runtime.store.listEvents().some(event => event.type === 'watchdog.fail')).toBe(true)
   })
@@ -145,7 +147,10 @@ describe('watchdog tick', () => {
       runtime.store.completeJob(job.id, 'failed')
     }
     runtime.watchdog.tick()
-    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.ended).toMatchObject({ outcome: 'failed', by: 'watchdog' })
+    const failedTicket = runtime.store.getDoc<Ticket>('ticket', ticket.id)!
+    expect(failedTicket.ended).toBeUndefined()
+    expect(failedTicket.assignments[0]?.state).toBe('ended')
+    expect(failedTicket.assignments[0]?.report?.kind).toBe('failed')
     expect(runtime.log.text()).toContain('[watchdog] fail ticketId=ticket_jobs')
     expect(runtime.log.text()).not.toContain('[watchdog] nudge')
     expect(stuckAssignments(
@@ -262,7 +267,7 @@ describe('journal-driven turns', () => {
     expect(blob).toContain('JOB_DONE')
     const jobAt = jobCall!.findIndex(content => content.startsWith('JOB_DONE'))
     expect(jobAt).toBeGreaterThan(1)
-    expect(jobCall![0]).toContain('WorkerSession')
+    expect(jobCall![0]).toContain('ExecutorSession')
   })
 })
 
