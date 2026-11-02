@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="{{ page.lang | default: site.lang | default: 'en' }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% assign lang = page.lang | default: site.lang | default: 'en' %}
+  <title>{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+  <link rel="canonical" href="{{ page.url | absolute_url }}">
+  {% if page.alt %}
+  <link rel="alternate" hreflang="{% if lang == 'zh-CN' %}en{% else %}zh-Hans{% endif %}" href="{{ page.alt | absolute_url }}">
+  {% endif %}
+  <meta property="og:title" content="{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}">
+  <meta property="og:description" content="{{ page.description | default: site.description }}">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="{{ page.url | absolute_url }}">
+  <meta name="theme-color" content="#f4f0e6">
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+</head>
+<body>
+  <a class="skip" href="#content">{% if lang == 'zh-CN' %}跳到正文{% else %}Skip to content{% endif %}</a>
+  <header class="site-header">
+    <a class="brand" href="{% if lang == 'zh-CN' %}{{ '/zh/' | relative_url }}{% else %}{{ '/' | relative_url }}{% endif %}">
+      <span class="brand-lab">ds-agent</span>
+      <span class="brand-slash" aria-hidden="true">/</span>
+      <span class="brand-name">deepseek-super-agent</span>
+    </a>
+    <p class="tagline">{% if lang == 'zh-CN' %}{{ site.tagline_zh }}{% else %}{{ site.tagline_en }}{% endif %}</p>
+    {% assign other = page.alt | default: '/' %}
+    {% if lang != 'zh-CN' %}{% assign other = page.alt | default: '/zh/' %}{% endif %}
+    <nav aria-label="{% if lang == 'zh-CN' %}文档{% else %}Docs{% endif %}">
+      {% if lang == 'zh-CN' %}
+      <a href="{{ '/zh/' | relative_url }}"{% if page.nav == 'home' %} aria-current="page"{% endif %}>首页</a>
+      <a href="{{ '/zh/install/' | relative_url }}"{% if page.nav == 'install' %} aria-current="page"{% endif %}>安装</a>
+      <a href="{{ '/zh/architecture/' | relative_url }}"{% if page.nav == 'architecture' %} aria-current="page"{% endif %}>架构</a>
+      <a href="{{ '/zh/safety/' | relative_url }}"{% if page.nav == 'safety' %} aria-current="page"{% endif %}>安全</a>
+      <a href="{{ other | relative_url }}" lang="en">English</a>
+      {% else %}
+      <a href="{{ '/' | relative_url }}"{% if page.nav == 'home' %} aria-current="page"{% endif %}>Home</a>
+      <a href="{{ '/install/' | relative_url }}"{% if page.nav == 'install' %} aria-current="page"{% endif %}>Install</a>
+      <a href="{{ '/architecture/' | relative_url }}"{% if page.nav == 'architecture' %} aria-current="page"{% endif %}>Architecture</a>
+      <a href="{{ '/safety/' | relative_url }}"{% if page.nav == 'safety' %} aria-current="page"{% endif %}>Safety</a>
+      <a href="{{ other | relative_url }}" lang="zh-Hans">中文</a>
+      {% endif %}
+      <a href="{{ site.repository_url }}">GitHub</a>
+    </nav>
+  </header>
+  <main id="content">
+    {% if page.home %}
+    <figure class="banner">
+      <img src="{{ '/assets/ds-agent-banner.png' | relative_url }}" alt="{% if lang == 'zh-CN' %}DeepSeek Super Agent，独立实现{% else %}DeepSeek Super Agent, independently implemented{% endif %}">
+    </figure>
+    {% endif %}
+    {{ content }}
+  </main>
+  <footer class="site-footer">
+    {% if lang == 'zh-CN' %}
+    <p>独立实现。不是 DeepSeek 官方产品。</p>
+    <p>
+      <a href="{{ site.repository_url }}">仓库</a>
+      ·
+      <a href="{{ site.repository_url }}/blob/main/LICENSE">MIT</a>
+      ·
+      <a href="{{ site.repository_url }}/blob/main/README.zh-CN.md">README</a>
+    </p>
+    {% else %}
+    <p>Independent implementation. Not an official DeepSeek product.</p>
+    <p>
+      <a href="{{ site.repository_url }}">Repository</a>
+      ·
+      <a href="{{ site.repository_url }}/blob/main/LICENSE">MIT</a>
+      ·
+      <a href="{{ site.repository_url }}/blob/main/README.md">README</a>
+    </p>
+    {% endif %}
+  </footer>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# Stock GitHub Pages Jekyll. Source is /docs on branch main.
+# Settings → Pages → Deploy from a branch → main → /docs.
+# No Pages workflow: the built-in builder is enough.
+# Do not add plugins outside the GitHub Pages allow-list.
+#
+# Review notes in this folder stay in the repo. They are excluded below
+# so the public site is only the short pages.
+
+title: deepseek-super-agent
+description: "Thin TypeScript harness. Router, Worker, triggers, Watchdog. Not an official DeepSeek product."
+tagline_en: "Thin harness. Not an official DeepSeek product."
+tagline_zh: "薄 Harness。不是 DeepSeek 官方产品。"
+lang: en
+repository_url: "https://github.com/LofiSu/deepseek-super-agent"
+url: "https://lofisu.github.io"
+baseurl: "/deepseek-super-agent"
+timezone: "Etc/UTC"
+encoding: "utf-8"
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
+  syntax_highlighter: rouge
+
+permalink: pretty
+
+defaults:
+  - scope:
+      path: ""
+      type: pages
+    values:
+      layout: default
+      lang: en
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - .sass-cache
+  - .jekyll-cache
+  - ARCHITECTURE_REVIEW.zh.md
+  - CODE_REVIEW_METHOD.md
+  - LIVE_CODE_REVIEW_2026-11-01.md
+  - PLAN_SOLIDITY_OPUS.md
+  - REAL_CHANNELS.md
+  - REVIEW.md

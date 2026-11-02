@@ -12,7 +12,9 @@ Inspired by DeepSeek's public article and prototype. Independent implementation.
 
 Author: LofiSu. Co-written with Grokbot (CoderBot).
 
-[Inspiration](#inspiration) · [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Demo](#demo) · [Models](#models) · [Credits](#credits) · [License](#license)
+[Docs](docs/index.md) · [Inspiration](#inspiration) · [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Demo](#demo) · [Models](#models) · [Credits](#credits) · [License](#license)
+
+Shorter pages, same facts: [install](docs/install.md), [architecture](docs/architecture.md), [safety](docs/safety.md). [中文](docs/zh/index.md).
 
 ## What this is
 
@@ -114,7 +116,7 @@ Kept out of M11.
 - [~] A product shell that is not a Session (§8.2) — opt-in `ProductShellBus`
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
 - [~] A2A across instances (§8.3) — opt-in `A2ARouter` (in-process)
-- [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` + FileVault `describe()` (names only) + Darwin `sandbox-exec` / Linux `bwrap|unshare` when `DS_AGENT_SANDBOX=1` (§8.4, T51). Host vault/seccomp policy still external.
+- [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` for secret-named env values of at least 8 characters (shorter values and other names are left as-is) + FileVault `describe()` (names only) + Darwin `sandbox-exec` / Linux `bwrap|unshare` when `DS_AGENT_SANDBOX=1` (§8.4, T51). Host vault/seccomp policy still external.
 
 ### Modules M0–M11
 
@@ -221,14 +223,20 @@ Node.js 22+. See `engines` in [package.json](./package.json). The store uses `no
 
 ```bash
 pnpm install
+export DS_AGENT_API_BASE=https://api.deepseek.com
+export DS_AGENT_API_KEY=sk-...
+export DS_AGENT_API_MODEL=deepseek-flash
 pnpm test
 gh auth login            # real GitHub Source + Outbox
+export DS_AGENT_GH_REPO=your-account/your-writable-repo
 pnpm demo
 ```
 
-`pnpm test` and `pnpm demo` both require a live OpenAI-compatible model. MockModel is forbidden in the default suite and demo. `pnpm demo` uses real channels only: it creates/reads real GitHub issues and posts real issue comments through `gh api`; there is no fake IM/GitHub fallback. `pnpm demo:local` is an in-memory fixture baseline for offline smoke checks, not the acceptance path. Feishu setup and `pnpm demo:feishu` are documented in [docs/REAL_CHANNELS.md](./docs/REAL_CHANNELS.md).
+`pnpm test` and `pnpm demo` both require a live OpenAI-compatible model. MockModel is forbidden in the default suite and demo. Set `DS_AGENT_API_BASE`, `DS_AGENT_API_KEY`, and `DS_AGENT_API_MODEL` before `pnpm test`. If any of the three is missing, the `test` script fills a local Magpie default (`http://127.0.0.1:3425/v1`, key `magpie`, model `workbuddy/deepseek-v4.1-flash`). A provider key alone does not replace that, because the script sets the base and key itself.
 
-Set both `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY` (or a provider key). Setting only one of that pair exits with an error. Local Magpie defaults are applied by `test/setup-live.ts` when unset.
+`pnpm demo` uses real channels only: it creates and reads real GitHub issues and posts real issue comments through `gh api`. There is no fake IM or GitHub fallback. Set `DS_AGENT_GH_REPO` to a repository you can write. Unset, it is `LofiSu/deepseek-super-agent`. Closing the issues is best-effort. The close runs after each scenario's main work, a failed close is ignored, and a throw or an early return before the close leaves issues open. `DS_AGENT_GH_KEEP=1` skips the close. Afterwards, check for open issues labeled `ds-agent-demo`. `pnpm demo:local` is an in-memory fixture baseline for offline smoke checks, not the acceptance path. Feishu setup and `pnpm demo:feishu` are documented in [docs/REAL_CHANNELS.md](./docs/REAL_CHANNELS.md).
+
+`pnpm demo` and `pnpm ds-agent chat` do not apply the Magpie default from the test script. For those, set both `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY`, or one provider key. Setting only one of that pair exits with an error.
 
 Live demo for DeepSeek V4.1 Flash. The API name is `deepseek-flash`. Set `DS_AGENT_API_*`:
 
@@ -248,6 +256,7 @@ Omit `DS_AGENT_API_MODEL` on that pair and the client sends `deepseek-chat`. `DE
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
 export DS_AGENT_API_KEY=magpie
 export DS_AGENT_API_MODEL=deepseek/deepseek-flash
+export DS_AGENT_GH_REPO=your-account/your-writable-repo
 pnpm demo
 ```
 
@@ -273,7 +282,7 @@ pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 | `02-spill-github` | one real issue body + two real comments | Router replies as issue comments |
 | `03-watchdog-github` | one real issue pulled via `gh api` | acknowledgement issue comment |
 
-Each run creates fresh issues on `DS_AGENT_GH_REPO` (default `LofiSu/deepseek-super-agent`), waits for the live Magpie/DeepSeek model, posts real comments, then re-reads those comments from the GitHub API as proof. Issues are closed at the end unless `DS_AGENT_GH_KEEP=1`. Logs and JSON proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`.
+Each run creates fresh issues on `DS_AGENT_GH_REPO` (default `LofiSu/deepseek-super-agent`), waits for the live model, posts real comments, then re-reads those comments from the GitHub API as proof. Closing is best-effort: it runs after each scenario's main work, a failed close is ignored, and a throw or an early return before the close leaves issues open. `DS_AGENT_GH_KEEP=1` skips the close. Check afterwards for open issues labeled `ds-agent-demo`. Logs and JSON proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`.
 
 ```bash
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
@@ -344,7 +353,7 @@ pnpm test
 pnpm demo          # real GitHub issues/comments + live model
 ```
 
-`test/setup-live.ts` applies those Magpie defaults when the env vars are unset. Transcripts from the E2E cases land under `/tmp/ds-agent-live-e2e-logs/`; real-channel demo logs and proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`. Update the pass/fail counts in this section after each live run.
+`pnpm test` fills any missing `DS_AGENT_API_*` with those Magpie defaults before Vitest starts. `test/setup-live.ts` does the same only when the variables are still unset, and it skips that fill on CI. A provider key alone does not replace the three. Transcripts from the E2E cases land under `/tmp/ds-agent-live-e2e-logs/`; real-channel demo logs and proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`. Update the pass/fail counts in this section after each live run.
 
 ## License
 
