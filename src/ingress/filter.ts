@@ -36,6 +36,7 @@ export function fastPath(trigger: Trigger): { pass: boolean; reason: string } {
     && trigger.source !== 'github'
     && trigger.source !== 'cli'
     && trigger.source !== 'a2a'
+    && trigger.source !== 'imessage'
   ) {
     return { pass: false, reason: 'source-not-allowlisted' }
   }

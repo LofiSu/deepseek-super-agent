@@ -12,4 +12,6 @@ export {
   type LongTermMemoryQuery,
 } from './memory/long-term.ts'
 export { compareBakeoff, type BakeoffComparison, type BakeoffSample } from './metrics/bakeoff.ts'
+export { startGatewayServer, type GatewayHandle } from './gateway/server.ts'
+export { gatewayProvidersFromEnv, type GatewayConfig, type GatewayProvider } from './gateway/config.ts'
 export { threadKey, type Trigger, type TriggerTrust } from './shared/types.ts'

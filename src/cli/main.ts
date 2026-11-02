@@ -15,6 +15,8 @@ import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
 import { defaultHome, runDemo } from './demo.ts'
+import { runGatewayCommand } from './gateway.ts'
+import { runImessageCommand } from './imessage.ts'
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`)
@@ -106,6 +108,8 @@ function help(): void {
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
+  pnpm ds-agent imessage [--once] [--interval 2000] [--handle <you>]  # two-way iMessage channel
+  pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
   pnpm ds-agent metrics
   pnpm ds-agent memory [--limit 10]   # persisted cross-ticket memories
   pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
@@ -388,6 +392,14 @@ async function main(): Promise<void> {
     const text = process.argv.slice(3).filter(part => !part.startsWith('--')).join(' ').trim()
     if (!text) throw new Error('chat needs text')
     await withRuntime(runtime => { runtime.ingest(cliTrigger({ text })) })
+    return
+  }
+  if (cmd === 'imessage') {
+    await runImessageCommand(home)
+    return
+  }
+  if (cmd === 'gateway') {
+    await runGatewayCommand(home)
     return
   }
   if (cmd === 'emit' && sub === 'im') {
