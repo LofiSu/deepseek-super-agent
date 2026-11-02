@@ -128,23 +128,45 @@ function listTasks(store: Store): ToolDef {
  * Shard arbitration (P2-2): the first shard in `Disposition.shards` is the
  * ticket's reply owner. Every matching shard runs its own Router session, but
  * only that session may speak to the user or end the ticket, so a trigger has
- * at most one terminal decision and one reply path.
+ * at most one terminal Router decision and one reply path.
+ *
+ * A call that names a trigger is resolved from that trigger's Disposition, not
+ * from the supplied ticket's origin. When both ids are present they must agree;
+ * otherwise a session could borrow another trigger's ownership. Missing ticket
+ * or disposition is fail-closed because every Ticket is created with an origin
+ * trigger and every admitted trigger has a Disposition.
  */
 function assertShardOwner(
   store: Store,
   sessionId: string,
-  ticketId?: string,
-  triggerId?: string,
+  call: { ticketId?: string; triggerId?: string },
 ): void {
-  const ticket = ticketId ? store.getDoc<Ticket>('ticket', ticketId) : undefined
-  const dispositionKey = ticket?.originTriggerId ?? triggerId
-  if (!dispositionKey) return
+  const ticket = call.ticketId ? store.getDoc<Ticket>('ticket', call.ticketId) : undefined
+  if (call.ticketId && !ticket) throw new UserError(`unknown ticket ${call.ticketId}`)
+  if (call.triggerId && ticket && ticket.originTriggerId !== call.triggerId) {
+    throw new UserError(
+      `trigger ${call.triggerId} does not belong to ticket ${call.ticketId}; `
+      + 'refusing cross-trigger shard ownership',
+    )
+  }
+  const dispositionKey = call.triggerId ?? ticket?.originTriggerId
+  if (!dispositionKey) {
+    // A ticket-scoped call without an origin is not a known path: Tickets.create
+    // always sets originTriggerId. Fail closed instead of falling back to default.
+    if (call.ticketId) {
+      throw new UserError(`ticket ${call.ticketId} has no origin trigger; cannot resolve shard owner`)
+    }
+    return
+  }
   const disposition = store.getDoc<Disposition>('disposition', dispositionKey)
-  const shard = disposition?.shards?.[0] ?? 'default'
+  if (!disposition) {
+    throw new UserError(`no disposition for trigger ${dispositionKey}; cannot resolve shard owner`)
+  }
+  const shard = disposition.shards?.[0] ?? 'default'
   const owner = routerSessionId(shard)
   if (sessionId !== owner) {
     throw new UserError(
-      `router shard session ${sessionId} does not own ticket ${ticketId ?? '-'} (owner=${owner}); `
+      `router shard session ${sessionId} does not own ticket ${call.ticketId ?? '-'} (owner=${owner}); `
       + 'only the first matching shard may reply or decide',
     )
   }
@@ -174,7 +196,7 @@ function mainAgentTools(
       roles: ['router'],
       run: guard('router', 'stop_worker', async (args, ctx) => {
         const ticketId = String(args.ticketId ?? '')
-        assertShardOwner(store, ctx.sessionId, ticketId)
+        assertShardOwner(store, ctx.sessionId, { ticketId })
         // Actually end the work; a log line alone told the model a lie.
         ports.stop(ticketId, 'router stop_worker')
         log(`[harness] stop_worker ticketId=${ticketId}`)
@@ -193,7 +215,7 @@ function mainAgentTools(
       roles: ['router'],
       run: guard('router', 'reply_user', async (args, ctx) => {
         const ticketId = String(args.ticketId ?? '')
-        assertShardOwner(store, ctx.sessionId, ticketId)
+        assertShardOwner(store, ctx.sessionId, { ticketId })
         const text = String(args.text ?? '')
         const purpose = String(args.purpose ?? 'result')
         const thread = typeof args.thread === 'string' && args.thread ? args.thread : undefined
@@ -246,13 +268,16 @@ function mainAgentTools(
         if (kind === 'stop') {
           const ticketId = String(args.ticketId ?? '')
           if (!ticketId) throw new UserError('assess_trigger stop needs a ticketId')
-          assertShardOwner(store, ctx.sessionId, ticketId, triggerId)
+          assertShardOwner(store, ctx.sessionId, { ticketId, triggerId })
           const decision = ports.decide(triggerId, { kind: 'stop', ticketId, reason })
           log(`[harness] router veto ticketId=${ticketId} triggerId=${triggerId} reason=${reason}`)
           return { decision: decision.kind, ticketId: decision.ticketId }
         }
         if (kind === 'unavailable') {
-          assertShardOwner(store, ctx.sessionId, String(args.ticketId ?? '') || undefined, triggerId)
+          assertShardOwner(store, ctx.sessionId, {
+            ticketId: String(args.ticketId ?? '') || undefined,
+            triggerId,
+          })
           const decision = ports.decide(triggerId, { kind: 'unavailable', reason })
           return { decision: decision.kind }
         }

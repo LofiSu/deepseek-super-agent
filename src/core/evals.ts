@@ -7,6 +7,13 @@ import { arbitrateSubscribers } from './intake.ts'
 import { DEFAULT_POLICY, gateTriggers, type Policy } from './policy.ts'
 import type { Tickets } from './tickets.ts'
 
+/**
+ * Router terminal assessments. An `accept` may precede one of these (the Gate
+ * accepted, then the Router vetoed), but only one terminal kind is ever
+ * recorded per trigger. Repeated owner calls are idempotent.
+ */
+const TERMINAL_DECISION_KINDS: ReadonlySet<DecisionKind> = new Set(['stop', 'ignore', 'unavailable'])
+
 export class Evals {
   constructor(
     private readonly host: Host,
@@ -158,6 +165,26 @@ export class Evals {
     const key = threadKey(trigger.threads[0]!)
     const thread = this.host.repo.getDoc<Thread>('thread', key)
     if (!thread) throw new UserError(`unknown thread ${key}`)
+    const prior = this.host.repo.listDocs<Decision>('decision')
+      .filter(decision => decision.triggerIds.includes(triggerId))
+    const terminal = prior.find(decision => TERMINAL_DECISION_KINDS.has(decision.kind))
+    if (terminal) {
+      this.host.log(
+        `[engine] Evals.decide skipped triggerId=${triggerId} kind=${outcome.kind} `
+        + `existing=${terminal.kind} decisionId=${terminal.id}`,
+      )
+      return terminal
+    }
+    if (outcome.kind === 'accept') {
+      const accepted = prior.find(decision => decision.kind === 'accept')
+      if (accepted) {
+        this.host.log(
+          `[engine] Evals.decide skipped triggerId=${triggerId} kind=accept `
+          + `existing=accept decisionId=${accepted.id}`,
+        )
+        return accepted
+      }
+    }
     thread.pending = thread.pending.filter(id => id !== triggerId)
     const strength = strengthOf(trigger)
     const evalId = this.host.repo.nextId('eval')

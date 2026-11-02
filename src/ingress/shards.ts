@@ -29,9 +29,11 @@ interface ShardEntry {
  * Arbitration (P2-2): the first id in the returned list is the reply owner.
  * `Harness.routerTurn` targets that shard's session, and only that session may
  * call `reply_user`, `assess_trigger` stop/unavailable, or `stop_worker`.
- * All matching shards run their Router sessions against the same Ticket and
- * Thread; a shard cannot create a second Ticket or emit a second terminal
- * decision for one trigger.
+ * Ownership is resolved from the trigger named by the call; a trigger/ticket
+ * mismatch or a missing ticket/disposition is rejected. All matching shards run
+ * their Router sessions against the same Ticket and Thread, so a shard cannot
+ * create a second Ticket or emit a second terminal decision for one trigger.
+ * `Evals.decide` also dedupes terminal outcomes per trigger.
  *
  * Shards are routing metadata, not multi-process placement: every shard's
  * session runs in this process.
