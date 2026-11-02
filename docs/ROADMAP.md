@@ -28,6 +28,7 @@
 | 2026-11-02 | `30bea75` | #55 sandbox docs and #56 PLAN §4/§10 merged; P1-10 resolved; P0-4 remaining §1.4 fix opened as #58. |
 | 2026-11-02 | `f57fd2b` | #57 bounded lifecycle history and #58 PLAN §1.4 stack correction merged; P0-4 and P1-4 resolved. |
 | 2026-11-02 | `e4ea8e9` | Post-rewrite re-audit after #39, #60, and #61: P1-2, P1-1/P1-7 (docs), and the slow-path/README claims resolved; C15/C12/C14 rows corrected. The board uses PR numbers; the rows above keep the SHAs observed at the time. |
+| 2026-11-02 | `6ab69e5` | P2-5: coverage baseline measured; `lint`, `format:check`, and `test:coverage` added to the required CI job. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -423,8 +424,25 @@ assessed, evaluated, or decided into a Ticket.
 **P2-4. Slow-path live policy:** optional model policy behind a flag, or keep
 the rule classifier and remove "can call a model" from README. Acceptance: one
 of the two is true and tested.
-**P2-5. Test coverage and lint:** add a coverage report and a lint/format script
-to CI; acceptance: thresholds documented, not necessarily enforced.
+**P2-5. Test coverage and lint:** `pnpm test:coverage` runs the offline fixture
+suite (`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1`) with the V8 provider and
+text-summary + json-summary reporters. It excludes the live-model and
+real-channel demo test files; the report counts `src/**/*.ts` except
+`src/cli/demos/**`. No failure threshold is configured. Measured on this branch
+(no `src/` changes from `6ab69e5`; 81 source files): lines 81.51% (5605/6876),
+branches 81.57% (1815/2225), functions 89.02% (495/556); statements track lines
+at 81.51%. Treat these as informational until a later change picks a floor.
+
+`pnpm lint` runs `scripts/lint.ts`: section 7 board rows have exactly seven
+cells; no live Phase-2 naming in `src/`, `docs/`, or the READMEs (this historical
+audit file is exempt because it quotes the removed switch while recording that
+it is gone); no tracked `repro-h9*`, `dist/`, or `node_modules/` paths; and no
+`console.log` under `src/` outside `src/cli/` (`src/shared/log.ts`, the Logger
+that writes to stdout, is exempt). The checker prints `file:line` and exits
+nonzero. `pnpm format:check` uses `git diff --check` on the branch diff and the
+working tree. CI runs `pnpm lint`, `pnpm format:check`, and
+`pnpm test:coverage` in the required `typecheck and test` job. Acceptance:
+thresholds documented, not enforced.
 **P2-6. Repo hygiene:** confirm the untracked `repro-h9*.ts` diagnostics are
 gone from `main`; acceptance: `git status` clean after merge.
 **P2-7. Doc snapshots:** add the "historical" banner to `docs/REVIEW.md` and
@@ -459,7 +477,7 @@ the work is already public.
 | P2-2 | Shard arbitration | LofiSu | `feat/shard-arbitration` | #69 | resolved | Precedence documented + tests: priority-desc/registration order, default fallback-only, first shard owns reply + terminal decision; owner resolved from the supplied trigger; idempotent decisions; one ticket/decision per trigger |
 | P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists`, `feat/ingress-adapter-wiring` | #67, #70 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address (Feishu maps `chat_id`); filtered triggers cannot be handed back, assessed, evaluated, or decided into a Ticket; tests cover each rule, env, and resurrection |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
-| P2-5 | Coverage + lint in CI |  |  |  | todo | Scripts exist; policy documented |
+| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #PR | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 81.51% lines / 81.57% branches / 89.02% functions over 81 files; no threshold |
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
 | P2-7 | Status banners on review snapshots |  |  |  | todo | Historical banner on each |
 | P2-8 | Email channel decision |  |  |  | todo | PLAN and code agree |

@@ -263,7 +263,7 @@ export DS_AGENT_GH_REPO=your-account/your-writable-repo
 pnpm demo
 ```
 
-[GitHub Actions](./.github/workflows/ci.yml) runs `pnpm typecheck` and `pnpm test` on pushes to `main` and on pull requests. The demo job runs `pnpm demo:local` (in-memory fixture smoke, no repository writes) when `DEEPSEEK_API_KEY` or `DS_AGENT_API_KEY` is set; real-channel acceptance is `pnpm demo` run by an operator with `gh` auth.
+[GitHub Actions](./.github/workflows/ci.yml) runs `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test`, and `pnpm test:coverage` on pushes to `main` and on pull requests. `pnpm lint` checks repo-specific invariants (roadmap board shape, removed-extension-switch naming, tracked build paths, and `console.log` outside the CLI); `pnpm format:check` uses `git diff --check`. `pnpm test:coverage` runs the offline fixture suite with a text and JSON summary and no failure threshold. The demo job runs `pnpm demo:local` (in-memory fixture smoke, no repository writes) when `DEEPSEEK_API_KEY` or `DS_AGENT_API_KEY` is set; real-channel acceptance is `pnpm demo` run by an operator with `gh` auth.
 
 State lives in `DS_AGENT_HOME`, or in `./.ds-agent` (SQLite).
 

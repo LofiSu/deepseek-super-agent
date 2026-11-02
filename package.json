@@ -15,6 +15,9 @@
     "test": "NODE_NO_WARNINGS=1 DS_AGENT_API_BASE=${DS_AGENT_API_BASE:-http://127.0.0.1:3425/v1} DS_AGENT_API_KEY=${DS_AGENT_API_KEY:-magpie} DS_AGENT_API_MODEL=${DS_AGENT_API_MODEL:-workbuddy/deepseek-v4.1-flash} vitest run",
     "test:live": "NODE_NO_WARNINGS=1 DS_AGENT_API_BASE=${DS_AGENT_API_BASE:-http://127.0.0.1:3425/v1} DS_AGENT_API_KEY=${DS_AGENT_API_KEY:-magpie} DS_AGENT_API_MODEL=${DS_AGENT_API_MODEL:-workbuddy/deepseek-v4.1-flash} vitest run test/live-demo.test.ts test/live-e2e.test.ts test/live-modules.test.ts",
     "test:demo:real": "NODE_NO_WARNINGS=1 DS_AGENT_REAL_CHANNELS=1 DS_AGENT_API_BASE=${DS_AGENT_API_BASE:-http://127.0.0.1:3425/v1} DS_AGENT_API_KEY=${DS_AGENT_API_KEY:-magpie} DS_AGENT_API_MODEL=${DS_AGENT_API_MODEL:-workbuddy/deepseek-v4.1-flash} vitest run test/demos-real-channels.test.ts",
+    "test:coverage": "CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 NODE_NO_WARNINGS=1 vitest run --coverage --coverage.reporter=text-summary --coverage.reporter=json-summary --exclude 'test/{live-demo,live-e2e,team-live,demos-real-channels}.test.ts'",
+    "lint": "NODE_NO_WARNINGS=1 tsx scripts/lint.ts",
+    "format:check": "git diff --check ${DS_AGENT_FORMAT_BASE:-HEAD} HEAD && git diff --check",
     "ds-agent": "NODE_NO_WARNINGS=1 tsx src/cli/main.ts",
     "bench:bakeoff": "NODE_NO_WARNINGS=1 tsx src/cli/bakeoff.ts",
     "typecheck": "tsc --noEmit"
@@ -26,6 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
+    "@vitest/coverage-v8": "^3.2.4",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
