@@ -138,7 +138,7 @@ LofiSu × Grokbot（CoderBot）。
 ```mermaid
 flowchart TB
   subgraph Channels["Channel"]
-    C1[CLI / Feishu IM / GitHub（真实适配器）]
+    C1["CLI / Feishu IM / GitHub（真实适配器）"]
   end
 
   subgraph Ingress["Ingress"]
