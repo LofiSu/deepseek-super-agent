@@ -880,7 +880,7 @@ pnpm install && pnpm test && pnpm demo
 
 ## 9. 功能域：评测与指标、扩展、长期记忆、产品层、互操作、安全与隐私（Runtime 常驻服务）
 
-以下功能域按所属 M 模块常驻装配：Runtime 每次启动都会构造这些服务，不再有 `DS_AGENT_PHASE2` / `RuntimeOptions.phase2` 总开关。编号沿用 §3 任务矩阵（T45–T51），不另设一套 ID。
+以下功能域按所属 M 模块常驻装配：Runtime 每次启动都会构造这些服务，不再有扩展域总开关。编号沿用 §3 任务矩阵（T45–T51），不另设一套 ID。
 
 | ID | 功能域 | 项 | 说明 | 实现 / 接口 |
 |----|--------|----|------|--------------|
@@ -1053,4 +1053,4 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 | §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
 | §8 未决 | T46–T51 + mid-task collab + T14 Team | T51 白名单+脱敏；中途 pause/intervene/resume（#31）；Team persist+CLI+e2e（#34） | `env/sanitize.ts` · `core/collab.ts` · `harness/team.ts` | vault/seccomp 仍外置 |
 
-**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与扩展域服务（T09/T46–T50）已落地；这些服务现在由 Runtime 默认路径常驻装配（`runtime.routerShards` / `workerMesh` / `longTermMemory` / `lifecycle` / `a2aRouter`），不再有 `DS_AGENT_PHASE2` 或 `RuntimeOptions.phase2` 总开关。
+**结论：** §2–§6 工程点均已进入 T 矩阵与 README 清单。§7 计数 + optional curveSamples、§8 vault/seccomp 与扩展域服务（T09/T46–T50）已落地；这些服务现在由 Runtime 默认路径常驻装配（`runtime.routerShards` / `workerMesh` / `longTermMemory` / `lifecycle` / `a2aRouter`），不再有扩展域总开关。
