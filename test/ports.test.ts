@@ -285,7 +285,11 @@ describe('worker cannot reply', () => {
       { sessionId: 'watchdog', role: 'watchdog' },
     ))
     expect(runtime.store.listReplies()).toHaveLength(before)
-    expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.ended?.outcome).toBe('failed')
+    // A failed Assignment does not end the Ticket: the same Ticket can be retried.
+    const stalled = runtime.store.getDoc<Ticket>('ticket', ticketId)
+    expect(stalled?.ended).toBeUndefined()
+    expect(stalled?.assignments.at(-1)?.state).toBe('ended')
+    expect(stalled?.assignments.at(-1)?.report?.kind).toBe('failed')
     await expect(tools.invoke(
       { id: 'call_steal', name: 'reply_user', args: { ticketId, text: 'STOLEN_BY_WORKER', purpose: 'result' } },
       { sessionId: 'watchdog', role: 'watchdog' },

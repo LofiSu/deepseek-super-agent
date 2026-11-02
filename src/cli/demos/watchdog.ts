@@ -19,7 +19,7 @@ import {
  *
  * A real GitHub issue asks for a deliberately blocking reproduction (`sleep`).
  * The live worker starts, the daemon's watchdog sees a running assignment with
- * no report past `stuckMs`, nudges the WorkerSession, then fails the assignment
+ * no report past `stuckMs`, nudges the ExecutorSession, then fails the assignment
  * on the next tick. The ack reply still leaves through the real GitHub comment
  * API, proving the outbound path stayed live.
  */
@@ -52,11 +52,11 @@ export async function runWatchdogDemo() {
     const result = runtime.ingest(trigger)
     check(ctx, 'real GitHub trigger stored', result === 'stored', String(result))
 
-    // The WorkerSession must start before the watchdog can observe it.
+    // The ExecutorSession must start before the watchdog can observe it.
     check(
       ctx,
       'worker session started from real GitHub activity',
-      await waitFor(() => countLines(runtime, 'WorkerSession start session=worker_') >= 1, 10_000, 100) != null,
+      await waitFor(() => countLines(runtime, 'ExecutorSession start session=worker_') >= 1, 10_000, 100) != null,
     )
 
     const nudged = await waitFor(

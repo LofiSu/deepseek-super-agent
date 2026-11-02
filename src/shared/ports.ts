@@ -33,11 +33,23 @@ export interface WorkerReport {
   deliver?: boolean
 }
 
-/** Router assessment handed to `decide`. Workers never construct this call. */
+/**
+ * Eval result handed to `decide` by the Main Agent. Executors never construct
+ * this call. `accept` carries the Mandate scope; it is not the Ticket title.
+ */
 export type AssessmentOutcome =
   | { kind: 'ignore'; reason: string }
   | { kind: 'unavailable'; reason: string }
-  | { kind: 'accept'; reason: string }
+  | {
+      kind: 'accept'
+      reason: string
+      title?: string
+      scope?: string
+      strength?: 'explicit' | 'inferred' | 'maybe'
+      policyVersion?: string
+      rules?: string[]
+      speculative?: boolean
+    }
   | { kind: 'stop'; ticketId: string; reason: string }
 
 export const rolePortBrand: unique symbol = Symbol('rolePort')
@@ -50,7 +62,8 @@ export interface RouterPorts {
   readonly [rolePortBrand]: 'router'
   receive(trigger: Trigger): ReceiveResult
   decide(triggerId: string, outcome: AssessmentOutcome): Decision
-  reply(ticketId: string, text: string, purpose: string): void
+  /** Reply to the Thread that produced the input; falls back to the Ticket's first Channel. */
+  reply(ticketId: string, text: string, purpose: string, threadKey?: string): void
   /** End a live ticket and its running assignment. Router-owned. */
   stop(ticketId: string, reason: string): void
   subscribe(ticketId: string, threadKey: string, opts?: { contextOnly?: boolean }): void
@@ -58,8 +71,11 @@ export interface RouterPorts {
   unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean
 }
 
+/** Canonical name for the Main Agent's tool surface. */
+export type MainAgentPorts = RouterPorts
+
 /**
- * Commands a worker session may use.
+ * Commands an Executor session may use.
  * There is no `reply`, `decide`, or `receive` on this surface.
  */
 export interface WorkerPorts {
@@ -73,6 +89,9 @@ export interface WorkerPorts {
   unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean
   handback(ticketId: string, triggerId: string, reason: string): boolean
 }
+
+/** Canonical name for the Executor's tool surface. */
+export type ExecutorPorts = WorkerPorts
 
 /**
  * Commands a watchdog session may use.

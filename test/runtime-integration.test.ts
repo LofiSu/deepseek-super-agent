@@ -76,7 +76,7 @@ describe('Runtime service integration', () => {
     const disposition = runtime.store.getDoc<Disposition>('disposition', 'trg_shard')
     expect(disposition?.shards).toEqual(['im'])
     expect(runtime.log.text()).toContain('[routing] shards=im')
-    expect(runtime.log.text()).toContain('RouterSession start session=router:im')
+    expect(runtime.log.text()).toContain('MainSession start session=router:im')
     expect(runtime.log.text()).toContain('[mesh] place')
 
     const [ticket] = runtime.store.listDocs<Ticket>('ticket')
@@ -213,6 +213,6 @@ describe('Runtime service integration', () => {
     expect(singleCalls).toBe(1)
     expect(dualCalls).toBeGreaterThan(singleCalls)
     expect(single.log.text()).toContain('[harness] single-session')
-    expect(single.log.text()).not.toContain('RouterSession start')
+    expect(single.log.text()).not.toContain('MainSession start')
   })
 })
