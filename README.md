@@ -142,7 +142,7 @@ A Channel enters Ingress, then the Engine. The Engine routes and batches, then r
 ```mermaid
 flowchart TB
   subgraph Channels["Channel"]
-    C1[CLI / Feishu IM / GitHub (real adapters)]
+    C1["CLI / Feishu IM / GitHub (real adapters)"]
   end
 
   subgraph Ingress["Ingress"]
