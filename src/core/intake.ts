@@ -52,7 +52,7 @@ export class Intake {
     const fanout: string[] = []
     const context: string[] = []
     const seen = new Set<string>()
-    const command = commandOf(trigger.text)
+    const command = commandOf(owned.text)
     for (const ref of trigger.threads) {
       const thread = this.ensure(ref)
       if (!primary) primary = thread
@@ -75,7 +75,7 @@ export class Intake {
           // A human follow-up on a live, non-context-only subscription is actionable.
           // A bot/CI event and a context-only subscription only add background.
           const actionable = bypassEligible(ticket, trigger, meta) && !contextOnly
-          addInput(this.host, ticket, trigger, actionable ? 'trigger' : 'context', at)
+          addInput(this.host, ticket, owned, actionable ? 'trigger' : 'context', at)
           if (actionable) fanout.push(ticket.id)
           else context.push(ticket.id)
         }

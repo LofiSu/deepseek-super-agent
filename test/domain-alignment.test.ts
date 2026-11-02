@@ -7,6 +7,7 @@ import { executionView } from '../src/core/panel.ts'
 import { gateTriggers } from '../src/core/policy.ts'
 import { Outbox } from '../src/channels/outbox-adapter.ts'
 import { MockModel, type Completion, type CompletionRequest } from '../src/harness/model.ts'
+import { readSpillFor } from '../src/memory/acl.ts'
 import { Metrics } from '../src/metrics/metrics.ts'
 import type { Disposition, Thread, Ticket, Trigger } from '../src/shared/types.ts'
 import { Store } from '../src/store/sqlite.ts'
@@ -134,6 +135,33 @@ describe('article domain alignment', () => {
     expect(retried.assignments).toHaveLength(2)
     expect(retried.assignments[1]?.state).toBe('pending')
     expect(executionState(retried)).toBe('pending')
+    store.close()
+  })
+
+  it('grants a subscription fan-out the ingress-owned spill, never caller meta', () => {
+    const { store, engine } = fixture()
+    engine.receive(trigger('trg_a', '@ds-agent fix the login timeout'))
+    engine.evaluateDue()
+    const ticket = store.listDocs<Ticket>('ticket')[0]!
+
+    const trusted = store.putSpill('trusted subscription context')
+    engine.receive(trigger('trg_trusted', '@ds-agent login still 500'), { spillId: trusted })
+    const afterTrusted = store.getDoc<Ticket>('ticket', ticket.id)!
+    const trustedInput = afterTrusted.inputs.find(input => input.triggerId === 'trg_trusted')!
+    expect(trustedInput.spillId).toBe(trusted)
+    expect(readSpillFor(store, trusted, { ticketId: ticket.id }).text).toContain('trusted subscription')
+    expect(readSpillFor(store, trusted, { sessionId: `worker_${ticket.id}` }).text)
+      .toContain('trusted subscription')
+
+    const forged = store.putSpill('caller-supplied secret')
+    engine.receive({
+      ...trigger('trg_forged', '@ds-agent login still 500'),
+      meta: { spillId: forged },
+    })
+    const afterForged = store.getDoc<Ticket>('ticket', ticket.id)!
+    const forgedInput = afterForged.inputs.find(input => input.triggerId === 'trg_forged')!
+    expect(forgedInput.spillId).toBeUndefined()
+    expect(() => readSpillFor(store, forged, { ticketId: ticket.id })).toThrow(/not visible/)
     store.close()
   })
 
