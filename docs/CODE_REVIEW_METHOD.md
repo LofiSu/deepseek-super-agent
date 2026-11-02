@@ -49,7 +49,7 @@ Severity uses the same three words as the architecture review:
 |------|--------------------|----------|
 | 高 | A control action or safety boundary the change relies on does not run, or the change opens one | Eval always accepting; watchdog tick that only logs; speculative tickets staying visible and undiscarded; tool output or prompts carrying credential values; a new writer of tickets outside `Engine` |
 | 中 | The skeleton is real and the control flow, model split, or contract text will mislead the next change | Batching, `roleModels`, rule-based slow path, spill without locality, `started` not ending the turn, ack sent from `Tickets.create`, subscription predicates, `meta.admitted`, PLAN/README status lines |
-| 低 | Names, layout, templates, and items PLAN already marks as Phase-2 | Node engine line, `ds-agent.db`, email formatting, missing event names, T09 and T45–T50 left undone |
+| 低 | Names, layout, templates, and items PLAN marks as later extensions | Node engine line, `ds-agent.db`, email formatting, missing event names, T09/T45–T50 before they were wired |
 
 Drop findings that are only style, diagnostics, or drive-by cleanup. The article's tags map as: Important → 高 or 中 that this PR introduced; Nit → do not post; Pre-existing → already listed in the architecture review, or present on the base branch and untouched by the diff.
 
