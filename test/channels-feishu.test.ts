@@ -12,7 +12,9 @@ import {
   type FeishuConfig,
   type FeishuMessage,
 } from '../src/channels/feishu.ts'
-import type { OutboxRow } from '../src/shared/types.ts'
+import { filterTrigger, ruleClassify } from '../src/ingress/filter.ts'
+import { admissionRulesFromEnv } from '../src/runtime.ts'
+import type { OutboxRow, Trigger } from '../src/shared/types.ts'
 
 const config: FeishuConfig = {
   appId: 'cli_app',
@@ -62,6 +64,15 @@ function fakeFetch(handler: Handler) {
 const tokenHandler: Handler = url => url.includes('tenant_access_token')
   ? { body: { code: 0, tenant_access_token: 'tok_1', expire: 7200 } }
   : { body: { code: 999, msg: `unexpected ${url}` } }
+
+/** Deterministic semantic layer; admission itself stays on the fast path. */
+const ruleSemantic = {
+  name: 'RuleSemantic',
+  classify: (trigger: Trigger) => ruleClassify(trigger),
+  async complete() {
+    return { text: '' }
+  },
+}
 
 describe('Feishu config', () => {
   it('is absent when no app credentials are set', () => {
@@ -125,9 +136,29 @@ describe('Feishu message mapping', () => {
     expect(trigger.channel?.address).toMatchObject({
       provider: 'feishu',
       chat_id: 'oc_chat',
+      group: 'oc_chat',
       message_id: 'om_1',
     })
     expect(new Date(trigger.at).toISOString()).toBe('2025-11-01T01:00:00.000Z')
+  })
+
+  it('admits a real chat message by its chat id and denies a different group', () => {
+    const trigger = feishuTriggerFromMessage(message(), config)
+    expect(trigger.channel?.address?.group).toBe('oc_chat')
+
+    // The same id a deployment puts in DS_AGENT_GROUP_ALLOWLIST admits this trigger.
+    const allowed = admissionRulesFromEnv({ DS_AGENT_GROUP_ALLOWLIST: 'oc_chat' })
+    expect(filterTrigger(trigger, ruleSemantic, allowed)).toMatchObject({ action: 'pass' })
+
+    const denied = admissionRulesFromEnv({ DS_AGENT_GROUP_ALLOWLIST: 'oc_other' })
+    expect(filterTrigger(trigger, ruleSemantic, denied))
+      .toMatchObject({ action: 'drop', layer: 'fast', reason: 'group-not-allowlisted' })
+    // A message from a different chat is denied under the original allowlist.
+    expect(filterTrigger(
+      feishuTriggerFromMessage(message({ chat_id: 'oc_other' }), config),
+      ruleSemantic,
+      allowed,
+    )).toMatchObject({ action: 'drop', layer: 'fast', reason: 'group-not-allowlisted' })
   })
 
   it('treats an app sender as non-human and detects bot mention ids', () => {

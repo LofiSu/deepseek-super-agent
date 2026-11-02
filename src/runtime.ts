@@ -113,19 +113,38 @@ function parseIdList(raw: string | undefined): string[] | undefined {
   return ids.length ? ids : undefined
 }
 
+/** Admission log field: trimmed non-empty ids, or `-` when the list is empty. */
+function logList(ids: string[] | undefined): string {
+  const clean = (ids ?? []).map(id => id.trim()).filter(id => id.length > 0)
+  return clean.length ? clean.join(',') : '-'
+}
+
+/** Trim and drop empty entries; an explicit `[]` stays `[]` so it disables the rule. */
+function normalizeIdList(ids: string[] | undefined): string[] | undefined {
+  if (ids === undefined) return undefined
+  return ids.map(id => id.trim()).filter(id => id.length > 0)
+}
+
 /**
  * Resolve T16 admission rules. Explicit `admission` fields win over env; an
  * explicit empty list disables that rule. Unset lists stay `undefined` so the
- * fast path behaves exactly as before.
+ * fast path behaves exactly as before. Both sources are trimmed and empty
+ * entries are dropped, so the resolved rules and the log line agree.
  */
 export function admissionRulesFromEnv(
   env: NodeJS.ProcessEnv,
   override: AdmissionRules = {},
 ): AdmissionRules {
   return {
-    actors: override.actors ?? parseIdList(env.DS_AGENT_ACTOR_ALLOWLIST),
-    groups: override.groups ?? parseIdList(env.DS_AGENT_GROUP_ALLOWLIST),
-    dropSelf: override.dropSelf ?? parseIdList(env.DS_AGENT_DROP_SELF),
+    actors: override.actors !== undefined
+      ? normalizeIdList(override.actors)
+      : parseIdList(env.DS_AGENT_ACTOR_ALLOWLIST),
+    groups: override.groups !== undefined
+      ? normalizeIdList(override.groups)
+      : parseIdList(env.DS_AGENT_GROUP_ALLOWLIST),
+    dropSelf: override.dropSelf !== undefined
+      ? normalizeIdList(override.dropSelf)
+      : parseIdList(env.DS_AGENT_DROP_SELF),
   }
 }
 
@@ -248,9 +267,10 @@ export class Runtime {
     const admission = admissionRulesFromEnv(baseEnv, opts.admission)
     log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} shards=${routerShards.list().length}`)
     log.info(`[runtime] model=${model.name}`)
-    if (admission.actors || admission.groups || admission.dropSelf) {
+    // An explicitly empty list disables that rule; do not log a misleading allowlist.
+    if (admission.actors?.length || admission.groups?.length || admission.dropSelf?.length) {
       log.info(
-        `[ingress] admission actors=${admission.actors?.join(',') ?? '-'} groups=${admission.groups?.join(',') ?? '-'} dropSelf=${admission.dropSelf?.join(',') ?? '-'}`,
+        `[ingress] admission actors=${logList(admission.actors)} groups=${logList(admission.groups)} dropSelf=${logList(admission.dropSelf)}`,
       )
     }
     const host: Host = {
@@ -431,7 +451,19 @@ export class Runtime {
       const work = Promise.resolve().then(async () => {
         // The snapshot is taken when the queued Router turn starts, coalescing same-tick ingress.
         const current = this.store.getDoc<Thread>('thread', thread.key)
-        const ids = [...(current?.pending ?? [])]
+        const pending = [...(current?.pending ?? [])]
+        if (!pending.length) return
+        // Assessment is a second entrypoint to accept; ingress-denied triggers must
+        // not survive in the queue. Clear them and persist even if others remain.
+        const filtered = pending.filter(id => this.store.getDoc<Disposition>('disposition', id)?.filtered !== undefined)
+        const ids = pending.filter(id => !filtered.includes(id))
+        if (filtered.length) {
+          const cleaned = this.store.getDoc<Thread>('thread', thread.key) ?? thread
+          cleaned.pending = cleaned.pending.filter(id => !filtered.includes(id))
+          if (!cleaned.pending.length) cleaned.deferred = false
+          this.store.putDoc('thread', cleaned.key, cleaned)
+          this.log.info(`[engine] assess.skip-filtered thread=${thread.key} triggerIds=${filtered.join(',')}`)
+        }
         if (!ids.length) return
         const triggers = ids.map(id => this.store.getDoc<Trigger>('trigger', id))
           .filter((trigger): trigger is Trigger => trigger != null)
@@ -518,7 +550,11 @@ export class Runtime {
     const result = this.engine.receive(incoming, trust)
     this.log.info(`[engine] Intake.receive id=${incoming.id} result=${result}`)
     if (result === 'filtered') {
-      this.log.info('noise dropped')
+      const disposition = this.store.getDoc<Disposition>('disposition', incoming.id)
+      const reason = disposition?.filtered ?? `${verdict.layer}:${verdict.reason}`
+      // Keep the historical keyword for actual noise; every other drop names its cause.
+      if (reason === 'fast:noise' || reason === 'semantic:noise') this.log.info('noise dropped')
+      else this.log.info(`[ingress] dropped reason=${reason}`)
       return result
     }
     if (result !== 'stored') return result

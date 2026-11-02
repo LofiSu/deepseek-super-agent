@@ -1,7 +1,7 @@
 import { nextBatch } from '../ingress/batch.ts'
 import { UserError } from '../shared/errors.ts'
 import type { AssessmentOutcome } from '../shared/ports.ts'
-import { threadKey, type Decision, type DecisionKind, type Strength, type Thread, type Ticket, type Trigger } from '../shared/types.ts'
+import { threadKey, type Decision, type DecisionKind, type Disposition, type Strength, type Thread, type Ticket, type Trigger } from '../shared/types.ts'
 import type { Host } from './host.ts'
 import { arbitrateSubscribers } from './intake.ts'
 import { DEFAULT_POLICY, gateTriggers, type Policy } from './policy.ts'
@@ -30,15 +30,30 @@ export class Evals {
     const due = this.host.repo.listDocs<Thread>('thread').filter(thread => thread.pending.length > 0)
     for (const thread of due) {
       const ids = nextBatch(thread.pending)
-      const triggers = ids
-        .map(id => this.host.repo.getDoc<Trigger>('trigger', id))
-        .filter((trigger): trigger is Trigger => trigger != null)
+      const triggers: Trigger[] = []
+      const filtered: string[] = []
+      for (const id of ids) {
+        const trigger = this.host.repo.getDoc<Trigger>('trigger', id)
+        if (!trigger) continue
+        // Defence in depth: an ingress-denied trigger must never be resurrected
+        // from a stale queue. Clear it so Router assessment cannot accept it either.
+        if (this.host.repo.getDoc<Disposition>('disposition', id)?.filtered !== undefined) {
+          filtered.push(id)
+          continue
+        }
+        triggers.push(trigger)
+      }
+      if (filtered.length) {
+        thread.pending = thread.pending.filter(id => !filtered.includes(id))
+        this.host.log(`[engine] Evals.skip-filtered thread=${thread.key} triggerIds=${filtered.join(',')}`)
+      }
       if (!triggers.length) {
         thread.pending = thread.pending.filter(id => !ids.includes(id))
         thread.deferred = false
         this.host.repo.putDoc('thread', thread.key, thread)
         continue
       }
+      const admittedIds = triggers.map(trigger => trigger.id)
       const primary = triggers.find(trigger => trigger.addressed) ?? triggers[0]!
       const strength = strengthOf(primary)
       const live = arbitrateSubscribers(
@@ -49,7 +64,7 @@ export class Evals {
       if (outcome.kind === 'defer') {
         this.host.log(`[engine] Evals.defer thread=${thread.key} reason=${outcome.reason}`)
         thread.deferred = true
-        this.host.repo.addEvent('eval.deferred', { threadKey: thread.key, triggerIds: ids, reason: outcome.reason })
+        this.host.repo.addEvent('eval.deferred', { threadKey: thread.key, triggerIds: admittedIds, reason: outcome.reason })
         this.host.repo.putDoc('thread', thread.key, thread)
         this.host.onAssessmentNeeded?.(thread.key)
         continue
@@ -57,8 +72,8 @@ export class Evals {
       thread.deferred = false
       thread.pending = thread.pending.filter(id => !ids.includes(id))
       const evalId = this.host.repo.nextId('eval')
-      this.host.log(`[engine] Evals.batch thread=${thread.key} size=${ids.length} triggerIds=${ids.join(',')}`)
-      this.host.repo.addEvent('eval.started', { evalId, threadKey: thread.key, triggerIds: ids, strength })
+      this.host.log(`[engine] Evals.batch thread=${thread.key} size=${admittedIds.length} triggerIds=${admittedIds.join(',')}`)
+      this.host.repo.addEvent('eval.started', { evalId, threadKey: thread.key, triggerIds: admittedIds, strength })
       if (outcome.kind === 'accept') {
         const decision = this.tickets.create({
           thread,
@@ -97,6 +112,10 @@ export class Evals {
     if (!thread || ids.length === 0 || ids.some(id => !thread.pending.includes(id))) return undefined
     const triggers = ids.map(id => this.host.repo.getDoc<Trigger>('trigger', id))
     if (triggers.some(trigger => !trigger)) return undefined
+    // Defence in depth: assessment must never commit a trigger ingress denied.
+    if (ids.some(id => this.host.repo.getDoc<Disposition>('disposition', id)?.filtered !== undefined)) {
+      return undefined
+    }
     const batch = triggers as Trigger[]
     thread.pending = thread.pending.filter(id => !ids.includes(id))
     thread.deferred = false
@@ -161,6 +180,12 @@ export class Evals {
   decide(triggerId: string, outcome: AssessmentOutcome): Decision {
     const trigger = this.host.repo.getDoc<Trigger>('trigger', triggerId)
     if (!trigger) throw new UserError(`unknown trigger ${triggerId}`)
+    const disposition = this.host.repo.getDoc<Disposition>('disposition', triggerId)
+    if (disposition?.filtered !== undefined) {
+      throw new UserError(
+        `trigger ${triggerId} was filtered (${disposition.filtered || 'filtered'}) and cannot be decided without re-admission`,
+      )
+    }
     if (!trigger.threads.length) throw new UserError('A trigger must belong to at least one thread')
     const key = threadKey(trigger.threads[0]!)
     const thread = this.host.repo.getDoc<Thread>('thread', key)

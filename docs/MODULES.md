@@ -119,16 +119,25 @@ allowlist, a group/chat allowlist, and a drop-self deny list. They run on the
 fast path before mention/keyword, so a denied trigger cannot be admitted by an
 @-mention. The group id comes from the channel address
 (`trigger.channel.address.group`); `trigger.meta` is never consulted, and a
-missing group is denied while the group list is active. No shipped adapter
-sets `address.group` yet (Feishu exposes `chat_id`), so enable the group list
-only after the adapter populates it; otherwise every trigger is denied. These
+missing group is denied while the group list is active. The shipped Feishu
+adapter maps `message.chat_id` to both `address.chat_id` and `address.group`;
+other adapters must populate `address.group` if they want group admission,
+otherwise every trigger they emit is denied while the list is active. These
 are admission filters, not authentication: a channel adapter must still verify
 its peer.
+A trigger that failed admission is persisted with `Disposition.filtered`.
+Assessment (`Runtime.assessPending`) and Eval (`Evals.evaluateDue`) skip and
+clear such an id from `Thread.pending`; handback throws a `UserError`, and
+eval-driven accept (`Evals.commitAssessed`/`decide`) refuses as well. A denied
+trigger therefore cannot become a Ticket without a fresh admission decision.
 Configure with `RuntimeOptions.admission` or the comma-separated
 `DS_AGENT_ACTOR_ALLOWLIST`, `DS_AGENT_GROUP_ALLOWLIST`, and
-`DS_AGENT_DROP_SELF` variables; explicit options win, empty entries are
-ignored, and unset lists leave the fast path unchanged. Active rules are
-logged once at `Runtime.create` as `[ingress] admission ...`.
+`DS_AGENT_DROP_SELF` variables; explicit options win, entries are trimmed and
+empty entries are dropped for both env and explicit options, and unset lists
+leave the fast path unchanged. An explicit `[]` still disables that rule.
+Active rules are logged once at `Runtime.create` as
+`[ingress] admission ...` (empty lists are not logged); a non-noise drop logs
+`[ingress] dropped reason=<layer>:<reason>`.
 
 - `RouterShardRegistry.route(trigger)` returns every matching non-default shard
   ordered by `priority` descending, then registration order.
@@ -158,6 +167,8 @@ logged once at `Runtime.create` as `[ingress] admission ...`.
 
 `core/subscribe.ts` implements handback: it removes the ticket from the Thread,
 requeues the trigger for Eval, and drops `bypass=subscription` for that ticket.
+It throws `UserError` for a trigger whose `Disposition.filtered` is defined
+instead of requeueing it (the requeue would bypass admission).
 `intake.ts` handles fan-out, context-only subscriptions, and the human follow-up
 bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
 
@@ -215,6 +226,12 @@ a delivered one clears `speculative` and emits `speculate.delivered`.
 `norms.ts` enforces channel formatting; `cli.ts`, `feishu.ts`,
 `github-source.ts`, and `outbox-adapter.ts` are the real adapters. `a2a.ts` and
 `a2a-transport.ts` are the inter-instance channel:
+
+- `feishu.ts` maps an inbound message to a Trigger and sets
+  `channel.address.group` to `message.chat_id` (alongside `chat_id`), so
+  `DS_AGENT_GROUP_ALLOWLIST=<chat id>` admits that chat. Other adapters must
+  populate `address.group` themselves to opt into group admission; `meta` is
+  never read.
 
 - `A2ARouter` validates non-empty `from`/`to`, serializable bodies, and a 64 KiB
   UTF-8 byte cap. `send` copies only `{ from, to, body }`, assigns a fresh
