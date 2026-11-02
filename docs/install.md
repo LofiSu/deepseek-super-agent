@@ -59,7 +59,7 @@ pnpm ds-agent status
 pnpm ds-agent metrics
 ```
 
-Opt-in extension helpers stay off unless you set `DS_AGENT_PHASE2=1`.
+Runtime always constructs sharded routers, the Worker mesh, long-term memory, the lifecycle bus, and A2A. There is no extension opt-in flag. Configure them with `DS_AGENT_SHARDS`, `DS_AGENT_MESH_CAPACITY`, and `DS_AGENT_INSTANCE_ID`; see [docs/MODULES.md]({{ site.repository_url }}/blob/main/docs/MODULES.md).
 
 Closing those issues is best-effort. Each scenario calls `closeGithubIssues` only after its main work. A failed close is ignored, so the issue stays open and the demo does not fail for that. A throw, or a return before that call, also leaves issues open: a later `createIssue` can fail after earlier ones exist, the watchdog scenario returns when the issue has no trigger, and the spill scenario returns when a trigger is missing. `DS_AGENT_GH_KEEP=1` skips the close on purpose. After a run, look through the repo for open issues labeled `ds-agent-demo`.
 
