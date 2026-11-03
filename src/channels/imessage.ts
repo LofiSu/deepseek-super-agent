@@ -34,6 +34,12 @@ export interface ImessageInbound {
   service?: string
   chatGuid?: string
   chatIdentifier?: string
+  /** `chat.style` from chat.db. `43` denotes a group chat. */
+  chatStyle?: number
+  /** `chat.room_name` from chat.db; non-empty for a named group chat. */
+  roomName?: string
+  /** True when chat.db metadata says this row belongs to a group chat. */
+  isGroup?: boolean
   /** ISO timestamp derived from the Apple-epoch `date` column. */
   at: string
 }
@@ -50,6 +56,77 @@ export interface ImessagePullOptions {
   handle?: string
   /** Only ingest messages that belong to this chat guid. */
   chatGuid?: string
+  /**
+   * Ingest group-chat messages. Off by default, so a group message is skipped
+   * before it can become a Trigger. Even when enabled a group message is never
+   * marked `addressed: 'direct'`.
+   */
+  allowGroups?: boolean
+}
+
+/** chat.db `chat.style` value for a group chat (1:1 chats use 45). */
+export const IMESSAGE_GROUP_CHAT_STYLE = 43
+
+/**
+ * Group detection uses chat.db metadata only (`chat.style`, `chat.room_name`),
+ * never message text. Any positive signal wins, so an inconsistent row fails
+ * closed as a group.
+ */
+export function isGroupMessage(message: {
+  isGroup?: boolean
+  chatStyle?: number
+  roomName?: string
+}): boolean {
+  if (message.isGroup === true) return true
+  if (Number(message.chatStyle) === IMESSAGE_GROUP_CHAT_STYLE) return true
+  return typeof message.roomName === 'string' && message.roomName.trim().length > 0
+}
+
+export interface ImessageAdmissionInput {
+  /** `--handle <id>` or `DS_AGENT_IMESSAGE_HANDLE`. */
+  handle?: string
+  /** Raw `DS_AGENT_ACTOR_ALLOWLIST` (comma-separated). */
+  actorAllowlist?: string
+  /** `--allow-any` or `DS_AGENT_IMESSAGE_ALLOW_ANY=1`. */
+  allowAny?: boolean
+}
+
+export interface ImessageAdmissionDecision {
+  allowed: boolean
+  allowAny: boolean
+  /** Trimmed sender ids from `--handle` plus a non-empty actor allowlist. */
+  senders: string[]
+  /** Refusal text when `allowed` is false. */
+  error?: string
+}
+
+/** Safe refusal shown when the channel would otherwise be default-open. */
+export const IMESSAGE_ADMISSION_ERROR =
+  'iMessage channel refuses to start without a sender allowlist: '
+  + 'pass --handle "+..." (your phone number or Apple ID email) or set DS_AGENT_ACTOR_ALLOWLIST, '
+  + 'or opt into open use with --allow-any (DS_AGENT_IMESSAGE_ALLOW_ANY=1).'
+
+function parseAllowlist(raw: string | undefined): string[] {
+  if (raw == null || raw.trim() === '') return []
+  return raw.split(',').map(id => id.trim()).filter(id => id.length > 0)
+}
+
+/**
+ * Default-deny startup gate for the iMessage CLI. This is not authorization:
+ * the runtime admission rules still evaluate every Trigger. It only refuses a
+ * configuration that would otherwise ingest messages from any sender.
+ */
+export function decideImessageAdmission(
+  input: ImessageAdmissionInput = {},
+): ImessageAdmissionDecision {
+  const senders = [input.handle, ...parseAllowlist(input.actorAllowlist)]
+    .map(value => value?.trim() ?? '')
+    .filter(value => value.length > 0)
+  const allowAny = input.allowAny === true
+  if (allowAny || senders.length > 0) {
+    return { allowed: true, allowAny, senders }
+  }
+  return { allowed: false, allowAny: false, senders, error: IMESSAGE_ADMISSION_ERROR }
 }
 
 export interface ImessageApi {
@@ -106,16 +183,22 @@ export function imessageThreadFor(message: { handle: string; chatGuid?: string }
   return message.chatGuid ? `chat:${message.chatGuid}` : `handle:${message.handle}`
 }
 
-/** Map a real inbound message to a Trigger. A dedicated agent account is addressed directly. */
+/**
+ * Map a real inbound message to a Trigger. Only a 1:1 message from the
+ * configured sender is addressed directly. A group message is explicitly not
+ * `direct`, so it still has to pass the normal admission rules.
+ */
 export function imessageTrigger(message: ImessageInbound): Trigger {
   const thread = imessageThreadFor(message)
+  const group = isGroupMessage(message)
+  const groupId = message.chatGuid ?? message.chatIdentifier ?? thread
   return {
     id: `imessage_${message.guid}`,
     source: 'imessage',
     threads: [{ source: 'imessage', id: thread }],
     actor: { source: 'imessage', id: message.handle },
     human: true,
-    addressed: 'direct',
+    ...(group ? {} : { addressed: 'direct' as const }),
     at: message.at,
     text: message.text,
     channel: {
@@ -125,13 +208,20 @@ export function imessageTrigger(message: ImessageInbound): Trigger {
         provider: 'imessage',
         handle: message.handle,
         ...(message.chatGuid ? { chatGuid: message.chatGuid } : {}),
+        // Group admission reads only `address.group`; a group message is never
+        // direct and must earn its way through the normal filter.
+        ...(group ? { group: groupId } : {}),
       },
     },
     meta: {},
   }
 }
 
-/** Pulls new inbound messages and maps them to Triggers, advancing the ROWID cursor. */
+/**
+ * Pulls new inbound messages and maps them to Triggers, advancing the ROWID
+ * cursor. Group messages are dropped unless `allowGroups` is set; the cursor
+ * still advances past them so a closed group can never stall the poll.
+ */
 export class ImessageSource {
   constructor(
     private readonly api: ImessageApi,
@@ -149,8 +239,10 @@ export class ImessageSource {
       if (message.rowId > lastRowId) lastRowId = message.rowId
     }
     // Advance past rows that decoded to no text (reactions, attachment-only
-    // payloads) without turning them into empty, "direct" Triggers.
-    const usable = messages.filter(message => message.text.trim().length > 0)
+    // payloads) or belong to a closed group, without turning them into Triggers.
+    const usable = messages.filter(message =>
+      message.text.trim().length > 0
+      && (this.opts.allowGroups === true || !isGroupMessage(message)))
     return { messages: usable, triggers: usable.map(imessageTrigger), lastRowId }
   }
 }
@@ -265,7 +357,8 @@ export class ChatDbImessageApi implements ImessageApi {
     const sql = `
       SELECT m.ROWID AS rowId, m.guid AS guid, m.text AS text, m.attributedBody AS attributedBody,
              m.date AS date, m.service AS service,
-             h.id AS handle, c.guid AS chatGuid, c.chat_identifier AS chatIdentifier
+             h.id AS handle, c.guid AS chatGuid, c.chat_identifier AS chatIdentifier,
+             c.style AS chatStyle, c.room_name AS roomName
       FROM message m
       LEFT JOIN handle h ON m.handle_id = h.ROWID
       LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
@@ -283,6 +376,10 @@ export class ChatDbImessageApi implements ImessageApi {
       const body = row.text != null && String(row.text).length > 0
         ? String(row.text)
         : decodeAttributedBody(row.attributedBody)
+      const chatStyle = row.chatStyle == null ? undefined : Number(row.chatStyle)
+      const roomName = row.roomName == null || String(row.roomName).trim() === ''
+        ? undefined
+        : String(row.roomName)
       // Keep empty decodes so the caller's cursor advances past them; the
       // source filters them out of the Trigger list.
       out.push({
@@ -293,6 +390,9 @@ export class ChatDbImessageApi implements ImessageApi {
         ...(row.service ? { service: String(row.service) } : {}),
         ...(row.chatGuid ? { chatGuid: String(row.chatGuid) } : {}),
         ...(row.chatIdentifier ? { chatIdentifier: String(row.chatIdentifier) } : {}),
+        ...(chatStyle === undefined || !Number.isFinite(chatStyle) ? {} : { chatStyle }),
+        ...(roomName === undefined ? {} : { roomName }),
+        isGroup: isGroupMessage({ chatStyle, roomName }),
         at: appleDateToIso(row.date),
       })
     }
