@@ -758,4 +758,36 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
     await expect(settlesWithin(queued, 2_000)).resolves.toBe(true)
     expect(load(runtime, later.ticketId).ended?.outcome).toBe('ready')
   })
+
+  it('releases the mesh node when a non-queued Worker turn rejects asynchronously', async () => {
+    const events: string[] = []
+    const held = new Map<string, Gate>()
+    const runtime = start(events, held)
+    const failed = createTicket(runtime, 'trg_async_fail')
+    const later = createTicket(runtime, 'trg_async_later')
+
+    // Memory recall runs inside the scheduled Worker callback, so throwing here
+    // rejects the promise `startWorkerTurn` returned instead of throwing
+    // synchronously out of `launch`.
+    const originalQuery = runtime.longTermMemory.query.bind(runtime.longTermMemory)
+    vi.spyOn(runtime.longTermMemory, 'query').mockImplementation(query => {
+      if (query.ticketId === failed.ticketId) throw new Error('worker turn exploded')
+      return originalQuery(query)
+    })
+
+    // The launch must resolve; the mesh slot picked before the turn rejected
+    // must not leak.
+    await expect(runtime.harness.launch(load(runtime, failed.ticketId))).resolves.toBeUndefined()
+    expect(runtime.log.text()).toContain(
+      `[harness] worker failed ticketId=${failed.ticketId} error=Error: worker turn exploded`,
+    )
+    expect(runtime.workerMesh.inFlight('mesh-test')).toBe(0)
+    expect(events.some(event => event.startsWith(`${failed.ticketId}:`))).toBe(false)
+
+    // A later Worker still gets the only node and runs to completion.
+    await runtime.harness.launch(load(runtime, later.ticketId))
+    expect(events.some(event => event.startsWith(`${later.ticketId}:call1`))).toBe(true)
+    expect(load(runtime, later.ticketId).ended?.outcome).toBe('ready')
+    expect(runtime.workerMesh.inFlight('mesh-test')).toBe(0)
+  })
 })
