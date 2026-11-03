@@ -1,6 +1,6 @@
 # Development status
 
-> Checkpoint: 2026-11-03 · `main` = `34aef25`
+> Checkpoint: 2026-11-03 · `main` = `10e9f3c`
 > Source of truth: `git`, GitHub PRs/checks, and the evidence in
 > `docs/PROJECT_AUDIT.md`. Do not trust this file without re-verifying.
 
@@ -8,49 +8,56 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `34aef25` |
-| Last merged PR | #84 mesh release-order correction |
-| Merged this cycle | #75 docs, #76 gateway, #77 iMessage, #78 orchestration, #79 mesh, #80 docs, #81 group fix, #82 token hardening, #84 mesh correction |
-| Open PRs at checkpoint | #74 (refreshed audit, re-review), #83 (this reconciliation), #85 (P1-6 restart recovery) |
+| Commit | `10e9f3c` |
+| Last merged PR | #85 P1-6 restart recovery |
+| Merged this cycle | #83 state reconciliation, #74 roadmap audit refresh, #85 restart recovery |
+| Open PRs at checkpoint | none (cycle 3 implementation branches not yet opened as PRs) |
 | Required check | `typecheck and test` |
-| Offline suite | 414 passed / 15 skipped (429 tests, 55 files) |
-| Coverage | 81.81% statements/lines, 80.06% branches, 89.77% functions |
+| Offline suite | 425 passed / 15 skipped (440 tests, 56 files) |
+| Coverage | 82% statements/lines, 80.09% branches, 89.85% functions |
 
 ## Active workstreams
 
 | Task | Priority | Branch | Owner | State |
 |------|----------|--------|-------|-------|
-| IMESSAGE-GROUP-FIX — group aggregation | P0 | `agent/imessage-group-aggregation` | implementer | merged (#81), APPROVE |
-| MESH-RELEASE-ORDER — defer pump past terminal commit | P0 | `agent/mesh-release-order` | implementer | merged (#84), APPROVE |
-| GATEWAY-TOKEN-SYMLINK — token file hardening | P1 | `agent/GATEWAY-TOKEN-SYMLINK` | implementer | merged (#82), APPROVE |
-| AUDIT-REFRESH — refresh PR #74 audit | P2 | `docs/final-audit` | chief engineer | head `cb6cdf2`; CI green; re-review after #83 merges |
-| P1-6 — restart recovery | P1 | `agent/P1-6-restart-recovery` | implementer | dispatched; contract issued |
-| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84 APPROVE; #77 corrected |
+| STATE-RECONCILIATION — docs to `34aef25` | P1 | `docs/state-reconciliation` | chief engineer | merged (#83, `cecfba0`), APPROVE |
+| AUDIT-REFRESH — roadmap audit | P2 | `docs/final-audit` | chief engineer | merged (#74, `299b908`), APPROVE |
+| P1-6 — restart recovery | P1 | `agent/P1-6-restart-recovery` | implementer | merged (#85, `10e9f3c`), APPROVE |
+| IMESSAGE-GROUP-EDGES — join-order/page/ambiguity | P1 | `agent/imessage-group-edge-tests` | implementer | implementing; no PR yet |
+| GATEWAY-TOKEN-RACE — first-create/ELOOP | P1 | `agent/gateway-token-race` | implementer | implementing; no PR yet |
+| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84/#85 APPROVE; #77 corrected |
 
 ## Completed this cycle
 
-- Audited `34aef25` in a detached worktree; typecheck, lint (224 tracked files),
-  format, offline suite, and coverage.
-- Merged #75, #76, #77, #78, #79, #80, #81, #82, and #84. #76, #81, #82, and
-  #84 received APPROVE reviews; #77 was merged before its blocking group-dedupe
-  finding was fixed and is corrected by #81; #79 was merged before its blocking
-  release-ordering finding was reported and is corrected by #84.
-- Opened #83 (this reconciliation) and corrected both post-merge incidents
-  rather than calling the surfaces clean.
+- Merged #83 after an independent REQUEST_CHANGES → APPROVE cycle. The review
+  caught stale Harness direct-write claims, a stale Task 1 status, a
+  present-tense iMessage defect description, and a branch-coverage
+  transcription error; all were corrected before merge.
+- Merged #74 after two REQUEST_CHANGES → APPROVE cycles. Its base was refreshed
+  onto `34aef25`, then refreshed again onto `cecfba0` after #83 landed, so the
+  `34aef25` audit evidence is documented on `main`.
+- Merged #85 after an independent review reproduced a same-process re-recovery
+  bug, a missing RECOVERED prompt in the Worker turn, and unhandled launch
+  failures. The final head has a per-Runtime recovery guard, prompt injection,
+  launch-failure isolation, crash-boundary relaunch, and per-ticket isolation;
+  all 11 regression tests fail on the pre-fix base.
+- `main` CI at `10e9f3c`: `typecheck and test` success; no live model or
+  real-channel run.
 
 ## Blockers
 
-- #74 can now be rebased because #79 updated `docs/MODULES.md` and
-  `docs/ROADMAP.md`; refresh its evidence to `34aef25`.
 - Live model and real-channel acceptance remain operator-only; no credentials
-  were used in this cycle.
-- Non-blocking follow-ups remain: two iMessage test gaps, gateway first-create
-  race/ELOOP, and two mesh `queueState` branch tests.
+  were used.
+- Residual non-blocking items: iMessage ambiguous-address/edge tests (being
+  addressed in cycle 3), gateway EEXIST/ELOOP tests (being addressed in cycle
+  3), mesh `queueState` branch tests, and the malformed-doc partial-write edge
+  in recovery (unreachable from valid state).
+- `serve` still has no inbound channel loop; this remains a documented boundary.
 
 ## Next actions
 
-1. Rebase and merge PR #74 with `34aef25` evidence.
-2. Dispatch P1-6 restart recovery.
-3. Keep the non-blocking follow-ups in the queue; do not reopen merged PRs.
-4. Update `.super-agent/state.json` at each checkpoint; only the main
+1. Review and merge the two cycle-3 implementation PRs.
+2. Refresh this status and the review log after each merge; do not reopen merged
+   PRs for non-blocking items.
+3. Update `.super-agent/state.json` at each checkpoint; only the main
    orchestrator writes it.

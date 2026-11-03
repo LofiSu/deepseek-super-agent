@@ -27,9 +27,11 @@
 | MESH-RELEASE-ORDER | Orchestration | `agent/mesh-release-order` | 2026-11-03 | #84 merged, APPROVE | #84 | integrated |
 | GATEWAY-HARDENING | Infrastructure/Security | `agent/gateway-hardening` | 2026-11-03 | merged | #76 | integrated |
 | GATEWAY-TOKEN-SYMLINK | Infrastructure/Security | `agent/GATEWAY-TOKEN-SYMLINK` | 2026-11-03 | #82 merged, APPROVE | #82 | integrated |
-| AUDIT-REFRESH | Chief Engineer | `docs/final-audit` | 2026-11-03 | head `3119369`; CI green; awaiting #83 then re-review | #74 | refreshed |
-| P1-6 | Core Runtime | `agent/P1-6-restart-recovery` | 2026-11-03 | head `4b3ad35`; CI green; review | #85 | review |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84 APPROVE; #77 corrected | — | continuing |
+| AUDIT-REFRESH | Chief Engineer | `docs/final-audit` | 2026-11-03 | merged `299b908`, APPROVE | #74 | integrated |
+| P1-6 | Core Runtime | `agent/P1-6-restart-recovery` | 2026-11-03 | merged `10e9f3c`, APPROVE | #85 | integrated |
+| IMESSAGE-GROUP-EDGES | Infrastructure/Security | `agent/imessage-group-edge-tests` | 2026-11-03 | implementing | — | in progress |
+| GATEWAY-TOKEN-RACE | Infrastructure/Security | `agent/gateway-token-race` | 2026-11-03 | implementing | — | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 

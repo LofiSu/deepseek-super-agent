@@ -248,25 +248,50 @@ head so a later reader can separate the reviewed tree from the merged tree.
   run reports 80.07% branches, consistent with the documented one-branch V8
   variance; the audit doc attributes 80.06% to the `34aef25` run.
 - **Verdict:** **APPROVE** and merge.
+- **Merged:** `cecfba0` (2026-11-03). CI green on `f7e545a`; all review threads
+  resolved.
+
+## PR #85 — `feat(harness): recover interrupted assignments on startup`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN heads `4b3ad35` → `04a421e` → `3bff7a5`; final merge
+  head `ba405c1`. Files: `src/core/assignments.ts`, `src/core/engine.ts`,
+  `src/runtime.ts`, `src/harness/loop.ts` (orchestrator-authorized for prompt
+  injection), `test/restart-recovery.test.ts`.
+- **Independent review:** **REQUEST_CHANGES** on the first heads. Blocking:
+  (1) same-process re-entrancy — a second `Runtime.start()` after the async
+  relaunch marked the replacement `running` re-recovered a live assignment,
+  producing 3 assignments and 2 RECOVERED inputs; the original test mocked
+  launch and masked it. (2) The RECOVERED context was persisted but never
+  rendered into the Worker prompt (`Harness.workerTask` did not read
+  `ticket.inputs`). Non-blocking: unhandled launch rejection, stranded pending
+  replacement, no per-ticket isolation.
+- **Re-review:** **APPROVE** at `3bff7a5`/`ba405c1`. Verified per-Runtime
+  one-shot guard, prompt injection, sync/async launch-failure isolation,
+  crash-boundary relaunch, malformed-ticket isolation, and 11 non-vacuous tests
+  that all fail on `34aef25`. Residual non-blocking: a malformed doc that
+  throws after a write can commit a partial effect (unreachable from valid
+  state); `recoveryAttempted` disables in-process retry after a scan failure.
+- **Merged:** `10e9f3c` (2026-11-03). CI green on `ba405c1`.
 
 ## PR #74 — `docs: record the final audit on main`
 
 - **Author:** LofiSu (agent-assisted)
-- **State at review:** initial head `cb6cdf2` (+34/−8); corrections pushed as
-  `3119369` (+36/−9); docs/ROADMAP.md and docs/MODULES.md only; CI passed on
-  both heads.
-- **Independent review:** **REQUEST_CHANGES**. The revision row claimed
-  "#75–#84 merged" although #83 is still open, and the `34aef25` headline
-  evidence is not in `docs/PROJECT_AUDIT.md` on `main` (main's audit doc still
-  carries the `bb11c96` baseline). The numbers match #83's unmerged audit, so
-  they are not fabricated, but they are not yet the documented main-tree
-  evidence.
-- **Resolution:** merge #83 first, then rebase/refresh #74 on the new `main` and
-  re-run the scoped review. Also correct "§1 status board" to §7, mark §5 as
-  last fully re-checked at `fa974ca`, and update the PR body diff counts.
-- **Verdict:** **REQUEST_CHANGES** (re-review pending).
+- **State at review:** initial head `cb6cdf2` (+34/−8); corrections at
+  `3119369` (+36/−9); post-#83 refresh `7a63284`; final coverage fix `6ce1c42`.
+  Docs/ROADMAP.md and docs/MODULES.md only; CI passed on every head.
+- **Independent review:** **REQUEST_CHANGES** twice. First: the revision row
+  claimed "#75–#84 merged" although #83 was still open, and the `34aef25`
+  evidence was not yet in `docs/PROJECT_AUDIT.md` on `main`. Second, at
+  `7a63284`: both docs still reported branches 80.05% (2702/3375) while the
+  merged audit doc and PR body said 80.06% (2703/3376).
+- **Resolution:** merge #83 first, merge `main` into the branch, add a
+  `cecfba0` revision row, and align the branch figure to 80.06% (2703/3376) in
+  `docs/ROADMAP.md:536` and `docs/MODULES.md:289`. Delta re-review APPROVE.
+- **Merged:** `299b908` (2026-11-03). CI green on `6ce1c42`.
+- **Verdict:** **APPROVE** and merge.
 
 ## Pending reviews
 
-- PR #74 re-review after #83 merges
-- PR #85 (`agent/P1-6-restart-recovery`)
+- None at this checkpoint. Cycle-3 branches (`agent/imessage-group-edge-tests`,
+  `agent/gateway-token-race`) have no PRs yet.

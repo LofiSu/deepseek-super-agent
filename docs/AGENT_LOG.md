@@ -4,6 +4,38 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-03 — Cycle 3 checkpoint 1 (cycle 2 integrated; edge work dispatched)
+
+### Observed
+
+- #83 merged at `cecfba0` after the scoped re-review APPROVE; all five blocking
+  doc findings and three CodeRabbit threads were resolved.
+- #74 merged at `299b908` after the final coverage-figure fix and delta APPROVE.
+  `main` now carries the `34aef25` audit evidence.
+- #85 merged at `10e9f3c` after the re-review APPROVE. The review reproduced a
+  same-process re-recovery bug; the final head has a per-Runtime guard, prompt
+  injection, launch-failure isolation, crash-boundary relaunch, and per-ticket
+  isolation. All 11 regression tests fail on the pre-fix base.
+- `main` CI at `10e9f3c`: `typecheck and test` success; 425 passed, 15 skipped
+  (440), 56 files; coverage 82% lines, 80.09% branches, 89.85% functions.
+
+### Decided
+
+- Accept ADR-004 as implemented. The at-least-once boundary and the
+  malformed-doc partial-write edge stay documented as non-blocking.
+- Start cycle 3 with two disjoint security-edge tasks: iMessage group join/page/
+  ambiguity coverage and gateway first-create/ELOOP hardening.
+- Do not reopen merged PRs for non-blocking follow-ups; new branches only.
+
+### Verified
+
+- `main` CI green at `10e9f3c`; no live model or real-channel run.
+- Both cycle-3 branches are isolated; no file overlap with each other or docs.
+
+### Pending
+
+- PRs and independent reviews for IMESSAGE-GROUP-EDGES and GATEWAY-TOKEN-RACE.
+
 ## 2026-11-03 — Cycle 2, checkpoint 2 (state review corrected; P1-6 in review)
 
 ### Observed

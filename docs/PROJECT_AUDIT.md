@@ -197,6 +197,8 @@ This is documented; it remains a production limitation rather than a bug.
 
 The offline gate is green on `34aef25` and the architecture matches its
 contracts. The iMessage group-classification, gateway token-redirection, and
-mesh release-ordering gaps are fixed by #81, #82, and #84. Next work is restart
-recovery (P1-6, PR #85) and the refreshed PR #74 audit; the non-blocking review
-follow-ups remain tracked in the review log.
+mesh release-ordering gaps are fixed by #81, #82, and #84. #85 then merged
+restart recovery (P1-6) at `10e9f3c`; CI there reports 425 passed / 15 skipped
+(440), 56 files, and 82% lines / 80.09% branches / 89.85% functions. The
+non-blocking review follow-ups remain tracked in the review log and the current
+status lives in `docs/DEVELOPMENT_STATUS.md`.
