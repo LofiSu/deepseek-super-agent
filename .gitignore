@@ -6,3 +6,10 @@ coverage
 *.log
 uploads
 *.tsbuildinfo
+
+# Super Agent runtime state and per-machine settings
+.super-agent/
+.claude/worktrees/
+.claude/settings.local.json
+
+__pycache__/
