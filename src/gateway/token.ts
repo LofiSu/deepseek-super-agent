@@ -70,6 +70,11 @@ function ensurePrivateMode(file: string, fd: number): void {
  * Read one token file. Missing/unreadable paths return undefined (callers may
  * mint a token), but a symlink, non-regular file, hard link, or a file that
  * cannot be secured throws so the caller fails closed instead of using it.
+ *
+ * `ELOOP` means the path was swapped for a symlink (or a symlinked parent)
+ * between `lstat` and `open`; `O_NOFOLLOW` refused to follow it. Treating that
+ * as "not found" would let a racing attacker make the gateway mint a new token
+ * over a path it could not verify, so it is an explicit failure.
  */
 function readTokenFile(file: string): string | undefined {
   let before: fs.Stats
@@ -80,6 +85,9 @@ function readTokenFile(file: string): string | undefined {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW)
   } catch (error) {
     if (error instanceof GatewayTokenFileError) throw error
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new GatewayTokenFileError(file, 'changed while being opened (ELOOP)')
+    }
     return undefined
   }
   try {
@@ -102,8 +110,9 @@ function readTokenFile(file: string): string | undefined {
  * Create the token file without ever following a pre-existing path. `O_EXCL`
  * fails on symlinks, directories, and hard links, and `O_NOFOLLOW` protects
  * the platforms where it is available. If another process wins the create
- * race, reuse its private token; a leftover empty file is only overwritten
- * after the opened descriptor proves it is a plain, singly-linked file.
+ * race, reuse its private token. Never overwrite the winner's file: while it
+ * is still empty it may be mid-write, so returning our token (or writing it
+ * over theirs) could make the caller use a value that is not persisted.
  */
 function writeTokenFile(file: string, token: string): string | undefined {
   const exclusive = fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | NOFOLLOW
@@ -125,31 +134,19 @@ function writeTokenFile(file: string, token: string): string | undefined {
       try { fs.unlinkSync(file) } catch { /* best effort */ }
       throw error
     }
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new GatewayTokenFileError(file, 'changed while being opened (ELOOP)')
+    }
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       const raced = readTokenFile(file)
       if (raced) return raced
-      return truncateTokenFile(file, token)
+      // The file exists but holds no token yet (empty or still being written
+      // by the process that won the create race). Returning our freshly
+      // minted token here would diverge from what ends up persisted.
+      throw new GatewayTokenFileError(file, 'was created concurrently and is empty')
     }
     throw error
   }
-}
-
-/** Replace an existing empty token file after validating the opened inode. */
-function truncateTokenFile(file: string, token: string): undefined {
-  const before = fs.lstatSync(file)
-  assertPlainTokenFile(file, before)
-  const fd = fs.openSync(file, fs.constants.O_WRONLY | NOFOLLOW)
-  try {
-    const after = fs.fstatSync(fd)
-    assertPlainTokenFile(file, after)
-    assertSameFile(file, before, after)
-    fs.ftruncateSync(fd, 0)
-    fs.writeFileSync(fd, `${token}\n`)
-    ensurePrivateMode(file, fd)
-  } finally {
-    fs.closeSync(fd)
-  }
-  return undefined
 }
 
 export function readGatewayToken(home: string): string | undefined {
