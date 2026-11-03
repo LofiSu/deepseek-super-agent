@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -50,6 +51,22 @@ jobs:
           fi
           bwrap --ro-bind / / --unshare-net -- /bin/true
 
+      - name: Fetch base branch
+        # `pnpm format:check` compares the PR branch with its target. A shallow
+        # checkout has no base ref, and no merge base is needed for the two-dot
+        # `git diff --check` comparison. PRs target main (see the trigger above).
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_REF"
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        env:
+          DS_AGENT_FORMAT_BASE: origin/${{ github.base_ref || 'main' }}
+        run: pnpm format:check
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -74,6 +91,29 @@ jobs:
           GOOGLE_API_KEY: ""
           ANTHROPIC_API_KEY: ""
         run: pnpm test
+
+      - name: Coverage
+        # Offline fixture only, same env as Test. No failure thresholds yet;
+        # the measured baseline is recorded in docs/ROADMAP.md P2-5.
+        env:
+          CI: "true"
+          DS_AGENT_ALLOW_MOCK_FIXTURE: "1"
+          DS_AGENT_API_BASE: ""
+          DS_AGENT_API_KEY: ""
+          DS_AGENT_PROVIDER: ""
+          DEEPSEEK_API_KEY: ""
+          OPENAI_API_KEY: ""
+          OPENROUTER_API_KEY: ""
+          XAI_API_KEY: ""
+          GROK_API_KEY: ""
+          MOONSHOT_API_KEY: ""
+          KIMI_API_KEY: ""
+          ZHIPU_API_KEY: ""
+          GLM_API_KEY: ""
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+        run: pnpm test:coverage
 
       - name: Detect live API key
         id: live_key

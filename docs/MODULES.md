@@ -32,24 +32,6 @@ and no imports from higher modules.
 Worker task. `session.ts` maps a shard to `router:<shard>` (the default shard
 keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
 
-- Matching shards run their Router turns sequentially in `route` order. The
-  **first** shard is the ticket's reply owner: `routerTurn` opens that shard's
-  session, and only that session may call `reply_user`, `assess_trigger`
-  (stop/unavailable), or `stop_worker` (`src/harness/tools.ts`).
-- Ownership is resolved from the trigger named by the call. A supplied
-  `triggerId` and `ticketId` must agree (`ticket.originTriggerId === triggerId`),
-  and a missing ticket or disposition is rejected instead of falling back to
-  default. Ticket-scoped calls (`reply_user`, `stop_worker`) use the ticket's
-  origin trigger; every Ticket has one.
-- `Evals.decide` is idempotent per trigger for terminal outcomes
-  (`stop`, `ignore`, `unavailable`). An earlier `accept` may precede the first
-  terminal decision (the Gate accepted, then the Router vetoed), but repeated
-  terminals return the existing Decision and write no new row.
-- Every shard session shares the same Ticket and Thread. A later shard cannot
-  create a second Ticket, reply, or emit a second terminal decision for the same
-  trigger. A report follow-up always goes to the owner, never to the second
-  shard or the default Router.
-
 - `pickNode(ticketId)` is least-loaded and stable for a ticket.
 - The chosen node is written to `Assignment.node`, the `assignment.placed`
   event, and the Worker task prompt (`node=`).
@@ -140,26 +122,9 @@ Active rules are logged once at `Runtime.create` as
 `[ingress] dropped reason=<layer>:<reason>`.
 
 - `RouterShardRegistry.route(trigger)` returns every matching non-default shard
-  ordered by `priority` descending, then registration order.
-- `default` is a fallback only: it is returned (as the whole list) when no
-  non-default shard matches; it is never appended to a match list, and its
-  `priority` is ignored.
-- The first id in the ordered list is the arbitration winner. It is the ticket's
-  reply owner and the only shard session that may emit a terminal decision
-  (`reply_user`, `assess_trigger` stop/unavailable, `stop_worker` in
-  `src/harness/tools.ts`). Ownership is resolved from the trigger named by the
-  call, and a mismatched trigger/ticket pair or missing disposition is rejected.
-- `Evals.decide` records at most one terminal decision
-  (`stop`/`ignore`/`unavailable`) per trigger. An `accept` may precede the first
-  terminal decision, but repeated terminal calls return the existing Decision
-  and write nothing. Because all shard sessions share one Ticket/Thread, one
-  trigger produces at most one terminal Router decision and one reply path.
-- The shard list is stored in `TriggerTrust.shards` and `Disposition.shards`;
-  the ordered matches are stored as-is (no `default` appended).
-- The Harness runs one Router session per matching shard, in order, then starts
-  the Worker.
-- Shards are routing metadata for Router sessions, not multi-process placement:
-  every shard's session runs in this process.
+  in priority order, or `['default']`.
+- The shard list is stored in `TriggerTrust.shards` and `Disposition.shards`.
+- The Harness runs one Router session per matching shard, then starts the Worker.
 - Configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`.
   Malformed JSON is logged and ignored, leaving the default shard.
 
@@ -180,40 +145,10 @@ bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
 - On every terminal path, `remember(ticket)` upserts `ltm_<ticketId>` with the
   title, brief, and last report, then grants the ticket access to its spill.
 - Text is redacted before it reaches the spill, including `put()` callers.
-- `put()` dedupes per ticket: text that is identical after redaction and
-  normalization (whitespace collapsed, trimmed, case-insensitive) reuses the
-  existing entry and spill, unions its tags, and creates no second row.
-  Only an entry with a readable spill body can match; an entry whose spill is
-  missing is skipped and the write creates a fresh, recallable entry. The
-  truncated summary is never used as a dedupe key.
-  Different text, or the same text for another ticket, is stored normally.
-  Both the create and dedupe paths run the retention pass, with the touched
-  entry protected.
-- The next ticket queries by title (three highest-scoring hits), receives a
-  spill grant for each hit, and gets `memory=<id> spillId=<id> text=<summary>`
-  lines in the Worker task.
+- The next ticket queries by title (three most recent hits), receives a spill
+  grant for each hit, and gets `memory=<id> spillId=<id> text=<summary>` lines
+  in the Worker task.
 - Recall requires the reader ticket id; an `ltm` id alone is not a capability.
-
-Recall formula (`query`). Matching is unchanged: every query word must appear
-in the spill body, and requested `tags` are an AND filter. The tag filter
-compares tag strings exactly after trimming (case-sensitive), as before; only
-the `tagHits` ranking needles are lower-cased. Results are ordered by a stable
-score:
-
-- `tagHits`: number of entry tags whose trimmed, lower-cased form equals a
-  distinct query word or a requested tag (trimmed, lower-cased).
-- `textHits`: sum over each distinct query word of its occurrences in the
-  lower-cased spill body, each word capped at 5.
-- Order: `tagHits` desc, then `textHits` desc, then `createdAt` desc, then
-  `id` desc. The final key is a lexicographic string comparison of ids
-  (`ltm_9` sorts after `ltm_10`), not numeric recency; it makes the order total
-  when timestamps collide.
-
-`test/long-term-memory.test.ts` pins the behavior with an injected clock: tag
-hits outrank newer untagged entries, more text hits outrank newer entries at
-equal tag hits, `createdAt` beats a conflicting id order, the per-word count
-caps at 5, recency/id break remaining ties, dedupe keeps one row and one spill,
-a missing-spill zombie is never reused, and requested tags still AND-filter.
 
 ## M7 — speculate
 
@@ -316,8 +251,8 @@ host-level seccomp stay external as PLAN §9 says.
 ## Tests
 
 ```text
-npx vitest run test/runtime-integration.test.ts   13 tests: shards/arbitration/ownership, mesh, memory, lifecycle, A2A, bake-off
-npx vitest run test/router-shards.test.ts         7 tests: route/priority/registration/fallback contracts
+npx vitest run test/runtime-integration.test.ts   8 tests: shards, mesh, memory, lifecycle, A2A, bake-off
+npx vitest run test/router-shards.test.ts          route/priority/filter contracts
 npx vitest run test/worker-mesh.test.ts            capacity/least-loaded/release
 npx vitest run test/long-term-memory.test.ts       persistence, ACL, redaction
 npx vitest run test/lifecycle-a2a.test.ts          lifecycle bus + envelope delivery
@@ -325,7 +260,10 @@ npx vitest run test/runtime-wiring.test.ts         default-path service construc
 npx vitest run test/cli-memory-a2a.test.ts         offline operator views
 npx vitest run test/metrics-curve.test.ts          percentiles + bake-off math
 pnpm typecheck                                     pass
-offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         273 passed, 15 skipped, 41 files
+pnpm lint                                          pass
+pnpm format:check                                  pass
+pnpm test:coverage                                 299 passed, 38 files; 81 src files; lines 82.38%, branches 82.41%, functions 89.14% (no threshold)
+offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         300 passed, 15 skipped, 42 files
 pnpm test (live Magpie, final tree)                207 passed, 3 skipped, 34 files (431.12 s)
 ```
 
