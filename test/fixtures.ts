@@ -8,9 +8,9 @@ export function tempHome(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-'))
 }
 
-function resolveFixtureModel(explicit?: Model): Model {
+function resolveFixtureModel(explicit?: Model, allowMockModel = false): Model {
   if (explicit) {
-    if (explicit.name === 'MockModel' && process.env.DS_AGENT_ALLOW_MOCK_FIXTURE !== '1') {
+    if (explicit.name === 'MockModel' && !allowMockModel && process.env.DS_AGENT_ALLOW_MOCK_FIXTURE !== '1') {
       throw new Error('freshRuntime refuses MockModel; configure DS_AGENT_API_* for a live model')
     }
     return explicit
@@ -26,9 +26,9 @@ function resolveFixtureModel(explicit?: Model): Model {
  * Default: live Magpie/DeepSeek Runtime (MockModel forbidden).
  * Set DS_AGENT_ALLOW_MOCK_FIXTURE=1 only for offline CI without a live API.
  */
-export function freshRuntime(opts: Partial<RuntimeOptions> = {}): Runtime {
-  const { model: explicitModel, jobDelayMs, watchdogIntervalMs, stuckMs, home, ...rest } = opts
-  const model = resolveFixtureModel(explicitModel)
+export function freshRuntime(opts: Partial<RuntimeOptions> & { allowMockModel?: boolean } = {}): Runtime {
+  const { model: explicitModel, jobDelayMs, watchdogIntervalMs, stuckMs, home, allowMockModel, ...rest } = opts
+  const model = resolveFixtureModel(explicitModel, allowMockModel)
   const live = model.name !== 'MockModel'
   return Runtime.create({
     home: home ?? tempHome(),
