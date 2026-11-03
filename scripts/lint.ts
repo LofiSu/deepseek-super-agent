@@ -33,6 +33,9 @@ const BOARD_HEADING = '## 7. Dynamic task board'
 const BOARD_COLUMNS = 7
 const PHASE2_PATTERN = /\bphase(?:\s*-\s*|\s*)?2\b/i
 const PHASE2_RULE_DESCRIPTION = /no live Phase-2 naming/i
+// The exemption is limited to the paragraph that documents the rule itself;
+// an arbitrary sentence that merely quotes the phrase must still fail.
+const PHASE2_RULE_CONTEXT = /inline-code citations|documenting the rule|historical audit/i
 const INLINE_CODE = /`[^`]*`/gu
 const CONSOLE_ALLOWLIST = new Set(['src/shared/log.ts'])
 const TEXT_FILE = /\.(?:ts|tsx|md|json)$/
@@ -91,7 +94,7 @@ export function checkRoadmapBoard(root: string): Violation[] {
     const raw = lines[index]
     if (raw.startsWith('## ')) break
     // A fenced example is not the board, even when it contains a pipe.
-    if (/^\s*```/u.test(raw)) {
+    if (/^\s*(?:```|~~~)/u.test(raw)) {
       inFence = !inFence
       continue
     }
@@ -104,11 +107,17 @@ export function checkRoadmapBoard(root: string): Violation[] {
       // header. A wrong shape is reported so the table cannot silently pass.
       if (cells[0] === 'ID') {
         headerIndex = index
-        if (cells.length !== BOARD_COLUMNS || cells[1] !== 'Task') {
+        if (cells.length !== BOARD_COLUMNS) {
           violations.push({
             file: ROADMAP_FILE,
             line: index + 1,
             message: `board header has ${cells.length} cells, expected ${BOARD_COLUMNS} (ID | Task | Owner | Branch | PR | Status | Acceptance)`,
+          })
+        } else if (cells[1] !== 'Task') {
+          violations.push({
+            file: ROADMAP_FILE,
+            line: index + 1,
+            message: `board header second cell is "${cells[1]}", expected "Task"`,
           })
         }
       }
@@ -119,6 +128,13 @@ export function checkRoadmapBoard(root: string): Violation[] {
       // checked as a row so malformed tables are reported.
       if (isSeparator(cells)) {
         separatorSeen = true
+        if (cells.length !== BOARD_COLUMNS) {
+          violations.push({
+            file: ROADMAP_FILE,
+            line: index + 1,
+            message: `board separator has ${cells.length} cells, expected ${BOARD_COLUMNS}`,
+          })
+        }
         continue
       }
     }
@@ -171,7 +187,8 @@ export function checkPhaseNaming(root: string, tracked: readonly string[]): Viol
       // switch and the line that documents this rule are history, not a new
       // live claim; plain "Phase-2" prose is still rejected.
       if (file === ROADMAP_FILE) {
-        if (PHASE2_RULE_DESCRIPTION.test(line) || !PHASE2_PATTERN.test(line.replace(INLINE_CODE, ''))) {
+        const ruleLine = PHASE2_RULE_DESCRIPTION.test(line) && PHASE2_RULE_CONTEXT.test(line)
+        if (ruleLine || !PHASE2_PATTERN.test(line.replace(INLINE_CODE, ''))) {
           continue
         }
       }
@@ -221,14 +238,32 @@ export function checkConsoleLog(root: string, tracked: readonly string[]): Viola
       // Any `console` identifier catches console.log, console['log'],
       // console.log?.(), and `const l = console.log` aliases. Comments and
       // strings are not identifiers, so documentation examples stay clean.
-      if (ts.isIdentifier(node) && node.text === 'console') {
-        const { line } = source.getLineAndCharacterOfPosition(node.getStart(source))
+      const report = (at: ts.Node): void => {
+        const { line } = source.getLineAndCharacterOfPosition(at.getStart(source))
         violations.push({
           file,
           line: line + 1,
           message: 'console usage outside src/cli/ (use the shared Logger or the CLI layer)',
         })
+      }
+      if (ts.isIdentifier(node) && node.text === 'console') {
+        report(node)
         return
+      }
+      // `globalThis["console"]` (optionally cast) is the same escape hatch with a
+      // string argument, so it is not an Identifier node.
+      if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
+        const globalBase = (raw: ts.Expression): boolean => {
+          if (ts.isIdentifier(raw)) return raw.text === 'globalThis'
+          if (ts.isAsExpression(raw) || ts.isParenthesizedExpression(raw)) {
+            return globalBase(raw.expression)
+          }
+          return false
+        }
+        if (globalBase(node.expression) && node.argumentExpression.text === 'console') {
+          report(node)
+          return
+        }
       }
       ts.forEachChild(node, visit)
     }

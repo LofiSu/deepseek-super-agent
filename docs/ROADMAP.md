@@ -435,10 +435,10 @@ statements track lines at 81.78%. V8 branch totals move by a few across runs, so
 treat these as informational until a later change picks a floor.
 
 `pnpm lint` runs `scripts/lint.ts`: section 7 board rows have exactly seven
-cells (fenced examples and legend tables are ignored); no live Phase-2 naming in
-`src/`, `docs/`, or the READMEs (in this historical audit, inline-code citations
+cells (fenced examples and legend tables are ignored); in this historical audit,
+no live Phase-2 naming in `src/`, `docs/`, or the READMEs (inline-code citations
 of the removed switch and the line documenting the rule are allowed; plain
-plain prose is not); no tracked `repro-h9*`, `dist/`, or `node_modules/` paths; and no
+prose is not); no tracked `repro-h9*`, `dist/`, or `node_modules/` paths; and no
 `console` usage under `src/` outside `src/cli/` (`src/shared/log.ts`, the Logger
 that writes to stdout, is exempt; the check uses the TypeScript AST, so comments
 and strings are ignored). The checker prints `file:line` and exits nonzero.

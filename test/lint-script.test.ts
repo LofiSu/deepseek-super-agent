@@ -79,6 +79,7 @@ describe('lint script', () => {
     const violations = runLint(root, ['docs/ROADMAP.md'])
     expect(messages(violations)).toEqual([
       'docs/ROADMAP.md:3: board header has 6 cells, expected 7 (ID | Task | Owner | Branch | PR | Status | Acceptance)',
+      'docs/ROADMAP.md:4: board separator has 6 cells, expected 7',
       'docs/ROADMAP.md:5: board row has 8 cells, expected 7',
     ])
   })
@@ -190,6 +191,8 @@ describe('lint script', () => {
         '  console["log"]("bracket")',
         '  const alias = console',
         '  alias.log("alias")',
+        '  globalThis["console"].log("global")',
+        '  ;(globalThis as any)["console"].log("cast")',
         '}',
         '',
       ].join('\n'),
@@ -201,6 +204,59 @@ describe('lint script', () => {
       'src/core/engine.ts:3: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
       'src/core/engine.ts:4: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
       'src/core/engine.ts:5: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
+      'src/core/engine.ts:7: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
+      'src/core/engine.ts:8: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
+    ])
+  })
+
+  it('ignores tilde-fenced examples in the board section', () => {
+    const root = fixture({
+      'docs/ROADMAP.md': [
+        '## 7. Dynamic task board',
+        '',
+        '~~~',
+        '| malformed |',
+        '~~~',
+        '',
+        '| ID | Task | Owner | Branch | PR | Status | Acceptance |',
+        '|----|------|-------|--------|----|--------|------------|',
+        '| P2-5 | Coverage |  | `feat/x` | #1 | resolved | ok |',
+        '',
+      ].join('\n'),
+    })
+    expect(runLint(root, ['docs/ROADMAP.md'])).toEqual([])
+  })
+
+  it('reports a separator whose cell count does not match the header', () => {
+    const root = fixture({
+      'docs/ROADMAP.md': [
+        '## 7. Dynamic task board',
+        '',
+        '| ID | Task | Owner | Branch | PR | Status | Acceptance |',
+        '|----|------|-------|--------|----|--------|',
+        '| P2-5 | Coverage |  | `feat/x` | #1 | resolved | ok |',
+        '',
+      ].join('\n'),
+    })
+    expect(messages(runLint(root, ['docs/ROADMAP.md']))).toEqual([
+      'docs/ROADMAP.md:4: board separator has 6 cells, expected 7',
+    ])
+  })
+
+  it('does not let a quoted rule phrase exempt an unrelated live claim', () => {
+    const root = fixture({
+      'docs/ROADMAP.md': [
+        '## 7. Dynamic task board',
+        '',
+        '| ID | Task | Owner | Branch | PR | Status | Acceptance |',
+        '|----|------|-------|--------|----|--------|------------|',
+        '',
+        'There is no live Phase-2 naming problem; Phase-2 extensions are enabled.',
+        '',
+      ].join('\n'),
+    })
+    expect(messages(runLint(root, ['docs/ROADMAP.md']))).toEqual([
+      'docs/ROADMAP.md:6: Phase-2 naming: this tree is one M0-M11 whole; there is no Phase 2 switch or directory',
     ])
   })
 })
