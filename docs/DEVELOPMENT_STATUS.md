@@ -61,9 +61,9 @@ reported 425/15 (440, 56 files) and 82% / 80.05% (2746/3430). A local
 
 ## Blockers
 
-- The session cycle budget is exhausted (4 completed cycles). Further
-  implementation work belongs to the next session; `.super-agent/state.json`
-  is paused with a recovery checkpoint.
+- The session cycle budget is exhausted (4 completed cycles). No further
+  implementation work is dispatched in this session; this checkpoint is the
+  recovery record for the next one.
 - Live model and real-channel acceptance remain operator-only; no credentials
   were used.
 - Residual non-blocking items: gateway EEXIST winner-reuse and create-path

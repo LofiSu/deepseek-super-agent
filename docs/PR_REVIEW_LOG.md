@@ -379,8 +379,10 @@ head so a later reader can separate the reviewed tree from the merged tree.
 ## PR #90 — `[SUPER-AGENT][IMESSAGE-THREAD-KEY] Separate group and 1:1 conversation keys`
 
 - **Author:** LofiSu (implementer agent)
-- **State at review:** OPEN; initial head `322a85d`, final head `e92f87b` after
-  merging `main` `ed8980d`. Files: `src/channels/imessage.ts`,
+- **State at review:** OPEN; initial head `322a85d`, reviewed head `e92f87b`
+  after merging `main` `ed8980d`. Two later integration merges of `main` —
+  `4460a8f` (`1dd426a`) and `59cbd2c` (`60bb9ae`) — changed no task-owned lines;
+  the final head is `59cbd2c`. Files: `src/channels/imessage.ts`,
   `test/channels-imessage.test.ts`, `docs/IMESSAGE.md` (+148/−5).
 - **Independent review:** **APPROVE**. Verified `imessageThreadFor` maps a chat
   guid to `chat:`, a group without a guid to `group:<identifier>` or
