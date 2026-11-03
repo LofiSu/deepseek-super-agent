@@ -33,15 +33,36 @@ Worker task. `session.ts` maps a shard to `router:<shard>` (the default shard
 keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
 
 - `pickNode(ticketId)` is least-loaded and stable for a ticket.
-- The chosen node is written to `Assignment.node`, the `assignment.placed`
-  event, and the Worker task prompt (`node=`).
+- The chosen node is written to `Assignment.node` by `Engine.assignmentPlaced`
+  (the Engine remains the only writer), which also records the
+  `assignment.placed` event. The Harness only supplies the node and includes
+  `node=` in the Worker task prompt.
 - `release` frees the slot on every terminal ticket path.
 
 Placement is logical: this process still executes the turn. A remote hands
-transport is an integration concern outside this repo. Capacity is a placement
-preference, not backpressure: when every node is full, `pickNode` records
-`node=none capacity-full` and the turn still runs — there is no queue, rejection,
-or admission failure.
+transport is an integration concern outside this repo. Capacity is enforced
+in-process with a bounded FIFO queue owned by the Harness (the registry stays
+pure accounting):
+
+- When every node is full, `launch` does not start the Worker. It parks the
+  ticket and records `mesh.queued`.
+- `DS_AGENT_MESH_QUEUE` (default 100) bounds the wait list. A full queue logs
+  `mesh.queue-full`, increments `mesh.queue_rejected`, and resolves the launch
+  without throwing; the ticket stays open for a later retry.
+- On ticket end the host releases the slot and calls `Harness.release`, which
+  pumps FIFO. The Engine's assignment-ended hook also releases when a
+  `blocked`/`failed`/`waiting` report ends the Assignment but leaves the
+  Ticket open.
+- The pump re-reads the ticket and skips missing, ended, or paused work.
+  Metrics: `mesh.queued`, `mesh.dequeued`, `mesh.queue_rejected`,
+  `mesh.queue_drained`.
+- `drain()` clears the queue, resolves queued launch promises, logs
+  `mesh.queue_drained count=N`, and leaves those tickets open. This is the
+  explicit shutdown path; `jobsSettled()` waits for queued Workers to run
+  instead of dropping them.
+
+`launch` resolves when the Worker turn completes, when a full queue rejects it,
+or when `drain()` releases it.
 
 `ds-agent serve` runs the in-process watchdog/daemon timer over persisted SQLite
 state and owns one Runtime for the process lifetime. It starts no inbound channel

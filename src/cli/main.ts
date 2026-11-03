@@ -15,7 +15,12 @@ import { visibleTickets } from '../speculate/index.ts'
 import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
+import { startEmbeddedGateway } from '../gateway/embedded.ts'
 import { defaultHome, runDemo } from './demo.ts'
+import { runGatewayCommand } from './gateway.ts'
+import { runImessageCommand } from './imessage.ts'
+import { runProfileCommand, runWireCommand } from './wiring.ts'
+import { runSetupCommand } from './setup.ts'
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`)
@@ -108,6 +113,12 @@ function help(): void {
   pnpm ds-agent health
   pnpm ds-agent serve            # daemon timer over persisted state; SIGINT/SIGTERM drain
   pnpm ds-agent chat "fix the login timeout"
+  pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
+  pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLMs, write gateway.config.json
+  pnpm ds-agent imessage [--handle <id>] [--allow-any] [--allow-groups] [--once] [--interval 2000]
+                            # two-way iMessage channel; sender admission is default-deny
+  pnpm ds-agent wire <file> --set KEY=VALUE [--env]  # merge gateway settings into an agent config
+  pnpm ds-agent profile list|save <name>|use <name>|rm <name>  # gateway config profiles
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
   pnpm ds-agent metrics
@@ -131,6 +142,11 @@ intervene records guidance and pauses by default, so the note lands before more 
 resume clears the pause and continues with the unseen guidance in the next turn.
 demo/retry/resume need a live model; chat may use MockModel.
 pause/intervene/collab/team/teams are offline.
+
+imessage refuses to start (default-deny) without --handle/DS_AGENT_IMESSAGE_HANDLE
+or a non-empty DS_AGENT_ACTOR_ALLOWLIST. --allow-any is an explicit opt-out that
+accepts any 1:1 sender; --allow-groups opens group ingestion, and group messages
+are never marked direct.
 
 serve starts the in-process watchdog/daemon timer over persisted SQLite state. It
 has no inbound channel loop: triggers written by a separate emit/chat process are
@@ -171,6 +187,24 @@ async function withRuntime(
       runtime.daemon.stop()
       runtime.store.close()
     }
+  }
+}
+
+/**
+ * If a gateway.config.json exists and no DS_AGENT_GATEWAY_URL is set, start the
+ * gateway in-process for the duration of `run`, so chat/imessage need no
+ * separate gateway process.
+ */
+async function runWithEmbeddedGateway(home: string, run: () => Promise<void>): Promise<void> {
+  const embedded = await startEmbeddedGateway(home)
+  if (embedded) {
+    process.env.DS_AGENT_GATEWAY_URL = embedded.url
+    process.env.DS_AGENT_GATEWAY_TOKEN = embedded.token
+  }
+  try {
+    await run()
+  } finally {
+    if (embedded) await embedded.close()
   }
 }
 
@@ -505,7 +539,27 @@ async function main(): Promise<void> {
   if (cmd === 'chat') {
     const text = process.argv.slice(3).filter(part => !part.startsWith('--')).join(' ').trim()
     if (!text) throw new Error('chat needs text')
-    await withRuntime(runtime => { runtime.ingest(cliTrigger({ text })) })
+    await runWithEmbeddedGateway(home, () => withRuntime(runtime => { runtime.ingest(cliTrigger({ text })) }))
+    return
+  }
+  if (cmd === 'imessage') {
+    await runWithEmbeddedGateway(home, () => runImessageCommand(home))
+    return
+  }
+  if (cmd === 'gateway') {
+    await runGatewayCommand(home)
+    return
+  }
+  if (cmd === 'setup') {
+    await runSetupCommand(home)
+    return
+  }
+  if (cmd === 'wire') {
+    runWireCommand()
+    return
+  }
+  if (cmd === 'profile') {
+    runProfileCommand(home)
     return
   }
   if (cmd === 'emit' && sub === 'im') {

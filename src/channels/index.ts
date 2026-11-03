@@ -36,6 +36,24 @@ export { githubTrigger } from './github.ts'
 export { A2ARouter, type A2ADelivery, type A2AEnvelope } from './a2a.ts'
 export { LocalA2ATransport, type A2ATransport } from './a2a-transport.ts'
 export { imTrigger } from './im.ts'
+export {
+  APPLE_EPOCH_OFFSET_SECONDS,
+  ChatDbImessageApi,
+  DEFAULT_IMESSAGE_INTERVAL_MS,
+  ImessageOutboxAdapter,
+  ImessageSource,
+  appleDateToIso,
+  decodeAttributedBody,
+  imessageDbPath,
+  imessageThreadFor,
+  imessageTrigger,
+  runOsascript,
+  type ImessageApi,
+  type ImessageInbound,
+  type ImessagePullOptions,
+  type ImessageTarget,
+  type OsascriptRunner,
+} from './imessage.ts'
 export { renderOutbound, truncateWords } from './norms.ts'
 export {
   Outbox,
