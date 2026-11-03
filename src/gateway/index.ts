@@ -29,6 +29,7 @@ export {
 export { Masker, maskingPlugin } from './mask.ts'
 export { strategyPlugin } from './builtin-plugins.ts'
 export { GatewayLimits, type LimitConfig, type LimitSnapshot } from './limits.ts'
-export { UsageLedger, type UsageBucket, type UsageRow, type UsageSummary } from './usage.ts'
+export { UsageLedger, type UsageBucket, type UsageRow, type UsageSummary, type SessionSummary } from './usage.ts'
+export { Affinity } from './affinity.ts'
 export { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from './token.ts'
 export { startGatewayServer, type GatewayHandle, type GatewayMetricsSnapshot } from './server.ts'

@@ -15,6 +15,7 @@ export interface UsageRow {
   tokens: number
   ok: boolean
   routing?: string
+  session?: string
 }
 
 export interface UsageBucket {
@@ -74,4 +75,28 @@ export class UsageLedger {
     }
     return { requests, errors, tokens, byProviderModel: [...buckets.values()] }
   }
+
+  /** Aggregate usage by conversation/session id (rows without one are skipped). */
+  summaryBySession(): SessionSummary[] {
+    const sessions = new Map<string, SessionSummary>()
+    for (const row of this.rows) {
+      if (!row.session) continue
+      let session = sessions.get(row.session)
+      if (!session) {
+        session = { session: row.session, requests: 0, tokens: 0, providers: [] }
+        sessions.set(row.session, session)
+      }
+      session.requests += 1
+      session.tokens += row.tokens
+      if (!session.providers.includes(row.provider)) session.providers.push(row.provider)
+    }
+    return [...sessions.values()]
+  }
+}
+
+export interface SessionSummary {
+  session: string
+  requests: number
+  tokens: number
+  providers: string[]
 }

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import type { GatewayConfig, GatewayProvider } from './config.ts'
 import { upstreamUrl } from './config.ts'
@@ -8,6 +9,7 @@ import { maskingPlugin } from './mask.ts'
 import { strategyPlugin } from './builtin-plugins.ts'
 import { GatewayLimits } from './limits.ts'
 import { UsageLedger, type UsageRow } from './usage.ts'
+import { Affinity } from './affinity.ts'
 
 interface Usage {
   prompt_tokens?: number
@@ -231,6 +233,20 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     usage.record(row)
     plugins.runUsage(row as unknown as JsonObject)
   }
+  const affinity = new Affinity()
+  const firstUserText = (body: Record<string, unknown>): string => {
+    for (const message of Array.isArray(body.messages) ? body.messages as Record<string, unknown>[] : []) {
+      if (message && message.role === 'user') return typeof message.content === 'string' ? message.content : textOf(message.content)
+    }
+    return ''
+  }
+  const sessionIdOf = (req: IncomingMessage, body: Record<string, unknown>): string | undefined => {
+    const header = req.headers['x-gateway-session'] ?? req.headers['x-conversation-id']
+    if (typeof header === 'string' && header.trim()) return header.trim()
+    const text = firstUserText(body)
+    if (!text.trim()) return undefined
+    return `magpie-${createHash('sha256').update(text).digest('hex').slice(0, 16)}`
+  }
 
   const forward = async (
     provider: GatewayProvider,
@@ -306,9 +322,20 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     stream: boolean,
     modelInput: string | undefined,
     protocol: string,
+    session?: string,
     routing?: string,
   ): Promise<'streamed' | ForwardResult> => {
     const candidates = applyStrategy(router.candidates(modelInput), routing)
+    if (session) {
+      const pinned = affinity.get(session)
+      if (pinned) {
+        const index = candidates.findIndex(candidate => candidate.provider.id === pinned)
+        if (index > 0) {
+          const [chosen] = candidates.splice(index, 1)
+          if (chosen) candidates.unshift(chosen)
+        }
+      }
+    }
     if (candidates.length === 0) {
       return { status: 503, body: JSON.stringify({ error: { message: 'no upstream provider configured' } }), contentType: 'application/json' }
     }
@@ -330,7 +357,8 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
         if (result === 'streamed') {
           router.recordSuccess(candidate.provider.id)
           metrics.record(candidate.provider.id, latency, true)
-          recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: 200, latencyMs: latency, tokens: 0, ok: true, routing })
+          if (session) affinity.set(session, candidate.provider.id)
+          recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: 200, latencyMs: latency, tokens: 0, ok: true, routing, session })
           return 'streamed'
         }
         const tokens = Number(result.usage?.total_tokens ?? 0) || 0
@@ -338,19 +366,20 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
           router.recordFailure(candidate.provider.id)
           if (result.status === 429 || result.status === 402) limits.rest(candidate.provider.id)
           metrics.record(candidate.provider.id, latency, false, result.usage)
-          recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: result.status, latencyMs: latency, tokens, ok: false, routing })
+          recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: result.status, latencyMs: latency, tokens, ok: false, routing, session })
           errors.push(`${candidate.provider.id}: ${result.status} ${result.body.slice(0, 200)}`)
           continue
         }
         router.recordSuccess(candidate.provider.id)
         limits.recordTokens(candidate.provider.id, tokens)
         metrics.record(candidate.provider.id, latency, true, result.usage)
-        recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: result.status, latencyMs: latency, tokens, ok: true, routing })
+        if (session) affinity.set(session, candidate.provider.id)
+        recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: result.status, latencyMs: latency, tokens, ok: true, routing, session })
         return result
       } catch (error) {
         router.recordFailure(candidate.provider.id)
         metrics.record(candidate.provider.id, Date.now() - started, false)
-        recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: 0, latencyMs: Date.now() - started, tokens: 0, ok: false, routing })
+        recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: 0, latencyMs: Date.now() - started, tokens: 0, ok: false, routing, session })
         errors.push(`${candidate.provider.id}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       } finally {
@@ -391,7 +420,8 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     const stream = body.stream === true && !config.masking
       && (options.upstreamPath.endsWith('/chat/completions') || options.upstreamPath.endsWith('/responses'))
     const routing = typeof req.headers['x-gateway-routing'] === 'string' ? req.headers['x-gateway-routing'] : undefined
-    const result = await routeForward(res, options.upstreamPath, body, stream, modelOf(body), options.protocol, routing)
+    const session = sessionIdOf(req, body)
+    const result = await routeForward(res, options.upstreamPath, body, stream, modelOf(body), options.protocol, session, routing)
     if (result === 'streamed') return
     let outBody = result.body
     if (result.status < 400 && options.transformRes) {
@@ -460,6 +490,10 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     if (url.pathname === '/v1/gateway/usage' && req.method === 'GET') {
       const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') ?? 100) || 100))
       sendJson(res, 200, { object: 'gateway.usage', summary: usage.summary(), recent: usage.recent(limit) })
+      return
+    }
+    if (url.pathname === '/v1/gateway/sessions' && req.method === 'GET') {
+      sendJson(res, 200, { object: 'gateway.sessions', sessions: usage.summaryBySession() })
       return
     }
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {

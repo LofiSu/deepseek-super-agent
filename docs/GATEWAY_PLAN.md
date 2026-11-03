@@ -43,8 +43,8 @@ scraping or quota bypass.
 
 ### Phase 2 — Ledger & session
 - [x] Per-call usage ledger (provider/model, status, latency, tokens) + `onUsage` plugin hook + `/v1/gateway/usage`. (Price/cost still pending.)
-- [ ] Session aggregation by conversation id.
-- [ ] Affinity: keep a conversation on the account that answered it; `affinity.json`.
+- [x] Session aggregation by conversation id (`/v1/gateway/sessions`; id from `X-Gateway-Session` / `X-Conversation-ID`, else hash of the first user message).
+- [x] Affinity: a conversation stays on the provider that answered it (in-process, bounded).
 - [ ] Usage strategies: `usage` / `pace` / `free` / `fast` over real usage data.
 
 ### Phase 3 — Wiring & shell

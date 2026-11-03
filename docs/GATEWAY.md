@@ -107,6 +107,7 @@ manual key juggling.
 | GET | `/v1/models` | yes | model catalog + aliases |
 | GET | `/v1/gateway/quotas` | yes | usage/quota snapshot |
 | GET | `/v1/gateway/usage` | yes | per-call usage ledger (summary + recent) |
+| GET | `/v1/gateway/sessions` | yes | usage aggregated by conversation id |
 | POST | `/v1/chat/completions` | yes | OpenAI chat, with failover |
 | POST | `/v1/responses` | yes | OpenAI Responses (pass-through) |
 | POST | `/v1/messages` | yes | Anthropic Messages (translated) |
