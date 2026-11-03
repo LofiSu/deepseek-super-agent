@@ -110,6 +110,26 @@ manual key juggling.
 | POST | `/v1/responses` | yes | OpenAI Responses (pass-through) |
 | POST | `/v1/messages` | yes | Anthropic Messages (translated) |
 | POST | `/v1/embeddings` | yes | embeddings (pass-through) |
+| POST | `/v1beta/models/{model}:generateContent` | yes | Gemini, translated to chat |
+
+## Plugins (gateway extension points)
+
+Mirrors Magpie's gateway middleware + router-strategy plugins.
+
+- **Privacy masking** (built-in `redact` plugin): set `DS_AGENT_GATEWAY_MASKING=1`. Secrets/personal data are replaced with stable `{{KIND_hash}}` placeholders before the request leaves this machine, and restored in the reply. While on, requests are buffered (stream replies become whole JSON) so nothing unmasked slips through.
+- **Your own plugins**: drop `.mjs`/`.js` modules in `<stateDir>/gateway-plugins/`; `<stateDir>/gateway.plugins.json` (`{ "plugins": [{ "id": "x", "enabled": true, "options": {} }] }`) selects them.
+- A plugin exports a default object: `{ id, onRequest?, onResponse?, strategies? }`. Hooks fail open (250 ms limit): a throw, a non-object return, or a timeout leaves the body as it was.
+- `strategies` are router orders: `(seats, options) => number[]`. Select one per request with header `X-Gateway-Routing: <name>`. The built-in `rotation` plugin provides `priority` / `smart`.
+
+```js
+// <stateDir>/gateway-plugins/example.mjs
+export default {
+  id: 'example',
+  onRequest(body) { return body },                 // transform the agent's request
+  onResponse(body) { return body },                // transform a whole reply
+  strategies: { reverse: seats => seats.map(s => s.index).reverse() },
+}
+```
 
 ## Notes / limits
 

@@ -40,6 +40,10 @@ export interface GatewayConfig {
   defaultModel?: string
   /** Routing groups: alias -> ordered list of "provider/model" or "model" entries. */
   aliases?: Record<string, string[]>
+  /** State dir, for loading gateway plugins (`<home>/gateway-plugins`, `gateway.plugins.json`). */
+  home?: string
+  /** Enable the built-in privacy masking plugin (onRequest masks, onResponse restores). */
+  masking?: boolean
 }
 
 interface GatewayProviderInput {

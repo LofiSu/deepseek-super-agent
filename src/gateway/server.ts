@@ -1,7 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import path from 'node:path'
 import type { GatewayConfig, GatewayProvider } from './config.ts'
 import { upstreamUrl } from './config.ts'
 import { GatewayRouter } from './router.ts'
+import { PluginHost, type JsonObject, type RouteSeat } from './plugins.ts'
+import { maskingPlugin } from './mask.ts'
+import { strategyPlugin } from './builtin-plugins.ts'
 
 interface Usage {
   prompt_tokens?: number
@@ -42,6 +46,7 @@ export interface GatewayHandle {
   port: number
   token: string
   router: GatewayRouter
+  plugins: string[]
   metrics: { snapshot(): GatewayMetricsSnapshot }
   close(): Promise<void>
 }
@@ -87,7 +92,6 @@ function authorized(req: IncomingMessage, token: string): boolean {
   return (req.headers.authorization ?? '') === `Bearer ${token}`
 }
 
-/** How the credential reaches the upstream (bearer / x-api-key / custom header). */
 function authHeaders(provider: GatewayProvider, key: string): Record<string, string> {
   if (provider.auth === 'none') return {}
   if (provider.auth === 'x-api-key') return key ? { 'x-api-key': key } : {}
@@ -107,7 +111,7 @@ function textOf(content: unknown): string {
   return ''
 }
 
-/** Minimal Anthropic Messages request -> OpenAI chat request translation (text only). */
+/** Anthropic Messages request -> OpenAI chat request (text only). */
 function anthropicToOpenAI(body: Record<string, unknown>): Record<string, unknown> {
   const messages: { role: string; content: string }[] = []
   const system = body.system
@@ -128,7 +132,7 @@ function anthropicToOpenAI(body: Record<string, unknown>): Record<string, unknow
   return out
 }
 
-/** Minimal OpenAI chat response -> Anthropic Messages response translation. */
+/** OpenAI chat response -> Anthropic Messages response. */
 function openAIToAnthropic(json: unknown, model: string): Record<string, unknown> {
   const record = (json ?? {}) as {
     id?: string
@@ -149,23 +153,77 @@ function openAIToAnthropic(json: unknown, model: string): Record<string, unknown
   }
 }
 
+/** Gemini generateContent request -> OpenAI chat request. */
+function geminiToOpenAI(body: Record<string, unknown>): Record<string, unknown> {
+  const messages: { role: string; content: string }[] = []
+  const system = body.systemInstruction as { parts?: { text?: unknown }[] } | undefined
+  const systemText = system?.parts?.map(part => String(part?.text ?? '')).join('\n').trim()
+  if (systemText) messages.push({ role: 'system', content: systemText })
+  for (const content of Array.isArray(body.contents) ? body.contents as Record<string, unknown>[] : []) {
+    const parts = Array.isArray(content.parts) ? content.parts as { text?: unknown }[] : []
+    messages.push({ role: content.role === 'model' ? 'assistant' : 'user', content: parts.map(part => String(part?.text ?? '')).join('') })
+  }
+  const generation = (body.generationConfig ?? {}) as Record<string, unknown>
+  const out: Record<string, unknown> = { model: typeof body.model === 'string' ? body.model : '', messages }
+  if (generation.temperature != null) out.temperature = generation.temperature
+  if (generation.topP != null) out.top_p = generation.topP
+  if (generation.maxOutputTokens != null) out.max_tokens = generation.maxOutputTokens
+  if (generation.stopSequences != null) out.stop = generation.stopSequences
+  return out
+}
+
+/** OpenAI chat response -> Gemini generateContent response. */
+function openAIToGemini(json: unknown): Record<string, unknown> {
+  const record = (json ?? {}) as {
+    choices?: { message?: { content?: unknown }; finish_reason?: string }[]
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+  }
+  const choice = record.choices?.[0]
+  const finishMap: Record<string, string> = { stop: 'STOP', length: 'MAX_TOKENS', tool_calls: 'STOP', content_filter: 'SAFETY' }
+  return {
+    candidates: [{
+      content: { role: 'model', parts: [{ text: textOf(choice?.message?.content) }] },
+      finishReason: choice?.finish_reason ? (finishMap[choice.finish_reason] ?? 'STOP') : 'STOP',
+    }],
+    usageMetadata: {
+      promptTokenCount: record.usage?.prompt_tokens ?? 0,
+      candidatesTokenCount: record.usage?.completion_tokens ?? 0,
+      totalTokenCount: record.usage?.total_tokens ?? 0,
+    },
+  }
+}
+
+interface ProtocolOptions {
+  protocol: string
+  upstreamPath: string
+  transformReq?: (body: Record<string, unknown>) => Record<string, unknown>
+  transformRes?: (json: unknown, model: string) => Record<string, unknown>
+}
+
 /**
  * Start the gateway. Endpoints:
- * - `GET  /health`              (no auth) — providers + cooldowns + metrics
+ * - `GET  /health`              (no auth) — providers + cooldowns + metrics + plugins
  * - `GET  /v1/models`           — model catalog + routing aliases
  * - `GET  /v1/gateway/quotas`   — usage/quota snapshot
  * - `POST /v1/chat/completions` — OpenAI chat (JSON + SSE)
  * - `POST /v1/responses`        — OpenAI Responses (pass-through)
  * - `POST /v1/messages`         — Anthropic Messages (translated to chat)
  * - `POST /v1/embeddings`       — embeddings (pass-through)
+ * - `POST /v1beta/models/{m}:generateContent` — Gemini (translated to chat)
  */
 export async function startGatewayServer(config: GatewayConfig): Promise<GatewayHandle> {
   const router = new GatewayRouter(config.providers, config.defaultModel, () => Date.now(), config.aliases ?? {})
   const metrics = new GatewayMetrics()
+  const plugins = new PluginHost()
+  plugins.register(strategyPlugin())
+  if (config.masking) plugins.register(maskingPlugin())
+  if (config.home) {
+    await plugins.loadFromDir(path.join(config.home, 'gateway-plugins'), path.join(config.home, 'gateway.plugins.json'))
+  }
 
   const forward = async (
     provider: GatewayProvider,
-    path: string,
+    upstreamPath: string,
     body: Record<string, unknown>,
     model: string,
     stream: boolean,
@@ -176,24 +234,16 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     const timer = setTimeout(() => controller.abort(), provider.timeoutMs ?? 60_000)
     try {
       const payload: Record<string, unknown> = { ...body, model }
-      if (path.endsWith('/chat/completions') || path.endsWith('/responses')) payload.stream = stream
-      const response = await fetch(upstreamUrl(provider, path), {
+      if (upstreamPath.endsWith('/chat/completions') || upstreamPath.endsWith('/responses')) payload.stream = stream
+      const response = await fetch(upstreamUrl(provider, upstreamPath), {
         method: 'POST',
         signal: controller.signal,
-        headers: {
-          'content-type': 'application/json',
-          ...authHeaders(provider, key),
-          ...(provider.headers ?? {}),
-        },
+        headers: { 'content-type': 'application/json', ...authHeaders(provider, key), ...(provider.headers ?? {}) },
         body: JSON.stringify(payload),
       })
       const contentType = response.headers.get('content-type') ?? 'application/json'
       if (stream && response.ok && contentType.includes('text/event-stream') && response.body) {
-        clientRes.writeHead(200, {
-          'content-type': 'text/event-stream',
-          'cache-control': 'no-cache',
-          connection: 'keep-alive',
-        })
+        clientRes.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
         const reader = response.body.getReader()
         for (;;) {
           const { done, value } = await reader.read()
@@ -216,6 +266,27 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     }
   }
 
+  const applyStrategy = (candidates: ReturnType<GatewayRouter['candidates']>, routing?: string) => {
+    if (!routing) return candidates
+    const strategy = plugins.strategies()[routing]
+    if (!strategy) return candidates
+    const cooling = new Map(router.providersState().map(state => [state.id, Boolean(state.cooldownUntil)]))
+    const seats: RouteSeat[] = candidates.map((candidate, index) => ({
+      index,
+      provider: candidate.provider.id,
+      model: candidate.model,
+      priority: candidate.provider.priority ?? 0,
+      cooling: cooling.get(candidate.provider.id) ?? false,
+    }))
+    try {
+      const order = strategy(seats, {})
+      if (!Array.isArray(order) || order.length !== candidates.length) return candidates
+      return order.map(index => candidates[index]).filter((item): item is (typeof candidates)[number] => item != null)
+    } catch {
+      return candidates
+    }
+  }
+
   /** Try each candidate provider; fall back on 5xx/429/network, return the winning result. */
   const routeForward = async (
     res: ServerResponse,
@@ -223,8 +294,9 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     body: Record<string, unknown>,
     stream: boolean,
     modelInput: string | undefined,
+    routing?: string,
   ): Promise<'streamed' | ForwardResult> => {
-    const candidates = router.candidates(modelInput)
+    const candidates = applyStrategy(router.candidates(modelInput), routing)
     if (candidates.length === 0) {
       return { status: 503, body: JSON.stringify({ error: { message: 'no upstream provider configured' } }), contentType: 'application/json' }
     }
@@ -268,46 +340,50 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       return undefined
     }
   }
-  const modelOf = (body: Record<string, unknown>): string | undefined =>
-    typeof body.model === 'string' ? body.model : undefined
+  const modelOf = (body: Record<string, unknown>): string | undefined => typeof body.model === 'string' ? body.model : undefined
 
-  const handleChat = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = await readJson(req, res)
+  const handleProtocol = async (req: IncomingMessage, res: ServerResponse, options: ProtocolOptions): Promise<void> => {
+    let body = await readJson(req, res)
     if (!body) return
-    const result = await routeForward(res, '/chat/completions', body, body.stream === true, modelOf(body))
-    if (result !== 'streamed') sendRaw(res, result.status, result.body, result.contentType)
-  }
-
-  const handleEmbeddings = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = await readJson(req, res)
-    if (!body) return
-    const result = await routeForward(res, '/embeddings', body, false, modelOf(body))
-    if (result !== 'streamed') sendRaw(res, result.status, result.body, result.contentType)
-  }
-
-  const handleResponses = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = await readJson(req, res)
-    if (!body) return
-    const result = await routeForward(res, '/responses', body, body.stream === true, modelOf(body))
-    if (result !== 'streamed') sendRaw(res, result.status, result.body, result.contentType)
-  }
-
-  const handleMessages = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = await readJson(req, res)
-    if (!body) return
-    const chatBody = anthropicToOpenAI(body)
-    const model = typeof chatBody.model === 'string' ? chatBody.model : undefined
-    const result = await routeForward(res, '/chat/completions', chatBody, false, model)
+    if (options.transformReq) body = options.transformReq(body)
+    if (config.masking && body.stream === true) body = { ...body, stream: false }
+    const model = modelOf(body)
+    const state: Record<string, unknown> = {}
+    body = await plugins.runRequest(body, { protocol: options.protocol, model }, state)
+    const stream = body.stream === true && !config.masking
+      && (options.upstreamPath.endsWith('/chat/completions') || options.upstreamPath.endsWith('/responses'))
+    const routing = typeof req.headers['x-gateway-routing'] === 'string' ? req.headers['x-gateway-routing'] : undefined
+    const result = await routeForward(res, options.upstreamPath, body, stream, modelOf(body), routing)
     if (result === 'streamed') return
-    if (result.status >= 400) {
-      sendRaw(res, result.status, result.body, result.contentType)
+    let outBody = result.body
+    if (result.status < 400 && options.transformRes) {
+      try {
+        outBody = JSON.stringify(options.transformRes(JSON.parse(result.body), model ?? ''))
+      } catch {
+        // Keep the provider's raw body.
+      }
+    }
+    if (result.status < 400) {
+      try {
+        outBody = JSON.stringify(await plugins.runResponse(JSON.parse(outBody) as JsonObject, { protocol: options.protocol, model, status: result.status }, state))
+      } catch {
+        // Keep the body as it was.
+      }
+    }
+    sendRaw(res, result.status, outBody, result.contentType || 'application/json')
+  }
+
+  const handleGemini = async (req: IncomingMessage, res: ServerResponse, method: string): Promise<void> => {
+    if (method === 'streamGenerateContent') {
+      sendJson(res, 501, { error: { message: 'streamGenerateContent is not supported yet; use generateContent' } })
       return
     }
-    try {
-      sendJson(res, 200, openAIToAnthropic(JSON.parse(result.body), model ?? 'unknown'))
-    } catch {
-      sendRaw(res, result.status, result.body, result.contentType)
-    }
+    await handleProtocol(req, res, {
+      protocol: 'gemini',
+      upstreamPath: '/chat/completions',
+      transformReq: geminiToOpenAI,
+      transformRes: json => openAIToGemini(json),
+    })
   }
 
   const handleQuotas = (_req: IncomingMessage, res: ServerResponse): void => {
@@ -315,6 +391,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       object: 'gateway.quotas',
       generatedAt: new Date().toISOString(),
       providers: router.providersState(),
+      plugins: plugins.list(),
       metrics: metrics.snapshot(),
     })
   }
@@ -322,7 +399,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://gateway.local')
     if (url.pathname === '/health' && req.method === 'GET') {
-      sendJson(res, 200, { ok: true, providers: router.providersState(), metrics: metrics.snapshot() })
+      sendJson(res, 200, { ok: true, providers: router.providersState(), plugins: plugins.list(), metrics: metrics.snapshot() })
       return
     }
     if (!authorized(req, config.token)) {
@@ -341,19 +418,29 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       return
     }
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
-      await handleChat(req, res)
+      await handleProtocol(req, res, { protocol: 'chat', upstreamPath: '/chat/completions' })
       return
     }
     if (url.pathname === '/v1/embeddings' && req.method === 'POST') {
-      await handleEmbeddings(req, res)
+      await handleProtocol(req, res, { protocol: 'embeddings', upstreamPath: '/embeddings' })
       return
     }
     if (url.pathname === '/v1/responses' && req.method === 'POST') {
-      await handleResponses(req, res)
+      await handleProtocol(req, res, { protocol: 'responses', upstreamPath: '/responses' })
       return
     }
     if (url.pathname === '/v1/messages' && req.method === 'POST') {
-      await handleMessages(req, res)
+      await handleProtocol(req, res, {
+        protocol: 'anthropic',
+        upstreamPath: '/chat/completions',
+        transformReq: anthropicToOpenAI,
+        transformRes: (json, model) => openAIToAnthropic(json, model),
+      })
+      return
+    }
+    const gemini = /^\/v1beta\/models\/(.+?):(generateContent|streamGenerateContent)$/.exec(url.pathname)
+    if (gemini && req.method === 'POST') {
+      await handleGemini(req, res, gemini[2]!)
       return
     }
     sendJson(res, 404, { error: { message: `not found: ${req.method ?? 'GET'} ${url.pathname}` } })
@@ -379,6 +466,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     port,
     token: config.token,
     router,
+    plugins: plugins.list(),
     metrics: { snapshot: () => metrics.snapshot() },
     close: () => new Promise<void>((resolve, reject) => {
       server.close(error => (error ? reject(error) : resolve()))

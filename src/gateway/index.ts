@@ -16,5 +16,17 @@ export {
   type GatewaySource,
 } from './config-file.ts'
 export { discoverLocalEndpoints, type DiscoveredEndpoint } from './discover.ts'
+export {
+  PluginHost,
+  type GatewayPlugin,
+  type JsonObject,
+  type PluginCtx,
+  type PluginEntry,
+  type PluginFile,
+  type RouteSeat,
+  type StrategyFn,
+} from './plugins.ts'
+export { Masker, maskingPlugin } from './mask.ts'
+export { strategyPlugin } from './builtin-plugins.ts'
 export { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from './token.ts'
 export { startGatewayServer, type GatewayHandle, type GatewayMetricsSnapshot } from './server.ts'

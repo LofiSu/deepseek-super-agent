@@ -33,11 +33,14 @@ export async function runGatewayCommand(home: string): Promise<void> {
     || fileDefault
     || providers[0]?.models?.[0]
 
+  const masking = process.env.DS_AGENT_GATEWAY_MASKING === '1'
   const handle = await startGatewayServer({
     host,
     port,
     token,
     providers,
+    home,
+    masking,
     ...(defaultModel ? { defaultModel } : {}),
     ...(Object.keys(aliases).length ? { aliases } : {}),
   })
@@ -56,6 +59,7 @@ export async function runGatewayCommand(home: string): Promise<void> {
   console.log(`  saved:     ${gatewayTokenPath(home)} (0600) + ${path.join(home, 'gateway.json')}`)
   console.log(`  providers: ${providers.map(provider => provider.id).join(', ')}${defaultModel ? `  defaultModel=${defaultModel}` : ''}  (source=${source})`)
   if (Object.keys(aliases).length) console.log(`  aliases:   ${Object.keys(aliases).join(', ')}`)
+  console.log(`  plugins:   ${handle.plugins.join(', ')}${masking ? '  (masking on)' : ''}`)
   console.log(`  point ds-agent at it:  export DS_AGENT_GATEWAY_URL=${handle.url}`)
 
   const shutdown = (): void => {
