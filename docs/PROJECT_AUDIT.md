@@ -16,7 +16,7 @@
 | Remote | `git@github.com:LofiSu/deepseek-super-agent.git` |
 | Last merged PR | **#84** mesh release-order correction (merged 2026-11-03T06:45:36Z) |
 | Merged this cycle | #75 docs (`08ea78f`), #76 gateway (`aae182c`), #77 iMessage (`03a4c02`), #78 orchestration (`cb32a17`), #79 mesh (`1dc9500`), #80 docs (`2c02f4b`), #81 group fix (`f4ba77a`), #82 token hardening (`1c165ef`), #84 mesh correction (`34aef25`) |
-| Open PRs at checkpoint | #74 (stale audit, refreshable), #83 (this reconciliation) |
+| Open PRs at checkpoint | #74 (refreshed audit, head `3119369`), #83 (this reconciliation), #85 (P1-6 restart recovery) |
 | Issues | GitHub Issues disabled |
 | Branch protection | required check `typecheck and test`; strict; admins enforced; conversation resolution required |
 | Node / pnpm | Node v22.23.4 / pnpm 9.15.9 |
@@ -198,5 +198,5 @@ This is documented; it remains a production limitation rather than a bug.
 The offline gate is green on `34aef25` and the architecture matches its
 contracts. The iMessage group-classification, gateway token-redirection, and
 mesh release-ordering gaps are fixed by #81, #82, and #84. Next work is restart
-recovery (P1-6) and the stale PR #74 audit; the non-blocking review follow-ups
-remain tracked in the review log.
+recovery (P1-6, PR #85) and the refreshed PR #74 audit; the non-blocking review
+follow-ups remain tracked in the review log.

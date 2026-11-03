@@ -4,6 +4,39 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-03 — Cycle 2, checkpoint 2 (state review corrected; P1-6 in review)
+
+### Observed
+
+- PR #83's independent review returned REQUEST_CHANGES on five stale/incorrect
+  statements: the pre-#79 Harness direct-write claim in two docs, a stale Task 1
+  "post-merge fix pending", a present-tense default-open iMessage description,
+  and a branch-coverage transcription (80.05% local vs 80.06% CI on `34aef25`).
+- PR #74's refreshed review returned REQUEST_CHANGES: its revision row claimed
+  "#75–#84 merged" while #83 was open, and the `34aef25` evidence was not yet in
+  `docs/PROJECT_AUDIT.md` on `main`.
+- P1-6 implementation opened PR #85 (`4b3ad35`) with six tests and a clean CI
+  run; the orchestrator review found the RECOVERED prompt is persisted but not
+  included in the relaunched Worker prompt.
+
+### Corrected
+
+- #83 head `e0bee0f` fixes all five findings; scoped re-review returned APPROVE.
+  CI passed on the exact head (414 passed / 15 skipped).
+- #74 head `3119369` corrects the merge-range claim and labels; it will merge
+  `main` after #83 lands so the audit evidence is documented on `main`.
+
+### Verified
+
+- `pnpm typecheck`, `pnpm lint` (224 files), and `pnpm format:check` pass on the
+  corrected docs branches.
+- No code, credential, or live-model changes were made in either docs PR.
+
+### Pending
+
+- Merge #83; refresh and re-review #74.
+- Fix the P1-6 RECOVERED-prompt gap and re-review #85.
+
 ## 2026-11-03 — Cycle 2, checkpoint 1 (corrections merged)
 
 ### Observed

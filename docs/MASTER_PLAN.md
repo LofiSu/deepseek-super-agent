@@ -35,12 +35,12 @@ Repository facts:
   orchestrator; at most 3 implementation agents run while the pipeline is being
   validated; at most 4 development cycles complete per session; subagents never
   merge and never write `.super-agent/state.json`.
-- `#75`, `#76`, `#77`, `#79`, `#80`, `#81`, `#82`, and `#84` merged into `main`
-  at `08ea78f`, `aae182c`, `03a4c02`, `1dc9500`, `2c02f4b`, `f4ba77a`,
-  `1c165ef`, and `34aef25`. `#75` merged before its final reconciliation commit,
-  so this PR carries the corrected checkpoint forward.
-- Open PRs at this checkpoint: **#83** (this documentation reconciliation) and
-  **#74** (stale audit, now refreshable).
+- `#75`, `#76`, `#77`, `#78`, `#79`, `#80`, `#81`, `#82`, and `#84` merged into
+  `main` at `08ea78f`, `aae182c`, `03a4c02`, `cb32a17`, `1dc9500`, `2c02f4b`,
+  `f4ba77a`, `1c165ef`, and `34aef25`. `#75` merged before its final
+  reconciliation commit, so this PR carries the corrected checkpoint forward.
+- Open PRs at this checkpoint: **#83** (this documentation reconciliation),
+  **#74** (refreshed audit, head `3119369`), and **#85** (P1-6 restart recovery).
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
 - GitHub Issues are disabled, so work items live in this plan and the roadmap.
@@ -54,11 +54,11 @@ Repository facts:
 | IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 (`f4ba77a`); non-blocking test gaps |
 | P1-3 | P1 | Worker-mesh capacity was advisory and the Harness wrote `Assignment.node` directly. #79 merged the queue and Engine-owned placement; its release-ordering bug is fixed by #84. | `src/harness/loop.ts`; `src/core/assignments.ts`; `test/worker-mesh.test.ts` | fixed by #79 + #84 |
 | MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`); APPROVE |
-| P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/cli/main.ts` serve comment; `docs/MODULES.md:81-82`; `docs/ROADMAP.md` P1-6 | dispatched |
+| P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/cli/main.ts` serve comment; `docs/MODULES.md:81-82`; `docs/ROADMAP.md` P1-6 | PR #85 in review |
 | GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. Residual: concurrent first-create token race, ELOOP fallback, POSIX-only mode caveat, two missing tests. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76 and #82 merged; non-blocking follow-ups |
 | GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
 | GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84 reviewed; #77 corrected |
-| AUDIT-REFRESH | P2 | `docs/final-audit` (#74) is stale against `34aef25`; the roadmap audit does not include `#64`, `#75`-`#84`. | PR #74; `git merge-base` = `fa974ca` | ready to rebase |
+| AUDIT-REFRESH | P2 | `docs/final-audit` (#74) was stale against `34aef25`; the roadmap audit did not include `#64`, `#75`-`#84`. | PR #74 head `3119369`; CI green | refreshed; awaiting #83 then re-review |
 | SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:206-221`; `docs/ROADMAP.md` | bounded design decision |
 
 ## 2. Workstream ordering

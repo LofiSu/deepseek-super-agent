@@ -223,9 +223,10 @@ head so a later reader can separate the reviewed tree from the merged tree.
 ## PR #83 — `docs: reconcile project state to main 34aef25`
 
 - **Author:** LofiSu (chief engineer)
-- **State at review:** OPEN head `581cc69`; 7 docs files, +746/−253; no code or
-  config. CI `typecheck and test` passed on the exact head.
-- **Independent review:** **REQUEST_CHANGES** on five blocking findings:
+- **State at review:** initial head `581cc69`; corrections pushed as `e0bee0f`;
+  7 docs files, +794/−251; no code or config.
+- **Independent review:** **REQUEST_CHANGES** on the initial head for five
+  blocking findings:
   (1) `docs/PROJECT_AUDIT.md` still described the pre-#79 direct
   `store.putDoc('ticket', ...)` deviation even though `34aef25` routes placement
   through `Engine.assignmentPlaced` (`src/harness/loop.ts:298`);
@@ -239,16 +240,20 @@ head so a later reader can separate the reviewed tree from the merged tree.
   on the exact commit reports 80.06% (2703/3376).
 - **Non-blocking fixes applied:** add #78 to the merged list; label #84's 400
   test count as the reviewed head; qualify the #76 token line citation; correct
-  the `docs/MODULES.md` restart citation to 81-82.
-- **Resolution:** all five blocking findings corrected; a scoped re-review on the
-  new head is required before merge.
-- **Verdict:** **REQUEST_CHANGES** (re-review pending).
+  the `docs/MODULES.md` restart citation to 81-82; add review provenance.
+- **Re-review:** scoped re-review at `e0bee0f` returned **APPROVE**; all five
+  blocking findings verified resolved and the non-blocking fixes confirmed. CI
+  `typecheck and test` passed on `e0bee0f` (414 passed / 15 skipped). The head
+  run reports 80.07% branches, consistent with the documented one-branch V8
+  variance; the audit doc attributes 80.06% to the `34aef25` run.
+- **Verdict:** **APPROVE** and merge.
 
 ## PR #74 — `docs: record the final audit on main`
 
 - **Author:** LofiSu (agent-assisted)
-- **State at review:** OPEN head `cb6cdf2`; docs/ROADMAP.md and
-  docs/MODULES.md, +34/−8; CI passed.
+- **State at review:** initial head `cb6cdf2` (+34/−8); corrections pushed as
+  `3119369` (+36/−9); docs/ROADMAP.md and docs/MODULES.md only; CI passed on
+  both heads.
 - **Independent review:** **REQUEST_CHANGES**. The revision row claimed
   "#75–#84 merged" although #83 is still open, and the `34aef25` headline
   evidence is not in `docs/PROJECT_AUDIT.md` on `main` (main's audit doc still
