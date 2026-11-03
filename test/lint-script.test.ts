@@ -96,13 +96,71 @@ describe('lint script', () => {
       'docs/notes.md': 'Phase-2 extensions are opt-in.\n',
       'src/phase2/shards.ts': 'export const shards = []\n',
       'README.md': 'The phase2 switch is gone.\n',
+      'src/phase2/asset.png': 'binary-ish\n',
     })
-    const tracked = ['docs/ROADMAP.md', 'docs/notes.md', 'src/phase2/shards.ts', 'README.md']
+    const tracked = [
+      'docs/ROADMAP.md',
+      'docs/notes.md',
+      'src/phase2/shards.ts',
+      'src/phase2/asset.png',
+      'README.md',
+    ]
     expect(messages(runLint(root, tracked))).toEqual([
       'docs/notes.md:1: Phase-2 naming: this tree is one M0-M11 whole; there is no Phase 2 switch or directory',
       'README.md:1: Phase-2 naming: this tree is one M0-M11 whole; there is no Phase 2 switch or directory',
+      'src/phase2/asset.png:1: Phase-2 naming: this tree is one M0-M11 whole; there is no Phase 2 switch or directory',
       'src/phase2/shards.ts:1: Phase-2 naming: this tree is one M0-M11 whole; there is no Phase 2 switch or directory',
     ])
+  })
+
+  it('allows backticked roadmap history but rejects a new live Phase-2 claim', () => {
+    const historical = [
+      '## 7. Dynamic task board',
+      '',
+      '| ID | Task | Owner | Branch | PR | Status | Acceptance |',
+      '|----|------|-------|--------|----|--------|------------|',
+      '',
+      '## 8. Verification log',
+      '',
+      'The switch `DS_AGENT_PHASE2` and `src/phase2/` are gone.',
+      '',
+    ].join('\n')
+    const root = fixture({ 'docs/ROADMAP.md': historical })
+    expect(runLint(root, ['docs/ROADMAP.md'])).toEqual([])
+
+    fs.appendFileSync(path.join(root, 'docs/ROADMAP.md'), 'Phase-2 extension work is live again.\n')
+    expect(messages(runLint(root, ['docs/ROADMAP.md']))).toEqual([
+      'docs/ROADMAP.md:9: Phase-2 naming: this tree is one M0-M11 whole; there is no Phase 2 switch or directory',
+    ])
+  })
+
+  it('ignores fenced examples and legend tables before the board header', () => {
+    const root = fixture({
+      'docs/ROADMAP.md': [
+        '## 7. Dynamic task board',
+        '',
+        '| Legend | Meaning |',
+        '|--------|---------|',
+        '| P0 | urgent |',
+        '',
+        '```',
+        '| a | b |',
+        '```',
+        '',
+        '| ID | Task | Owner | Branch | PR | Status | Acceptance |',
+        '|----|------|-------|--------|----|--------|------------|',
+        '| P2-5 | Coverage |  | `feat/x` | #1 | resolved | ok |',
+        '',
+      ].join('\n'),
+    })
+    expect(runLint(root, ['docs/ROADMAP.md'])).toEqual([])
+  })
+
+  it('does not crash when a tracked file is missing from the working tree', () => {
+    const root = fixture({
+      'docs/ROADMAP.md': board('| P2-5 | Coverage |  | `feat/x` | #1 | resolved | ok |'),
+    })
+    expect(runLint(root, ['docs/ROADMAP.md', 'src/core/gone.ts'])).toEqual([])
   })
 
   it('reports tracked repro-h9, dist, and node_modules paths', () => {
@@ -122,16 +180,27 @@ describe('lint script', () => {
     ])
   })
 
-  it('reports console.log outside src/cli/ but allows the shared Logger', () => {
+  it('reports console usage outside src/cli/ but allows the shared Logger', () => {
     const root = fixture({
       'docs/ROADMAP.md': board('| P2-5 | Coverage |  | `feat/x` | #1 | resolved | ok |'),
-      'src/core/engine.ts': 'export function f(): void {\n  console.log("leak")\n}\n',
+      'src/core/engine.ts': [
+        '// console.log("documented, not code")',
+        'export function f(): void {',
+        '  console.log("leak")',
+        '  console["log"]("bracket")',
+        '  const alias = console',
+        '  alias.log("alias")',
+        '}',
+        '',
+      ].join('\n'),
       'src/cli/main.ts': 'console.log("cli")\n',
       'src/shared/log.ts': 'console.log("logger")\n',
     })
     const tracked = ['docs/ROADMAP.md', 'src/core/engine.ts', 'src/cli/main.ts', 'src/shared/log.ts']
     expect(messages(runLint(root, tracked))).toEqual([
-      'src/core/engine.ts:2: console.log outside src/cli/ (use the shared Logger or the CLI layer)',
+      'src/core/engine.ts:3: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
+      'src/core/engine.ts:4: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
+      'src/core/engine.ts:5: console usage outside src/cli/ (use the shared Logger or the CLI layer)',
     ])
   })
 })

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -51,17 +52,19 @@ jobs:
           bwrap --ro-bind / / --unshare-net -- /bin/true
 
       - name: Fetch base branch
-        # `pnpm format:check` compares the PR branch with origin/main. A
-        # shallow checkout has no base ref, and no merge base is needed for
-        # the two-dot `git diff --check` comparison.
-        run: git fetch --no-tags --depth=1 origin main
+        # `pnpm format:check` compares the PR branch with its target. A shallow
+        # checkout has no base ref, and no merge base is needed for the two-dot
+        # `git diff --check` comparison. PRs target main (see the trigger above).
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_REF"
 
       - name: Lint
         run: pnpm lint
 
       - name: Format check
         env:
-          DS_AGENT_FORMAT_BASE: origin/main
+          DS_AGENT_FORMAT_BASE: origin/${{ github.base_ref || 'main' }}
         run: pnpm format:check
 
       - name: Typecheck

@@ -428,20 +428,23 @@ of the two is true and tested.
 suite (`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1`) with the V8 provider and
 text-summary + json-summary reporters. It excludes the live-model and
 real-channel demo test files; the report counts `src/**/*.ts` except
-`src/cli/demos/**`. No failure threshold is configured. Measured on this branch
-(no `src/` changes from `6ab69e5`; 81 source files): lines 81.51% (5605/6876),
-branches 81.57-81.58% (1815/2225 to 1817/2227; the V8 branch total moves by a
-few across runs), functions 89.02% (495/556); statements track lines at 81.51%.
-Treat these as informational until a later change picks a floor.
+`src/cli/demos/**`. No failure threshold is configured. Measured on the PR head
+after the #69 rebase (81 source files, 282 offline tests): lines 81.78%
+(5706/6977), branches 82.00% (1882/2295), functions 89.10% (499/560);
+statements track lines at 81.78%. V8 branch totals move by a few across runs, so
+treat these as informational until a later change picks a floor.
 
 `pnpm lint` runs `scripts/lint.ts`: section 7 board rows have exactly seven
-cells; no live Phase-2 naming in `src/`, `docs/`, or the READMEs (this historical
-audit file is exempt because it quotes the removed switch while recording that
-it is gone); no tracked `repro-h9*`, `dist/`, or `node_modules/` paths; and no
-`console.log` under `src/` outside `src/cli/` (`src/shared/log.ts`, the Logger
-that writes to stdout, is exempt). The checker prints `file:line` and exits
-nonzero. `pnpm format:check` uses `git diff --check` on the branch diff and the
-working tree. CI runs `pnpm lint`, `pnpm format:check`, and
+cells (fenced examples and legend tables are ignored); no live Phase-2 naming in
+`src/`, `docs/`, or the READMEs (in this historical audit, inline-code citations
+of the removed switch and the line documenting the rule are allowed; plain
+plain prose is not); no tracked `repro-h9*`, `dist/`, or `node_modules/` paths; and no
+`console` usage under `src/` outside `src/cli/` (`src/shared/log.ts`, the Logger
+that writes to stdout, is exempt; the check uses the TypeScript AST, so comments
+and strings are ignored). The checker prints `file:line` and exits nonzero.
+`pnpm format:check` runs `git diff --check HEAD` (staged and unstaged) and,
+when `DS_AGENT_FORMAT_BASE` names a base, `git diff --check` against that base.
+CI runs `pnpm lint`, `pnpm format:check`, and
 `pnpm test:coverage` in the required `typecheck and test` job. Acceptance:
 thresholds documented, not enforced.
 **P2-6. Repo hygiene:** confirm the untracked `repro-h9*.ts` diagnostics are
@@ -478,7 +481,7 @@ the work is already public.
 | P2-2 | Shard arbitration | LofiSu | `feat/shard-arbitration` | #69 | resolved | Precedence documented + tests: priority-desc/registration order, default fallback-only, first shard owns reply + terminal decision; owner resolved from the supplied trigger; idempotent decisions; one ticket/decision per trigger |
 | P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists`, `feat/ingress-adapter-wiring` | #67, #70 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address (Feishu maps `chat_id`); filtered triggers cannot be handed back, assessed, evaluated, or decided into a Ticket; tests cover each rule, env, and resurrection |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
-| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #71 | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 81.51% lines / 81.57% branches / 89.02% functions over 81 files; no threshold |
+| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #71 | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 81.78% lines / 82.00% branches / 89.10% functions over 81 files; no threshold |
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
 | P2-7 | Status banners on review snapshots |  |  |  | todo | Historical banner on each |
 | P2-8 | Email channel decision |  |  |  | todo | PLAN and code agree |

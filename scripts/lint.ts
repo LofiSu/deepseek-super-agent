@@ -6,18 +6,21 @@
  *
  * Rules:
  *  - docs/ROADMAP.md section 7 board rows have exactly 7 cells.
- *  - No live Phase-2 naming in src/, docs/, or the READMEs. The historical
- *    audit in docs/ROADMAP.md is exempt: it quotes the removed switch while
- *    recording that the switch is gone.
+ *  - No live Phase-2 naming in src/, docs/, or the READMEs. Path names are
+ *    checked for every tracked file. In docs/ROADMAP.md, inline-code citations
+ *    of the removed switch (e.g. `src/phase2`, `DS_AGENT_PHASE2`) and the one
+ *    line that describes this rule are allowed; a live "Phase-2" claim is not.
  *  - No tracked repro-h9* diagnostics and no tracked dist/ or node_modules/
  *    paths.
- *  - No console.log under src/ outside src/cli/. src/shared/log.ts is the
- *    Logger that deliberately writes to stdout, so it is exempt.
+ *  - No `console` usage under src/ outside src/cli/. src/shared/log.ts is the
+ *    Logger that deliberately writes to stdout, so it is exempt. Comments and
+ *    strings are ignored because this uses the TypeScript AST.
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import ts from 'typescript'
 
 export interface Violation {
   file: string
@@ -29,8 +32,9 @@ const ROADMAP_FILE = 'docs/ROADMAP.md'
 const BOARD_HEADING = '## 7. Dynamic task board'
 const BOARD_COLUMNS = 7
 const PHASE2_PATTERN = /\bphase(?:\s*-\s*|\s*)?2\b/i
-const PHASE2_HISTORY_ALLOWLIST = new Set([ROADMAP_FILE])
-const CONSOLE_LOG_ALLOWLIST = new Set(['src/shared/log.ts'])
+const PHASE2_RULE_DESCRIPTION = /no live Phase-2 naming/i
+const INLINE_CODE = /`[^`]*`/gu
+const CONSOLE_ALLOWLIST = new Set(['src/shared/log.ts'])
 const TEXT_FILE = /\.(?:ts|tsx|md|json)$/
 
 export function findRepoRoot(): string {
@@ -40,28 +44,6 @@ export function findRepoRoot(): string {
 export function listTrackedFiles(root: string): string[] {
   const output = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
   return output.split('\0').filter(Boolean).sort()
-}
-
-function lineOf(content: string, index: number): number {
-  return content.slice(0, index).split('\n').length
-}
-
-function readLineViolations(
-  root: string,
-  files: readonly string[],
-  test: (file: string) => boolean,
-  pattern: RegExp,
-  message: string,
-): Violation[] {
-  const violations: Violation[] = []
-  for (const file of files) {
-    if (!test(file)) continue
-    const content = fs.readFileSync(path.join(root, file), 'utf8')
-    for (const match of content.matchAll(pattern)) {
-      violations.push({ file, line: lineOf(content, match.index ?? 0), message })
-    }
-  }
-  return violations
 }
 
 function splitBoardRow(rawLine: string): string[] {
@@ -102,23 +84,43 @@ export function checkRoadmapBoard(root: string): Violation[] {
   }
 
   const violations: Violation[] = []
-  let headerSeen = false
+  let inFence = false
+  let headerIndex = -1
+  let separatorSeen = false
   for (let index = start + 1; index < lines.length; index += 1) {
     const raw = lines[index]
     if (raw.startsWith('## ')) break
+    // A fenced example is not the board, even when it contains a pipe.
+    if (/^\s*```/u.test(raw)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
     const trimmed = raw.trim()
     if (!trimmed.startsWith('|')) continue
     const cells = splitBoardRow(trimmed)
-    if (!headerSeen) {
-      headerSeen = true
-      if (cells.length !== BOARD_COLUMNS || cells[0] !== 'ID' || cells[1] !== 'Task') {
-        violations.push({
-          file: ROADMAP_FILE,
-          line: index + 1,
-          message: `board header has ${cells.length} cells, expected ${BOARD_COLUMNS} (ID | Task | Owner | Branch | PR | Status | Acceptance)`,
-        })
+    if (headerIndex === -1) {
+      // Ignore legend/other tables: only a row starting with ID is the board
+      // header. A wrong shape is reported so the table cannot silently pass.
+      if (cells[0] === 'ID') {
+        headerIndex = index
+        if (cells.length !== BOARD_COLUMNS || cells[1] !== 'Task') {
+          violations.push({
+            file: ROADMAP_FILE,
+            line: index + 1,
+            message: `board header has ${cells.length} cells, expected ${BOARD_COLUMNS} (ID | Task | Owner | Branch | PR | Status | Acceptance)`,
+          })
+        }
       }
       continue
+    }
+    if (!separatorSeen) {
+      // The separator belongs to the header; a non-separator pipe line is still
+      // checked as a row so malformed tables are reported.
+      if (isSeparator(cells)) {
+        separatorSeen = true
+        continue
+      }
     }
     if (isSeparator(cells)) continue
     if (cells.length !== BOARD_COLUMNS) {
@@ -129,19 +131,19 @@ export function checkRoadmapBoard(root: string): Violation[] {
       })
     }
   }
-  if (!headerSeen) {
+  if (headerIndex === -1) {
     violations.push({ file: ROADMAP_FILE, line: start + 1, message: 'board table header not found' })
+  } else if (!separatorSeen) {
+    violations.push({
+      file: ROADMAP_FILE,
+      line: headerIndex + 1,
+      message: `board header has no separator row (${BOARD_COLUMNS} columns expected)`,
+    })
   }
   return violations
 }
 
 export function checkPhaseNaming(root: string, tracked: readonly string[]): Violation[] {
-  const inScope = (file: string): boolean => {
-    if (PHASE2_HISTORY_ALLOWLIST.has(file)) return false
-    if (!TEXT_FILE.test(file)) return false
-    if (file === 'README.md' || file === 'README.zh-CN.md') return true
-    return file.startsWith('src/') || file.startsWith('docs/')
-  }
   const message = 'Phase-2 naming: this tree is one M0-M11 whole; there is no Phase 2 switch or directory'
   const violations: Violation[] = []
   const seen = new Set<string>()
@@ -152,11 +154,28 @@ export function checkPhaseNaming(root: string, tracked: readonly string[]): Viol
     violations.push({ file, line, message })
   }
   for (const file of tracked) {
-    if (!inScope(file)) continue
+    // Paths are checked for every tracked file, including binaries and assets.
     if (PHASE2_PATTERN.test(file)) add(file, 1)
-    const content = fs.readFileSync(path.join(root, file), 'utf8')
-    for (const match of content.matchAll(new RegExp(PHASE2_PATTERN.source, 'giu'))) {
-      add(file, lineOf(content, match.index ?? 0))
+    const contentScope = file === 'README.md'
+      || file === 'README.zh-CN.md'
+      || file.startsWith('src/')
+      || file.startsWith('docs/')
+    if (!contentScope || !TEXT_FILE.test(file)) continue
+    const absolute = path.join(root, file)
+    if (!fs.existsSync(absolute)) continue
+    const lines = fs.readFileSync(absolute, 'utf8').split('\n')
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]
+      if (!PHASE2_PATTERN.test(line)) continue
+      // The roadmap is the audit record. Inline-code citations of the removed
+      // switch and the line that documents this rule are history, not a new
+      // live claim; plain "Phase-2" prose is still rejected.
+      if (file === ROADMAP_FILE) {
+        if (PHASE2_RULE_DESCRIPTION.test(line) || !PHASE2_PATTERN.test(line.replace(INLINE_CODE, ''))) {
+          continue
+        }
+      }
+      add(file, index + 1)
     }
   }
   return violations
@@ -185,16 +204,37 @@ export function checkRepoHygiene(tracked: readonly string[]): Violation[] {
 }
 
 export function checkConsoleLog(root: string, tracked: readonly string[]): Violation[] {
-  return readLineViolations(
-    root,
-    tracked,
-    file => file.startsWith('src/')
-      && file.endsWith('.ts')
-      && !file.startsWith('src/cli/')
-      && !CONSOLE_LOG_ALLOWLIST.has(file),
-    /\bconsole\.log\s*\(/gu,
-    'console.log outside src/cli/ (use the shared Logger or the CLI layer)',
-  )
+  const violations: Violation[] = []
+  for (const file of tracked) {
+    if (!file.startsWith('src/') || !file.endsWith('.ts')) continue
+    if (file.startsWith('src/cli/') || CONSOLE_ALLOWLIST.has(file)) continue
+    const absolute = path.join(root, file)
+    if (!fs.existsSync(absolute)) continue
+    const source = ts.createSourceFile(
+      file,
+      fs.readFileSync(absolute, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    )
+    const visit = (node: ts.Node): void => {
+      // Any `console` identifier catches console.log, console['log'],
+      // console.log?.(), and `const l = console.log` aliases. Comments and
+      // strings are not identifiers, so documentation examples stay clean.
+      if (ts.isIdentifier(node) && node.text === 'console') {
+        const { line } = source.getLineAndCharacterOfPosition(node.getStart(source))
+        violations.push({
+          file,
+          line: line + 1,
+          message: 'console usage outside src/cli/ (use the shared Logger or the CLI layer)',
+        })
+        return
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+  }
+  return violations
 }
 
 export function runLint(root: string, tracked: readonly string[] = listTrackedFiles(root)): Violation[] {

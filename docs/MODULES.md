@@ -262,8 +262,8 @@ npx vitest run test/metrics-curve.test.ts          percentiles + bake-off math
 pnpm typecheck                                     pass
 pnpm lint                                          pass
 pnpm format:check                                  pass
-pnpm test:coverage                                 262 passed, 38 files; 81 src files; lines 81.51%, branches 81.57-81.58%, functions 89.02% (no threshold)
-offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         263 passed, 15 skipped, 42 files
+pnpm test:coverage                                 282 passed, 38 files; 81 src files; lines 81.78%, branches 82.00%, functions 89.10% (no threshold)
+offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         283 passed, 15 skipped, 42 files
 pnpm test (live Magpie, final tree)                207 passed, 3 skipped, 34 files (431.12 s)
 ```
 

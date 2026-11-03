@@ -259,7 +259,7 @@ export DS_AGENT_GH_REPO=your-account/your-writable-repo
 pnpm demo
 ```
 
-[GitHub Actions](./.github/workflows/ci.yml) 在推送到 `main` 和每个 pull request 上跑 `pnpm typecheck` 与 `pnpm test`。仓库 secret 里有 `DEEPSEEK_API_KEY` 或 `DS_AGENT_API_KEY` 时运行 `pnpm demo:local`（内存 fixture 冒烟，不写仓库）；真实信道验收由有 `gh` 登录的运维者运行 `pnpm demo`。
+[GitHub Actions](./.github/workflows/ci.yml) 在推送到 `main` 和每个 pull request 上跑 `pnpm lint`、`pnpm format:check`、`pnpm typecheck`、`pnpm test` 与 `pnpm test:coverage`。仓库 secret 里有 `DEEPSEEK_API_KEY` 或 `DS_AGENT_API_KEY` 时运行 `pnpm demo:local`（内存 fixture 冒烟，不写仓库）；真实信道验收由有 `gh` 登录的运维者运行 `pnpm demo`。
 
 状态在 `DS_AGENT_HOME`，否则在 `./.ds-agent`（SQLite）。
 
