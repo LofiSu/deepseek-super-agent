@@ -372,9 +372,76 @@ head so a later reader can separate the reviewed tree from the merged tree.
   history; #86 listed as stale; the duplicate #74 section marked superseded;
   scoped re-review pending.
 - **Verdict:** corrections applied; not merged at this checkpoint.
+- **Post-checkpoint:** scoped re-review at `e4e8768` returned **APPROVE**; the
+  two blocking findings and the superseded-#74 note were verified resolved. CI
+  passed on the exact head (run `41601373653`). Merged `ed8980d`.
+
+## PR #90 — `[SUPER-AGENT][IMESSAGE-THREAD-KEY] Separate group and 1:1 conversation keys`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; initial head `322a85d`, reviewed head `e92f87b`
+  after merging `main` `ed8980d`. Two later integration merges of `main` —
+  `4460a8f` (`1dd426a`) and `59cbd2c` (`60bb9ae`) — changed no task-owned lines;
+  the final head is `59cbd2c`. Files: `src/channels/imessage.ts`,
+  `test/channels-imessage.test.ts`, `docs/IMESSAGE.md` (+148/−5).
+- **Independent review:** **APPROVE**. Verified `imessageThreadFor` maps a chat
+  guid to `chat:`, a group without a guid to `group:<identifier>` or
+  `group-unknown:<handle>`, and a 1:1 without a guid to `handle:`; group keys
+  can never equal a 1:1 key. `imessageTrigger` passes the resolved group flag;
+  actor and admission are unchanged. Positive-group guids and identifiers are
+  aggregated independently, so an identifier-only row cannot hide a later
+  guid. Search found no consumer that assumes the old group `handle:` key.
+- **Non-vacuity:** three behavioral tests fail on `d3beb9c` (ambiguous group
+  key, identifier key, later-guid aggregation); the guid-thread and 1:1-key
+  tests pass on base by design. Focused suite 45/45; full offline 445/15 (460).
+- **Residual non-blocking:** same-sender ambiguous groups across distinct group
+  chats share `group-unknown:<handle>` (never with 1:1); persisted historical
+  group threads under the old key no longer correlate (one-time split, no code
+  migration); `imessageThreadFor` checks raw `chatGuid` truthiness while the
+  pull path normalizes.
+- **Merged:** `8fa3a79` after a final merge of `main` `60bb9ae`; CI green on the
+  exact head `59cbd2c`.
+
+## PR #91 — `[SUPER-AGENT][LIVE-SUITE-SALVAGE] Re-land the test-only live-suite determinism changes`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; head `4f55247`; base `ed8980d`. Four test files,
+  +12/−10; no docs or product code.
+- **Independent review:** **APPROVE**. The default MockModel refusal is
+  unchanged; only `test/credential-sentinel.test.ts` passes `allowMockModel:
+  true`, and no other `freshRuntime` caller opts in. `metrics.test.ts` removed
+  only the three live/timer-dependent keys from the strict match; all separate
+  assertions remain. `team-live.test.ts` changed only deadlines. The four test
+  files are byte-identical to PR #86's head.
+- **Residual non-blocking:** the replacement `toHaveProperty` assertions for
+  `speculate.deliver`/`watchdog.idle` are tautological under the zeroed counter
+  map; a future change should assert them deterministically under the offline
+  fixture. The live deadline change cannot be exercised offline.
+- **Merged:** `1dd426a`. CI green on the exact head (run `41602071864`). PR #86
+  was closed as superseded; its docs conflict with current `main` and its
+  live-run record was not reproduced.
+
+## PR #92 — `[SUPER-AGENT][MESH-QUEUE-TESTS] Cover queueState skip branches and clean up failed non-queued starts`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; head `606869a` after merging main `ed8980d`;
+  final head `a226cc0` after merging `1dd426a`. Files: `src/harness/loop.ts`
+  (+19/−2), `test/worker-mesh.test.ts` (+136/−1).
+- **Independent review:** **APPROVE**. Direct tests now cover `store-closed`,
+  `ticket-missing`, `no-assignment`, `assignment-ended`, `assignment-failed`,
+  and `assignment-blocked`; the existing test covers `ended` and `paused`. Each
+  asserts the skip log, no Worker start, and a settling launch. Mutation of the
+  six skip branches made all six tests fail, so they pin the branches.
+  `startNow()` releases the active marker and picked node on a synchronous
+  throw; `releaseNode` is idempotent and the queued path is unchanged.
+- **Residual non-blocking:** an asynchronous rejection still rejects
+  `harness.launch` and does not release the node from the Harness (unchanged
+  from base, outside the synchronous scope); a throw inside `assignmentPlaced`
+  or later is not directly exercised; the six tests pin branches via the skip
+  log, with the no-start assertions backstopped by the `startQueued` re-read.
+- **Merged:** `60bb9ae`. CI green on the exact head (run `41604489526`).
 
 ## Pending reviews
 
-- PR #89 — scoped re-review after the docs corrections.
-- PR #86 — stale/DIRTY; its test-only changes are to be re-landed on a fresh
-  branch before it is closed.
+- None at this checkpoint. The cycle-4 checkpoint PR is the only open PR and is
+  reviewed before merge.

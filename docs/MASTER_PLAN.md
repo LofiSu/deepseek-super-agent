@@ -1,27 +1,27 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `d3beb9c` (`[SUPER-AGENT][IMESSAGE-GROUP-EDGES] Fail
-> closed on ambiguous group addresses (#88)`)
+> Baseline: `main` at `8fa3a79` (`[SUPER-AGENT][IMESSAGE-THREAD-KEY] Separate
+> group and 1:1 conversation keys (#90)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
 ## 0. Verified baseline (2026-11-03)
 
-The gate evidence below is from `main` CI at `d3beb9c` (run `41600424146`).
+The gate evidence below is from `main` CI at `8fa3a79` (run `41605279682`).
 The `34aef25` audit was produced locally in a detached worktree; the later
 figures are CI results:
 
 ```text
 pnpm lint                                              lint ok (227 tracked files)
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   440 passed, 15 skipped (455)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   452 passed, 15 skipped (467)
                                                       58 files: 55 with passing tests,
                                                       3 fully skipped
-pnpm test:coverage                                     439 passed; statements/lines
-                                                       82.29% (7809/9489), branches
-                                                       80.57% (2787/3459), functions
-                                                       89.97% (691/768)
+pnpm test:coverage                                     451 passed; statements/lines
+                                                       82.39% (7837/9512), branches
+                                                       80.97% (2814/3475), functions
+                                                       90.11% (693/769)
 ```
 
 The 3 fully skipped files are `test/demos-real-channels.test.ts`,
@@ -32,8 +32,9 @@ and 80.06% branches. The `10e9f3c` run recorded 425 passed / 15 skipped (440),
 56 files, 82% lines, and 80.05% branches (2746/3430); a local run on the same
 commit reported 80.09% (2748/3431), a one-branch V8 variance. The `5fbfb00` run
 recorded 429 passed / 15 skipped (444), 58 files, 82.27% lines, and 80.52%
-branches (2779/3451). The `d3beb9c` run adds the #88 iMessage edge and
-outbound-fail-closed tests.
+branches (2779/3451). The `d3beb9c` run added the #88 iMessage edge and
+outbound-fail-closed tests (440/15, 82.29% / 80.57%). The `8fa3a79` run adds
+the #90 thread-key, #91 live-suite salvage, and #92 mesh queue tests.
 
 Repository facts:
 
@@ -44,12 +45,13 @@ Repository facts:
 - `#75`, `#76`, `#77`, `#78`, `#79`, `#80`, `#81`, `#82`, and `#84` merged into
   `main` at `08ea78f`, `aae182c`, `03a4c02`, `cb32a17`, `1dc9500`, `2c02f4b`,
   `f4ba77a`, `1c165ef`, and `34aef25`. `#83` (`cecfba0`), `#74` (`299b908`),
-  `#85` (`10e9f3c`), `#87` (`5fbfb00`), and `#88` (`d3beb9c`) then merged the
+  `#85` (`10e9f3c`), `#87` (`5fbfb00`), `#88` (`d3beb9c`), `#89` (`ed8980d`),
+  `#91` (`1dd426a`), `#92` (`60bb9ae`), and `#90` (`8fa3a79`) then merged the
   state reconciliation, roadmap refresh, restart recovery, gateway token race
-  fix, and iMessage group edge fix. Current `main` is `d3beb9c`.
-- Open PRs at this checkpoint: #89 (`docs/cycle-3-status`; this
-  reconciliation) and #86 (`test/live-suite-determinism`; stale/DIRTY, docs
-  superseded, test-only salvage pending).
+  fix, iMessage group edge fix, cycle-3 reconciliation, live-suite salvage,
+  mesh queue tests, and thread-key separation. Current `main` is `8fa3a79`.
+- Open PRs at this checkpoint: this cycle-4 checkpoint PR only. PR #86 was
+  closed as superseded by #91.
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
 - GitHub Issues are disabled, so work items live in this plan and the roadmap.
@@ -60,7 +62,7 @@ Repository facts:
 
 | ID | Priority | Gap | Evidence | Status |
 |----|----------|-----|----------|--------|
-| IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling; #88 fixed join-order/page/ambiguity addresses and the group-to-1:1 outbound fallback. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 + #88 (`d3beb9c`); APPROVE |
+| IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling; #88 fixed join-order/page/ambiguity addresses and the group-to-1:1 outbound fallback; #90 separated group and 1:1 thread keys. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 + #88 + #90 (`8fa3a79`); APPROVE |
 | P1-3 | P1 | Worker-mesh capacity was advisory and the Harness wrote `Assignment.node` directly. #79 merged the queue and Engine-owned placement; its release-ordering bug is fixed by #84. | `src/harness/loop.ts`; `src/core/assignments.ts`; `test/worker-mesh.test.ts` | fixed by #79 + #84 |
 | MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`); APPROVE |
 | P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/core/assignments.ts`; `src/runtime.ts`; `test/restart-recovery.test.ts` | fixed by #85 (`10e9f3c`); APPROVE |
@@ -92,12 +94,18 @@ Cycle 3 (integration + security edges)
   GATEWAY-TOKEN-RACE    First-create race and ELOOP handling — merged #87
   IMESSAGE-GROUP-EDGES  Join order, page boundary, ambiguous group address,
                         outbound fail-closed — merged #88
-  STATE-DOCS  Reconcile status after #83/#74/#85/#87/#88 — PR #89
+  STATE-DOCS  Reconcile status after #83/#74/#85/#87/#88 — merged #89
 
-Cycle 4 candidates (after cycle 3 merges; not started)
-  IMESSAGE-THREAD-KEY  Separate ambiguous-group thread keys from 1:1 keys
-  MESH-QUEUE-TESTS     queueState branches and non-queued start-error cleanup
-  LIVE-SUITE-SALVAGE   Re-land #86's test-only determinism changes
+Cycle 4 (follow-ups; completed)
+  IMESSAGE-THREAD-KEY  Group vs 1:1 thread-key separation — merged #90
+  MESH-QUEUE-TESTS     queueState branches and non-queued start cleanup —
+                       merged #92
+  LIVE-SUITE-SALVAGE   Re-land #86's test-only determinism changes — merged
+                       #91; #86 closed as superseded
+
+Next sessions (not started)
+  GATEWAY-TOKEN-TESTS  EEXIST winner-reuse and create-path ELOOP branch tests
+  METRICS-ASSERTIONS   Make the live-relaxed counter assertions meaningful
   SERVE-CHANNEL-LOOP   Channel loop for serve (reuse Feishu/iMessage sources)
   Evaluate semantic long-term memory (roadmap open item)
 ```

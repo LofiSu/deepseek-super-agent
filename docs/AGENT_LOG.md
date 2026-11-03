@@ -4,6 +4,55 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-03 — Cycle 4 checkpoint (follow-ups merged; session at cycle cap)
+
+### Observed
+
+- The previous session process ended while three implementers and three
+  reviewers were running. On restart, the merged PRs (#87–#89) were intact; the
+  lost worktrees were recreated from their pushed branches, and the three
+  cycle-4 reviewers were re-dispatched fresh. No result was assumed from the
+  interrupted run.
+- #90 merged at `8fa3a79` after an independent APPROVE: group thread keys are
+  `chat:`/`group:`/`group-unknown:` and can never equal a 1:1 `handle:` key;
+  positive-group guids and identifiers aggregate independently. Three
+  behavioral tests fail on the pre-fix base; the "guid thread" and "1:1 keys"
+  tests are regression guards.
+- #91 merged at `1dd426a` after an independent APPROVE, re-landing the four
+  test-only determinism changes from #86. The default MockModel refusal still
+  holds; only the credential sentinel opts in explicitly. #86 was closed as
+  superseded; its docs conflict with `main` and its live-run record remains in
+  PR history without being reproduced.
+- #92 merged at `60bb9ae` after an independent APPROVE: six previously
+  untested `queueState()` skip branches now have direct tests, and a
+  synchronous throw on the non-queued start path releases the active marker
+  and mesh node instead of rejecting the launch. The cleanup test fails on the
+  base; the branch tests were mutation-verified.
+- `main` CI at `8fa3a79` (run `41605279682`): 452 passed / 15 skipped (467),
+  58 files; 82.39% statements/lines (7837/9512), 80.97% branches (2814/3475),
+  90.11% functions (693/769).
+
+### Decided
+
+- Close #86 rather than rebase; the test-only changes are on `main` via #91,
+  and its docs record cannot merge as-is.
+- Accept these residual non-blocking items for a later session: gateway EEXIST
+  winner-reuse and create-path ELOOP tests; the tautological replacement
+  assertions in `test/metrics.test.ts`; the unchanged async-rejection node
+  release on the non-queued path; fail-closed group outbox retry noise.
+- Stop at the four-cycle session cap.
+
+### Verified
+
+- All four cycle-4 review verdicts (including #89) were independent and
+  recorded; every merge had green `typecheck and test` on its exact head.
+- No live model or real-channel run; no credentials used.
+
+### Pending
+
+- Next session: pick from `docs/MASTER_PLAN.md` "Next sessions" and start from
+  current `main`. Do not reopen merged PRs.
+
 ## 2026-11-03 — Cycle 3 checkpoint 2 (gateway merged; iMessage fix and docs corrected)
 
 ### Observed
