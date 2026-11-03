@@ -39,7 +39,8 @@ export async function runGatewayCommand(home: string): Promise<void> {
   const host = flag('host') ?? process.env.DS_AGENT_GATEWAY_HOST ?? '127.0.0.1'
   const hostWarning = gatewayHostWarning(host)
   if (hostWarning) console.warn(hostWarning)
-  const token = loadOrCreateGatewayToken(home, flag('token') ?? process.env.DS_AGENT_GATEWAY_TOKEN)
+  const explicitToken = (flag('token') ?? process.env.DS_AGENT_GATEWAY_TOKEN)?.trim()
+  const token = loadOrCreateGatewayToken(home, explicitToken)
   const { providers, aliases, defaultModel: fileDefault, masking: fileMasking, source } = gatewayFromSources(home)
   if (providers.length === 0) {
     throw new Error(
@@ -66,7 +67,7 @@ export async function runGatewayCommand(home: string): Promise<void> {
   fs.mkdirSync(home, { recursive: true })
   const info = {
     url: handle.url,
-    tokenPath: gatewayTokenPath(home),
+    tokenPath: explicitToken ? null : gatewayTokenPath(home),
     providers: providers.map(provider => provider.id),
     defaultModel: defaultModel ?? null,
     aliases: Object.keys(aliases),
@@ -74,7 +75,9 @@ export async function runGatewayCommand(home: string): Promise<void> {
   fs.writeFileSync(path.join(home, 'gateway.json'), `${JSON.stringify(info, null, 2)}\n`)
 
   console.log(`ds-agent gateway listening on ${handle.url}`)
-  console.log(`  token:     ${gatewayTokenPath(home)} (mode 0600; never printed)`)
+  console.log(explicitToken
+    ? '  token:     supplied via --token / DS_AGENT_GATEWAY_TOKEN (never printed)'
+    : `  token:     ${gatewayTokenPath(home)} (mode 0600; never printed)`)
   console.log(`  info:      ${path.join(home, 'gateway.json')}`)
   console.log(`  providers: ${providers.map(provider => provider.id).join(', ')}${defaultModel ? `  defaultModel=${defaultModel}` : ''}  (source=${source})`)
   if (Object.keys(aliases).length) console.log(`  aliases:   ${Object.keys(aliases).join(', ')}`)

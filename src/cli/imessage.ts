@@ -2,6 +2,7 @@ import {
   ChatDbImessageApi,
   DEFAULT_IMESSAGE_INTERVAL_MS,
   ImessageOutboxAdapter,
+  ImessageSchemaError,
   ImessageSource,
   decideImessageAdmission,
   imessageDbPath,
@@ -19,6 +20,41 @@ function has(name: string): boolean {
   return process.argv.includes(`--${name}`)
 }
 
+/**
+ * Resolve `--handle` / `DS_AGENT_IMESSAGE_HANDLE` exactly once and trim it.
+ * The same value feeds both the startup admission decision and the SQL sender
+ * filter; padded input would make the filter match nothing and idle silently.
+ * An explicitly passed but missing/flag-like value is rejected, never treated
+ * as "no handle".
+ */
+export function resolveImessageHandle(
+  argv: string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const index = argv.indexOf('--handle')
+  if (index >= 0) {
+    const raw = argv[index + 1]
+    const handle = raw?.trim()
+    if (!handle || handle.startsWith('--')) {
+      throw new Error(
+        'iMessage --handle needs a non-empty sender id; '
+        + 'a missing value, whitespace, or another flag is not valid.',
+      )
+    }
+    return handle
+  }
+  const raw = env.DS_AGENT_IMESSAGE_HANDLE
+  if (raw === undefined) return undefined
+  const handle = raw.trim()
+  if (!handle || handle.startsWith('--')) {
+    throw new Error(
+      'DS_AGENT_IMESSAGE_HANDLE must be a non-empty sender id; '
+      + 'whitespace-only or flag-like values are refused.',
+    )
+  }
+  return handle
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -29,15 +65,16 @@ function sleep(ms: number): Promise<void> {
  * Reads new inbound messages from chat.db and posts replies back through
  * Messages.app. Requires Full Disk Access (read) + Automation (send) and a
  * live model key. Admission is default-deny: the command refuses to start
- * unless `--handle`/`DS_AGENT_IMESSAGE_HANDLE` or `DS_AGENT_ACTOR_ALLOWLIST`
- * names a sender, or `--allow-any` is an explicit opt-out. Group chats are
- * skipped unless `--allow-groups` is passed. On the first run the cursor starts
- * at the current max ROWID, so only messages that arrive from now on are
- * handled; pass `--since <rowid>` to replay from an explicit point.
+ * unless a non-empty `--handle`/`DS_AGENT_IMESSAGE_HANDLE` or
+ * `DS_AGENT_ACTOR_ALLOWLIST` names a sender, or `--allow-any` is an explicit
+ * opt-out. Group chats are skipped unless `--allow-groups` is passed. On the
+ * first run the cursor starts at the current max ROWID, so only messages that
+ * arrive from now on are handled; pass `--since <rowid>` to replay from an
+ * explicit point.
  */
 export async function runImessageCommand(home: string): Promise<void> {
   const dbPath = flag('db') ?? imessageDbPath()
-  const handle = flag('handle') ?? process.env.DS_AGENT_IMESSAGE_HANDLE ?? undefined
+  const handle = resolveImessageHandle()
   const allowAny = has('allow-any') || process.env.DS_AGENT_IMESSAGE_ALLOW_ANY === '1'
   const allowGroups = has('allow-groups') || process.env.DS_AGENT_IMESSAGE_ALLOW_GROUPS === '1'
   const admission = decideImessageAdmission({
@@ -128,6 +165,9 @@ export async function runImessageCommand(home: string): Promise<void> {
           runtime.log.info(`[imessage] outbox error ${error instanceof Error ? error.message : String(error)}`)
         })
       } catch (error) {
+        // A schema/configuration incompatibility cannot heal between polls:
+        // surface it once and stop instead of logging the same failure forever.
+        if (error instanceof ImessageSchemaError) throw error
         runtime.log.info(`[imessage] poll error ${error instanceof Error ? error.message : String(error)}`)
       }
       if (once || stopping) break
