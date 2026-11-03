@@ -44,9 +44,10 @@ head so a later reader can separate the reviewed tree from the merged tree.
   operator-only and unreproduced. The revision row is internally consistent with
   the `fa974ca` base.
 - **Blocking finding:** the PR claims an audit of current `main` but its base is
-  `fa974ca`; `main` has since merged `#64` (`bb11c96`), `#78` (`cb32a17`), and
-  `#75`/`#76`/`#77` (`03a4c02`). The 302 tests / 82.40% coverage evidence is
-  stale, and the header and §2/§3 matrices still say `fa974ca`.
+  `fa974ca`; `main` has since merged `#64` (`bb11c96`), `#78` (`cb32a17`), `#75`
+  (`08ea78f`), `#76` (`aae182c`), and `#77` (`03a4c02`, the resulting main tip).
+  The 302 tests / 82.40% coverage evidence is stale, and the header and §2/§3
+  matrices still say `fa974ca`.
 - **Verdict:** **REQUEST_CHANGES** — rebase on current `main`, replace the
   evidence with the verified `03a4c02` run, add revision rows for `#64`, `#75`,
   `#76`, `#77`, and `#78`, and state that the gateway/iMessage surface is

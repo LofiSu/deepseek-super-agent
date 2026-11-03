@@ -274,12 +274,13 @@ method also writes the ticket aggregate directly to persist `Assignment.node`.
 7. Add tests for constant-time authorization behavior (401 for wrong/missing),
    empty-token refusal, token-file permissions, and the non-loopback warning.
 
-### Non-blocking follow-up (GATEWAY-TOKEN-SYMLINK, Cycle 2)
+### Non-blocking follow-up (GATEWAY-TOKEN-SYMLINK, Cycle 2) — resolved by #82
 
-The merged hardening rejects chmod failure but still follows symlinks. The
-follow-up must `lstat` the token path, reject symlinks and non-regular files,
-read with `O_NOFOLLOW`, create atomically, and add tests for fail-closed chmod,
-SSE headers, and identical 401 bodies across malformed/wrong/missing tokens.
+This block is historical. #82 merged the follow-up at `1c165ef`: it `lstat`s
+the token path, rejects symlinks, hard links, and non-regular files, reads with
+`O_NOFOLLOW`, creates exclusively, and adds tests for fail-closed chmod, SSE
+headers, and identical 401 bodies across malformed/wrong/missing tokens.
+Residual non-blocking items are recorded in `docs/PR_REVIEW_LOG.md`.
 
 ### Acceptance
 

@@ -75,6 +75,44 @@ with a new entry.
 - Rebase and refresh PR #74.
 - Dispatch P1-6.
 
+## 2026-11-03 — Cycle 2 (deployment and review reconciliation)
+
+> Preserved verbatim from `main`; the checkpoint entries above supersede its
+> status but do not replace this record.
+
+### Observed
+
+- `main` advanced from `bb11c96` to `03a4c02`; four PRs were open (#74–#77).
+- #75 was BEHIND and blocked by six CodeRabbit threads; #76/#77 were BEHIND.
+- The orchestration config did not exist yet (no CLAUDE.md, agents, skill, or
+  Stop guard).
+
+### Decided
+
+- Deploy the orchestration layer on its own branch/PR, not on top of the docs
+  branch.
+- Treat the stale PR #74 as blocked; refresh it only after P1-3 edits the same
+  docs.
+- Merge #75/#76/#77 only after required checks, independent review, and
+  resolving every review thread.
+
+### Executed
+
+- #78: CLAUDE.md, five agents, autonomous-engineering skill, Stop guard,
+  gitignore rules. Nine guard cases tested.
+- #75: fixed six review findings in `deed616`, answered/resolved all threads.
+- #76 and #77: reviewed against the audit findings; both merged.
+
+### Verified
+
+- Offline suite on `03a4c02`: 376 passed / 50 files.
+- CI green on every merged PR; branch protection was not bypassed.
+
+### Pending
+
+- P1-3 is unfinished (worktree edits, no commit).
+- AUDIT-REFRESH after P1-3; P1-6 after P1-3; GATEWAY-REVIEW coverage.
+
 ## 2026-11-03 — Cycle 1, checkpoint 3 (integration at `03a4c02`)
 
 ### Observed
