@@ -37,10 +37,21 @@ export interface HarnessOptions {
    * stays pure capacity accounting.
    */
   queueLimit?: number
+  /** Return a reserved mesh slot when a queued Worker fails before it starts. */
+  releaseNode?: (ticketId: string) => void
   /** Cross-ticket recall lines injected into the Worker task. */
   memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string }[]
   /** T45 bake-off baseline: one turn chain, no Router session. */
   singleSession?: boolean
+}
+
+/** Bound for an in-process Worker backlog. Environment parsing already sanitizes. */
+export const DEFAULT_QUEUE_LIMIT = 100
+
+/** Programmatic queue limits are untrusted too: NaN, negative, and fractional fall back. */
+export function normalizeQueueLimit(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_QUEUE_LIMIT
+  return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_QUEUE_LIMIT
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
@@ -58,7 +69,7 @@ export class Harness {
   private draining = false
 
   constructor(private readonly opts: HarnessOptions) {
-    this.queueLimit = opts.queueLimit ?? 100
+    this.queueLimit = normalizeQueueLimit(opts.queueLimit)
     const byRole = Object.entries(opts.models ?? {})
       .filter(([, model]) => model != null)
       .map(([role, model]) => `${role}=${model.name}`)
@@ -189,18 +200,11 @@ export class Harness {
     if (this.draining) return
     while (this.queued.length > 0) {
       const next = this.queued[0]!
-      const latest = this.opts.store.isOpen
-        ? this.opts.store.getDoc<Ticket>('ticket', next.ticketId)
-        : undefined
-      let skip: string | undefined
-      if (!latest) skip = 'ticket-missing'
-      else if (latest.ended) skip = `ended=${latest.ended.outcome}`
-      else if (this.pauseReason(next.ticketId)) skip = 'paused'
-      else if (!latest.assignments.at(-1)) skip = 'no-assignment'
-      if (skip) {
+      const check = this.queueState(next.ticketId)
+      if (check.skip) {
         this.queued.shift()
         this.opts.metrics.increment('mesh.dequeued')
-        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length} skipped=${skip}`)
+        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length} skipped=${check.skip}`)
         next.resolve()
         continue
       }
@@ -210,7 +214,7 @@ export class Harness {
         this.queued.shift()
         this.opts.metrics.increment('mesh.dequeued')
         this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length}`)
-        this.startQueued(next, latest!, node)
+        this.startQueued(next, node)
         continue
       }
       // Queued entries only exist when pickNode is configured.
@@ -219,15 +223,49 @@ export class Harness {
     }
   }
 
+  /**
+   * Read the committed snapshot for a queued launch. A terminal Assignment
+   * (`ended`) is as fatal as an ended or paused Ticket: a report may have ended
+   * it without ending the Ticket, and starting it would resurrect the turn.
+   */
+  private queueState(ticketId: string): { ticket?: Ticket; skip?: string } {
+    if (!this.opts.store.isOpen) return { skip: 'store-closed' }
+    const ticket = this.opts.store.getDoc<Ticket>('ticket', ticketId)
+    if (!ticket) return { skip: 'ticket-missing' }
+    if (ticket.ended) return { skip: `ended=${ticket.ended.outcome}` }
+    const paused = this.pauseReason(ticketId)
+    if (paused) return { skip: 'paused' }
+    const assignment = ticket.assignments.at(-1)
+    if (!assignment) return { skip: 'no-assignment' }
+    if (assignment.state === 'ended') return { skip: 'assignment-ended' }
+    if (assignment.report?.kind === 'failed' || assignment.report?.kind === 'blocked') {
+      return { skip: `assignment-${assignment.report.kind}` }
+    }
+    return { ticket }
+  }
+
   private startQueued(
     entry: { ticketId: string; resolve: () => void },
-    ticket: Ticket,
     node: string,
   ): void {
+    // Final re-read immediately before the turn starts. This is the barrier
+    // that keeps a just-ended Ticket from being resurrected by a stale pump.
+    const check = this.queueState(entry.ticketId)
+    if (!check.ticket) {
+      // pump() already reserved a mesh slot for this entry; give it back.
+      this.opts.releaseNode?.(entry.ticketId)
+      this.opts.log(`[mesh] mesh.start-skipped ticketId=${entry.ticketId} reason=${check.skip}`)
+      entry.resolve()
+      return
+    }
     let work: Promise<void>
     try {
-      work = this.startWorkerTurn(ticket, node)
+      work = this.startWorkerTurn(check.ticket, node)
     } catch (error) {
+      // startWorkerTurn marks the ticket active before Engine callbacks run.
+      // If one throws, neither the active marker nor the mesh reservation may leak.
+      this.activeWorkers.delete(entry.ticketId)
+      this.opts.releaseNode?.(entry.ticketId)
       this.opts.log(`[harness] queued worker failed ticketId=${entry.ticketId} error=${String(error)}`)
       entry.resolve()
       return

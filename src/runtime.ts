@@ -16,7 +16,7 @@ import type { Host } from './core/host.ts'
 import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
-import { Harness } from './harness/loop.ts'
+import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, roleModelsFromEnv, type Model } from './harness/model.ts'
@@ -247,8 +247,9 @@ export class Runtime {
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
     const meshCapacity = Number.isSafeInteger(rawCapacity) && rawCapacity > 0 ? rawCapacity : 4
-    const meshQueue = opts.meshQueue
-      ?? parseNonNegativeInt(baseEnv.DS_AGENT_MESH_QUEUE, DEFAULT_MESH_QUEUE)
+    const meshQueue = opts.meshQueue !== undefined
+      ? normalizeQueueLimit(opts.meshQueue)
+      : parseNonNegativeInt(baseEnv.DS_AGENT_MESH_QUEUE, DEFAULT_MESH_QUEUE)
     const routerShards = new RouterShardRegistry()
     routerShards.register({ id: 'default' })
     // Optional JSON config so CLI/demo users can shard without writing code:
@@ -284,6 +285,28 @@ export class Runtime {
     }
     // Bound late because the host and the tool ports both reach the Harness.
     const late: { harness?: Harness } = {}
+    /**
+     * Engine.report runs inside `Store.atomic`; the Ticket document is written
+     * just before the hook, but the Store snapshot only becomes observable to
+     * other commands after commit. Releasing capacity synchronously would let
+     * `Harness.pump` read the pre-report snapshot (Ticket open, Assignment
+     * pending/running) and start a Worker for the Ticket that just ended.
+     * A microtask runs after the synchronous transaction commits.
+     */
+    const releaseMesh = (ticketId: string): void => {
+      queueMicrotask(() => {
+        try {
+          workerMesh.release(ticketId)
+        } catch (error) {
+          log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
+        }
+        try {
+          late.harness?.release(ticketId)
+        } catch (error) {
+          log.info(`[hook] hook=harness-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
+        }
+      })
+    }
     const host: Host = {
       repo: store,
       now,
@@ -315,9 +338,9 @@ export class Runtime {
       onTicketEnded: ticket => {
         // One durable memory entry per finished ticket; the next ticket recalls it.
         const entry = longTermMemory.remember(ticket)
-        workerMesh.release(ticket.id)
-        // Capacity first, then let the scheduler start a queued Worker.
-        late.harness?.release(ticket.id)
+        // Capacity first, then let the scheduler start a queued Worker, but
+        // only after the Engine transaction has committed the terminal state.
+        releaseMesh(ticket.id)
         lifecycle.publish({
           kind: 'ticket.ended',
           payload: {
@@ -333,8 +356,7 @@ export class Runtime {
       onAssignmentEnded: ticketId => {
         // blocked/failed/waiting end the Assignment but leave the Ticket open.
         // Free the logical Worker slot so enforcement does not leak capacity.
-        workerMesh.release(ticketId)
-        late.harness?.release(ticketId)
+        releaseMesh(ticketId)
       },
       discardScratch: ticketId => env.discardIsolated?.(workerSessionId(ticketId)),
     }
@@ -396,6 +418,9 @@ export class Runtime {
         return node?.id
       },
       queueLimit: meshQueue,
+      releaseNode: ticketId => {
+        workerMesh.release(ticketId)
+      },
       memory: ticket => {
         const entries = longTermMemory.query({
           ticketId: ticket.id,
