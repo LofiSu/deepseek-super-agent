@@ -4,6 +4,11 @@ Independent reviews by the Chief Engineer. A passing CI run is necessary but not
 sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
 **REQUEST_CHANGES** / **REJECT** / **BLOCKED**.
 
+Provenance: this log records the orchestrator's independent review verdicts.
+GitHub review objects were not submitted for #75–#84; the external evidence is
+each PR's required CI run and its merge SHA. Verdicts below name the reviewed
+head so a later reader can separate the reviewed tree from the merged tree.
+
 ## PR #75 — `docs: establish the 2026-11-03 engineering state`
 
 - **Author:** LofiSu (chief engineer)
@@ -62,8 +67,9 @@ sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
   upstream calls; `nosniff` on JSON and SSE paths; `no-store` after auth; empty
   token refused; non-loopback warning; token file re-chmodded 0600; dashboard
   does not embed the token.
-- **Non-blocking findings:** token-file reads follow symlinks
-  (`src/gateway/token.ts:25-63`); fail-closed chmod, SSE header, identical-401,
+- **Non-blocking findings:** token-file reads followed symlinks at the #76
+  reviewed head (`src/gateway/token.ts:25-63`; fixed by #82, so those lines
+  differ at `34aef25`); fail-closed chmod, SSE header, identical-401,
   and CLI-warning tests are missing; Windows mode enforcement is skipped;
   `Bearer` scheme parsing is stricter than RFC 7235; the CLI can name a token
   file that was not written. Symlink/tests are tracked as
@@ -183,7 +189,9 @@ sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
   `startQueued()` re-reads immediately before start and cleans the reservation
   on synchronous failure; programmatic queue limits are sanitized. The two
   regression tests reproduce the capacity-1 and capacity-2 interleavings and
-  fail on the pre-fix base. Full offline suite 400 passed / 15 skipped.
+  fail on the pre-fix base. Full offline suite 400 passed / 15 skipped on the
+  reviewed head `e8614b9`; CI on the merged `34aef25` tree reports 414 passed /
+  15 skipped.
 - **Non-blocking findings:** no dedicated `queueState` tests for
   `ended`/`failed`/`blocked`/missing-ticket branches; the non-queued
   `startOrQueue` synchronous error path still lacks cleanup; `mesh.assigned` can
@@ -212,7 +220,47 @@ sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
   protocol-breaking defect found in the reviewed paths; the admission and auth
   edges must be hardened before this surface is called production-ready.
 
+## PR #83 — `docs: reconcile project state to main 34aef25`
+
+- **Author:** LofiSu (chief engineer)
+- **State at review:** OPEN head `581cc69`; 7 docs files, +746/−253; no code or
+  config. CI `typecheck and test` passed on the exact head.
+- **Independent review:** **REQUEST_CHANGES** on five blocking findings:
+  (1) `docs/PROJECT_AUDIT.md` still described the pre-#79 direct
+  `store.putDoc('ticket', ...)` deviation even though `34aef25` routes placement
+  through `Engine.assignmentPlaced` (`src/harness/loop.ts:298`);
+  (2) `docs/MASTER_PLAN.md` repeated the same stale constraint;
+  (3) `docs/MASTER_PLAN.md` Task 1 still said the group-fix PR was pending when
+  #81 merged at `f4ba77a`;
+  (4) `docs/PROJECT_AUDIT.md` described default-open `addressed: 'direct'` in
+  the present tense and cited the pre-#77 lines (now `src/channels/imessage.ts`
+  at 215-225 sets direct only for non-group messages);
+  (5) the coverage branch figure was transcribed as 80.05% (2702/3375) while CI
+  on the exact commit reports 80.06% (2703/3376).
+- **Non-blocking fixes applied:** add #78 to the merged list; label #84's 400
+  test count as the reviewed head; qualify the #76 token line citation; correct
+  the `docs/MODULES.md` restart citation to 81-82.
+- **Resolution:** all five blocking findings corrected; a scoped re-review on the
+  new head is required before merge.
+- **Verdict:** **REQUEST_CHANGES** (re-review pending).
+
+## PR #74 — `docs: record the final audit on main`
+
+- **Author:** LofiSu (agent-assisted)
+- **State at review:** OPEN head `cb6cdf2`; docs/ROADMAP.md and
+  docs/MODULES.md, +34/−8; CI passed.
+- **Independent review:** **REQUEST_CHANGES**. The revision row claimed
+  "#75–#84 merged" although #83 is still open, and the `34aef25` headline
+  evidence is not in `docs/PROJECT_AUDIT.md` on `main` (main's audit doc still
+  carries the `bb11c96` baseline). The numbers match #83's unmerged audit, so
+  they are not fabricated, but they are not yet the documented main-tree
+  evidence.
+- **Resolution:** merge #83 first, then rebase/refresh #74 on the new `main` and
+  re-run the scoped review. Also correct "§1 status board" to §7, mark §5 as
+  last fully re-checked at `fa974ca`, and update the PR body diff counts.
+- **Verdict:** **REQUEST_CHANGES** (re-review pending).
+
 ## Pending reviews
 
-- `docs/final-audit` refresh (PR #74)
-- `agent/P1-6-restart-recovery`
+- PR #74 re-review after #83 merges
+- PR #85 (`agent/P1-6-restart-recovery`)

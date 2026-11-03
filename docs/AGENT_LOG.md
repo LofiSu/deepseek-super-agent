@@ -20,7 +20,7 @@ with a new entry.
   independent APPROVE review; the pump now waits for committed state and
   revalidates before start.
 - `34aef25` gates: typecheck/lint (224 files)/format pass; 414 passed,
-  15 skipped (429); coverage 81.81% lines, 80.05% branches, 89.77% functions.
+  15 skipped (429); coverage 81.81% lines, 80.06% branches, 89.77% functions.
 - `#80` merged as a docs checkpoint at `2c02f4b`; its P1-3 statement was stale
   before merge and is superseded here.
 

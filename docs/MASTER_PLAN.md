@@ -19,7 +19,7 @@ CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   414 passed, 15 skipped (4
                                                       55 files: 52 with passing tests,
                                                       3 fully skipped
 pnpm test:coverage                                     413 passed; statements/lines 81.81%,
-                                                       branches 80.05%, functions 89.77%
+                                                       branches 80.06%, functions 89.77%
 ```
 
 The 3 fully skipped files are `test/demos-real-channels.test.ts`,
@@ -54,7 +54,7 @@ Repository facts:
 | IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 (`f4ba77a`); non-blocking test gaps |
 | P1-3 | P1 | Worker-mesh capacity was advisory and the Harness wrote `Assignment.node` directly. #79 merged the queue and Engine-owned placement; its release-ordering bug is fixed by #84. | `src/harness/loop.ts`; `src/core/assignments.ts`; `test/worker-mesh.test.ts` | fixed by #79 + #84 |
 | MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`); APPROVE |
-| P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/cli/main.ts` serve comment; `docs/MODULES.md:60`; `docs/ROADMAP.md` P1-6 | ready to dispatch |
+| P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/cli/main.ts` serve comment; `docs/MODULES.md:81-82`; `docs/ROADMAP.md` P1-6 | dispatched |
 | GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. Residual: concurrent first-create token race, ELOOP fallback, POSIX-only mode caveat, two missing tests. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76 and #82 merged; non-blocking follow-ups |
 | GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
 | GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84 reviewed; #77 corrected |
@@ -91,11 +91,11 @@ placement in Cycle 1 was a planning error.
 
 ## 3. Global constraints for every task
 
-1. Engine remains the owner of domain aggregate transitions. The only known
-   direct-write deviation is `Harness.launch` setting `Assignment.node` through
-   `store.putDoc('ticket', ...)` at `src/harness/loop.ts:134-135`; P1-3 removes
-   it. No new direct writes are allowed. The Harness may read `Ticket` and call
-   host callbacks.
+1. Engine remains the owner of domain aggregate transitions. At `34aef25` the
+   Harness has no direct ticket write: `Harness.launch` persists placement
+   through `Engine.assignmentPlaced` (`src/harness/loop.ts:298`). #79 removed
+   the earlier `store.putDoc('ticket', ...)` deviation. No new direct writes are
+   allowed. The Harness may read `Ticket` and call host callbacks.
 2. Harness must not acquire domain business rules. Worker must not reply to
    external channels or make Router decisions.
 3. Store is the source of truth. Any in-process queue must be recoverable or
@@ -118,7 +118,7 @@ placement in Cycle 1 was a planning error.
 ## Task 1: IMESSAGE-ADMISSION — iMessage fail-closed admission and group handling
 
 **Owner:** implementation agent · **Branch:** `agent/imessage-group-aggregation`
-**PR:** #77 merged; post-merge fix PR pending · **Depends on:** none ·
+**PR:** #77 merged; correction #81 merged (`f4ba77a`) · **Depends on:** none ·
 **Files:** `src/channels/imessage.ts`, `src/cli/imessage.ts`,
 `test/channels-imessage.test.ts`, `docs/IMESSAGE.md`
 

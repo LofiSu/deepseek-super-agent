@@ -46,7 +46,7 @@ CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   414 passed, 15 skipped (4
                                                       3 fully skipped
 pnpm test:coverage                                     413 passed, 51 files
                                                        statements 81.81% (7667/9371)
-                                                       branches   80.05% (2702/3375)
+                                                       branches   80.06% (2703/3376)
                                                        functions  89.77% (685/763)
                                                        lines      81.81% (7667/9371)
 ```
@@ -63,9 +63,9 @@ File-count detail for the plain offline run:
 Coverage note: the earlier `bb11c96` run reported 79.69% branches
 (2469/3098), `cb32a17` 79.67% (2465/3094), `03a4c02` 79.84% (2528/3166),
 `1dc9500` 80.04% (2587/3232), `f4ba77a` 80.42% (2646/3290), and `1c165ef`
-80.14% (2689/3355). The current `34aef25` run reports 80.05% (2702/3375); the
-new #84 tests add branches. The figures above are the audited `34aef25`
-numbers.
+80.14% (2689/3355). The `34aef25` CI run (`41591922248`) reports 80.06%
+(2703/3376); a local run on the same commit reported 80.05% (2702/3375), a
+one-branch V8 variance. The figures above use the CI run.
 
 ## 3. Architecture state
 
@@ -86,29 +86,31 @@ present in `src/`:
 - `src/gateway` — local OpenAI/Anthropic/Gemini-compatible proxy.
 - `src/runtime.ts` — composition root.
 
-The Engine owns ticket/assignment transitions. One direct-write deviation exists:
-`Harness.launch` assigns the chosen node and then calls
-`this.opts.store.putDoc('ticket', started.id, started)` at
-`src/harness/loop.ts:134-135`. That is a scheduler write to the ticket
-aggregate, even though it does not change ticket status or make a domain
-decision. PR #79 moves placement to `Engine.assignmentPlaced`; until it merges,
-the accurate claim is "Engine owns domain transitions", not "Engine is the only
-writer". No new direct writes are permitted.
+The Engine owns ticket/assignment transitions. At `34aef25` the Harness has no
+direct ticket write: `Harness.launch` reads the ticket, picks a node, and
+persists placement through `this.opts.assignmentPlaced(...)` at
+`src/harness/loop.ts:298`; `Engine.assignmentPlaced` is the sole writer of
+`Assignment.node`. #79 removed the earlier `store.putDoc('ticket', ...)`
+deviation, so "Engine owns domain transitions" now also holds as "Engine is the
+only writer" for ticket state. Do not add scheduler writes to the ticket
+aggregate.
 
 The gateway is an infrastructure surface, not a domain actor.
 
 ## 4. Findings
 
-### IMESSAGE-ADMISSION — iMessage admission is default-open
+### IMESSAGE-ADMISSION — iMessage admission was default-open (resolved)
 
-`imessageTrigger()` sets `addressed: 'direct'` for every message
-(`src/channels/imessage.ts:110-132`). Admission ordering is not the defect:
+Before #77, `imessageTrigger()` set `addressed: 'direct'` for every message, so
+a default run with no admission rules ingested any sender in any chat. At
+`34aef25` it sets `addressed: 'direct'` only for non-group messages
+(`src/channels/imessage.ts:215-225`). Admission ordering was not the defect:
 `src/ingress/filter.ts:36-58` runs `admissionDeny` before checking `addressed`.
-The defect is that the default run supplies no admission rules, so `deny`
-returns nothing, and the always-`direct` marker then passes the fast path with
-`mention-or-direct`. `--handle` / `DS_AGENT_IMESSAGE_HANDLE` is optional and no
-group metadata is read, so a default run ingests any sender in any chat,
-including group chats. Any party who can message the agent's Apple ID can
+The defect was that the default run supplied no admission rules, so `deny`
+returned nothing, and the always-`direct` marker then passed the fast path with
+`mention-or-direct`. `--handle` / `DS_AGENT_IMESSAGE_HANDLE` was optional and no
+group metadata was read, so a default run ingested any sender in any chat,
+including group chats. Any party who could message the agent's Apple ID could
 trigger work. PR #77 merged the fail-closed gate, but its independent review
 returned REQUEST_CHANGES before merge: a message joined to multiple chats was
 deduped to one row, so a group message could still be classified as 1:1, and
@@ -170,7 +172,7 @@ Residual non-blocking findings from the #82 review:
 ### GATEWAY-REVIEW — #64 has no independent review record
 
 `#64` added 4,390 lines and 12 test files after the last roadmap audit.
-Coverage on `34aef25` is 81.81% lines / 80.05% branches, up from the
+Coverage on `34aef25` is 81.81% lines / 80.06% branches, up from the
 pre-hardening 80.68% / 79.67% but still below the 82.40% historical baseline
 recorded for `fa974ca`. The absolute difference is explained by the new
 surface. `#76`, `#81`, and `#82` have independent APPROVE reviews; `#77` has a
