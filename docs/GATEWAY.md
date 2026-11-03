@@ -121,7 +121,7 @@ Mirrors Magpie's gateway middleware + router-strategy plugins.
 - **Privacy masking** (built-in `redact` plugin): set `DS_AGENT_GATEWAY_MASKING=1`. Secrets/personal data are replaced with stable `{{KIND_hash}}` placeholders before the request leaves this machine, and restored in the reply. Streaming replies are unmasked per SSE event; whole replies are restored as-is.
 - **Your own plugins**: drop `.mjs`/`.js` modules in `<stateDir>/gateway-plugins/`; `<stateDir>/gateway.plugins.json` (`{ "plugins": [{ "id": "x", "enabled": true, "options": {} }] }`) selects them.
 - A plugin exports a default object: `{ id, onRequest?, onResponse?, strategies? }`. Hooks fail open (250 ms limit): a throw, a non-object return, or a timeout leaves the body as it was.
-- `strategies` are router orders: `(seats, options) => number[]`. Select one per request with header `X-Gateway-Routing: <name>`. The built-in `rotation` plugin provides `priority` / `smart`.
+- `strategies` are router orders: `(seats, options) => number[]`. Select one per request with header `X-Gateway-Routing: <name>`. The built-in `rotation` plugin provides `priority` / `smart` / `usage` (least-used first) / `free` (cheapest by provider `cost`) / `fast` (lowest observed latency).
 
 ```js
 // <stateDir>/gateway-plugins/example.mjs

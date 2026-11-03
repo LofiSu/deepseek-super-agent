@@ -45,7 +45,7 @@ scraping or quota bypass.
 - [x] Per-call usage ledger (provider/model, status, latency, tokens) + `onUsage` plugin hook + `/v1/gateway/usage`. (Price/cost still pending.)
 - [x] Session aggregation by conversation id (`/v1/gateway/sessions`; id from `X-Gateway-Session` / `X-Conversation-ID`, else hash of the first user message).
 - [x] Affinity: a conversation stays on the provider that answered it (in-process, bounded).
-- [ ] Usage strategies: `usage` / `pace` / `free` / `fast` over real usage data.
+- [x] Routing strategies `usage` / `free` / `fast` over real data (requests, cost, latency). `pace` still pending.
 
 ### Phase 3 — Wiring & shell
 - [ ] Agent config wiring: rewrite each agent's model config to point at the gateway; profiles.

@@ -36,6 +36,8 @@ export interface GatewayProvider {
   maxRpm?: number
   /** Soft daily token budget; a provider past it is skipped as exhausted. */
   dailyTokens?: number
+  /** Relative cost (lower = cheaper), used by the `free` routing strategy. */
+  cost?: number
 }
 
 export interface GatewayConfig {
@@ -69,6 +71,7 @@ interface GatewayProviderInput {
   maxConcurrency?: number
   maxRpm?: number
   dailyTokens?: number
+  cost?: number
 }
 
 export function providerBaseUrl(baseUrl: string): string {
@@ -124,6 +127,7 @@ function normalizeProvider(input: GatewayProviderInput, env: NodeJS.ProcessEnv, 
     ...(Number.isFinite(input.maxConcurrency) ? { maxConcurrency: Number(input.maxConcurrency) } : {}),
     ...(Number.isFinite(input.maxRpm) ? { maxRpm: Number(input.maxRpm) } : {}),
     ...(Number.isFinite(input.dailyTokens) ? { dailyTokens: Number(input.dailyTokens) } : {}),
+    ...(Number.isFinite(input.cost) ? { cost: Number(input.cost) } : {}),
   }
 }
 

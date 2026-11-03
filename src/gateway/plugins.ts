@@ -33,6 +33,12 @@ export interface RouteSeat {
   model: string
   priority: number
   cooling: boolean
+  /** Relative provider cost, lower = cheaper (for the `free` strategy). */
+  cost?: number
+  /** Requests seen for this provider (for the `usage` strategy). */
+  requests?: number
+  /** Observed average latency in ms (for the `fast` strategy). */
+  avgLatencyMs?: number
 }
 
 export type StrategyFn = (seats: RouteSeat[], options: JsonObject) => number[]

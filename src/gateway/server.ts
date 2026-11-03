@@ -329,13 +329,26 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     const strategy = plugins.strategies()[routing]
     if (!strategy) return candidates
     const cooling = new Map(router.providersState().map(state => [state.id, Boolean(state.cooldownUntil)]))
-    const seats: RouteSeat[] = candidates.map((candidate, index) => ({
-      index,
-      provider: candidate.provider.id,
-      model: candidate.model,
-      priority: candidate.provider.priority ?? 0,
-      cooling: cooling.get(candidate.provider.id) ?? false,
-    }))
+    const stats = new Map<string, { requests: number; latencyMs: number }>()
+    for (const bucket of usage.summary().byProviderModel) {
+      const entry = stats.get(bucket.provider) ?? { requests: 0, latencyMs: 0 }
+      entry.requests += bucket.requests
+      entry.latencyMs += bucket.latencyMs
+      stats.set(bucket.provider, entry)
+    }
+    const seats: RouteSeat[] = candidates.map((candidate, index) => {
+      const stat = stats.get(candidate.provider.id)
+      return {
+        index,
+        provider: candidate.provider.id,
+        model: candidate.model,
+        priority: candidate.provider.priority ?? 0,
+        cooling: cooling.get(candidate.provider.id) ?? false,
+        cost: candidate.provider.cost ?? 0,
+        requests: stat?.requests ?? 0,
+        ...(stat && stat.requests > 0 ? { avgLatencyMs: stat.latencyMs / stat.requests } : {}),
+      }
+    })
     try {
       const order = strategy(seats, {})
       if (!Array.isArray(order) || order.length !== candidates.length) return candidates
