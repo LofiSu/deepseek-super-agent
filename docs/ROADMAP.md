@@ -31,7 +31,7 @@
 | 2026-11-02 | `6ab69e5` | P2-5: coverage baseline measured; `lint`, `format:check`, and `test:coverage` added to the required CI job. |
 | 2026-11-03 | `fa974ca` | Re-audit after #65–#73: A2A transport contract (#65), `serve` drain (#66), admission allowlists (#67, #70), LTM dedupe/ranking (#68), shard arbitration (#69), coverage/lint/format CI (#71), slow-path determinism (#72), and P2-6/7/8 close-out (#73). P1-5, the P1-6 serve portion (restart replay remains open), P2-1, and P2-2–P2-8 are resolved; P1-3, P1-6 restart replay, P1-9 live reproduction, and semantic/month-scale memory remain bounded/open. |
 | 2026-11-03 | `bb11c96` | #64 merged the iMessage channel and the local OpenAI-compatible gateway. The same-day audit found default-open iMessage admission and gateway authentication edges; those are tracked as IMESSAGE-ADMISSION and GATEWAY-HARDENING. |
-| 2026-11-03 | `34aef25` | #75–#84 merged: project-state checkpoint (#75), gateway authentication hardening (#76), iMessage fail-closed admission (#77, corrected by #81), single-owner orchestration (#78), Worker-mesh backpressure (#79, release ordering corrected by #84), state reconciliation (#80), and gateway token-file redirection rejection (#82). The §1 status board and the final-tree evidence below are re-checked at `34aef25`; P1-3 is resolved, restart replay (P1-6) is ready, and the live Magpie claim remains operator-only. |
+| 2026-11-03 | `34aef25` | #75–#82 and #84 merged: project-state checkpoint (#75), gateway authentication hardening (#76), iMessage fail-closed admission (#77, corrected by #81), single-owner orchestration (#78), Worker-mesh backpressure (#79, release ordering corrected by #84), docs reconciliation (#80), and gateway token-file redirection rejection (#82). The §7 work board and the final-tree evidence below are re-checked at `34aef25`; P1-3 is resolved and restart replay (P1-6) is ready to start. #83 (state-doc reconciliation) was still open at this base. The live Magpie claim remains operator-only. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -183,7 +183,8 @@ These must be documented as external, with an interface and a security note:
 
 ## 5. Documentation contradictions
 
-Status is against current `main` (`fa974ca`). Resolved rows are kept so readers
+Status is last fully re-checked against current `main` (`fa974ca`); the
+`34aef25` revision records the later merges. Resolved rows are kept so readers
 can see what changed.
 
 | # | Claim | Location at audit time | Current reality | Status |
