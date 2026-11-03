@@ -115,7 +115,8 @@ function help(): void {
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
   pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLMs, write gateway.config.json
-  pnpm ds-agent imessage [--once] [--interval 2000] [--handle <you>]  # two-way iMessage channel
+  pnpm ds-agent imessage [--handle <id>] [--allow-any] [--allow-groups] [--once] [--interval 2000]
+                            # two-way iMessage channel; sender admission is default-deny
   pnpm ds-agent wire <file> --set KEY=VALUE [--env]  # merge gateway settings into an agent config
   pnpm ds-agent profile list|save <name>|use <name>|rm <name>  # gateway config profiles
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
@@ -141,6 +142,11 @@ intervene records guidance and pauses by default, so the note lands before more 
 resume clears the pause and continues with the unseen guidance in the next turn.
 demo/retry/resume need a live model; chat may use MockModel.
 pause/intervene/collab/team/teams are offline.
+
+imessage refuses to start (default-deny) without --handle/DS_AGENT_IMESSAGE_HANDLE
+or a non-empty DS_AGENT_ACTOR_ALLOWLIST. --allow-any is an explicit opt-out that
+accepts any 1:1 sender; --allow-groups opens group ingestion, and group messages
+are never marked direct.
 
 serve starts the in-process watchdog/daemon timer over persisted SQLite state. It
 has no inbound channel loop: triggers written by a separate emit/chat process are
