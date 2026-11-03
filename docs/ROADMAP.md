@@ -1,9 +1,9 @@
 # Plan audit and living roadmap
 
 > Status: living document · First audit: 2026-11-02 against `8f8e104` ·
-> Revised: 2026-11-02 against `e4ea8e9` · Repo: `LofiSu/deepseek-super-agent`
+> Revised: 2026-11-03 against `bb11c96` · Repo: `LofiSu/deepseek-super-agent`
 >
-> Sources for current-state claims: `origin/main` at `e4ea8e9` (`PLAN.md`,
+> Sources for current-state claims: `origin/main` at `bb11c96` (`PLAN.md`,
 > `README.md`, `README.zh-CN.md`, `docs/install.md`, `docs/zh/install.md`,
 > `docs/MODULES.md`, `docs/HARDENING_2026-11-01.md`), `src/`, `test/`,
 > `package.json`, `.github/workflows/`, and the `gh` PR history.
@@ -29,6 +29,7 @@
 | 2026-11-02 | `f57fd2b` | #57 bounded lifecycle history and #58 PLAN §1.4 stack correction merged; P0-4 and P1-4 resolved. |
 | 2026-11-02 | `e4ea8e9` | Post-rewrite re-audit after #39, #60, and #61: P1-2, P1-1/P1-7 (docs), and the slow-path/README claims resolved; C15/C12/C14 rows corrected. The board uses PR numbers; the rows above keep the SHAs observed at the time. |
 | 2026-11-02 | `6ab69e5` | P2-5: coverage baseline measured; `lint`, `format:check`, and `test:coverage` added to the required CI job. |
+| 2026-11-03 | `bb11c96` | Live reference run reproduced on local Magpie (`workbuddy/deepseek-v4.1-flash`): `pnpm test` 384 passed / 3 skipped / 55 files (622.33 s), `pnpm test:live` 22/22 (195.34 s); P1-9 resolved. Three test-only fixes make the default live suite deterministic. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -95,7 +96,7 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 
 | Domain | Status | Evidence | Gap |
 |--------|--------|----------|-----|
-| **评测与指标** (T45) | done | `src/metrics/metrics.ts`, `curve.ts`, `bakeoff.ts`, `batching-bench.ts`; `src/cli/bakeoff.ts`; `test/metrics.test.ts`, `metrics-curve.test.ts`, `batching-bench.test.ts`, `runtime-integration.test.ts` | Counters, `curveSamples`, `model.call`, `compareBakeoff`, and `pnpm bench:bakeoff` exist. A live bake-off is a manual measurement (needs a model key); it is not a CI gate. `docs/MODULES.md:197` claims 207 passed / 3 skipped on a live Magpie run; unverified in this audit (P1-9). |
+| **评测与指标** (T45) | done | `src/metrics/metrics.ts`, `curve.ts`, `bakeoff.ts`, `batching-bench.ts`; `src/cli/bakeoff.ts`; `test/metrics.test.ts`, `metrics-curve.test.ts`, `batching-bench.test.ts`, `runtime-integration.test.ts` | Counters, `curveSamples`, `model.call`, `compareBakeoff`, and `pnpm bench:bakeoff` exist. A live bake-off is a manual measurement (needs a model key); it is not a CI gate. The live reference run is reproduced: `pnpm test` 384 passed / 3 skipped on 2026-11-03 (P1-9). |
 | **扩展** — Router shards (T46) | done | `src/ingress/shards.ts`; `Disposition.shards` in `src/shared/types.ts:85-91`; `Runtime.create` registers `DS_AGENT_SHARDS` (`src/runtime.ts:151-166`); `Harness.launch` runs one Router session per shard (`src/harness/loop.ts:74-77,145-160`); `test/router-shards.test.ts`, `runtime-integration.test.ts` | P2-2 is resolved on `feat/shard-arbitration`: matches sort by `priority` desc then registration order, `default` is fallback-only, and every matching shard runs its Router session. The first shard is the single reply owner and the only session allowed to emit a terminal decision; later shards share the Ticket/Thread and are rejected by the tool guard. Ownership comes from the trigger named by the call (mismatched trigger/ticket pairs are rejected), and `Evals.decide` dedupes terminal decisions per trigger. Shards remain routing metadata, not multi-process placement. |
 | **扩展** — Worker mesh (T47) | partial | `src/harness/mesh.ts`; `Assignment.node` in `src/shared/types.ts:102-120`; placement event in `src/harness/loop.ts:84-89,129-141`; `test/worker-mesh.test.ts`, `runtime-integration.test.ts` | Placement is logical and single-process. When capacity is full, `launch` logs `node=none capacity-full` and still runs the Worker; there is no queue, rejection, or backpressure. Cross-host transport is external, which is acceptable, but capacity enforcement is not. This is P1-3. |
 | **长期记忆** (T48) | partial | `src/memory/long-term.ts`; write on terminal ticket in `src/runtime.ts:201-216`; recall injection in `src/runtime.ts:274-282`; `test/long-term-memory.test.ts`, `runtime-integration.test.ts` | One redacted entry per ticket, keyword AND recall, three results. #54 added retention (count/age, default 1000 entries / 90 days, 0 disables) with transactional spill+grant cleanup and configurable env. #68 added same-ticket dedupe (normalized redacted text, tag union, no extra row/spill, missing-spill zombies never reused) and deterministic tag+text+recency ranking (formula in `docs/MODULES.md` M6); P2-1 is resolved (#54, #68). Semantic/multi-hop search and the month-scale story remain open. Documented as partial in `README.md:115`. |
@@ -130,7 +131,10 @@ The project can be called complete only when **all** of these are true.
    green, with no live key, on every PR. New domain tests must run, not skip.
 2. Live reference run: `pnpm test` green on a documented model/gateway, with the
    date, model id, pass/skip counts, and transcript path recorded.
-   `docs/MODULES.md:197` claims 207 passed / 3 skipped; reproduce it (P1-9).
+   **Satisfied on 2026-11-03 (P1-9):** local Magpie gateway
+   `http://127.0.0.1:3425/v1`, `workbuddy/deepseek-v4.1-flash`; `pnpm test`
+   384 passed / 3 skipped / 55 files (622.33 s). Transcript:
+   `/tmp/ds-agent-live-e2e-logs/full-2026-11-03.log`. The 3 skips are the real-channel demo tests.
 3. Real-channel acceptance: `pnpm demo` (real GitHub issues + comments) and
    `pnpm demo:feishu` run on a release candidate, with artifacts under
    `/tmp/ds-agent-live-e2e-logs/`. A green offline suite is not a substitute.
@@ -359,16 +363,23 @@ a `dist/cli.js` binary. Publishing an npm package would be a new product
 decision, not a missing implementation of M0–M11.
 
 **P1-9. Reproduce the live reference run.**
-Status: partially reproduced, still open. `docs/MODULES.md:197` claims 207
-passed / 3 skipped on a live Magpie run (431.12 s). On the pre-rewrite #44 tree
-(`7f1c9a1`), the previously red live tests `job`, `ports`, and `metrics` pass
-together (13/13, 90.48 s). A full `pnpm test` on that tree reached 206 passed /
-3 skipped with 2 failures that
-were both upstream provider 429s (`live-modules` model call; `metrics` saw
-`model.error: 3` instead of 0), not product assertions. Re-run with a healthy
-provider quota and record the dated counts; update `docs/MODULES.md` if the
-reference number changes.
-Suggested workstream: release agent, `ci/live-reference-run`.
+Status: resolved on 2026-11-03. Run on `main` at `bb11c96` plus the
+`test/live-suite-determinism` fixes, against the local Magpie gateway
+(`http://127.0.0.1:3425/v1`, `workbuddy/deepseek-v4.1-flash`), Node
+`v22.23.4`, pnpm `9.15.9`:
+
+```text
+pnpm test:live     22 passed, 3 files (195.34 s)
+pnpm test          384 passed, 3 skipped, 55 files (622.33 s)
+```
+
+The 3 skips are `test/demos-real-channels.test.ts`, which needs `gh auth` and
+real channel peers. The previous 207/3 claim in `docs/MODULES.md` was replaced
+with this dated run. Three test-only fixes were needed to make the default live
+suite deterministic: the offline credential sentinel now opts into MockModel
+explicitly, `metrics.test.ts` no longer asserts live-model-dependent counters in
+its strict object, and `team-live.test.ts` uses a 150 s settle deadline with a
+240 s test timeout. No product code changed.
 
 **P1-10. Correct the sandbox documentation after #44.**
 Status: resolved by #55.
@@ -481,7 +492,7 @@ the work is already public.
 | P1-6 | `ds-agent serve` + in-flight resume |  | `daemon-serve` | #66 | partially resolved (serve; no restart replay) | `serve` runs the daemon timer over persisted state (no inbound channel loop), drains on SIGINT/SIGTERM, exits 0; second signal forces 1. In-flight turn is still not reconstructed after restart |
 | P1-7 | Packaging decision |  |  |  | resolved (source-only) | No `bin`/`build`; install docs say source-only via `pnpm` |
 | P1-8 | Fail-closed filesystem sandbox |  | `fix/env-fail-closed-sandbox` | #44 | resolved | Missing wrapper throws; CI installs `bubblewrap` |
-| P1-9 | Reproduce live reference run |  |  |  | partially reproduced | 3/3 previously red live files pass; full run hit provider 429, not assertion failures |
+| P1-9 | Reproduce live reference run |  | `test/live-suite-determinism` |  | resolved | Local Magpie `workbuddy/deepseek-v4.1-flash`, 2026-11-03: `pnpm test:live` 22/22 (195.34 s); full `pnpm test` 384 passed / 3 skipped / 55 files (622.33 s); 3 skips are real-channel demos |
 | P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 | resolved | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
 | P2-1 | LTM retention/ranking |  | `feat/ltm-retention`, `feat/ltm-ranking-dedupe` | #54, #68 | resolved | Retention 1000/90 + spill cleanup (#54); dedupe (same-ticket normalized text, tag union, no extra row/spill) and tagHits/textHits/createdAt/id ranking tested with an injected clock; formula in `docs/MODULES.md` M6 |
 | P2-2 | Shard arbitration | LofiSu | `feat/shard-arbitration` | #69 | resolved | Precedence documented + tests: priority-desc/registration order, default fallback-only, first shard owns reply + terminal decision; owner resolved from the supplied trigger; idempotent decisions; one ticket/decision per trigger |
@@ -512,6 +523,27 @@ npx tsc --noEmit                                      pass
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  278 passed, 15 skipped, 41 files, 2.26 s
 ```
 
+### Live reference run (`main` at `bb11c96` + `test/live-suite-determinism`, 2026-11-03)
+
+Local Magpie gateway `http://127.0.0.1:3425/v1`, model
+`workbuddy/deepseek-v4.1-flash`, Node `v22.23.4`, pnpm `9.15.9`:
+
+```text
+pnpm typecheck                                        pass
+pnpm lint                                             lint ok (215 tracked files)
+pnpm format:check                                     pass
+pnpm test:coverage                                    371 passed, 51 files; 103 src files
+                                                      lines 80.68%, branches 79.67%, functions 89.72% (no threshold)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  372 passed, 15 skipped, 55 files
+pnpm test:live                                        22 passed, 3 files (195.34 s)
+pnpm test                                             384 passed, 3 skipped, 55 files (622.33 s)
+```
+
+The 3 skips in the live run are `demos-real-channels.test.ts`; the 15 offline
+skips are the live and real-channel suites. Transcripts:
+`/tmp/ds-agent-live-e2e-logs/full-2026-11-03.log` (full) and `/tmp/ds-agent-live-e2e-logs/full-2026-11-03-pre-fix.log`
+(pre-fix failure evidence).
+
 ### P2-2 branch (`feat/shard-arbitration`)
 
 ```text
@@ -528,17 +560,16 @@ The 15 skipped tests are the live/real-channel suites:
 the pre-rewrite #44 tree reported 196 passed / 15 skipped / 35 files; #39, #53,
 #54, #57, #60, and the docs PRs account for the additional 17 offline tests.
 
-`docs/MODULES.md:197` claims a **live** Magpie run of 207 passed / 3 skipped
-(431.12 s). That is a different configuration from the offline gate: the live
-suite runs the 15 normally-skipped tests. It was not reproduced in this audit
-(no live key), so treat 207/3 as unverified. The offline CI evidence is 196/15.
+The old `docs/MODULES.md` claim of 207 passed / 3 skipped is superseded by the
+2026-11-03 live reference run above (384 passed / 3 skipped / 55 files). The
+offline gate and the live suite are separate configurations; neither replaces
+the real-channel acceptance path.
 
-Not verified in this audit (no live key / no `gh` auth):
+Not verified in this audit (no `gh` auth / no real channel peers):
 
 - `pnpm demo` real GitHub acceptance.
 - `pnpm demo:feishu`.
 - `pnpm bench:bakeoff` numbers.
-- The live 207/3 count.
 
 Do not mark those claims `[x]` until someone reproduces them.
 
