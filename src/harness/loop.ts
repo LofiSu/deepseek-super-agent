@@ -177,17 +177,24 @@ export class Harness {
    * Start a non-queued Worker turn. `startWorkerTurn` marks the ticket active
    * before the host callbacks run; a synchronous throw there must not leak the
    * active marker or the mesh slot `pickNode` already reserved, and the launch
-   * must resolve instead of rejecting.
+   * must resolve instead of rejecting. The same holds when the turn rejects
+   * asynchronously: `.finally` in `startWorkerTurn` already cleared the active
+   * marker and pumped, so only the reserved mesh slot is left to return.
    */
   private startNow(ticket: Ticket, node?: string): Promise<void> {
+    let work: Promise<void>
     try {
-      return this.startWorkerTurn(ticket, node)
+      work = this.startWorkerTurn(ticket, node)
     } catch (error) {
       this.activeWorkers.delete(ticket.id)
       if (node) this.opts.releaseNode?.(ticket.id)
       this.opts.log(`[harness] worker failed ticketId=${ticket.id} error=${String(error)}`)
       return Promise.resolve()
     }
+    return work.catch(error => {
+      if (node) this.opts.releaseNode?.(ticket.id)
+      this.opts.log(`[harness] worker failed ticketId=${ticket.id} error=${String(error)}`)
+    })
   }
 
   private enqueueWorker(ticketId: string): Promise<void> {
