@@ -200,8 +200,25 @@ export function decodeAttributedBody(blob: unknown): string {
   return best.replace(/^[\u0000-\u001f]+/, '').replace(/^\+/, '').trim()
 }
 
-export function imessageThreadFor(message: { handle: string; chatGuid?: string }): string {
-  return message.chatGuid ? `chat:${message.chatGuid}` : `handle:${message.handle}`
+/**
+ * Conversation key for a message. A chat guid always wins. Without one, a
+ * group message is namespaced away from 1:1 traffic: a positive chat
+ * identifier yields `group:<identifier>`, and a group with no identifier stays
+ * under `group-unknown:<handle>` so it can never share a thread with a 1:1
+ * message from the same sender.
+ */
+export function imessageThreadFor(message: {
+  handle: string
+  chatGuid?: string
+  chatIdentifier?: string
+  isGroup?: boolean
+}): string {
+  if (message.chatGuid) return `chat:${message.chatGuid}`
+  if (message.isGroup === true) {
+    const identifier = nonEmptyText(message.chatIdentifier)
+    return identifier ? `group:${identifier}` : `group-unknown:${message.handle}`
+  }
+  return `handle:${message.handle}`
 }
 
 /**
@@ -213,8 +230,16 @@ export function imessageThreadFor(message: { handle: string; chatGuid?: string }
  * the actor allowlist for every Trigger.
  */
 export function imessageTrigger(message: ImessageInbound): Trigger {
-  const thread = imessageThreadFor(message)
   const group = isGroupMessage(message)
+  // A group message without a chat guid must not share the 1:1 `handle:`
+  // namespace, so `imessageThreadFor` receives the resolved group flag and the
+  // positive chat identifier.
+  const thread = imessageThreadFor({
+    handle: message.handle,
+    chatGuid: message.chatGuid,
+    chatIdentifier: message.chatIdentifier,
+    isGroup: group,
+  })
   // A group address must come from a positive group chat row. Falling back to
   // the thread (or a joined 1:1 chat's guid) would let an ambiguous group reply
   // into a direct conversation, so leave it unset and let admission fail closed.
@@ -492,8 +517,13 @@ export class ChatDbImessageApi implements ImessageApi {
       // ambiguous and therefore treated as a group too.
       if (style === IMESSAGE_GROUP_CHAT_STYLE || roomName !== undefined) {
         aggregate.groupSignal = true
-        if (aggregate.groupChatGuid === undefined && aggregate.groupChatIdentifier === undefined) {
+        // Aggregate the group guid and identifier independently: the first
+        // non-empty value of each wins, so an identifier-only positive row
+        // cannot hide a usable guid from a later positive row.
+        if (aggregate.groupChatGuid === undefined && chatGuid !== undefined) {
           aggregate.groupChatGuid = chatGuid
+        }
+        if (aggregate.groupChatIdentifier === undefined && chatIdentifier !== undefined) {
           aggregate.groupChatIdentifier = chatIdentifier
         }
       }

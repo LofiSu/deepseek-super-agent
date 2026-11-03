@@ -138,6 +138,60 @@ describe('iMessage trigger mapping', () => {
     expect(group.addressed).toBeUndefined()
     expect(group.channel?.address?.group).toBeUndefined()
   })
+
+  it('keeps an ambiguous group thread separate from a 1:1 thread for the same handle', () => {
+    const handle = '+8613800000000'
+    const direct = imessageTrigger(sample({ guid: 'G-DIRECT', handle, chatGuid: undefined }))
+    const ambiguousGroup = imessageTrigger(sample({
+      guid: 'G-AMBIGUOUS',
+      handle,
+      chatGuid: undefined,
+      chatIdentifier: undefined,
+      isGroup: true,
+    }))
+    expect(direct.threads[0]!.id).toBe(`handle:${handle}`)
+    expect(direct.channel?.thread).toBe(`handle:${handle}`)
+    expect(ambiguousGroup.threads[0]!.id).toBe(`group-unknown:${handle}`)
+    expect(ambiguousGroup.channel?.thread).toBe(`group-unknown:${handle}`)
+    expect(ambiguousGroup.threads[0]!.id).not.toBe(direct.threads[0]!.id)
+    expect(ambiguousGroup.threads[0]!.id).not.toBe(`handle:${handle}`)
+  })
+
+  it('uses a group identifier thread when a positive group row has no guid', () => {
+    const group = imessageTrigger(sample({
+      guid: 'G-ID-ONLY',
+      chatGuid: undefined,
+      chatIdentifier: 'chat123',
+      isGroup: true,
+      roomName: 'Team',
+    }))
+    expect(group.threads[0]!.id).toBe('group:chat123')
+    expect(group.channel?.thread).toBe('group:chat123')
+    expect(imessageThreadFor({ handle: '+1', chatIdentifier: 'chat123', isGroup: true }))
+      .toBe('group:chat123')
+  })
+
+  it('keeps the chat guid thread for a group that has a guid', () => {
+    const group = imessageTrigger(sample({
+      guid: 'G-GUID',
+      chatGuid: 'iMessage;+;chat123',
+      chatIdentifier: 'chat123',
+      isGroup: true,
+      roomName: 'Team',
+    }))
+    expect(group.threads[0]!.id).toBe('chat:iMessage;+;chat123')
+    expect(group.channel?.thread).toBe('chat:iMessage;+;chat123')
+  })
+
+  it('keeps the existing thread keys for 1:1 messages', () => {
+    expect(imessageThreadFor({ handle: 'a@b.com', isGroup: false })).toBe('handle:a@b.com')
+    expect(imessageThreadFor({ handle: 'a@b.com', chatGuid: 'g1', isGroup: false })).toBe('chat:g1')
+    // A chat identifier alone never becomes a group key for a 1:1 message.
+    expect(imessageThreadFor({ handle: 'a@b.com', chatIdentifier: 'direct-id', isGroup: false }))
+      .toBe('handle:a@b.com')
+    expect(imessageTrigger(sample({ guid: 'G-1TO1-NOGUID', chatGuid: undefined })).threads[0]!.id)
+      .toBe('handle:+8613800000000')
+  })
 })
 
 describe('iMessage admission decision', () => {
@@ -497,6 +551,57 @@ describe('ChatDbImessageApi pull', () => {
         group: 'iMessage;+;chat123',
         chatGuid: 'iMessage;+;chat123',
       })
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('prefers a later positive group guid over an identifier-only positive row', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-group-guid-late-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      -- The identifier-only positive group row sorts first; the later positive
+      -- row still carries a usable chat guid.
+      INSERT INTO chat VALUES (1, NULL, 'chat-id-only', 43, 'Team');
+      INSERT INTO chat VALUES (2, 'iMessage;+;chat-guid', 'chat-guid', 43, 'Team');
+      INSERT INTO message VALUES (1, 'G1', 'joined two group rows', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1), (1, 2);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows).toHaveLength(1)
+      // The first non-empty identifier wins, but the guid is aggregated
+      // independently and must not be blocked by the identifier-only row.
+      expect(rows[0]).toMatchObject({
+        guid: 'G1',
+        isGroup: true,
+        chatGuid: 'iMessage;+;chat-guid',
+        chatIdentifier: 'chat-id-only',
+      })
+
+      const open = await new ImessageSource(api, { allowGroups: true }).pull(0)
+      expect(open.triggers).toHaveLength(1)
+      expect(open.triggers[0]!.addressed).toBeUndefined()
+      expect(open.triggers[0]!.channel?.address).toEqual({
+        provider: 'imessage',
+        chatGuid: 'iMessage;+;chat-guid',
+        group: 'iMessage;+;chat-guid',
+      })
+      expect(open.triggers[0]!.channel?.address?.handle).toBeUndefined()
     } finally {
       api.close()
       db.close()
