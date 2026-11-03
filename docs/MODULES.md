@@ -33,8 +33,10 @@ Worker task. `session.ts` maps a shard to `router:<shard>` (the default shard
 keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
 
 - `pickNode(ticketId)` is least-loaded and stable for a ticket.
-- The chosen node is written to `Assignment.node`, the `assignment.placed`
-  event, and the Worker task prompt (`node=`).
+- The chosen node is written to `Assignment.node` by `Engine.assignmentPlaced`
+  (the Engine remains the only writer), which also records the
+  `assignment.placed` event. The Harness only supplies the node and includes
+  `node=` in the Worker task prompt.
 - `release` frees the slot on every terminal ticket path.
 
 Placement is logical: this process still executes the turn. A remote hands

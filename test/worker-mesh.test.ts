@@ -1,6 +1,12 @@
+import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
+import { bindRolePorts } from '../src/core/role-ports.ts'
+import { LocalEnv } from '../src/env/local-env.ts'
+import { Harness } from '../src/harness/loop.ts'
 import { WorkerMeshRegistry } from '../src/harness/mesh.ts'
+import { SessionJournal } from '../src/harness/session.ts'
+import { ToolRegistry } from '../src/harness/tools.ts'
 import type { Runtime } from '../src/runtime.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
@@ -238,6 +244,66 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
     expect(leftOpen.ended).toBeUndefined()
     expect(leftOpen.assignments.at(-1)?.state).toBe('ended')
     expect(events.some(event => event.startsWith(`${b.ticketId}:call1`))).toBe(true)
+  })
+
+  it('persists placement through the Engine, not by writing the ticket in the Harness', async () => {
+    const events: string[] = []
+    const runtime = start(events, new Map())
+    const a = createTicket(runtime, 'trg_place_a')
+    // The Harness gets a Store that refuses putDoc. Engine callbacks use the
+    // real Store, so a direct write from the Harness would fail the test.
+    const guarded = new Proxy(runtime.store, {
+      get(target, prop) {
+        if (prop === 'putDoc') {
+          return () => {
+            throw new Error('Harness must not call store.putDoc')
+          }
+        }
+        const value = Reflect.get(target, prop, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const tools = new ToolRegistry({
+      store: runtime.store,
+      ports: bindRolePorts(runtime.engine),
+      env: new LocalEnv(path.join(runtime.home, 'workspaces')),
+      metrics: runtime.metrics,
+      redact: text => text,
+      log: () => undefined,
+      scheduleJob: () => undefined,
+      routerTurn: async () => undefined,
+    })
+    const harness = new Harness({
+      model: meshModel(events, new Map()),
+      tools,
+      store: guarded,
+      assignmentStarted: (ticketId, assignmentId, sessionId) => {
+        runtime.engine.assignmentStarted(ticketId, assignmentId, sessionId)
+      },
+      assignmentPlaced: (ticketId, assignmentId, node) => {
+        runtime.engine.assignmentPlaced(ticketId, assignmentId, node)
+      },
+      journal: new SessionJournal(
+        path.join(runtime.home, 'sessions'),
+        runtime.store,
+        () => undefined,
+      ),
+      metrics: runtime.metrics,
+      redact: text => text,
+      log: line => runtime.log.info(line),
+      jobDelayMs: 0,
+      singleSession: true,
+      pickNode: ticketId => runtime.workerMesh.pickNode(ticketId)?.id,
+    })
+
+    await harness.launch(load(runtime, a.ticketId))
+
+    expect(events.some(event => event.startsWith(`${a.ticketId}:call1`))).toBe(true)
+    expect(load(runtime, a.ticketId).assignments.at(-1)?.node).toBe('mesh-test')
+    const placed = runtime.store.listEvents().filter(event => event.type === 'assignment.placed')
+    expect(placed).toHaveLength(1)
+    expect(placed[0]?.payload).toMatchObject({ ticketId: a.ticketId, node: 'mesh-test' })
+    expect(runtime.log.text()).toContain('[engine] Assignments.placed')
   })
 
   it('jobsSettled waits for queued Workers instead of dropping them', async () => {

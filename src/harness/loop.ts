@@ -17,6 +17,8 @@ export interface HarnessOptions {
   store: Store
   /** Host bookkeeping when a worker session starts. The harness does not hold the Engine. */
   assignmentStarted(ticketId: string, assignmentId: string, sessionId: string): void
+  /** Host bookkeeping for logical mesh placement. The Engine owns the ticket write. */
+  assignmentPlaced(ticketId: string, assignmentId: string, node: string): void
   journal: SessionJournal
   metrics: Metrics
   redact: (text: string) => string
@@ -255,20 +257,7 @@ export class Harness {
     this.activeWorkers.add(ticket.id)
     this.opts.log(`[harness] ExecutorSession start session=${sessionId} ticketId=${ticket.id} role=worker`)
     this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
-    if (node) {
-      // assignmentStarted wrote the ticket; re-read so the node does not clobber startedAt.
-      const started = this.opts.store.getDoc<Ticket>('ticket', ticket.id)
-      const current = started?.assignments.at(-1)
-      if (started && current) {
-        current.node = node
-        this.opts.store.putDoc('ticket', started.id, started)
-        this.opts.store.addEvent('assignment.placed', {
-          ticketId: started.id,
-          assignmentId: current.id,
-          node,
-        })
-      }
-    }
+    if (node) this.opts.assignmentPlaced(ticket.id, assignment.id, node)
     return this.enqueue(
       sessionId,
       () => this.run(sessionId, 'worker', ticket.id, this.workerTask(ticket, node)),

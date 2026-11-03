@@ -375,6 +375,9 @@ export class Runtime {
       assignmentStarted: (ticketId, assignmentId, sessionId) => {
         engine.assignmentStarted(ticketId, assignmentId, sessionId)
       },
+      assignmentPlaced: (ticketId, assignmentId, node) => {
+        engine.assignmentPlaced(ticketId, assignmentId, node)
+      },
       journal,
       metrics,
       redact,
