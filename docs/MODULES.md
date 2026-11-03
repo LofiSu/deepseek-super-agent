@@ -271,7 +271,8 @@ pnpm test (live Magpie, final tree)                207 passed, 3 skipped, 34 fil
 ```
 
 The service contract suite is deterministic and offline; none of it needs a
-model key.
+model key. The live Magpie line is operator-only and was not reproduced in the
+final audit (P1-9).
 
 Live reference run (Magpie, 45 s deadline per mode):
 

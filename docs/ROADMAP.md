@@ -1,9 +1,9 @@
 # Plan audit and living roadmap
 
 > Status: living document · First audit: 2026-11-02 against `8f8e104` ·
-> Revised: 2026-11-02 against `e4ea8e9` · Repo: `LofiSu/deepseek-super-agent`
+> Revised: 2026-11-03 against `fa974ca` · Repo: `LofiSu/deepseek-super-agent`
 >
-> Sources for current-state claims: `origin/main` at `e4ea8e9` (`PLAN.md`,
+> Sources for current-state claims: `origin/main` at `fa974ca` (`PLAN.md`,
 > `README.md`, `README.zh-CN.md`, `docs/install.md`, `docs/zh/install.md`,
 > `docs/MODULES.md`, `docs/HARDENING_2026-11-01.md`), `src/`, `test/`,
 > `package.json`, `.github/workflows/`, and the `gh` PR history.
@@ -29,6 +29,7 @@
 | 2026-11-02 | `f57fd2b` | #57 bounded lifecycle history and #58 PLAN §1.4 stack correction merged; P0-4 and P1-4 resolved. |
 | 2026-11-02 | `e4ea8e9` | Post-rewrite re-audit after #39, #60, and #61: P1-2, P1-1/P1-7 (docs), and the slow-path/README claims resolved; C15/C12/C14 rows corrected. The board uses PR numbers; the rows above keep the SHAs observed at the time. |
 | 2026-11-02 | `6ab69e5` | P2-5: coverage baseline measured; `lint`, `format:check`, and `test:coverage` added to the required CI job. |
+| 2026-11-03 | `fa974ca` | Re-audit after #65–#73: A2A transport contract (#65), `serve` drain (#66), admission allowlists (#67, #70), LTM dedupe/ranking (#68), shard arbitration (#69), coverage/lint/format CI (#71), slow-path determinism (#72), and P2-6/7/8 close-out (#73). P1-5, the P1-6 serve portion (restart replay remains open), P2-1, and P2-2–P2-8 are resolved; P1-3, P1-6 restart replay, P1-9 live reproduction, and semantic/month-scale memory remain bounded/open. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -60,7 +61,7 @@ refactor. **That refactor has merged as #40 (`4b919bd`).** On current `main`:
   described the old opt-in flag were corrected by #55; C15 is resolved.
 
 The §2/§3 matrices keep audit-time observations where useful, but every
-**current-state** claim below was re-checked against `e4ea8e9`.
+**current-state** claim below was re-checked against `fa974ca`.
 
 ## 1. Status legend
 
@@ -178,7 +179,7 @@ These must be documented as external, with an interface and a security note:
 
 ## 5. Documentation contradictions
 
-Status is against current `main` (`e4ea8e9`). Resolved rows are kept so readers
+Status is against current `main` (`fa974ca`). Resolved rows are kept so readers
 can see what changed.
 
 | # | Claim | Location at audit time | Current reality | Status |
@@ -511,6 +512,21 @@ CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  195 passed, 15 skipped, 34
 npx tsc --noEmit                                      pass
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  278 passed, 15 skipped, 41 files, 2.26 s
 ```
+
+### Final tree (`main`, `fa974ca`, 2026-11-03)
+
+```text
+npx tsc --noEmit                                      pass
+pnpm lint                                             lint ok (171 tracked files)
+pnpm format:check                                     pass
+pnpm test:coverage                                    302 passed, 39 files; 81 src files
+                                                      lines 82.40%, branches 82.40%, functions 89.32%
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  303 passed, 15 skipped, 43 files
+```
+
+The offline gate is green on the merged tree. The 15 skips are the live and
+real-channel suites listed below; the live Magpie 207/3 claim in
+`docs/MODULES.md` is still operator-only and not reproduced here (P1-9).
 
 ### P2-2 branch (`feat/shard-arbitration`)
 
