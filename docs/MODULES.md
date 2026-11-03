@@ -286,14 +286,16 @@ npx vitest run test/metrics-curve.test.ts          percentiles + bake-off math
 pnpm typecheck                                     pass
 pnpm lint                                          pass
 pnpm format:check                                  pass
-pnpm test:coverage                                 413 passed, 51 files; statements/lines 81.81%, branches 80.06%, functions 89.77% (no threshold)
-offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         414 passed, 15 skipped, 429 tests in 55 files (52 active, 3 fully skipped)
-pnpm test (live Magpie, operator-only reference)    207 passed, 3 skipped, 34 files (431.12 s)
+pnpm test:coverage                                 451 passed, 54 files; statements/lines 82.39%, branches 80.93%, functions 90.11% (no threshold)
+offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         452 passed, 15 skipped, 467 tests in 58 files (55 active, 3 fully skipped)
+pnpm test:live (local Magpie, 2026-11-03)          22 passed, 3 files (195.34 s)
+pnpm test (live Magpie, `bb11c96` + fixes)         384 passed, 3 skipped, 55 files (622.33 s)
 ```
 
 The service contract suite is deterministic and offline; none of it needs a
-model key. The live Magpie line is operator-only and was not reproduced in the
-final audit (P1-9).
+model key. The live run above used the local Magpie gateway at
+`http://127.0.0.1:3425/v1` with `auto/deepseek-v4.1-flash`; its 3 skips are
+`test/demos-real-channels.test.ts`, which needs `gh auth` and real channel peers.
 
 Live reference run (Magpie, 45 s deadline per mode):
 
