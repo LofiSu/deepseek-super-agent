@@ -104,6 +104,16 @@ If `<stateDir>/gateway.config.json` exists and `DS_AGENT_GATEWAY_URL` is unset,
 ephemeral port for the duration of the command — no separate `ds-agent gateway`
 process is needed.
 
+## Wiring agents and profiles
+
+- `ds-agent wire <file> --set KEY=VALUE [--set ...] [--env]` merges gateway
+  settings into any agent's config file (JSON, or `KEY=VALUE` env style), keeping
+  unrelated keys and writing atomically. `--env` puts JSON values under `env`
+  (Claude Code's `settings.json` shape).
+- `ds-agent profile save <name>` snapshots `gateway.config.json`;
+  `ds-agent profile use <name>` applies it; `profile list` / `profile rm` manage
+  them (stored in `<stateDir>/gateway.profiles.json`).
+
 ## Endpoints
 
 | Method | Path | Auth | Purpose |

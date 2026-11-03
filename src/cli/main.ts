@@ -18,6 +18,7 @@ import { defaultHome, runDemo } from './demo.ts'
 import { runGatewayCommand } from './gateway.ts'
 import { runImessageCommand } from './imessage.ts'
 import { runSetupCommand } from './setup.ts'
+import { runProfileCommand, runWireCommand } from './wiring.ts'
 import { startEmbeddedGateway } from '../gateway/embedded.ts'
 
 function option(name: string): string | undefined {
@@ -113,6 +114,8 @@ function help(): void {
   pnpm ds-agent imessage [--once] [--interval 2000] [--handle <you>]  # two-way iMessage channel
   pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
   pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLM products, write gateway.config.json
+  pnpm ds-agent wire <file> --set KEY=VALUE [--env]  # merge gateway settings into an agent's config file
+  pnpm ds-agent profile list|save <name>|use <name>|rm <name>  # gateway config profiles
   pnpm ds-agent metrics
   pnpm ds-agent memory [--limit 10]   # persisted cross-ticket memories
   pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
@@ -425,6 +428,14 @@ async function main(): Promise<void> {
   }
   if (cmd === 'setup') {
     await runSetupCommand(home)
+    return
+  }
+  if (cmd === 'wire') {
+    runWireCommand()
+    return
+  }
+  if (cmd === 'profile') {
+    runProfileCommand(home)
     return
   }
   if (cmd === 'emit' && sub === 'im') {

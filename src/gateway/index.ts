@@ -32,5 +32,14 @@ export { GatewayLimits, type LimitConfig, type LimitSnapshot } from './limits.ts
 export { UsageLedger, type UsageBucket, type UsageRow, type UsageSummary, type SessionSummary } from './usage.ts'
 export { Affinity } from './affinity.ts'
 export { startEmbeddedGateway, type EmbeddedGateway } from './embedded.ts'
+export { wireConfig, readConfig, detectFormat, type WiringFormat } from './wiring.ts'
+export {
+  saveProfile,
+  listProfiles,
+  loadProfile,
+  deleteProfile,
+  profilesPath,
+  type GatewayProfile,
+} from './profiles.ts'
 export { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from './token.ts'
 export { startGatewayServer, type GatewayHandle, type GatewayMetricsSnapshot } from './server.ts'

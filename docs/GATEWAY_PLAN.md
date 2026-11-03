@@ -48,7 +48,7 @@ scraping or quota bypass.
 - [x] Routing strategies `usage` / `free` / `fast` over real data (requests, cost, latency). `pace` still pending.
 
 ### Phase 3 — Wiring & shell
-- [ ] Agent config wiring: rewrite each agent's model config to point at the gateway; profiles.
+- [x] Agent config wiring (generic JSON/env merge via `ds-agent wire`) + profiles (`ds-agent profile`). Per-agent presets are a future nicety.
 - [x] `ds-agent gateway` embedded mode (auto-start in-process for chat/imessage when a config file exists).
 - [ ] TUI/web panels (later).
 
