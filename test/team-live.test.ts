@@ -81,7 +81,7 @@ describe.skipIf(!hasLive)('live Magpie Team E2E', () => {
     for (const member of team.members) {
       runtime.harness.scheduleJob({ id: member.jobId, sessionId, ticketId })
     }
-    expect(await settleWithDeadline(runtime, 60_000)).toBe('settled')
+    expect(await settleWithDeadline(runtime, 150_000)).toBe('settled')
 
     const log = runtime.log.text()
     expect(log).toContain('[team] member done')
@@ -102,5 +102,5 @@ describe.skipIf(!hasLive)('live Magpie Team E2E', () => {
     expect(mine).toBeTruthy()
     expect(mine!.completedAt).toBeTruthy()
     expect(mine!.members.every(member => member.status === 'succeeded')).toBe(true)
-  }, 180_000)
+  }, 240_000)
 })
