@@ -8,6 +8,7 @@ import { WorkerMeshRegistry } from '../src/harness/mesh.ts'
 import { SessionJournal } from '../src/harness/session.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import type { Runtime } from '../src/runtime.ts'
+import { DEFAULT_MESH_QUEUE } from '../src/runtime.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 import { field, lastPrompt, ScriptedModel } from './scripted-model.ts'
@@ -188,6 +189,182 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
       if (timer) clearTimeout(timer)
     }
   }
+
+  /**
+   * Like `meshModel`, but names the prompt kind so a test can prove a queued
+   * `TASK` turn never runs after its Ticket ended.
+   */
+  function orderModel(events: string[], held: Map<string, Gate>): ScriptedModel {
+    const calls = new Map<string, number>()
+    return new ScriptedModel(async request => {
+      if (request.role !== 'worker') return { text: 'router-ok' }
+      const prompt = lastPrompt(request)
+      const ticketId = field(prompt, 'ticketId')
+      const mode = prompt.startsWith('TASK')
+        ? 'task'
+        : prompt.startsWith('FOLLOWUP') ? 'followup' : 'other'
+      const key = `${ticketId}:${mode}`
+      const n = (calls.get(key) ?? 0) + 1
+      calls.set(key, n)
+      events.push(`${key}:call${n}`)
+      const gated = held.get(ticketId)
+      if (gated && n === 1) await gated.promise
+      const reported = request.messages.some(message =>
+        message.role === 'tool' && message.name === 'report_to_router')
+      if (!reported) {
+        return {
+          toolCalls: [{
+            id: `report_${ticketId}_${mode}_${n}`,
+            name: 'report_to_router',
+            args: { ticketId, text: 'ready: done', deliver: true, kind: 'ready' },
+          }],
+        }
+      }
+      return { text: 'worker-done' }
+    })
+  }
+
+  function startOrdered(
+    events: string[],
+    held: Map<string, Gate>,
+    capacity: number,
+  ): Runtime {
+    const runtime = freshRuntime({
+      model: orderModel(events, held),
+      env: meshEnv({ DS_AGENT_MESH_CAPACITY: String(capacity) }),
+      singleSession: true,
+      jobDelayMs: 0,
+      watchdogIntervalMs: 60_000,
+    })
+    runtimes.push(runtime)
+    return runtime
+  }
+
+  it('does not start a queued Worker that a fanned-out follow-up ends', async () => {
+    const events: string[] = []
+    const held = new Map<string, Gate>()
+    const runtime = startOrdered(events, held, 2)
+    const a = createTicket(runtime, 'trg_order_a')
+    const c = createTicket(runtime, 'trg_order_c')
+    const b = createTicket(runtime, 'trg_order_b')
+    runtime.lifecycle.subscribe('ticket.ended', event => {
+      events.push(`${(event.payload as { ticketId: string }).ticketId}:ended`)
+    })
+    const gateA = gate()
+    const gateC = gate()
+    held.set(a.ticketId, gateA)
+    held.set(c.ticketId, gateC)
+
+    // A and C occupy both mesh slots; B cannot start and must queue.
+    const launches = [
+      runtime.harness.launch(load(runtime, a.ticketId)),
+      runtime.harness.launch(load(runtime, c.ticketId)),
+    ]
+    await waitFor(
+      () => events.some(event => event.startsWith(`${a.ticketId}:task`))
+        && events.some(event => event.startsWith(`${c.ticketId}:task`)),
+      'both mesh slots occupied',
+    )
+    const queued = runtime.harness.launch(load(runtime, b.ticketId))
+    await tick(20)
+    expect(runtime.log.text()).toContain(`mesh.queued ticketId=${b.ticketId}`)
+    expect(events.some(event => event.startsWith(`${b.ticketId}:`))).toBe(false)
+
+    // Free C's slot while its Worker turn is still unwinding. `activeWorkers`
+    // suppresses that pump, leaving capacity available when B reports.
+    runtime.engine.stop(c.ticketId, 'free one slot for the queued report')
+
+    // A human follow-up on B's thread fans out to the open, queued ticket.
+    // Its deliver() turn reports ready, which ends B.
+    runtime.ingest(imTrigger({
+      id: 'trg_order_followup',
+      thread: 'topic/trg_order_b',
+      text: '@ds-agent please fix the login timeout on checkout',
+    }))
+
+    await expect(settlesWithin(queued, 2_000)).resolves.toBe(true)
+    gateA.release()
+    gateC.release()
+    await Promise.all(launches)
+    await runtime.jobsSettled()
+
+    const endedAt = events.indexOf(`${b.ticketId}:ended`)
+    expect(endedAt).toBeGreaterThanOrEqual(0)
+    expect(events.slice(endedAt + 1).filter(event => event.startsWith(`${b.ticketId}:task`))).toEqual([])
+    expect(events.filter(event => event.startsWith(`${b.ticketId}:task`))).toEqual([])
+
+    const bEvents = runtime.store.listEvents()
+      .filter(event => (event.payload as { ticketId?: string }).ticketId === b.ticketId)
+    expect(bEvents.filter(event => event.type === 'assignment.started')).toEqual([])
+    expect(bEvents.filter(event => event.type === 'assignment.placed')).toEqual([])
+    expect(load(runtime, b.ticketId).ended?.outcome).toBe('ready')
+    expect(load(runtime, b.ticketId).assignments.at(-1)?.state).toBe('ended')
+  })
+
+  it('direct Harness.deliver cannot resurrect the queued ticket it just ended', async () => {
+    const events: string[] = []
+    const held = new Map<string, Gate>()
+    const runtime = startOrdered(events, held, 1)
+    const a = createTicket(runtime, 'trg_direct_a')
+    const b = createTicket(runtime, 'trg_direct_b')
+    runtime.lifecycle.subscribe('ticket.ended', event => {
+      events.push(`${(event.payload as { ticketId: string }).ticketId}:ended`)
+    })
+    const gateA = gate()
+    held.set(a.ticketId, gateA)
+
+    const firstLaunch = runtime.harness.launch(load(runtime, a.ticketId))
+    await waitFor(() => events.includes(`${a.ticketId}:task:call1`), 'first worker start')
+    const queued = runtime.harness.launch(load(runtime, b.ticketId))
+    await tick(20)
+    expect(runtime.log.text()).toContain(`mesh.queued ticketId=${b.ticketId}`)
+
+    // Free A's slot while its turn is still held; A's own release is deferred.
+    runtime.engine.stop(a.ticketId, 'free one slot for the direct delivery')
+    const delivered = runtime.harness.deliver(b.ticketId, imTrigger({
+      id: 'trg_direct_followup',
+      thread: 'topic/trg_direct_b',
+      text: '@ds-agent please fix the login timeout on checkout',
+    }))
+    await expect(settlesWithin(queued, 2_000)).resolves.toBe(true)
+    await delivered
+    gateA.release()
+    await firstLaunch
+    await runtime.jobsSettled()
+
+    expect(events.filter(event => event.startsWith(`${b.ticketId}:task`))).toEqual([])
+    const bEvents = runtime.store.listEvents()
+      .filter(event => (event.payload as { ticketId?: string }).ticketId === b.ticketId)
+    expect(bEvents.filter(event => event.type === 'assignment.started')).toEqual([])
+    expect(bEvents.filter(event => event.type === 'assignment.placed')).toEqual([])
+    expect(load(runtime, b.ticketId).ended?.outcome).toBe('ready')
+  })
+
+  it('falls back to the default queue limit for invalid programmatic values', () => {
+    for (const invalid of [Number.NaN, -1, 2.5, Number.POSITIVE_INFINITY]) {
+      const runtime = freshRuntime({
+        model: meshModel([], new Map()),
+        env: meshEnv(),
+        singleSession: true,
+        meshQueue: invalid,
+        watchdogIntervalMs: 60_000,
+      })
+      runtimes.push(runtime)
+      expect(runtime.log.text()).toContain(`meshQueue=${DEFAULT_MESH_QUEUE}`)
+    }
+  })
+
+  it('keeps an explicit zero queue limit (reject instead of queue)', () => {
+    const runtime = freshRuntime({
+      model: meshModel([], new Map()),
+      env: meshEnv(),
+      singleSession: true,
+      meshQueue: 0,
+      watchdogIntervalMs: 60_000,
+    })
+    runtimes.push(runtime)
+    expect(runtime.log.text()).toContain('meshQueue=0')
+  })
 
   it('does not start a second Worker while the first turn is running at capacity 1', async () => {
     const events: string[] = []

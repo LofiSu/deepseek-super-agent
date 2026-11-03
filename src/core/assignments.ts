@@ -127,7 +127,11 @@ export class Assignments {
         assignmentId: assignment.id,
         kind: report.kind,
       })
+      // Persist the terminal state before observers can release mesh capacity
+      // and pump a queued Worker. A hook fired first would let the scheduler
+      // re-read the pre-report snapshot and resurrect this Ticket.
       this.host.repo.putDoc('ticket', ticket.id, ticket)
+      this.notifyEnded(ticket, true, true)
       this.host.log(`[speculate] discarded ticketId=${ticket.id} kind=${report.kind}`)
       return { surfaced: false, verdict }
     }
@@ -145,14 +149,22 @@ export class Assignments {
       this.host.log(`deliver=true ticketId=${ticket.id}`)
     }
 
+    let assignmentEnded = false
+    let ticketEnded = false
     if (report.kind === 'ready' || report.kind === 'dropped') {
       this.finish(ticket, assignment, report.kind, report.kind)
+      assignmentEnded = true
+      ticketEnded = true
     } else if (report.kind === 'failed' || report.kind === 'blocked' || report.kind === 'waiting') {
       // Failure and waiting end the Assignment, not the Ticket. The same Ticket
       // can start a new Assignment later with the same Session and directory.
       this.endAssignment(ticket, assignment, report.kind)
+      assignmentEnded = true
     }
     this.host.repo.putDoc('ticket', ticket.id, ticket)
+    // Observers may release capacity and start queued Workers. Fire them only
+    // after the terminal state above is durable in the Store snapshot.
+    this.notifyEnded(ticket, assignmentEnded, ticketEnded)
     const surfaced = wasSpeculative ? verdict === 'deliver' : report.deliver === true
     return { surfaced, verdict }
   }
@@ -187,15 +199,6 @@ export class Assignments {
       assignmentId: assignment.id,
       kind,
     })
-    // Releasing the logical Worker slot here is what makes mesh enforcement
-    // safe for blocked/failed/waiting, which leave the Ticket open.
-    try {
-      this.host.onAssignmentEnded?.(ticket.id)
-    } catch (error) {
-      this.host.log(
-        `[hook] hook=assignment-ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
   }
 
   private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {
@@ -206,10 +209,29 @@ export class Assignments {
       by: 'executor',
     }
     this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome })
-    try {
-      this.host.onTicketEnded?.(ticket)
-    } catch (error) {
-      this.host.log(`[hook] hook=ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  /**
+   * Notify observers after the Ticket document is written. Releasing the
+   * logical Worker slot may pump a queued launch, and that launch must observe
+   * the committed terminal state rather than the pre-report snapshot.
+   */
+  private notifyEnded(ticket: Ticket, assignmentEnded: boolean, ticketEnded: boolean): void {
+    if (assignmentEnded) {
+      try {
+        this.host.onAssignmentEnded?.(ticket.id)
+      } catch (error) {
+        this.host.log(
+          `[hook] hook=assignment-ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
+    if (ticketEnded) {
+      try {
+        this.host.onTicketEnded?.(ticket)
+      } catch (error) {
+        this.host.log(`[hook] hook=ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`)
+      }
     }
   }
 
