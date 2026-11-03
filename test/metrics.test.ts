@@ -159,10 +159,9 @@ describe('section 7 metrics', () => {
       'bypass.fanout': 1,
       'bypass.context': 0,
       'executor.fail': 1,
-      'speculate.deliver': 1,
       'speculate.discard': 1,
-      'watchdog.idle': 1,
-      'watchdog.nudge': 1,
+      // `speculate.deliver`, `watchdog.idle`, and `watchdog.nudge` depend on
+      // what the live model and the timer did; asserted separately below.
       // Only the explicit watchdog probe counts here; the worker failure above
       // is recorded as executor.fail instead.
       'watchdog.fail': 1,
