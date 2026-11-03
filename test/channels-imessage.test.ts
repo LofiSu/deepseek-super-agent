@@ -87,6 +87,12 @@ describe('iMessage trigger mapping', () => {
     expect(trigger.actor).toEqual({ source: 'imessage', id: '+8613800000000' })
     expect(trigger.threads).toEqual([{ source: 'imessage', id: 'chat:iMessage;-;+8613800000000' }])
     expect(trigger.channel?.address).toMatchObject({ provider: 'imessage', handle: '+8613800000000' })
+    // 1:1 addresses keep the sender handle and an optional chat guid unchanged.
+    expect(trigger.channel?.address).toEqual({
+      provider: 'imessage',
+      handle: '+8613800000000',
+      chatGuid: 'iMessage;-;+8613800000000',
+    })
   })
 
   it('uses a handle thread when there is no chat guid', () => {
@@ -104,9 +110,11 @@ describe('iMessage trigger mapping', () => {
       roomName: 'Team',
     }))
     expect(group.addressed).toBeUndefined()
-    expect(group.channel?.address).toMatchObject({
+    // A group address never carries the sender handle: the adapter would send
+    // that handle in buddy (1:1) mode and leak the group reply as a DM.
+    expect(group.channel?.address).toEqual({
       provider: 'imessage',
-      handle: '+8613800000000',
+      chatGuid: 'iMessage;+;chat123',
       group: 'iMessage;+;chat123',
     })
   })
@@ -118,6 +126,17 @@ describe('iMessage trigger mapping', () => {
     expect(isGroupMessage({ chatStyle: 45, roomName: '' })).toBe(false)
     expect(imessageTrigger(sample({ chatStyle: IMESSAGE_GROUP_CHAT_STYLE })).addressed).toBeUndefined()
     expect(imessageTrigger(sample({ roomName: 'Team' })).addressed).toBeUndefined()
+  })
+
+  it('leaves the group address unset when no chat row supplies one', () => {
+    const group = imessageTrigger(sample({
+      guid: 'G-NO-CHAT',
+      chatGuid: undefined,
+      chatIdentifier: undefined,
+      isGroup: true,
+    }))
+    expect(group.addressed).toBeUndefined()
+    expect(group.channel?.address?.group).toBeUndefined()
   })
 })
 
@@ -439,6 +458,208 @@ describe('ChatDbImessageApi pull', () => {
     }
   })
 
+  it('keeps the positive group address when the 1:1 join sorts first', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-order-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45, NULL);
+      INSERT INTO chat VALUES (2, 'iMessage;+;chat123', 'chat123', 43, 'Team');
+      INSERT INTO message VALUES (1, 'G1', 'joined both', NULL, 0, 'iMessage', 1, 0);
+      -- The 1:1 chat ROWID sorts first; the positive group row must still win.
+      INSERT INTO chat_message_join VALUES (1, 1), (1, 2);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({
+        guid: 'G1',
+        isGroup: true,
+        chatGuid: 'iMessage;+;chat123',
+        chatIdentifier: 'chat123',
+      })
+
+      const open = await new ImessageSource(api, { allowGroups: true }).pull(0)
+      expect(open.triggers).toHaveLength(1)
+      expect(open.triggers[0]!.addressed).toBeUndefined()
+      expect(open.triggers[0]!.channel?.address).toMatchObject({
+        group: 'iMessage;+;chat123',
+        chatGuid: 'iMessage;+;chat123',
+      })
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not reuse the 1:1 chat guid when the positive group row has no guid', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-noguid-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45, NULL);
+      -- A positive style-43/room-name group row may lack a guid; only its own
+      -- identifier may be used, never the 1:1 chat's guid.
+      INSERT INTO chat VALUES (2, NULL, 'chat123', 43, 'Team');
+      INSERT INTO message VALUES (1, 'G1', 'group without guid', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1), (1, 2);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows[0]).toMatchObject({ isGroup: true, chatIdentifier: 'chat123' })
+      expect(rows[0]!.chatGuid).toBeUndefined()
+
+      const open = await new ImessageSource(api, { allowGroups: true }).pull(0)
+      expect(open.triggers[0]!.channel?.address).toMatchObject({ group: 'chat123' })
+      expect(open.triggers[0]!.channel?.address?.chatGuid).toBeUndefined()
+      expect(open.triggers[0]!.channel?.address?.group).not.toBe('iMessage;-;+15550000000')
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('aggregates every joined chat when a page boundary lands on the message', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-page-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45, NULL);
+      INSERT INTO chat VALUES (2, 'iMessage;+;chat123', 'chat123', 43, 'Team');
+      INSERT INTO message VALUES (1, 'G1', 'joined both', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (2, 'G2', 'direct only', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1), (1, 2), (2, 1);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      // ROWID pages are over messages, so a page ending at message 1 must still
+      // carry both of its joined chats and classify it exactly once.
+      const first = await api.pull(0, { limit: 1 })
+      expect(first.map(row => row.guid)).toEqual(['G1'])
+      expect(first[0]).toMatchObject({ isGroup: true, chatGuid: 'iMessage;+;chat123' })
+
+      const second = await api.pull(1, { limit: 1 })
+      expect(second.map(row => row.guid)).toEqual(['G2'])
+      expect(second[0]!.isGroup).toBe(false)
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not leak a 1:1 chat guid across a page boundary for an ambiguous group', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-page-unknown-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45, NULL);
+      INSERT INTO chat VALUES (2, 'iMessage;+;chatunknown', 'chatunknown', NULL, NULL);
+      INSERT INTO message VALUES (1, 'G1', 'ambiguous join', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (2, 'G2', 'direct only', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1), (1, 2), (2, 1);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const first = await api.pull(0, { limit: 1 })
+      expect(first).toHaveLength(1)
+      expect(first[0]).toMatchObject({ guid: 'G1', isGroup: true })
+      expect(first[0]!.chatGuid).toBeUndefined()
+      expect(first[0]!.chatIdentifier).toBeUndefined()
+
+      const open = await new ImessageSource(api, { allowGroups: true, limit: 1 }).pull(0)
+      expect(open.triggers).toHaveLength(1)
+      expect(open.triggers[0]!.addressed).toBeUndefined()
+      expect(open.triggers[0]!.channel?.address?.group).toBeUndefined()
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('never exposes the 1:1 chat guid for a group-then-1:1 ambiguous join', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-ambiguous-first-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      -- The ambiguous/group-looking join sorts first, the 1:1 chat second.
+      INSERT INTO chat VALUES (1, 'iMessage;+;chatunknown', 'chatunknown', NULL, NULL);
+      INSERT INTO chat VALUES (2, 'iMessage;-;+15550000000', '+15550000000', 45, NULL);
+      INSERT INTO message VALUES (1, 'G1', 'ambiguous first', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1), (1, 2);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows[0]).toMatchObject({ guid: 'G1', isGroup: true })
+      expect(rows[0]!.chatGuid).toBeUndefined()
+      expect(rows[0]!.chatIdentifier).toBeUndefined()
+
+      const open = await new ImessageSource(api, { allowGroups: true }).pull(0)
+      expect(open.triggers[0]!.addressed).toBeUndefined()
+      expect(open.triggers[0]!.channel?.address?.group).toBeUndefined()
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('treats a missing chat row and ambiguous metadata as group/unknown', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-unknown-'))
     const dbPath = path.join(dir, 'chat.db')
@@ -469,7 +690,10 @@ describe('ChatDbImessageApi pull', () => {
       expect(rows.map(row => row.isGroup)).toEqual([true, true, true])
       expect(rows[0]!.chatGuid).toBeUndefined()
       expect(rows[1]).toMatchObject({ chatGuid: 'iMessage;+;chat43null' })
-      expect(rows[2]).toMatchObject({ chatGuid: 'iMessage;+;chatunknown' })
+      // Ambiguous metadata is still group/unknown, but it is not a positive
+      // group address and must not be published as one.
+      expect(rows[2]!.chatGuid).toBeUndefined()
+      expect(rows[2]!.chatIdentifier).toBeUndefined()
 
       const closed = await new ImessageSource(api).pull(0)
       expect(closed.triggers).toEqual([])
@@ -556,6 +780,95 @@ describe('iMessage outbound', () => {
     const api = new FakeImessage()
     const adapter = new ImessageOutboxAdapter(api)
     await expect(adapter.send(outboxRow({ target: {} }))).rejects.toThrow(/target/)
+  })
+
+  it('never DMs the sender for an ambiguous group and the outbox rejects it', async () => {
+    const trigger = imessageTrigger(sample({
+      guid: 'G-AMBIGUOUS',
+      chatGuid: undefined,
+      chatIdentifier: undefined,
+      isGroup: true,
+    }))
+    expect(trigger.addressed).toBeUndefined()
+    // The pre-fix construction always emitted `handle`, so this exact shape and
+    // the zero-send assertion below both fail against it.
+    expect(trigger.channel?.address).toEqual({ provider: 'imessage' })
+    expect(trigger.channel?.address?.handle).toBeUndefined()
+    expect(trigger.channel?.address?.chatGuid).toBeUndefined()
+    // The sender is still available to admission as the actor.
+    expect(trigger.actor).toEqual({ source: 'imessage', id: '+8613800000000' })
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await expect(adapter.send(outboxRow({ target: { ...trigger.channel!.address! } })))
+      .rejects.toThrow(/no target\.handle or target\.chatGuid/)
+    expect(api.sent).toHaveLength(0)
+  })
+
+  it('rejects a positive group row that only carries a chat identifier', async () => {
+    const trigger = imessageTrigger(sample({
+      guid: 'G-ID-ONLY',
+      chatGuid: undefined,
+      chatIdentifier: 'chat123',
+      isGroup: true,
+      roomName: 'Team',
+    }))
+    expect(trigger.addressed).toBeUndefined()
+    expect(trigger.channel?.address).toEqual({ provider: 'imessage', group: 'chat123' })
+    expect(trigger.channel?.address?.handle).toBeUndefined()
+    expect(trigger.channel?.address?.chatGuid).toBeUndefined()
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await expect(adapter.send(outboxRow({ target: { ...trigger.channel!.address! } })))
+      .rejects.toThrow(/targets group chat123 without a chatGuid/)
+    expect(api.sent).toHaveLength(0)
+  })
+
+  it('rejects a group row that still carries a handle instead of DMing it', async () => {
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    // Defense in depth: even a target that still has a sender handle must not
+    // fall back to buddy (1:1) mode when it is marked as a group row.
+    await expect(adapter.send(outboxRow({
+      target: { provider: 'imessage', handle: '+8613800000000', group: 'chat123' },
+    }))).rejects.toThrow(/targets group chat123 without a chatGuid/)
+    expect(api.sent).toHaveLength(0)
+  })
+
+  it('sends a group reply in chat mode and never falls back to the sender handle', async () => {
+    const trigger = imessageTrigger(sample({
+      guid: 'G-GUID',
+      chatGuid: 'iMessage;+;chat123',
+      chatIdentifier: 'chat123',
+      isGroup: true,
+      roomName: 'Team',
+    }))
+    expect(trigger.addressed).toBeUndefined()
+    expect(trigger.channel?.address).toEqual({
+      provider: 'imessage',
+      chatGuid: 'iMessage;+;chat123',
+      group: 'iMessage;+;chat123',
+    })
+    expect(trigger.channel?.address?.handle).toBeUndefined()
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await adapter.send(outboxRow({ target: { ...trigger.channel!.address! } }))
+    expect(api.sent).toHaveLength(1)
+    expect(api.sent[0]!.target).toEqual({ chatGuid: 'iMessage;+;chat123' })
+    expect(api.sent[0]!.target.handle).toBeUndefined()
+  })
+
+  it('still sends a 1:1 reply to the sender handle when there is no chat guid', async () => {
+    const trigger = imessageTrigger(sample({ guid: 'G-DIRECT', chatGuid: undefined }))
+    expect(trigger.addressed).toBe('direct')
+    expect(trigger.channel?.address).toEqual({ provider: 'imessage', handle: '+8613800000000' })
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await adapter.send(outboxRow({ target: { ...trigger.channel!.address! } }))
+    expect(api.sent).toEqual([{ target: { handle: '+8613800000000' }, text: 'ds-agent reply' }])
   })
 })
 
