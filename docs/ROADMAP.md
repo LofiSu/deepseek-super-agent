@@ -1,9 +1,9 @@
 # Plan audit and living roadmap
 
 > Status: living document · First audit: 2026-11-02 against `8f8e104` ·
-> Revised: 2026-11-03 against `fa974ca` · Repo: `LofiSu/deepseek-super-agent`
+> Revised: 2026-11-03 against `34aef25` · Repo: `LofiSu/deepseek-super-agent`
 >
-> Sources for current-state claims: `origin/main` at `fa974ca` (`PLAN.md`,
+> Sources for current-state claims: `origin/main` at `34aef25` (`PLAN.md`,
 > `README.md`, `README.zh-CN.md`, `docs/install.md`, `docs/zh/install.md`,
 > `docs/MODULES.md`, `docs/HARDENING_2026-11-01.md`), `src/`, `test/`,
 > `package.json`, `.github/workflows/`, and the `gh` PR history.
@@ -30,6 +30,8 @@
 | 2026-11-02 | `e4ea8e9` | Post-rewrite re-audit after #39, #60, and #61: P1-2, P1-1/P1-7 (docs), and the slow-path/README claims resolved; C15/C12/C14 rows corrected. The board uses PR numbers; the rows above keep the SHAs observed at the time. |
 | 2026-11-02 | `6ab69e5` | P2-5: coverage baseline measured; `lint`, `format:check`, and `test:coverage` added to the required CI job. |
 | 2026-11-03 | `fa974ca` | Re-audit after #65–#73: A2A transport contract (#65), `serve` drain (#66), admission allowlists (#67, #70), LTM dedupe/ranking (#68), shard arbitration (#69), coverage/lint/format CI (#71), slow-path determinism (#72), and P2-6/7/8 close-out (#73). P1-5, the P1-6 serve portion (restart replay remains open), P2-1, and P2-2–P2-8 are resolved; P1-3, P1-6 restart replay, P1-9 live reproduction, and semantic/month-scale memory remain bounded/open. |
+| 2026-11-03 | `bb11c96` | #64 merged the iMessage channel and the local OpenAI-compatible gateway. The same-day audit found default-open iMessage admission and gateway authentication edges; those are tracked as IMESSAGE-ADMISSION and GATEWAY-HARDENING. |
+| 2026-11-03 | `34aef25` | #75–#84 merged: project-state checkpoint (#75), gateway authentication hardening (#76), iMessage fail-closed admission (#77, corrected by #81), single-owner orchestration (#78), Worker-mesh backpressure (#79, release ordering corrected by #84), state reconciliation (#80), and gateway token-file redirection rejection (#82). The §1 status board and the final-tree evidence below are re-checked at `34aef25`; P1-3 is resolved, restart replay (P1-6) is ready, and the live Magpie claim remains operator-only. |
 
 PR history correction: the audit base `8f8e104` is **#37** (GitHub Pages).
 **#38** (`566d308`, opt-in domain naming) merged just before it. The refactor is
@@ -61,7 +63,9 @@ refactor. **That refactor has merged as #40 (`4b919bd`).** On current `main`:
   described the old opt-in flag were corrected by #55; C15 is resolved.
 
 The §2/§3 matrices keep audit-time observations where useful, but every
-**current-state** claim below was re-checked against `fa974ca`.
+**current-state** claim below was last fully re-checked against `fa974ca`;
+the `34aef25` revision records the later merges and updates the affected
+P1-3 and final-tree evidence.
 
 ## 1. Status legend
 
@@ -479,7 +483,7 @@ the work is already public.
 | P0-5 | Credential sentinel test across store/journal/prompt/tool |  | `test/credential-sentinel` | #53 | resolved | Sentinel absent from all SQLite tables, session JSONL, tool results, and captured model requests; Worker port/tool calls throw |
 | P1-1 | Real-channel acceptance job/checklist |  | `ci/real-channel-acceptance` | #61 | resolved (manual dispatch) | `workflow_dispatch` runs live `pnpm test` + `pnpm demo`, fails on missing credentials, uploads logs |
 | P1-2 | Router assessment / domain alignment |  | `fix/domain-alignment-article` | #39 | resolved | Main Agent originates `accept`/`ignore`/`stop`/`unavailable`; domain-alignment test green |
-| P1-3 | Mesh capacity enforcement |  | `agent/P1-3-mesh-backpressure` |  | resolved (in-process) | Capacity enforced with a bounded FIFO (`DS_AGENT_MESH_QUEUE`, default 100); full queue rejects without throwing; Assignment-ended ticket-open paths free the slot; `drain` resolves queued work. Cross-host transport stays external |
+| P1-3 | Mesh capacity enforcement |  | `agent/P1-3-mesh-backpressure`, `agent/mesh-release-order` | #79, #84 | resolved (in-process) | Capacity is enforced in-process with a bounded FIFO (`DS_AGENT_MESH_QUEUE`, default 100); a full queue rejects without throwing; release and pump run after the terminal ticket state is persisted, and queued entries are revalidated before start (#84); `drain` resolves queued work. Cross-host transport stays external |
 | P1-4 | Lifecycle replayability |  | `feat/lifecycle-history-cap` | #57 | resolved (current-process replay only) | Bounded history (default 1000) + test; no persistence claim |
 | P1-5 | A2A transport interface + auth note |  | `a2a-transport` | #65 | resolved (contract + local double) | In-process contract + local double now exist: `A2ATransport` + `LocalA2ATransport` in `src/channels/a2a-transport.ts`, tests in `test/a2a-transport.test.ts`. Remaining external boundary: network transport + peer authentication must be supplied by an adapter |
 | P1-6 | `ds-agent serve` + in-flight resume |  | `daemon-serve` | #66 | partially resolved (serve; no restart replay) | `serve` runs the daemon timer over persisted state (no inbound channel loop), drains on SIGINT/SIGTERM, exits 0; second signal forces 1. In-flight turn is still not reconstructed after restart |
@@ -516,18 +520,23 @@ npx tsc --noEmit                                      pass
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  278 passed, 15 skipped, 41 files, 2.26 s
 ```
 
-### Final tree (`main`, `fa974ca`, 2026-11-03)
+### Final tree (`main`, `34aef25`, 2026-11-03)
 
 ```text
-npx tsc --noEmit                                      pass
-pnpm lint                                             lint ok (171 tracked files)
-pnpm format:check                                     pass
-pnpm test:coverage                                    302 passed, 39 files; 81 src files
-                                                      lines 82.40%, branches 82.40%, functions 89.32%
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  303 passed, 15 skipped, 43 files
+pnpm typecheck                                         exit 0
+pnpm lint                                              lint ok (224 tracked files)
+pnpm format:check                                      exit 0
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   414 passed, 15 skipped (429)
+                                                      55 files: 52 with passing tests,
+                                                      3 fully skipped
+pnpm test:coverage                                     413 passed, 51 files
+                                                       statements 81.81% (7667/9371)
+                                                       branches   80.05% (2702/3375)
+                                                       functions  89.77% (685/763)
+                                                       lines      81.81% (7667/9371)
 ```
 
-The offline gate is green on the merged tree. The 15 skips are the live and
+The offline gate is green on `34aef25`. The 15 skips are the live and
 real-channel suites listed below; the live Magpie 207/3 claim in
 `docs/MODULES.md` is still operator-only and not reproduced here (P1-9).
 
