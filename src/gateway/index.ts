@@ -42,4 +42,5 @@ export {
   type GatewayProfile,
 } from './profiles.ts'
 export { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from './token.ts'
+export { GatewayTokenFileError, GatewayTokenPermissionError } from './token.ts'
 export { startGatewayServer, type GatewayHandle, type GatewayMetricsSnapshot } from './server.ts'
