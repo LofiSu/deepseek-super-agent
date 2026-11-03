@@ -151,6 +151,7 @@ describe('section 7 metrics', () => {
 
     runtime.metrics.flush()
     const snap = runtime.metrics.snapshot()
+    const offline = runtime.model.name === 'MockModel'
     // Deterministic counters: ingress, eval, and the two reports forced above.
     expect(snap.counters).toMatchObject({
       'ingress.admit': 3,
@@ -167,10 +168,21 @@ describe('section 7 metrics', () => {
       'watchdog.fail': 1,
       'model.error': 0,
     })
-    // These depend on what the live model chose to do in this run.
-    expect(snap.counters).toHaveProperty('speculate.deliver')
-    expect(snap.counters).toHaveProperty('watchdog.idle')
-    expect(snap.counters['watchdog.nudge']).toBeGreaterThanOrEqual(1)
+    if (offline) {
+      // MockModel's scripted flow delivers the speculative ticket and the
+      // single explicit watchdog tick sees an idle store, then nudges the
+      // stuck probe session. All three counts are deterministic here.
+      expect(snap.counters).toMatchObject({
+        'speculate.deliver': 1,
+        'watchdog.idle': 1,
+        'watchdog.nudge': 1,
+      })
+    } else {
+      // These depend on what the live model chose to do in this run.
+      expect(snap.counters).toHaveProperty('speculate.deliver')
+      expect(snap.counters).toHaveProperty('watchdog.idle')
+      expect(snap.counters['watchdog.nudge']).toBeGreaterThanOrEqual(1)
+    }
     expect(snap.modelLatencyMs.count).toBeGreaterThan(0)
     expect(snap.modelLatencyMs.sum).toBeGreaterThanOrEqual(0)
     expect(snap.modelLatencyMs.max).toBeGreaterThanOrEqual(snap.modelLatencyMs.last)
