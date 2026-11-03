@@ -166,11 +166,28 @@ export class Harness {
       return
     }
     // No mesh configured: keep the original no-placement behavior.
-    if (!this.opts.pickNode) return this.startWorkerTurn(latest)
+    if (!this.opts.pickNode) return this.startNow(latest)
     const node = this.opts.pickNode(latest.id)
     if (!node) return this.enqueueWorker(latest.id)
     this.opts.log(`[mesh] place ticketId=${latest.id} node=${node}`)
-    return this.startWorkerTurn(latest, node)
+    return this.startNow(latest, node)
+  }
+
+  /**
+   * Start a non-queued Worker turn. `startWorkerTurn` marks the ticket active
+   * before the host callbacks run; a synchronous throw there must not leak the
+   * active marker or the mesh slot `pickNode` already reserved, and the launch
+   * must resolve instead of rejecting.
+   */
+  private startNow(ticket: Ticket, node?: string): Promise<void> {
+    try {
+      return this.startWorkerTurn(ticket, node)
+    } catch (error) {
+      this.activeWorkers.delete(ticket.id)
+      if (node) this.opts.releaseNode?.(ticket.id)
+      this.opts.log(`[harness] worker failed ticketId=${ticket.id} error=${String(error)}`)
+      return Promise.resolve()
+    }
   }
 
   private enqueueWorker(ticketId: string): Promise<void> {

@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
 import { bindRolePorts } from '../src/core/role-ports.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
@@ -60,6 +60,7 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
   const gates: Gate[] = []
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     for (const gate of gates.splice(0)) gate.release()
     for (const runtime of runtimes.splice(0)) await shutdown(runtime)
   })
@@ -622,5 +623,139 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
     await firstLaunch
     expect(load(runtime, b.ticketId).ended).toBeUndefined()
     expect(load(runtime, c.ticketId).ended).toBeUndefined()
+  })
+
+  /** Rewrite the queued Ticket's latest Assignment to simulate a committed snapshot. */
+  function patchLatestAssignment(
+    runtime: Runtime,
+    ticketId: string,
+    patch: Partial<Ticket['assignments'][number]>,
+  ): void {
+    const ticket = load(runtime, ticketId)
+    const assignments = [...ticket.assignments]
+    const latest = assignments.at(-1)
+    if (!latest) throw new Error(`missing assignment ${ticketId}`)
+    assignments[assignments.length - 1] = { ...latest, ...patch }
+    runtime.store.putDoc('ticket', ticketId, { ...ticket, assignments })
+  }
+
+  /**
+   * Queue a Worker behind a held one, rewrite its committed snapshot, then free
+   * the slot so `pump()` reads the new state. The skip branch must resolve the
+   * queued launch without ever starting a Worker for that Ticket.
+   */
+  async function expectQueuedSkip(
+    reason: string,
+    mutate: (runtime: Runtime, ticketId: string) => void,
+  ): Promise<void> {
+    const events: string[] = []
+    const held = new Map<string, Gate>()
+    const runtime = start(events, held)
+    const blocker = createTicket(runtime, `trg_skip_${reason}_blocker`)
+    const queuedTicket = createTicket(runtime, `trg_skip_${reason}_queued`)
+    const first = gate()
+    held.set(blocker.ticketId, first)
+
+    const firstLaunch = runtime.harness.launch(load(runtime, blocker.ticketId))
+    await waitFor(() => events.includes(`${blocker.ticketId}:call1`), 'blocker worker start')
+    const queued = runtime.harness.launch(load(runtime, queuedTicket.ticketId))
+    await tick(20)
+    expect(runtime.log.text()).toContain(`mesh.queued ticketId=${queuedTicket.ticketId}`)
+
+    mutate(runtime, queuedTicket.ticketId)
+    first.release()
+    await expect(settlesWithin(queued)).resolves.toBe(true)
+    await firstLaunch
+    await runtime.jobsSettled()
+
+    expect(runtime.log.text()).toContain(`skipped=${reason}`)
+    expect(events.some(event => event.startsWith(`${queuedTicket.ticketId}:`))).toBe(false)
+    if (runtime.store.isOpen) {
+      const started = runtime.store.listEvents().filter(event =>
+        event.type === 'assignment.started'
+        && (event.payload as { ticketId?: string }).ticketId === queuedTicket.ticketId)
+      expect(started).toEqual([])
+    }
+  }
+
+  it('queueState skips a queued Worker when the Store closed', async () => {
+    await expectQueuedSkip('store-closed', runtime => runtime.store.close())
+  })
+
+  it('queueState skips a queued Worker whose Ticket document is gone', async () => {
+    await expectQueuedSkip('ticket-missing', (runtime, ticketId) => {
+      runtime.store.deleteDoc('ticket', ticketId)
+    })
+  })
+
+  it('queueState skips a queued Worker with no Assignment', async () => {
+    await expectQueuedSkip('no-assignment', (runtime, ticketId) => {
+      const ticket = load(runtime, ticketId)
+      runtime.store.putDoc('ticket', ticketId, { ...ticket, assignments: [] })
+    })
+  })
+
+  it('queueState skips a queued Worker whose latest Assignment ended', async () => {
+    await expectQueuedSkip('assignment-ended', (runtime, ticketId) => {
+      patchLatestAssignment(runtime, ticketId, {
+        state: 'ended',
+        endedAt: new Date().toISOString(),
+      })
+    })
+  })
+
+  it('queueState skips a queued Worker whose latest Assignment reported failed', async () => {
+    await expectQueuedSkip('assignment-failed', (runtime, ticketId) => {
+      patchLatestAssignment(runtime, ticketId, {
+        state: 'running',
+        report: { kind: 'failed', text: 'executor failed' },
+      })
+    })
+  })
+
+  it('queueState skips a queued Worker whose latest Assignment reported blocked', async () => {
+    await expectQueuedSkip('assignment-blocked', (runtime, ticketId) => {
+      patchLatestAssignment(runtime, ticketId, {
+        state: 'running',
+        report: { kind: 'blocked', text: 'needs a human' },
+      })
+    })
+  })
+
+  it('cleans up a synchronous throw on the non-queued start path', async () => {
+    const events: string[] = []
+    const held = new Map<string, Gate>()
+    const runtime = start(events, held)
+    const failed = createTicket(runtime, 'trg_start_throw')
+    const later = createTicket(runtime, 'trg_start_later')
+
+    const originalStarted = runtime.engine.assignmentStarted.bind(runtime.engine)
+    vi.spyOn(runtime.engine, 'assignmentStarted').mockImplementation((ticketId, assignmentId, sessionId) => {
+      if (ticketId === failed.ticketId) throw new Error('placement exploded')
+      originalStarted(ticketId, assignmentId, sessionId)
+    })
+
+    // The launch must resolve; the active marker and the mesh slot picked before
+    // the throw must not leak.
+    await expect(runtime.harness.launch(load(runtime, failed.ticketId))).resolves.toBeUndefined()
+    expect(runtime.log.text()).toContain(
+      `[harness] worker failed ticketId=${failed.ticketId} error=Error: placement exploded`,
+    )
+    expect(runtime.workerMesh.inFlight('mesh-test')).toBe(0)
+    expect(events.some(event => event.startsWith(`${failed.ticketId}:`))).toBe(false)
+
+    // Hold the only slot so the next launch queues. Nothing else can pump it.
+    expect(runtime.workerMesh.pickNode('manual-hold')?.id).toBe('mesh-test')
+    const queued = runtime.harness.launch(load(runtime, later.ticketId))
+    await tick(20)
+    expect(runtime.log.text()).toContain(`mesh.queued ticketId=${later.ticketId}`)
+    runtime.workerMesh.release('manual-hold')
+
+    // If the failed start leaked its active marker, release() would no-op and
+    // the queued Worker would never start.
+    runtime.harness.release(failed.ticketId)
+    await waitFor(() => events.some(event => event.startsWith(`${later.ticketId}:call1`)), 'queued worker start')
+    await expect(settlesWithin(queued, 2_000)).resolves.toBe(true)
+    expect(load(runtime, later.ticketId).ended?.outcome).toBe('ready')
   })
 })
