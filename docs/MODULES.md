@@ -91,8 +91,11 @@ verdict, and the Main Agent is not consulted when the Gate already decided.
 
 ## M4 — ingress
 
-`filter.ts` is the fast path plus the semantic rule classifier; admission is
-computed from the ingress-owned `TriggerTrust`, never from `trigger.meta`.
+`filter.ts` is the fast path plus the deterministic semantic classifier
+(`ruleClassify`), which both `MockModel` and `HttpOpenAI` use; no model-backed
+policy classifier is wired, and `test/slow-path-policy.test.ts` pins that
+classification is network-free. Admission is computed from the ingress-owned
+`TriggerTrust`, never from `trigger.meta`.
 `shards.ts` adds ordered predicates over `source`, `thread`, `actor`, `human`,
 and `text`; comma joins with AND.
 

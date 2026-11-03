@@ -64,7 +64,7 @@ LofiSu × Grokbot（CoderBot）。
 
 - [x] **环境半结构化事件 = Trigger** — IM / GitHub 风格 Source
 - [x] **Fast Path 程序过滤** — source/噪声等确定性规则（`ingress/filter`）
-- [x] **Slow Path 语义/策略过滤** — 当前实现是确定性 `ruleClassify`；模型策略分类器尚未接线，规则代替
+- [x] **Slow Path 语义/策略过滤** — 当前实现是确定性 `ruleClassify`，`MockModel` 与 `HttpOpenAI` 均如此；模型策略分类器尚未接线，规则代替。`test/slow-path-policy.test.ts` 固定这一行为，并证明分类不访问网络
 - [x] **Thread = 同一话题/PR 下的事件流** — Thread key
 - [x] **已订阅 → 直通 Worker（bypass Router Eval）** — 日志 `bypass=subscription` + `ticketId`
 - [x] **未订阅 → Router/Eval 冷启动分派** — Intake → Eval → Ticket

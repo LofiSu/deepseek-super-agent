@@ -63,7 +63,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 - [x] **Triggers.** Semi-structured events from IM / GitHub-style sources.
 - [x] **Fast Path.** Deterministic source and noise rules (`ingress/filter`).
-- [x] **Slow Path.** Semantic or policy filter. The shipped classifier is deterministic (`ruleClassify`); a model-backed policy classifier is not wired, so rules stand in.
+- [x] **Slow Path.** Semantic or policy filter. The shipped classifier is deterministic (`ruleClassify`) for both `MockModel` and `HttpOpenAI`; a model-backed policy classifier is not wired, so rules stand in. `test/slow-path-policy.test.ts` pins this and proves classification never calls the network.
 - [x] **Thread.** One topic or PR. One event stream. Thread key.
 - [x] **Already subscribed.** Straight to the Worker. Log line `bypass=subscription` plus `ticketId`.
 - [x] **Not subscribed.** Cold start: Intake → Eval → Ticket.
