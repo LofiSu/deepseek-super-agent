@@ -37,6 +37,24 @@ export class Assignments {
   }
 
   /**
+   * Persist logical Worker-mesh placement. The Harness decides the node, but
+   * only the Engine writes the Assignment aggregate.
+   */
+  placed(ticketId: string, assignmentId: string, node: string): void {
+    const ticket = this.must(ticketId)
+    const assignment = ticket.assignments.find(item => item.id === assignmentId) ?? ticket.assignments.at(-1)
+    if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
+    assignment.node = node
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    this.host.log(`[engine] Assignments.placed ticketId=${ticket.id} assignmentId=${assignment.id} node=${node}`)
+    this.host.repo.addEvent('assignment.placed', {
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      node,
+    })
+  }
+
+  /**
    * Record a report. User-facing text is sent by the router, not here.
    * A speculative discard ends the assignment and the ticket with no outbound copy.
    * Reports on an ended ticket never rewrite it.
@@ -169,6 +187,15 @@ export class Assignments {
       assignmentId: assignment.id,
       kind,
     })
+    // Releasing the logical Worker slot here is what makes mesh enforcement
+    // safe for blocked/failed/waiting, which leave the Ticket open.
+    try {
+      this.host.onAssignmentEnded?.(ticket.id)
+    } catch (error) {
+      this.host.log(
+        `[hook] hook=assignment-ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
   }
 
   private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {

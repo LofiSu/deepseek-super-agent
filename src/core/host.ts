@@ -14,6 +14,12 @@ export interface Host {
   onTicketCreated?: (ticket: Ticket) => void
   /** Lifecycle hook for every terminal ticket path (deliver, discard, stop, fail). */
   onTicketEnded?: (ticket: Ticket) => void
+  /**
+   * Lifecycle hook when an Assignment ends. A `blocked`/`failed`/`waiting`
+   * report ends the Assignment but leaves the Ticket open; the host frees any
+   * per-assignment capacity here. Must not throw into the Engine transaction.
+   */
+  onAssignmentEnded?: (ticketId: string) => void
   /** Gate deferred this Thread; the Main Agent should assess the queued Triggers. */
   onAssessmentNeeded?: (threadKey: string) => void
   /** Infrastructure cleanup for a speculative ticket that ends without delivering. */
