@@ -365,11 +365,12 @@ head so a later reader can separate the reviewed tree from the merged tree.
   "none" and that the cycle-3 branches had no PRs, while #86, #88, and #89 were
   open and #88 was on the named branch. Non-blocking: a duplicate `## PR #74`
   section and self-exclusion of #89 from pending reviews.
-- **Resolution:** all figures and PR snapshots refreshed to `main` `5fbfb00`
-  (run `41599524227`: 429 passed / 15 skipped (444), 58 files; 82.27%
-  statements/lines, 80.52% branches (2779/3451), 89.97% functions); #87 merge
-  and #88 REQUEST_CHANGES/fix recorded; #86 listed as stale; the duplicate #74
-  section marked superseded; scoped re-review pending.
+- **Resolution:** all figures and PR snapshots refreshed to `main` `d3beb9c`
+  (run `41600424146`: 440 passed / 15 skipped (455), 58 files; 82.29%
+  statements/lines, 80.57% branches (2787/3459), 89.97% functions); #87 and
+  #88 merges recorded, with #88's REQUEST_CHANGES → fix `890f238` → APPROVE
+  history; #86 listed as stale; the duplicate #74 section marked superseded;
+  scoped re-review pending.
 - **Verdict:** corrections applied; not merged at this checkpoint.
 
 ## Pending reviews
