@@ -17,6 +17,8 @@ export interface HarnessOptions {
   store: Store
   /** Host bookkeeping when a worker session starts. The harness does not hold the Engine. */
   assignmentStarted(ticketId: string, assignmentId: string, sessionId: string): void
+  /** Host bookkeeping for logical mesh placement. The Engine owns the ticket write. */
+  assignmentPlaced(ticketId: string, assignmentId: string, node: string): void
   journal: SessionJournal
   metrics: Metrics
   redact: (text: string) => string
@@ -29,10 +31,27 @@ export interface HarnessOptions {
   routerSessions?: (ticket: Ticket) => string[]
   /** Logical Worker mesh placement. Released by the host on ticket end. */
   pickNode?: (ticketId: string) => string | undefined
+  /**
+   * Maximum Workers waiting for mesh capacity. `0` rejects instead of queueing.
+   * Default 100. The queue lives in the Harness scheduler; the mesh registry
+   * stays pure capacity accounting.
+   */
+  queueLimit?: number
+  /** Return a reserved mesh slot when a queued Worker fails before it starts. */
+  releaseNode?: (ticketId: string) => void
   /** Cross-ticket recall lines injected into the Worker task. */
   memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string }[]
   /** T45 bake-off baseline: one turn chain, no Router session. */
   singleSession?: boolean
+}
+
+/** Bound for an in-process Worker backlog. Environment parsing already sanitizes. */
+export const DEFAULT_QUEUE_LIMIT = 100
+
+/** Programmatic queue limits are untrusted too: NaN, negative, and fractional fall back. */
+export function normalizeQueueLimit(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_QUEUE_LIMIT
+  return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_QUEUE_LIMIT
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
@@ -42,8 +61,15 @@ export class Harness {
   private readonly running = new Set<string>()
   private readonly pendingJobs: Promise<void>[] = []
   private readonly routersReady = new Set<string>()
+  /** FIFO of Workers waiting for mesh capacity. Owned by the scheduler, not the registry. */
+  private readonly queued: { ticketId: string; resolve: () => void }[] = []
+  /** Tickets whose Worker turn promise has not settled yet. */
+  private readonly activeWorkers = new Set<string>()
+  private readonly queueLimit: number
+  private draining = false
 
   constructor(private readonly opts: HarnessOptions) {
+    this.queueLimit = normalizeQueueLimit(opts.queueLimit)
     const byRole = Object.entries(opts.models ?? {})
       .filter(([, model]) => model != null)
       .map(([role, model]) => `${role}=${model.name}`)
@@ -81,26 +107,6 @@ export class Harness {
     }
     if (!ticket.assignments.at(-1)) throw new Error(`ticket ${ticket.id} has no assignment`)
     const mode = ticket.speculative ? 'speculative' : 'normal'
-    const node = this.opts.pickNode?.(ticket.id)
-    if (node) {
-      this.opts.log(`[mesh] place ticketId=${ticket.id} node=${node}`)
-    } else if (this.opts.pickNode) {
-      this.opts.log(`[mesh] place ticketId=${ticket.id} node=none capacity-full`)
-    }
-    const task = [
-      'TASK',
-      `ticketId=${ticket.id}`,
-      `title=${ticket.title}`,
-      `mode=${mode}`,
-      `thread=${ticket.threadKeys[0] ?? ''}`,
-      `brief=${ticket.brief}`,
-    ]
-    if (ticket.spillId) task.push(`spillId=${ticket.spillId}`)
-    if (node) task.push(`node=${node}`)
-    for (const entry of this.opts.memory?.(ticket) ?? []) {
-      const spill = entry.spillId ? ` spillId=${entry.spillId}` : ''
-      task.push(`memory=${entry.id}${spill} text=${entry.text}`)
-    }
     const routerPrompt = [
       ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
       `ticketId=${ticket.id}`,
@@ -110,40 +116,10 @@ export class Harness {
       'decision=accepted-by-gate',
       'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
     ].join('\n')
-    const startWorker = (): Promise<void> | undefined => {
-      const latest = this.opts.store.isOpen
-        ? this.opts.store.getDoc<Ticket>('ticket', ticket.id)
-        : undefined
-      if (!latest) {
-        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ticket-missing`)
-        return
-      }
-      if (latest.ended) {
-        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=${latest.ended.outcome}`)
-        return
-      }
-      const assignment = latest.assignments.at(-1)
-      if (!assignment) throw new Error(`ticket ${latest.id} has no assignment`)
-      this.opts.log(`[harness] ExecutorSession start session=${sessionId} ticketId=${latest.id} role=worker`)
-      this.opts.assignmentStarted(latest.id, assignment.id, sessionId)
-      if (node) {
-        // assignmentStarted wrote the ticket; re-read so the node does not clobber startedAt.
-        const started = this.opts.store.getDoc<Ticket>('ticket', latest.id)
-        const current = started?.assignments.at(-1)
-        if (started && current) {
-          current.node = node
-          this.opts.store.putDoc('ticket', started.id, started)
-          this.opts.store.addEvent('assignment.placed', {
-            ticketId: started.id,
-            assignmentId: current.id,
-            node,
-          })
-        }
-      }
-      return this.enqueue(sessionId, () => this.run(sessionId, 'worker', latest.id, task.join('\n')))
-    }
     // Sequence point (T06/T08): Router turn(s) complete first. A Router veto
     // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
+    // Capacity is picked after the Routers so a veto never consumes a slot.
+    const startWorker = (): Promise<void> | undefined => this.startOrQueue(ticket.id)
     let chain: Promise<void> = Promise.resolve()
     if (this.opts.singleSession) {
       this.opts.log(`[harness] single-session ticketId=${ticket.id}`)
@@ -165,6 +141,187 @@ export class Harness {
         this.running.delete(ticket.id)
       })
     return this.track(work)
+  }
+
+  /** Start the Worker now, or park it in the bounded FIFO until a slot frees. */
+  private startOrQueue(ticketId: string): Promise<void> | undefined {
+    const latest = this.opts.store.isOpen
+      ? this.opts.store.getDoc<Ticket>('ticket', ticketId)
+      : undefined
+    if (!latest) {
+      this.opts.log(`[harness] worker skipped ticketId=${ticketId} ticket-missing`)
+      return
+    }
+    if (latest.ended) {
+      this.opts.log(`[harness] worker skipped ticketId=${ticketId} ended=${latest.ended.outcome}`)
+      return
+    }
+    const paused = this.pauseReason(ticketId)
+    if (paused) {
+      this.opts.log(`[harness] worker skipped ticketId=${ticketId} paused reason=${paused}`)
+      return
+    }
+    if (!latest.assignments.at(-1)) {
+      this.opts.log(`[harness] worker skipped ticketId=${ticketId} no-assignment`)
+      return
+    }
+    // No mesh configured: keep the original no-placement behavior.
+    if (!this.opts.pickNode) return this.startWorkerTurn(latest)
+    const node = this.opts.pickNode(latest.id)
+    if (!node) return this.enqueueWorker(latest.id)
+    this.opts.log(`[mesh] place ticketId=${latest.id} node=${node}`)
+    return this.startWorkerTurn(latest, node)
+  }
+
+  private enqueueWorker(ticketId: string): Promise<void> {
+    if (this.queued.length >= this.queueLimit) {
+      this.opts.metrics.increment('mesh.queue_rejected')
+      this.opts.log(
+        `[mesh] mesh.queue-full ticketId=${ticketId} depth=${this.queued.length} limit=${this.queueLimit}`,
+      )
+      return Promise.resolve()
+    }
+    let resolve!: () => void
+    const done = new Promise<void>(accept => {
+      resolve = accept
+    })
+    this.queued.push({ ticketId, resolve })
+    this.opts.metrics.increment('mesh.queued')
+    this.opts.log(`[mesh] mesh.queued ticketId=${ticketId} depth=${this.queued.length} limit=${this.queueLimit}`)
+    return done
+  }
+
+  /**
+   * Dequeue while capacity allows. The head is re-read from the Store: a ticket
+   * that ended or paused while waiting is skipped and its launch resolves. A
+   * full mesh stops the pump at the head, preserving FIFO order.
+   */
+  private pump(): void {
+    if (this.draining) return
+    while (this.queued.length > 0) {
+      const next = this.queued[0]!
+      const check = this.queueState(next.ticketId)
+      if (check.skip) {
+        this.queued.shift()
+        this.opts.metrics.increment('mesh.dequeued')
+        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length} skipped=${check.skip}`)
+        next.resolve()
+        continue
+      }
+      if (this.opts.pickNode) {
+        const node = this.opts.pickNode(next.ticketId)
+        if (!node) return
+        this.queued.shift()
+        this.opts.metrics.increment('mesh.dequeued')
+        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length}`)
+        this.startQueued(next, node)
+        continue
+      }
+      // Queued entries only exist when pickNode is configured.
+      this.queued.shift()
+      next.resolve()
+    }
+  }
+
+  /**
+   * Read the committed snapshot for a queued launch. A terminal Assignment
+   * (`ended`) is as fatal as an ended or paused Ticket: a report may have ended
+   * it without ending the Ticket, and starting it would resurrect the turn.
+   */
+  private queueState(ticketId: string): { ticket?: Ticket; skip?: string } {
+    if (!this.opts.store.isOpen) return { skip: 'store-closed' }
+    const ticket = this.opts.store.getDoc<Ticket>('ticket', ticketId)
+    if (!ticket) return { skip: 'ticket-missing' }
+    if (ticket.ended) return { skip: `ended=${ticket.ended.outcome}` }
+    const paused = this.pauseReason(ticketId)
+    if (paused) return { skip: 'paused' }
+    const assignment = ticket.assignments.at(-1)
+    if (!assignment) return { skip: 'no-assignment' }
+    if (assignment.state === 'ended') return { skip: 'assignment-ended' }
+    if (assignment.report?.kind === 'failed' || assignment.report?.kind === 'blocked') {
+      return { skip: `assignment-${assignment.report.kind}` }
+    }
+    return { ticket }
+  }
+
+  private startQueued(
+    entry: { ticketId: string; resolve: () => void },
+    node: string,
+  ): void {
+    // Final re-read immediately before the turn starts. This is the barrier
+    // that keeps a just-ended Ticket from being resurrected by a stale pump.
+    const check = this.queueState(entry.ticketId)
+    if (!check.ticket) {
+      // pump() already reserved a mesh slot for this entry; give it back.
+      this.opts.releaseNode?.(entry.ticketId)
+      this.opts.log(`[mesh] mesh.start-skipped ticketId=${entry.ticketId} reason=${check.skip}`)
+      entry.resolve()
+      return
+    }
+    let work: Promise<void>
+    try {
+      work = this.startWorkerTurn(check.ticket, node)
+    } catch (error) {
+      // startWorkerTurn marks the ticket active before Engine callbacks run.
+      // If one throws, neither the active marker nor the mesh reservation may leak.
+      this.activeWorkers.delete(entry.ticketId)
+      this.opts.releaseNode?.(entry.ticketId)
+      this.opts.log(`[harness] queued worker failed ticketId=${entry.ticketId} error=${String(error)}`)
+      entry.resolve()
+      return
+    }
+    // The queued launch resolves when this Worker turn settles, or on drain.
+    work.then(() => entry.resolve(), () => entry.resolve())
+    this.track(work)
+  }
+
+  /**
+   * The host calls this from `onTicketEnded`, after the mesh slot is released.
+   * A Worker turn that ends its own ticket is still unwinding, so defer the
+   * pump to that turn's `finally` and never overlap two Worker turns.
+   */
+  release(ticketId: string): void {
+    if (this.activeWorkers.has(ticketId)) return
+    this.pump()
+  }
+
+  private startWorkerTurn(ticket: Ticket, node?: string): Promise<void> {
+    const sessionId = workerSessionId(ticket.id)
+    const assignment = ticket.assignments.at(-1)
+    if (!assignment) {
+      this.opts.log(`[harness] worker skipped ticketId=${ticket.id} no-assignment`)
+      return Promise.resolve()
+    }
+    this.activeWorkers.add(ticket.id)
+    this.opts.log(`[harness] ExecutorSession start session=${sessionId} ticketId=${ticket.id} role=worker`)
+    this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
+    if (node) this.opts.assignmentPlaced(ticket.id, assignment.id, node)
+    return this.enqueue(
+      sessionId,
+      () => this.run(sessionId, 'worker', ticket.id, this.workerTask(ticket, node)),
+    ).finally(() => {
+      this.activeWorkers.delete(ticket.id)
+      this.pump()
+    })
+  }
+
+  private workerTask(ticket: Ticket, node?: string): string {
+    const mode = ticket.speculative ? 'speculative' : 'normal'
+    const task = [
+      'TASK',
+      `ticketId=${ticket.id}`,
+      `title=${ticket.title}`,
+      `mode=${mode}`,
+      `thread=${ticket.threadKeys[0] ?? ''}`,
+      `brief=${ticket.brief}`,
+    ]
+    if (ticket.spillId) task.push(`spillId=${ticket.spillId}`)
+    if (node) task.push(`node=${node}`)
+    for (const entry of this.opts.memory?.(ticket) ?? []) {
+      const spill = entry.spillId ? ` spillId=${entry.spillId}` : ''
+      task.push(`memory=${entry.id}${spill} text=${entry.text}`)
+    }
+    return task.join('\n')
   }
 
   deliver(ticketId: string, trigger: Trigger, spillId?: string): Promise<void> {
@@ -362,6 +519,48 @@ export class Harness {
   }
 
   async drain(): Promise<void> {
+    this.draining = true
+    try {
+      for (let wave = 0; wave < 40; wave += 1) {
+        // Queued launches never start during a drain; resolve them so shutdown
+        // is bounded. The tickets stay open in the Store for a later retry.
+        this.drainQueue()
+        if (this.inflight.length === 0) return
+        const batch = this.inflight.splice(0, this.inflight.length)
+        const results = await Promise.allSettled(batch)
+        const failed = results.find(result => result.status === 'rejected')
+        if (failed && failed.status === 'rejected') throw failed.reason
+        if (this.queued.length === 0 && this.inflight.length === 0) return
+      }
+      this.drainQueue()
+      if (this.inflight.length > 0) throw new Error('harness drain did not settle')
+    } finally {
+      this.draining = false
+    }
+  }
+
+  private drainQueue(): void {
+    if (this.queued.length === 0) return
+    const pending = this.queued.splice(0, this.queued.length)
+    for (const entry of pending) entry.resolve()
+    this.opts.metrics.increment('mesh.queue_drained', pending.length)
+    this.opts.log(`[mesh] mesh.queue_drained count=${pending.length}`)
+  }
+
+  async jobsSettled(): Promise<void> {
+    for (let wave = 0; wave < 20; wave += 1) {
+      // Settle, do not drain: queued Workers must get their turn as capacity
+      // frees. Only the explicit shutdown path clears the queue.
+      await this.settleInflight()
+      if (this.pendingJobs.length === 0) return
+      const batch = this.pendingJobs.splice(0, this.pendingJobs.length)
+      await Promise.all(batch)
+    }
+    throw new Error('jobs did not settle')
+  }
+
+  /** Wait for every tracked turn/launch without dropping queued Workers. */
+  private async settleInflight(): Promise<void> {
     for (let wave = 0; wave < 40; wave += 1) {
       if (this.inflight.length === 0) return
       const batch = this.inflight.splice(0, this.inflight.length)
@@ -369,17 +568,7 @@ export class Harness {
       const failed = results.find(result => result.status === 'rejected')
       if (failed && failed.status === 'rejected') throw failed.reason
     }
-    if (this.inflight.length > 0) throw new Error('harness drain did not settle')
-  }
-
-  async jobsSettled(): Promise<void> {
-    for (let wave = 0; wave < 20; wave += 1) {
-      await this.drain()
-      if (this.pendingJobs.length === 0) return
-      const batch = this.pendingJobs.splice(0, this.pendingJobs.length)
-      await Promise.all(batch)
-    }
-    throw new Error('jobs did not settle')
+    if (this.inflight.length > 0) throw new Error('harness settle did not settle')
   }
 
   private track(work: Promise<void>): Promise<void> {

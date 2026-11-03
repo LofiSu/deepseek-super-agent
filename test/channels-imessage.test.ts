@@ -9,6 +9,7 @@ import {
   IMESSAGE_ADMISSION_ERROR,
   IMESSAGE_GROUP_CHAT_STYLE,
   ImessageOutboxAdapter,
+  ImessageSchemaError,
   ImessageSource,
   appleDateToIso,
   decideImessageAdmission,
@@ -21,8 +22,9 @@ import {
   type ImessageInbound,
   type ImessagePullOptions,
 } from '../src/channels/imessage.ts'
-import { runImessageCommand } from '../src/cli/imessage.ts'
+import { resolveImessageHandle, runImessageCommand } from '../src/cli/imessage.ts'
 import type { OutboxRow } from '../src/shared/types.ts'
+import { freshRuntime, shutdown } from './fixtures.ts'
 
 function sample(over: Partial<ImessageInbound> = {}): ImessageInbound {
   return {
@@ -182,6 +184,73 @@ describe('iMessage CLI admission', () => {
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('trims DS_AGENT_IMESSAGE_HANDLE once for admission and the source filter', async () => {
+    const handle = resolveImessageHandle([], { DS_AGENT_IMESSAGE_HANDLE: '  +15551234567  ' })
+    expect(handle).toBe('+15551234567')
+    expect(decideImessageAdmission({ handle }).senders).toEqual(['+15551234567'])
+    // The trimmed id is what the SQL/source filter matches, not the padded env.
+    const api = new FakeImessage([sample({ rowId: 1, handle: '+15551234567' })])
+    const pulled = await new ImessageSource(api, { handle: handle! }).pull(0)
+    expect(pulled.triggers.map(trigger => trigger.id)).toEqual(['imessage_GUID-1'])
+  })
+
+  it('rejects missing, flag-like, and whitespace-only handles instead of idling', () => {
+    expect(() => resolveImessageHandle(['--handle', '--once'], {}))
+      .toThrow(/--handle needs a non-empty sender id/)
+    expect(() => resolveImessageHandle(['--handle'], {}))
+      .toThrow(/--handle needs a non-empty sender id/)
+    expect(() => resolveImessageHandle(['--handle', '   '], {}))
+      .toThrow(/--handle needs a non-empty sender id/)
+    expect(() => resolveImessageHandle([], { DS_AGENT_IMESSAGE_HANDLE: '   ' }))
+      .toThrow(/DS_AGENT_IMESSAGE_HANDLE must be a non-empty sender id/)
+    expect(() => resolveImessageHandle([], { DS_AGENT_IMESSAGE_HANDLE: ' --allow-any ' }))
+      .toThrow(/DS_AGENT_IMESSAGE_HANDLE must be a non-empty sender id/)
+  })
+
+  it('refuses a whitespace-only env handle before touching the database', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-cli-'))
+    const dbPath = path.join(dir, 'missing-chat.db')
+    const argv = process.argv
+    const saved = {
+      handle: process.env.DS_AGENT_IMESSAGE_HANDLE,
+      actors: process.env.DS_AGENT_ACTOR_ALLOWLIST,
+    }
+    try {
+      process.argv = ['node', 'ds-agent', 'imessage', '--once', '--db', dbPath]
+      process.env.DS_AGENT_IMESSAGE_HANDLE = '   '
+      delete process.env.DS_AGENT_ACTOR_ALLOWLIST
+      await expect(runImessageCommand(dir)).rejects.toThrow(/DS_AGENT_IMESSAGE_HANDLE/)
+      expect(fs.existsSync(dbPath)).toBe(false)
+    } finally {
+      process.argv = argv
+      if (saved.handle === undefined) delete process.env.DS_AGENT_IMESSAGE_HANDLE
+      else process.env.DS_AGENT_IMESSAGE_HANDLE = saved.handle
+      if (saved.actors === undefined) delete process.env.DS_AGENT_ACTOR_ALLOWLIST
+      else process.env.DS_AGENT_ACTOR_ALLOWLIST = saved.actors
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('iMessage runtime admission', () => {
+  it('drops an unallowlisted direct trigger even though it is 1:1', async () => {
+    const runtime = freshRuntime({ env: { DS_AGENT_ACTOR_ALLOWLIST: 'trusted@example.com' } })
+    try {
+      expect(runtime.ingest(imessageTrigger(sample({
+        guid: 'G-DENY',
+        handle: '+15550001111',
+      })))).toBe('filtered')
+      expect(runtime.ingest(imessageTrigger(sample({
+        guid: 'G-ALLOW',
+        handle: 'trusted@example.com',
+      })))).toBe('stored')
+      const text = runtime.log.text()
+      expect(text).toContain('actor-not-allowlisted')
+    } finally {
+      await shutdown(runtime)
+    }
+  })
 })
 
 describe('iMessage source pull', () => {
@@ -256,7 +325,7 @@ describe('ChatDbImessageApi pull', () => {
     `)
     db.exec(`
       INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
-      INSERT INTO chat (ROWID, guid, chat_identifier) VALUES (1, 'iMessage;-;+15550000000', '+15550000000');
+      INSERT INTO chat (ROWID, guid, chat_identifier, style) VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45);
       -- 1: normal text; 2: tapback/attachment with no text columns;
       -- 3: attributedBody that decodes to nothing (must still advance the cursor).
       INSERT INTO message VALUES (1, 'G1', 'first message', NULL, 0, 'iMessage', 1, 0);
@@ -318,6 +387,132 @@ describe('ChatDbImessageApi pull', () => {
       const open = await new ImessageSource(api, { allowGroups: true }).pull(0)
       expect(open.triggers.map(trigger => trigger.id)).toEqual(['imessage_G1', 'imessage_G2', 'imessage_G3'])
       expect(open.triggers.map(trigger => trigger.addressed)).toEqual(['direct', undefined, undefined])
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('aggregates all joined chats: a message in a 1:1 and a group is a group', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-both-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45, NULL);
+      INSERT INTO chat VALUES (2, 'iMessage;+;chat123', 'chat123', 43, 'Team');
+      INSERT INTO message VALUES (1, 'G1', 'joined both', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (2, 'G2', 'direct only', NULL, 0, 'iMessage', 1, 0);
+      -- The 1:1 join sorts first; taking the first row's metadata would say direct.
+      INSERT INTO chat_message_join VALUES (1, 1), (1, 2), (2, 1);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows.map(row => row.guid)).toEqual(['G1', 'G2'])
+      expect(rows.map(row => row.isGroup)).toEqual([true, false])
+      expect(rows[0]).toMatchObject({ chatGuid: 'iMessage;+;chat123', chatIdentifier: 'chat123' })
+      expect(rows[1]).toMatchObject({ chatGuid: 'iMessage;-;+15550000000' })
+
+      const closed = await new ImessageSource(api).pull(0)
+      expect(closed.triggers.map(trigger => trigger.id)).toEqual(['imessage_G2'])
+      expect(closed.lastRowId).toBe(2)
+
+      const open = await new ImessageSource(api, { allowGroups: true }).pull(0)
+      expect(open.triggers.map(trigger => trigger.id)).toEqual(['imessage_G1', 'imessage_G2'])
+      expect(open.triggers.map(trigger => trigger.addressed)).toEqual([undefined, 'direct'])
+      expect(open.triggers[0]!.channel?.address).toMatchObject({ group: 'iMessage;+;chat123' })
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('treats a missing chat row and ambiguous metadata as group/unknown', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-unknown-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      -- 43 with a NULL room name is still a group at the DB level.
+      INSERT INTO chat VALUES (1, 'iMessage;+;chat43null', 'chat43null', 43, NULL);
+      -- Neither a known group style nor a known 1:1 style is ambiguous.
+      INSERT INTO chat VALUES (2, 'iMessage;+;chatunknown', 'chatunknown', NULL, NULL);
+      INSERT INTO message VALUES (1, 'G1', 'no chat row', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (2, 'G2', 'style 43 null room', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (3, 'G3', 'unknown metadata', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (2, 1), (3, 2);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows.map(row => row.isGroup)).toEqual([true, true, true])
+      expect(rows[0]!.chatGuid).toBeUndefined()
+      expect(rows[1]).toMatchObject({ chatGuid: 'iMessage;+;chat43null' })
+      expect(rows[2]).toMatchObject({ chatGuid: 'iMessage;+;chatunknown' })
+
+      const closed = await new ImessageSource(api).pull(0)
+      expect(closed.triggers).toEqual([])
+      expect(closed.lastRowId).toBe(3)
+
+      const open = await new ImessageSource(api, { allowGroups: true }).pull(0)
+      expect(open.triggers.map(trigger => trigger.addressed)).toEqual([undefined, undefined, undefined])
+      expect(open.triggers[1]!.channel?.address).toMatchObject({ group: 'iMessage;+;chat43null' })
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails once with a compatibility error when chat.style/room_name are absent', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-schema-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat VALUES (1, 'iMessage;-;+15550000000', '+15550000000');
+      INSERT INTO message VALUES (1, 'G1', 'hello', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const first = await api.pull(0).catch(error => error)
+      expect(first).toBeInstanceOf(ImessageSchemaError)
+      expect((first as Error).message).toContain('not compatible')
+      expect((first as Error).message).toContain('chat.style, chat.room_name')
+      // The cached failure is rethrown; the incompatible query is not retried.
+      const second = await api.pull(0).catch(error => error)
+      expect(second).toBe(first)
     } finally {
       api.close()
       db.close()

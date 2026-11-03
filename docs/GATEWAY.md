@@ -31,8 +31,10 @@ accounts, or bypass provider quotas.
 - **Local bearer token**: auto-generated (`gw_<random>`) and persisted
   `<stateDir>/gateway.token` with mode `0600`, so the agent reads it itself.
   The file is re-checked on every read and forced back to `0600`; if that fails
-  the token is not used (fail closed). The token is never printed or embedded in
-  the dashboard.
+  the token is not used (fail closed). Symlinks, directories, and multiply
+  hard-linked files are rejected instead of followed, so a writable state
+  directory cannot redirect the token or `chmod` another file. The token is
+  never printed or embedded in the dashboard.
 - **Metering**: per-provider requests / errors / latency / tokens.
 
 ## Configure providers
@@ -145,7 +147,10 @@ process is needed.
   `DS_AGENT_GATEWAY_TOKEN`.
 - **Token file**: `<stateDir>/gateway.token` is re-checked on every read and
   re-applied as mode `0600` if it was loosened. If the file cannot be secured,
-  the gateway fails closed instead of using it.
+  the gateway fails closed instead of using it. The path must be a plain,
+  singly-linked file opened with `O_NOFOLLOW`; symlinks and non-regular files
+  are refused. Mode enforcement is POSIX-only — Windows has no POSIX mode bits,
+  so the `0600` check is skipped there, while the plain-file checks still run.
 - **Bind exposure**: the gateway listens on `127.0.0.1` by default. Passing a
   non-loopback `--host` / `DS_AGENT_GATEWAY_HOST` (for example `0.0.0.0`) prints
   an explicit warning: `/health` and the dashboard are **unauthenticated** in

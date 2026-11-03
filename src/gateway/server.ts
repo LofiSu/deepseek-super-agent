@@ -94,13 +94,18 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
- * Constant-time bearer check. A missing, non-string, or wrong header is
- * rejected with the same result, and only an exact `Bearer <token>` matches.
+ * Constant-time bearer check. RFC 7235 makes the scheme case-insensitive and
+ * allows one or more spaces/tabs before the credential, so
+ * `/^Bearer[ \t]+(.+)$/i` is accepted. A missing, non-string, or wrong header
+ * is rejected with the same result. Only the credential is compared, and the
+ * comparison stays constant-time.
  */
 export function bearerAuthorized(header: string | string[] | undefined, token: string): boolean {
   if (!token || typeof header !== 'string') return false
-  const expected = Buffer.from(`Bearer ${token}`, 'utf8')
-  const provided = Buffer.from(header, 'utf8')
+  const match = /^Bearer[ \t]+(.+)$/i.exec(header)
+  if (!match) return false
+  const expected = Buffer.from(token, 'utf8')
+  const provided = Buffer.from(match[1]!, 'utf8')
   if (provided.length !== expected.length) return false
   return timingSafeEqual(provided, expected)
 }
