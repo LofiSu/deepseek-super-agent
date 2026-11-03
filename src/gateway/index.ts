@@ -28,5 +28,6 @@ export {
 } from './plugins.ts'
 export { Masker, maskingPlugin } from './mask.ts'
 export { strategyPlugin } from './builtin-plugins.ts'
+export { GatewayLimits, type LimitConfig, type LimitSnapshot } from './limits.ts'
 export { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from './token.ts'
 export { startGatewayServer, type GatewayHandle, type GatewayMetricsSnapshot } from './server.ts'

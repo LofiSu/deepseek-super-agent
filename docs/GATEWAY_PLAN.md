@@ -1,0 +1,65 @@
+# Gateway parity plan (phase plan)
+
+Goal: bring the in-repo gateway (`src/gateway/`) to functional parity with
+[magpie](https://github.com/yetone/magpie) (MIT, Go, ~984k LOC, 83 packages),
+**in phases**, as TypeScript — so users don't need to install Magpie.
+
+**Non-goal:** the subscription-account relays Magpie itself retired
+(cursor / kiro / workbuddy / …). Those were moved to community OpenCode plugins
+because using them can break vendors' terms. We do not reimplement credential
+scraping or quota bypass.
+
+## Subsystem map (Magpie → this repo)
+
+| Magpie subsystem | This repo | Status |
+|---|---|---|
+| Gateway HTTP surface (Chat/Responses/Messages/Gemini) | `server.ts` | chat / responses / messages / embeddings / **Gemini** done |
+| Protocol translation | `server.ts` (anthropic↔chat, gemini↔chat) | text + basic params done; tools/vision/thinking pending |
+| Provider presets + custom URL | `config.ts`, `config-file.ts`, `harness/providers.ts` | done (presets, apiKeyEnv, auth styles, multi-key) |
+| Model catalog + routing aliases (`auto/*`) | `router.ts`, `config.ts` | done |
+| Routing strategies (smart/order/rotate/usage/pace/weight/free/fast/drain/cheap) | `builtin-plugins.ts`, `plugins.ts` | `priority`/`smart` done; others via plugins — usage/pace/free/fast pending core data |
+| Failover on failure/429 + cooldown | `router.ts`, `server.ts` | done |
+| Allowance-aware failover (quota/balance/402) | `server.ts`, `limits.ts` | in progress (phase 1) |
+| Concurrency lanes + RPM limits | `limits.ts` | in progress (phase 1) |
+| Privacy masking | `mask.ts` (plugin `redact`) | done (non-stream buffered) |
+| Gateway middleware / strategies as plugins | `plugins.ts` (`gateway-plugins/*.mjs`) | done (onRequest/onResponse/strategies) |
+| Usage/price ledger | — | phase 2 |
+| Session aggregation + affinity | — | phase 2 |
+| Agent config wiring (write model back to each agent) | — | phase 3 |
+| Profiles, Library, MCP router, GUI/TUI/web | — | phase 3+ (out of near-term scope) |
+| Subscription account brokers (Cursor/Kiro/WorkBuddy) | — | **non-goal** |
+
+## Phases
+
+### Phase 1 — Gateway parity (in progress)
+- [x] Plugin runtime: `onRequest` / `onResponse` / `strategies`; fail-open + 250ms.
+- [x] Privacy masking plugin (`redact`), `DS_AGENT_GATEWAY_MASKING=1`.
+- [x] Router strategies as plugins (`rotation`: `priority` / `smart`); `X-Gateway-Routing`.
+- [x] Gemini `generateContent` dialect.
+- [x] Allowance-aware failover: 402/429 rest a provider; `dailyTokens` budget exhaustion rests it.
+- [x] Concurrency lanes (`maxConcurrency`) + RPM (`maxRpm`); saturated → 429 with Retry-After.
+- [x] `/v1/gateway/quotas` reports in-flight, rpm used, tokens today, exhausted.
+- [ ] Streaming masking (currently buffers when masking on).
+
+### Phase 2 — Ledger & session
+- [ ] Per-call usage/price ledger (tokens, latency, cost per provider/model).
+- [ ] Session aggregation by conversation id.
+- [ ] Affinity: keep a conversation on the account that answered it; `affinity.json`.
+- [ ] Usage strategies: `usage` / `pace` / `free` / `fast` over real usage data.
+
+### Phase 3 — Wiring & shell
+- [ ] Agent config wiring: rewrite each agent's model config to point at the gateway; profiles.
+- [ ] `ds-agent gateway` embedded mode (auto-start in-process for chat/imessage).
+- [ ] TUI/web panels (later).
+
+## Definition of done (phase 1)
+`pnpm typecheck` clean; gateway tests green; a request with `X-Gateway-Routing`
+selects a plugin strategy; masking round-trips; Gemini works; concurrency/RPM
+limits return 429 with `Retry-After` when a provider is saturated; quota data
+visible at `/v1/gateway/quotas`.
+
+## Verification
+```bash
+pnpm typecheck
+pnpm exec vitest run test/gateway*.test.ts test/channels-imessage.test.ts
+```

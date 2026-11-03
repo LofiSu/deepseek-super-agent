@@ -140,5 +140,7 @@ export default {
   images, and thinking blocks are not translated yet.
 - `/v1/responses` is a pass-through to the upstream's `/responses`; it does not
   translate to chat for providers that only speak chat.
+- Per-provider `maxConcurrency`, `maxRpm` and `dailyTokens` enforce concurrency lanes, a rolling 60s RPM window and a soft daily token budget; a saturated provider is skipped and the request gets `429` with `Retry-After`. `/v1/gateway/quotas` reports in-flight / rpm used / tokens today / exhausted per provider.
+- A provider answering `429` or `402` (quota/balance) is rested for the day in-process.
 - The gateway does not implement provider-specific subscription protocols
   (Cursor/Codex/Kiro). For those, supply your own token as above.

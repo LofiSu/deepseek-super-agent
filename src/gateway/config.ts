@@ -30,6 +30,12 @@ export interface GatewayProvider {
   priority?: number
   headers?: Record<string, string>
   timeoutMs?: number
+  /** Max concurrent requests to this provider (lane size); undefined = unlimited. */
+  maxConcurrency?: number
+  /** Max requests per rolling 60s; undefined = unlimited. */
+  maxRpm?: number
+  /** Soft daily token budget; a provider past it is skipped as exhausted. */
+  dailyTokens?: number
 }
 
 export interface GatewayConfig {
@@ -60,6 +66,9 @@ interface GatewayProviderInput {
   priority?: number
   headers?: Record<string, string>
   timeoutMs?: number
+  maxConcurrency?: number
+  maxRpm?: number
+  dailyTokens?: number
 }
 
 export function providerBaseUrl(baseUrl: string): string {
@@ -112,6 +121,9 @@ function normalizeProvider(input: GatewayProviderInput, env: NodeJS.ProcessEnv, 
     priority: Number(input.priority ?? 0) || 0,
     ...(input.headers ? { headers: input.headers } : {}),
     ...(input.timeoutMs && Number.isFinite(input.timeoutMs) ? { timeoutMs: input.timeoutMs } : {}),
+    ...(Number.isFinite(input.maxConcurrency) ? { maxConcurrency: Number(input.maxConcurrency) } : {}),
+    ...(Number.isFinite(input.maxRpm) ? { maxRpm: Number(input.maxRpm) } : {}),
+    ...(Number.isFinite(input.dailyTokens) ? { dailyTokens: Number(input.dailyTokens) } : {}),
   }
 }
 

@@ -6,6 +6,7 @@ import { GatewayRouter } from './router.ts'
 import { PluginHost, type JsonObject, type RouteSeat } from './plugins.ts'
 import { maskingPlugin } from './mask.ts'
 import { strategyPlugin } from './builtin-plugins.ts'
+import { GatewayLimits } from './limits.ts'
 
 interface Usage {
   prompt_tokens?: number
@@ -220,6 +221,10 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
   if (config.home) {
     await plugins.loadFromDir(path.join(config.home, 'gateway-plugins'), path.join(config.home, 'gateway.plugins.json'))
   }
+  const limits = new GatewayLimits(id => {
+    const provider = config.providers.find(item => item.id === id)
+    return { maxConcurrency: provider?.maxConcurrency, maxRpm: provider?.maxRpm, dailyTokens: provider?.dailyTokens }
+  })
 
   const forward = async (
     provider: GatewayProvider,
@@ -301,7 +306,15 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       return { status: 503, body: JSON.stringify({ error: { message: 'no upstream provider configured' } }), contentType: 'application/json' }
     }
     const errors: string[] = []
+    let attempted = 0
+    let rateLimited = false
     for (const candidate of candidates) {
+      if (!limits.acquire(candidate.provider.id)) {
+        rateLimited = true
+        errors.push(`${candidate.provider.id}: limit`)
+        continue
+      }
+      attempted += 1
       const started = Date.now()
       const key = router.pickKey(candidate.provider)
       try {
@@ -312,13 +325,15 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
           metrics.record(candidate.provider.id, latency, true)
           return 'streamed'
         }
-        if (result.status >= 500 || result.status === 429) {
+        if (result.status >= 500 || result.status === 429 || result.status === 402) {
           router.recordFailure(candidate.provider.id)
+          if (result.status === 429 || result.status === 402) limits.rest(candidate.provider.id)
           metrics.record(candidate.provider.id, latency, false, result.usage)
           errors.push(`${candidate.provider.id}: ${result.status} ${result.body.slice(0, 200)}`)
           continue
         }
         router.recordSuccess(candidate.provider.id)
+        limits.recordTokens(candidate.provider.id, Number(result.usage?.total_tokens ?? 0) || 0)
         metrics.record(candidate.provider.id, latency, true, result.usage)
         return result
       } catch (error) {
@@ -326,6 +341,17 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
         metrics.record(candidate.provider.id, Date.now() - started, false)
         errors.push(`${candidate.provider.id}: ${error instanceof Error ? error.message : String(error)}`)
         continue
+      } finally {
+        limits.release(candidate.provider.id)
+      }
+    }
+    if (attempted === 0 && rateLimited) {
+      const retryAfterMs = Math.min(...candidates.map(candidate => limits.retryAfterMs(candidate.provider.id)))
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))))
+      return {
+        status: 429,
+        body: JSON.stringify({ error: { message: 'all providers are rate-limited or exhausted', retryAfterMs } }),
+        contentType: 'application/json',
       }
     }
     return { status: 502, body: JSON.stringify({ error: { message: 'all upstream providers failed', details: errors } }), contentType: 'application/json' }
@@ -392,6 +418,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       generatedAt: new Date().toISOString(),
       providers: router.providersState(),
       plugins: plugins.list(),
+      limits: config.providers.map(provider => ({ id: provider.id, ...limits.snapshot(provider.id) })),
       metrics: metrics.snapshot(),
     })
   }
