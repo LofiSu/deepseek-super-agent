@@ -317,6 +317,14 @@ export class Harness {
     ]
     if (ticket.spillId) task.push(`spillId=${ticket.spillId}`)
     if (node) task.push(`node=${node}`)
+    // Restart recovery (P1-6): the relaunch turn must tell the Worker that a
+    // previous process died. Only RECOVERED context inputs are injected here;
+    // ordinary context inputs stay read-only background for resume/report paths.
+    for (const input of ticket.inputs) {
+      if (input.kind === 'context' && input.text?.startsWith('RECOVERED:')) {
+        task.push(`recovered=${input.text}`)
+      }
+    }
     for (const entry of this.opts.memory?.(ticket) ?? []) {
       const spill = entry.spillId ? ` spillId=${entry.spillId}` : ''
       task.push(`memory=${entry.id}${spill} text=${entry.text}`)

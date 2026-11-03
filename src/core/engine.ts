@@ -1,7 +1,7 @@
 import { maySurface } from '../speculate/gate.ts'
 import type { AssessmentOutcome, WorkerReport } from '../shared/ports.ts'
 import type { Decision, ReceiveResult, Ticket, Trigger, TriggerTrust } from '../shared/types.ts'
-import { Assignments, type ReportResult } from './assignments.ts'
+import { Assignments, type Recovery, type ReportResult } from './assignments.ts'
 import {
   Collaborations,
   type CollaborationView,
@@ -83,6 +83,37 @@ export class Engine {
   /** Start a new Assignment on the same Ticket after a failed or blocked turn. */
   retryTicket(ticketId: string, reason = 'retry'): void {
     this.host.repo.atomic(() => { this.assignments.retry(ticketId, reason) })
+  }
+
+  /**
+   * Startup-only restart recovery (ADR-004). Persisted SQLite state is the
+   * source of truth: every open, unpaused Ticket with a `running` Assignment is
+   * ended, gets one RECOVERED context input, and gets one pending replacement
+   * Assignment. Safe to call repeatedly; a recovered Ticket no longer matches.
+   */
+  recoverInterrupted(): Recovery[] {
+    return this.host.repo.atomic(() => {
+      const recovered: Recovery[] = []
+      for (const ticket of this.host.repo.listDocs<Ticket>('ticket')) {
+        // One malformed Ticket must not roll back recovery for the others.
+        try {
+          if (ticket.ended || ticket.collab?.paused) continue
+          if (ticket.assignments.some(assignment => assignment.state === 'running')) {
+            const outcome = this.assignments.recover(ticket.id)
+            if (outcome) recovered.push(outcome)
+            continue
+          }
+          const pending = this.assignments.pendingRecovery(ticket.id)
+          if (pending) recovered.push(pending)
+        } catch (error) {
+          const id = typeof ticket?.id === 'string' ? ticket.id : '-'
+          this.host.log(
+            `[recovery] ticket failed ticketId=${id} error=${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+      }
+      return recovered
+    })
   }
 
   /** Watchdog-only failure. Separate from worker reports so `watchdog.fail` stays accurate. */
