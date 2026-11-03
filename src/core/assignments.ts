@@ -169,6 +169,15 @@ export class Assignments {
       assignmentId: assignment.id,
       kind,
     })
+    // Releasing the logical Worker slot here is what makes mesh enforcement
+    // safe for blocked/failed/waiting, which leave the Ticket open.
+    try {
+      this.host.onAssignmentEnded?.(ticket.id)
+    } catch (error) {
+      this.host.log(
+        `[hook] hook=assignment-ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
   }
 
   private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {

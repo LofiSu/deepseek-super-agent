@@ -57,6 +57,11 @@ export interface RuntimeOptions {
   instanceId?: string
   /** Worker slots this process advertises. Defaults to `DS_AGENT_MESH_CAPACITY` or 4. */
   meshCapacity?: number
+  /**
+   * Workers allowed to wait for a mesh slot. Defaults to `DS_AGENT_MESH_QUEUE`
+   * or 100. `0` rejects instead of queueing.
+   */
+  meshQueue?: number
   /** Extra Router shards. `DS_AGENT_SHARDS` JSON is merged in as well. */
   routerShards?: RouterShard[]
   /** T45 bake-off baseline: run one Worker chain with no Router turn. */
@@ -81,6 +86,8 @@ export interface MemoryRetention {
 /** Conservative defaults: bound index growth without dropping recent history. */
 export const DEFAULT_MEMORY_MAX_ENTRIES = 1000
 export const DEFAULT_MEMORY_MAX_AGE_DAYS = 90
+/** Bounded in-process Worker backlog when every mesh slot is busy. */
+export const DEFAULT_MESH_QUEUE = 100
 
 /**
  * Parse `DS_AGENT_MEMORY_MAX_ENTRIES` / `DS_AGENT_MEMORY_MAX_AGE_DAYS` as
@@ -240,6 +247,8 @@ export class Runtime {
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
     const meshCapacity = Number.isSafeInteger(rawCapacity) && rawCapacity > 0 ? rawCapacity : 4
+    const meshQueue = opts.meshQueue
+      ?? parseNonNegativeInt(baseEnv.DS_AGENT_MESH_QUEUE, DEFAULT_MESH_QUEUE)
     const routerShards = new RouterShardRegistry()
     routerShards.register({ id: 'default' })
     // Optional JSON config so CLI/demo users can shard without writing code:
@@ -265,7 +274,7 @@ export class Runtime {
     const a2aRouter = new A2ARouter(store)
     // T16 admission is deterministic and runs before mention/keyword. Ids only.
     const admission = admissionRulesFromEnv(baseEnv, opts.admission)
-    log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} shards=${routerShards.list().length}`)
+    log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} meshQueue=${meshQueue} shards=${routerShards.list().length}`)
     log.info(`[runtime] model=${model.name}`)
     // An explicitly empty list disables that rule; do not log a misleading allowlist.
     if (admission.actors?.length || admission.groups?.length || admission.dropSelf?.length) {
@@ -273,6 +282,8 @@ export class Runtime {
         `[ingress] admission actors=${logList(admission.actors)} groups=${logList(admission.groups)} dropSelf=${logList(admission.dropSelf)}`,
       )
     }
+    // Bound late because the host and the tool ports both reach the Harness.
+    const late: { harness?: Harness } = {}
     const host: Host = {
       repo: store,
       now,
@@ -305,6 +316,8 @@ export class Runtime {
         // One durable memory entry per finished ticket; the next ticket recalls it.
         const entry = longTermMemory.remember(ticket)
         workerMesh.release(ticket.id)
+        // Capacity first, then let the scheduler start a queued Worker.
+        late.harness?.release(ticket.id)
         lifecycle.publish({
           kind: 'ticket.ended',
           payload: {
@@ -317,11 +330,16 @@ export class Runtime {
         metrics.increment('memory.remembered')
         log.info(`[memory] ticket.ended ticketId=${ticket.id} memory=${entry.id}`)
       },
+      onAssignmentEnded: ticketId => {
+        // blocked/failed/waiting end the Assignment but leave the Ticket open.
+        // Free the logical Worker slot so enforcement does not leak capacity.
+        workerMesh.release(ticketId)
+        late.harness?.release(ticketId)
+      },
       discardScratch: ticketId => env.discardIsolated?.(workerSessionId(ticketId)),
     }
     const engine = new Engine(host)
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
-    const late: { harness?: Harness } = {}
     const teams = new TeamRegistry(store)
     const machines = new MachineRegistry()
     const tools = new ToolRegistry({
@@ -374,6 +392,7 @@ export class Runtime {
         if (node) metrics.increment('mesh.assigned')
         return node?.id
       },
+      queueLimit: meshQueue,
       memory: ticket => {
         const entries = longTermMemory.query({
           ticketId: ticket.id,
