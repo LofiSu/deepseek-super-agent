@@ -199,6 +199,11 @@ The offline gate is green on `34aef25` and the architecture matches its
 contracts. The iMessage group-classification, gateway token-redirection, and
 mesh release-ordering gaps are fixed by #81, #82, and #84. #85 then merged
 restart recovery (P1-6) at `10e9f3c`; CI there reports 425 passed / 15 skipped
-(440), 56 files, and 82% lines / 80.09% branches / 89.85% functions. The
-non-blocking review follow-ups remain tracked in the review log and the current
-status lives in `docs/DEVELOPMENT_STATUS.md`.
+(440), 56 files, 82% lines, 80.05% branches (2746/3430), and 89.85% functions.
+#87 merged the gateway token first-create/ELOOP fix at `5fbfb00`; CI on `main`
+there reports 429 passed / 15 skipped (444), 58 files, 82.27% lines, 80.52%
+branches (2779/3451), and 89.97% functions. #88 merged the iMessage group edge
+and outbound fail-closed fix at `d3beb9c`; CI there reports 440 passed / 15
+skipped (455), 58 files, 82.29% lines, 80.57% branches (2787/3459), and 89.97%
+functions. The non-blocking review follow-ups remain tracked in the review log
+and the current status lives in `docs/DEVELOPMENT_STATUS.md`.

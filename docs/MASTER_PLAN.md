@@ -1,33 +1,39 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `10e9f3c` (`[SUPER-AGENT][P1-6] Restart recovery: end
-> interrupted assignments and relaunch (#85)`)
+> Baseline: `main` at `d3beb9c` (`[SUPER-AGENT][IMESSAGE-GROUP-EDGES] Fail
+> closed on ambiguous group addresses (#88)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
 ## 0. Verified baseline (2026-11-03)
 
-All evidence below was produced on this machine against `34aef25` in a detached
-worktree at `origin/main`, then re-run by CI on `10e9f3c` after #85:
+The gate evidence below is from `main` CI at `d3beb9c` (run `41600424146`).
+The `34aef25` audit was produced locally in a detached worktree; the later
+figures are CI results:
 
 ```text
-pnpm typecheck                                         exit 0
-pnpm lint                                              lint ok (225 tracked files)
-pnpm format:check                                      exit 0
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   425 passed, 15 skipped (440)
-                                                      56 files: 53 with passing tests,
+pnpm lint                                              lint ok (227 tracked files)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   440 passed, 15 skipped (455)
+                                                      58 files: 55 with passing tests,
                                                       3 fully skipped
-pnpm test:coverage                                     424 passed; statements/lines 82%,
-                                                       branches 80.09%, functions 89.85%
+pnpm test:coverage                                     439 passed; statements/lines
+                                                       82.29% (7809/9489), branches
+                                                       80.57% (2787/3459), functions
+                                                       89.97% (691/768)
 ```
 
 The 3 fully skipped files are `test/demos-real-channels.test.ts`,
 `test/live-e2e.test.ts`, and `test/team-live.test.ts`;
 `test/live-demo.test.ts` runs one offline test and skips three live ones. The
-`34aef25` run recorded 414 passed / 15 skipped and 81.81% lines / 80.06%
-branches; the `10e9f3c` run adds the #85 recovery tests.
+`34aef25` run recorded 414 passed / 15 skipped (429), 55 files, 81.81% lines,
+and 80.06% branches. The `10e9f3c` run recorded 425 passed / 15 skipped (440),
+56 files, 82% lines, and 80.05% branches (2746/3430); a local run on the same
+commit reported 80.09% (2748/3431), a one-branch V8 variance. The `5fbfb00` run
+recorded 429 passed / 15 skipped (444), 58 files, 82.27% lines, and 80.52%
+branches (2779/3451). The `d3beb9c` run adds the #88 iMessage edge and
+outbound-fail-closed tests.
 
 Repository facts:
 
@@ -38,11 +44,12 @@ Repository facts:
 - `#75`, `#76`, `#77`, `#78`, `#79`, `#80`, `#81`, `#82`, and `#84` merged into
   `main` at `08ea78f`, `aae182c`, `03a4c02`, `cb32a17`, `1dc9500`, `2c02f4b`,
   `f4ba77a`, `1c165ef`, and `34aef25`. `#83` (`cecfba0`), `#74` (`299b908`),
-  and `#85` (`10e9f3c`) then merged the state reconciliation, roadmap refresh,
-  and restart recovery. Current `main` is `10e9f3c`.
-- Open PRs at this checkpoint: none. Cycle-3 branches
-  (`agent/imessage-group-edge-tests`, `agent/gateway-token-race`) have no PRs
-  yet.
+  `#85` (`10e9f3c`), `#87` (`5fbfb00`), and `#88` (`d3beb9c`) then merged the
+  state reconciliation, roadmap refresh, restart recovery, gateway token race
+  fix, and iMessage group edge fix. Current `main` is `d3beb9c`.
+- Open PRs at this checkpoint: #89 (`docs/cycle-3-status`; this
+  reconciliation) and #86 (`test/live-suite-determinism`; stale/DIRTY, docs
+  superseded, test-only salvage pending).
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
 - GitHub Issues are disabled, so work items live in this plan and the roadmap.
@@ -53,13 +60,13 @@ Repository facts:
 
 | ID | Priority | Gap | Evidence | Status |
 |----|----------|-----|----------|--------|
-| IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 (`f4ba77a`); edge tests in cycle 3 |
+| IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling; #88 fixed join-order/page/ambiguity addresses and the group-to-1:1 outbound fallback. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 + #88 (`d3beb9c`); APPROVE |
 | P1-3 | P1 | Worker-mesh capacity was advisory and the Harness wrote `Assignment.node` directly. #79 merged the queue and Engine-owned placement; its release-ordering bug is fixed by #84. | `src/harness/loop.ts`; `src/core/assignments.ts`; `test/worker-mesh.test.ts` | fixed by #79 + #84 |
 | MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`); APPROVE |
 | P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/core/assignments.ts`; `src/runtime.ts`; `test/restart-recovery.test.ts` | fixed by #85 (`10e9f3c`); APPROVE |
-| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. Residual: concurrent first-create token race, ELOOP fallback, POSIX-only mode caveat, two missing tests. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82 merged; race/ELOOP in cycle 3 |
+| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. #87 fixed the concurrent first-create race and ELOOP fallback. Residual: POSIX-only mode caveat, EEXIST winner-reuse and create-path ELOOP branch tests, stale-empty-file recovery. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82/#87 merged; APPROVE |
 | GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
-| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84 reviewed; #77 corrected |
+| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84/#87 reviewed; #77 corrected |
 | AUDIT-REFRESH | P2 | `docs/final-audit` (#74) was stale against `34aef25`; the roadmap audit did not include `#64`, `#75`-`#84`. | PR #74 merged `299b908` | fixed; APPROVE |
 | SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:206-221`; `docs/ROADMAP.md` | bounded design decision |
 
@@ -82,13 +89,16 @@ Cycle 2 (post-merge corrections; touches harness/runtime, gateway token, docs)
 
 Cycle 3 (integration + security edges)
   P1-6  Restart recovery — merged #85
-  IMESSAGE-GROUP-EDGES  Join order, page boundary, ambiguous group address
-  GATEWAY-TOKEN-RACE    First-create returned-token race and ELOOP handling
-  STATE-DOCS  Reconcile status after #83/#74/#85 (this PR)
+  GATEWAY-TOKEN-RACE    First-create race and ELOOP handling — merged #87
+  IMESSAGE-GROUP-EDGES  Join order, page boundary, ambiguous group address,
+                        outbound fail-closed — merged #88
+  STATE-DOCS  Reconcile status after #83/#74/#85/#87/#88 — PR #89
 
 Cycle 4 candidates (after cycle 3 merges; not started)
-  SERVE-CHANNEL-LOOP  Channel loop for serve (reuse Feishu/iMessage sources)
-  MESH-QUEUE-TESTS    queueState branches and non-queued start-error cleanup
+  IMESSAGE-THREAD-KEY  Separate ambiguous-group thread keys from 1:1 keys
+  MESH-QUEUE-TESTS     queueState branches and non-queued start-error cleanup
+  LIVE-SUITE-SALVAGE   Re-land #86's test-only determinism changes
+  SERVE-CHANNEL-LOOP   Channel loop for serve (reuse Feishu/iMessage sources)
   Evaluate semantic long-term memory (roadmap open item)
 ```
 

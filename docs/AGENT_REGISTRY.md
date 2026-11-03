@@ -29,9 +29,10 @@
 | GATEWAY-TOKEN-SYMLINK | Infrastructure/Security | `agent/GATEWAY-TOKEN-SYMLINK` | 2026-11-03 | #82 merged, APPROVE | #82 | integrated |
 | AUDIT-REFRESH | Chief Engineer | `docs/final-audit` | 2026-11-03 | merged `299b908`, APPROVE | #74 | integrated |
 | P1-6 | Core Runtime | `agent/P1-6-restart-recovery` | 2026-11-03 | merged `10e9f3c`, APPROVE | #85 | integrated |
-| IMESSAGE-GROUP-EDGES | Infrastructure/Security | `agent/imessage-group-edge-tests` | 2026-11-03 | implementing | — | in progress |
-| GATEWAY-TOKEN-RACE | Infrastructure/Security | `agent/gateway-token-race` | 2026-11-03 | implementing | — | in progress |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85 APPROVE; #77 corrected | — | continuing |
+| IMESSAGE-GROUP-EDGES | Infrastructure/Security | `agent/imessage-group-edge-tests` | 2026-11-03 | merged `d3beb9c`, APPROVE after fix `890f238` | #88 | integrated |
+| GATEWAY-TOKEN-RACE | Infrastructure/Security | `agent/gateway-token-race` | 2026-11-03 | merged `5fbfb00`, security APPROVE | #87 | integrated |
+| STATE-DOCS | Chief Engineer | `docs/cycle-3-status` | 2026-11-03 | PR #89; docs REQUEST_CHANGES corrected, re-review pending | #89 | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 
@@ -46,6 +47,11 @@
   `src/cli/gateway.ts`, `src/gateway/web.ts`, gateway tests, `docs/GATEWAY.md`.
 - GATEWAY-TOKEN-SYMLINK: `src/gateway/token.ts`, `test/gateway.test.ts`,
   `docs/GATEWAY.md`.
+- GATEWAY-TOKEN-RACE: `src/gateway/token.ts`, `test/gateway-token.test.ts`,
+  `test/cli-gateway.test.ts` (after #82 and the #87 merge).
+- IMESSAGE-GROUP-EDGES: `src/channels/imessage.ts`,
+  `test/channels-imessage.test.ts`, `docs/IMESSAGE.md` (after #81; merged #88).
+- STATE-DOCS: the seven project-state docs on `docs/cycle-3-status`.
 - AUDIT-REFRESH: `docs/ROADMAP.md`, `docs/MODULES.md` (after P1-3 merges).
 - State reconciliation: the seven project-state docs in this PR.
 - No two active agents may edit the same file. If a shared interface change is
