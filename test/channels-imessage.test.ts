@@ -87,6 +87,12 @@ describe('iMessage trigger mapping', () => {
     expect(trigger.actor).toEqual({ source: 'imessage', id: '+8613800000000' })
     expect(trigger.threads).toEqual([{ source: 'imessage', id: 'chat:iMessage;-;+8613800000000' }])
     expect(trigger.channel?.address).toMatchObject({ provider: 'imessage', handle: '+8613800000000' })
+    // 1:1 addresses keep the sender handle and an optional chat guid unchanged.
+    expect(trigger.channel?.address).toEqual({
+      provider: 'imessage',
+      handle: '+8613800000000',
+      chatGuid: 'iMessage;-;+8613800000000',
+    })
   })
 
   it('uses a handle thread when there is no chat guid', () => {
@@ -104,9 +110,11 @@ describe('iMessage trigger mapping', () => {
       roomName: 'Team',
     }))
     expect(group.addressed).toBeUndefined()
-    expect(group.channel?.address).toMatchObject({
+    // A group address never carries the sender handle: the adapter would send
+    // that handle in buddy (1:1) mode and leak the group reply as a DM.
+    expect(group.channel?.address).toEqual({
       provider: 'imessage',
-      handle: '+8613800000000',
+      chatGuid: 'iMessage;+;chat123',
       group: 'iMessage;+;chat123',
     })
   })
@@ -772,6 +780,95 @@ describe('iMessage outbound', () => {
     const api = new FakeImessage()
     const adapter = new ImessageOutboxAdapter(api)
     await expect(adapter.send(outboxRow({ target: {} }))).rejects.toThrow(/target/)
+  })
+
+  it('never DMs the sender for an ambiguous group and the outbox rejects it', async () => {
+    const trigger = imessageTrigger(sample({
+      guid: 'G-AMBIGUOUS',
+      chatGuid: undefined,
+      chatIdentifier: undefined,
+      isGroup: true,
+    }))
+    expect(trigger.addressed).toBeUndefined()
+    // The pre-fix construction always emitted `handle`, so this exact shape and
+    // the zero-send assertion below both fail against it.
+    expect(trigger.channel?.address).toEqual({ provider: 'imessage' })
+    expect(trigger.channel?.address?.handle).toBeUndefined()
+    expect(trigger.channel?.address?.chatGuid).toBeUndefined()
+    // The sender is still available to admission as the actor.
+    expect(trigger.actor).toEqual({ source: 'imessage', id: '+8613800000000' })
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await expect(adapter.send(outboxRow({ target: { ...trigger.channel!.address! } })))
+      .rejects.toThrow(/no target\.handle or target\.chatGuid/)
+    expect(api.sent).toHaveLength(0)
+  })
+
+  it('rejects a positive group row that only carries a chat identifier', async () => {
+    const trigger = imessageTrigger(sample({
+      guid: 'G-ID-ONLY',
+      chatGuid: undefined,
+      chatIdentifier: 'chat123',
+      isGroup: true,
+      roomName: 'Team',
+    }))
+    expect(trigger.addressed).toBeUndefined()
+    expect(trigger.channel?.address).toEqual({ provider: 'imessage', group: 'chat123' })
+    expect(trigger.channel?.address?.handle).toBeUndefined()
+    expect(trigger.channel?.address?.chatGuid).toBeUndefined()
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await expect(adapter.send(outboxRow({ target: { ...trigger.channel!.address! } })))
+      .rejects.toThrow(/targets group chat123 without a chatGuid/)
+    expect(api.sent).toHaveLength(0)
+  })
+
+  it('rejects a group row that still carries a handle instead of DMing it', async () => {
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    // Defense in depth: even a target that still has a sender handle must not
+    // fall back to buddy (1:1) mode when it is marked as a group row.
+    await expect(adapter.send(outboxRow({
+      target: { provider: 'imessage', handle: '+8613800000000', group: 'chat123' },
+    }))).rejects.toThrow(/targets group chat123 without a chatGuid/)
+    expect(api.sent).toHaveLength(0)
+  })
+
+  it('sends a group reply in chat mode and never falls back to the sender handle', async () => {
+    const trigger = imessageTrigger(sample({
+      guid: 'G-GUID',
+      chatGuid: 'iMessage;+;chat123',
+      chatIdentifier: 'chat123',
+      isGroup: true,
+      roomName: 'Team',
+    }))
+    expect(trigger.addressed).toBeUndefined()
+    expect(trigger.channel?.address).toEqual({
+      provider: 'imessage',
+      chatGuid: 'iMessage;+;chat123',
+      group: 'iMessage;+;chat123',
+    })
+    expect(trigger.channel?.address?.handle).toBeUndefined()
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await adapter.send(outboxRow({ target: { ...trigger.channel!.address! } }))
+    expect(api.sent).toHaveLength(1)
+    expect(api.sent[0]!.target).toEqual({ chatGuid: 'iMessage;+;chat123' })
+    expect(api.sent[0]!.target.handle).toBeUndefined()
+  })
+
+  it('still sends a 1:1 reply to the sender handle when there is no chat guid', async () => {
+    const trigger = imessageTrigger(sample({ guid: 'G-DIRECT', chatGuid: undefined }))
+    expect(trigger.addressed).toBe('direct')
+    expect(trigger.channel?.address).toEqual({ provider: 'imessage', handle: '+8613800000000' })
+
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    await adapter.send(outboxRow({ target: { ...trigger.channel!.address! } }))
+    expect(api.sent).toEqual([{ target: { handle: '+8613800000000' }, text: 'ds-agent reply' }])
   })
 })
 

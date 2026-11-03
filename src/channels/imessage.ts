@@ -219,6 +219,24 @@ export function imessageTrigger(message: ImessageInbound): Trigger {
   // the thread (or a joined 1:1 chat's guid) would let an ambiguous group reply
   // into a direct conversation, so leave it unset and let admission fail closed.
   const groupId = group ? message.chatGuid ?? message.chatIdentifier : undefined
+  // A group address deliberately omits the sender `handle`. The outbox adapter
+  // sends a handle target in buddy (1:1) mode, so copying the sender handle
+  // from a group message would leak group content into a direct conversation.
+  // Group replies may only use a chat guid; otherwise they fail closed.
+  const address: Record<string, string> = group
+    ? {
+        provider: 'imessage',
+        ...(message.chatGuid ? { chatGuid: message.chatGuid } : {}),
+        // Group admission reads only `address.group`; a group message is never
+        // direct and must earn its way through the normal filter. Only a
+        // positive group chat row can supply this address.
+        ...(groupId ? { group: groupId } : {}),
+      }
+    : {
+        provider: 'imessage',
+        handle: message.handle,
+        ...(message.chatGuid ? { chatGuid: message.chatGuid } : {}),
+      }
   return {
     id: `imessage_${message.guid}`,
     source: 'imessage',
@@ -231,15 +249,7 @@ export function imessageTrigger(message: ImessageInbound): Trigger {
     channel: {
       source: 'imessage',
       thread,
-      address: {
-        provider: 'imessage',
-        handle: message.handle,
-        ...(message.chatGuid ? { chatGuid: message.chatGuid } : {}),
-        // Group admission reads only `address.group`; a group message is never
-        // direct and must earn its way through the normal filter. Only a
-        // positive group chat row can supply this address.
-        ...(group && groupId ? { group: groupId } : {}),
-      },
+      address,
     },
     meta: {},
   }
@@ -558,6 +568,16 @@ export class ImessageOutboxAdapter implements OutboundAdapter {
   async send(row: OutboxRow): Promise<{ externalId: string }> {
     const handle = row.target.handle
     const chatGuid = row.target.chatGuid
+    const group = row.target.group
+    // A group-originated row may only be delivered with its group chat guid.
+    // Sending its sender `handle` would use buddy (1:1) mode and leak group
+    // content into a direct conversation, so refuse instead of falling back.
+    if (group && !chatGuid) {
+      throw new Error(
+        `imessage outbox row ${row.id} targets group ${group} without a chatGuid; `
+        + 'refusing to fall back to a buddy (1:1) send',
+      )
+    }
     if (!handle && !chatGuid) {
       throw new Error(`imessage outbox row ${row.id} has no target.handle or target.chatGuid`)
     }

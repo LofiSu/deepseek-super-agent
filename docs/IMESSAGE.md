@@ -118,8 +118,10 @@ are handled. Pass `--since <rowid>` to replay from an explicit point.
 - **Group chats are closed by default.** `--allow-groups` /
   `DS_AGENT_IMESSAGE_ALLOW_GROUPS=1` opens ingestion, but group triggers are
   never `addressed: 'direct'`; they pass the normal admission filter (keyword,
-  noise, semantic). Sending uses `chat id` when a `chatGuid` target exists,
-  otherwise `buddy <handle>`.
+  noise, semantic). A group reply is sent with `chat id` only when a positive
+  group row supplied a `chatGuid`; a group target without a `chatGuid` fails
+  closed and is never sent as `buddy <handle>`. 1:1 replies still use
+  `buddy <handle>` when no `chatGuid` is present.
 - **externalId is synthetic** (`imessage_<ts>_<n>`) — osascript does not return
   the provider message GUID, so outbox rows cannot be re-read for acceptance
   the way GitHub comments are.
