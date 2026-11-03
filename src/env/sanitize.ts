@@ -34,6 +34,35 @@ export function secretValues(env: NodeJS.ProcessEnv): string[] {
   return [...new Set(found)].sort((a, b) => b.length - a.length)
 }
 
+/**
+ * Credential shapes that are recognisable without knowing the source file.
+ * This covers the common case where a worker `cat`s a credentials file: the
+ * value was never in our environment, so `secretValues` cannot know it.
+ * It is defense in depth, not a guarantee for arbitrary secret formats.
+ */
+const CREDENTIAL_PATTERNS: readonly { pattern: RegExp; replacement: string }[] = [
+  // A truncated block must not leave key material behind, and the `|$`
+  // alternative keeps a header with no end marker a single linear scan.
+  { pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g, replacement: '[redacted]' },
+  { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, replacement: '[redacted]' },
+  // Horizontal whitespace only: an empty assignment must not consume the next line.
+  { pattern: /\b(?:aws_secret_access_key|aws_access_key_id|aws_session_token)[ \t]*=[ \t]*\S*/gi, replacement: '[redacted]' },
+  // `aws configure export-credentials` JSON fields.
+  { pattern: /\b(AccessKeyId|SecretAccessKey|SessionToken)\b("?\s*:\s*")[^"\s,}]+/g, replacement: '$1$2[redacted]' },
+  { pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, replacement: '[redacted]' },
+  { pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, replacement: '[redacted]' },
+  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: '[redacted]' },
+  { pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g, replacement: '[redacted]' },
+]
+
+export function redactCredentialPatterns(text: string): string {
+  let out = text
+  for (const { pattern, replacement } of CREDENTIAL_PATTERNS) {
+    out = out.replace(pattern, replacement)
+  }
+  return out
+}
+
 export function redactSecrets(text: string, secrets: readonly string[]): string {
   const ordered = [...new Set(secrets)]
     .filter(secret => secret.length >= MIN_SECRET_LENGTH)
@@ -43,7 +72,7 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
     if (!out.includes(secret)) continue
     out = out.split(secret).join('[redacted]')
   }
-  return out
+  return redactCredentialPatterns(out)
 }
 
 export function allowlistedEnv(

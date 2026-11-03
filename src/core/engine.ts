@@ -61,12 +61,32 @@ export class Engine {
     return this.host.repo.atomic(() => this.evals.evaluateDue())
   }
 
+  /** Commit a Router assessment against precisely the queued trigger snapshot. */
+  commitAssessed(threadKey: string, triggerIds: string[], outcome: AssessmentOutcome): Decision | undefined {
+    assertSessionMay('decide')
+    return this.host.repo.atomic(() => this.evals.commitAssessed(threadKey, triggerIds, outcome))
+  }
+
   assignmentStarted(ticketId: string, assignmentId: string, sessionId: string): void {
     this.host.repo.atomic(() => this.assignments.start(ticketId, assignmentId, sessionId))
   }
 
   report(ticketId: string, report: WorkerReport): ReportResult {
     return this.host.repo.atomic(() => this.assignments.report(ticketId, report))
+  }
+
+  /** Start a new Assignment on the same Ticket after a failed or blocked turn. */
+  retryTicket(ticketId: string, reason = 'retry'): void {
+    this.host.repo.atomic(() => { this.assignments.retry(ticketId, reason) })
+  }
+
+  /** Watchdog-only failure. Separate from worker reports so `watchdog.fail` stays accurate. */
+  watchdogFail(ticketId: string, reason: string): ReportResult {
+    return this.host.repo.atomic(() => this.assignments.report(ticketId, {
+      kind: 'failed',
+      text: reason,
+      deliver: false,
+    }, 'watchdog'))
   }
 
   /** Freeze a live ticket. Router turns, Worker turns, reports, and replies stop. */
@@ -97,7 +117,7 @@ export class Engine {
    * DeliverGate clears `speculative` only when a report may surface.
    * Until that commit, maySurface keeps the reply off the outbox.
    */
-  reply(ticketId: string, text: string, purpose: string): void {
+  reply(ticketId: string, text: string, purpose: string, threadKey?: string): void {
     assertSessionMay('reply')
     this.host.repo.atomic(() => {
       const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
@@ -111,12 +131,26 @@ export class Engine {
         })
         return
       }
+      // A ticket that was speculative when it stopped never passed the delivery
+      // gate. Stopping clears `speculative` for visibility, so the end record
+      // carries `silent` and only that blocks a reply; a normal stopped ticket
+      // may still report partial findings.
+      if (ticket.ended?.silent === true) {
+        this.host.log(`[engine] reply held ticketId=${ticket.id} purpose=${purpose} ended=${ticket.ended.outcome}`)
+        this.host.repo.addEvent('collab.reply_held', {
+          ticketId: ticket.id,
+          purpose,
+          reason: 'ended-speculative',
+          outcome: ticket.ended.outcome,
+        })
+        return
+      }
       const deliver = ticket.speculative ? false : undefined
       if (!maySurface(ticket.speculative, deliver)) {
         this.host.log(`[speculate] reply held ticketId=${ticket.id} purpose=${purpose}`)
         return
       }
-      this.replies.send(ticket, text, purpose)
+      this.replies.send(ticket, text, purpose, threadKey)
     })
   }
 
@@ -126,6 +160,11 @@ export class Engine {
 
   unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean {
     return this.host.repo.atomic(() => this.tickets.unsubscribe(ticketId, threadKey, reason))
+  }
+
+  /** Subscribe for context only: readable, never a wake-up or follow-up bypass. */
+  followForContext(ticketId: string, threadKey: string): void {
+    this.subscribe(ticketId, threadKey, { contextOnly: true })
   }
 
   handback(ticketId: string, triggerId: string, reason: string): boolean {

@@ -7,7 +7,6 @@ export function truncateWords(text: string, maxWords: number): string {
 
 export function renderOutbound(channel: string, text: string, ticketId: string): string {
   if (channel === 'im') return truncateWords(text, 100)
-  if (channel === 'imessage') return truncateWords(text, 400)
   if (channel === 'github') {
     return [`ds-agent note`, `ticket: ${ticketId}`, '', truncateWords(text, 80)].join('\n')
   }

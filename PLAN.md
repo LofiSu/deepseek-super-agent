@@ -10,6 +10,23 @@
 
 本文档是并行 coding agents 的**只读契约**：改契约须先改本文再改代码。
 
+## 0. 领域对齐（优先阅读）
+
+本仓后续以《从零打造 Personal Agent（三）：从 DeepSeek Super-agent 看主动服务的设计模式》的领域模型为准；原先按另一篇博客写的 Router/Worker 词汇只保留为内部兼容标识。完整偏差清单与修正记录见 [`docs/DOMAIN_ALIGNMENT.md`](./docs/DOMAIN_ALIGNMENT.md)。
+
+| 本仓标识 | 文章语义 | 约定 |
+|---|---|---|
+| `role='router'` | **Main Agent / Main Session** | 负责 Gate 之后的 Assessment、接单、路由与对外回复 |
+| `role='worker'` | **Executor / Executor Session** | 在 Mandate 范围内执行 Assignment，向 Main Agent 报告 |
+| `Evals` | **Eval**（Gate + Assessment → Decision） | 确定性 Gate 先行；无法确定时 `defer` 给 Main Agent |
+| `Thread.subscriptions` + `Subscription` | **Subscription**（Ticket ↔ Thread 多对多） | 只传上下文、不增加授权；`contextOnly` 不唤醒 |
+| `Ticket.threadKeys` | Subscription 的缓存视图 | 权威关系仍以 Ticket + Thread 记录为准 |
+| `Assignments` | **Assignment**（Ticket ↔ Executor 实例） | 重试 = 同一 Ticket 上的新 Assignment |
+| `Replies` / `outbox` | **Outbox** | 结果先入队；失败重试；幂等键去重 |
+| `ticketStage` / `executionView` | **Panel / Execution** | 状态来自 Ticket 事实，不来自模型自述 |
+
+**结论：** 领域写入仍只经 Engine；Harness 不持有领域规则；Panel 只读；Executor 不能 `reply/decide/receive`。
+
 ---
 
 ## 1. 目标 / 边界 / 免责
@@ -40,14 +57,14 @@
 | 自研 thinnest Harness（Session 日志、async ReAct、OpenAI 兼容、角色工具、daemon） | 生产 Feishu IM Source + GitHub Source（禁止 fake IM / fake GitHub 作为验收） |
 | 原型领域语义：Intake / Evals / Tickets / Assignments / Replies | Cordis 插件树、DSH Session API 兼容层 |
 | SQLite + Spill、Watchdog Session、Speculative gate | Web Panel |
-| MockModel 默认可跑 demo；BYOM `DS_AGENT_API_*` | 跨进程 A2A 传输 / 真多机 mesh（扩展 / 互操作；本进程内已常驻） |
+| BYOM `DS_AGENT_API_*`；`demo` / `test` 默认走 live 模型，Mock 仅限 fixture | 跨进程 A2A 传输 / 真多机 mesh（扩展 / 互操作；本进程内已常驻） |
 | MIT OSS，`pnpm demo` 验收博客能力 | §7 实验指标（可选 M12，不挡开源） |
 
 ### 1.4 技术栈冻结
 
-- Runtime: Node ≥ 20 · TypeScript · `pnpm`
-- DB: `better-sqlite3`（或 `node:sqlite` 若可用）单文件 `<stateDir>/ds-agent.sqlite`
-- 测试: `vitest` · 默认 `MockModel`
+- Runtime: Node ≥ 22（`node:sqlite` 要求）· TypeScript · `pnpm`
+- DB: `node:sqlite` 单文件 `<stateDir>/ds-agent.db`
+- 测试: `vitest` · 默认 live 模型（`DS_AGENT_API_*`）；MockModel 仅用于 `DS_AGENT_ALLOW_MOCK_FIXTURE=1` 的离线 CI
 - 无 `@deepseek-ai/dsh*`、无 `cordis`、无 `@cordisjs/*`
 
 ---
@@ -65,8 +82,8 @@
                                     ▼
 ┌─ Ingress 层 ─────────────────────────────────────────────────────────────┐
 │  Fast Path：来源/群组/白名单等确定性过滤                                  │
-│  Slow Path：LLM Policy 语义是否行动                                       │
-│  Thread key 映射（IM topic / PR / email thread）                          │
+│  Slow Path：确定性规则 ruleClassify（模型策略未接线）                    │
+│  Thread key 映射（IM topic / PR）                                         │
 └───────────────────────────────────┬───────────────────────────────────────┘
                                     ▼
 ┌─ Domain Engine 层（唯一写领域聚合）──────────────────────────────────────┐
@@ -103,8 +120,8 @@
 Source event
   → Channel adapter（半结构化 → Trigger 形状）
   → Ingress Fast Path（source/group/whitelist 确定性过滤）
-  → Ingress Slow Path（LLM policy；可 Mock）
-  → Thread key（IM topic / PR / email thread）
+  → Ingress Slow Path（确定性 ruleClassify；模型策略未接线）
+  → Thread key（IM topic / PR）
   → Engine.receive(trigger)
        → Intake：去重入库 Trigger + disposition；记入 Thread
        → Subscription fan-out
@@ -114,12 +131,12 @@ Source event
   → Gate（确定性）+ Assessment（Router Session）→ Decision
   → accept ⇒ 原子：Mandate + Ticket + Assignment + Subscriptions + ack Outbox
   → Worker Harness Session（强模型；无直接用户 I/O；经 LocalEnv）
-  → Report → DomainEvents → Router
+  → report → DomainEventName 事件 → Router
   → Router Replies via Channel norms（IM≤100 words / GH 结构化）→ Outbox → Source
 并行：Watchdog Control Loop（timer）
   → detect stuck / infra fault / goal drift → nudge 或 fail Assignment 或告警 Router
 旁路：speculative Assignment → DeliverGate → deliver（可见）| discard（无出站）
-异步：工具 {status:started,jobId} → 完成作新 SessionEvent（不阻塞入站）
+异步：工具 `{status:'started',jobId}` → job 完成以 `JOB_DONE` prompt 触发下一 turn（不阻塞入站）
 ```
 
 逐步说明：
@@ -175,7 +192,7 @@ flowchart TB
 | 组件 | 做什么 | 不做什么 | 关键 ports / 文件 | 模块 |
 |------|--------|----------|-------------------|------|
 | **Channels** | 入站适配（CLI / 真实 Feishu / 真实 GitHub）→ Trigger；出站 ChannelNorms（IM≤100 words；GH 结构化）；Outbox 发到真实信道 | 写领域聚合；跑 LLM 循环 | `Outbox`, `ChannelNorms` · `src/channels/` | M8 |
-| **Ingress** | Fast Path 确定性过滤；Slow Path LLM policy；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
+| **Ingress** | Fast Path 确定性过滤；Slow Path 确定性规则（模型策略未接线）；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
 | **Engine** | **领域唯一写者**：Intake / Evals(Gate+Assessment) / Tickets / Assignments / Replies / Subscribe；同步命令+事务 | Node I/O；模型 HTTP；文件系统；Channel 协议细节 | `Engine`, `Repositories`, `Assessor`, `Executor`, `Outbox` · `src/core/` | M3+M5 |
 | **Harness** | Session 事件日志；async ReAct `start/stop/runTurn`；角色工具；Mock/BYOM；daemon 调度；Router=Sequence Point；Worker 隔离；Watchdog Session 宿主 | 领域状态机；直接写 Channel；解释 Policy | `Harness`, `Tool`, `Model` · `src/harness/` | M1 |
 | **Store** | SQLite Repositories + Spill 对象；atomic；session_event/job 持久化 | 业务 Decision；出站格式；跑工具 | `Repositories`, `SpillStore` · `src/store/` | M2 |
@@ -202,7 +219,7 @@ flowchart TB
 
 ### 2.7 职责一句话（速查）
 
-- **Ingress**：两级过滤 + Thread key；Fast Path 白名单；Slow Path LLM policy（可 Mock）。
+- **Ingress**：两级过滤 + Thread key；Fast Path 白名单；Slow Path 确定性规则（模型策略未接线）。
 - **Engine**：唯一写 Trigger/Thread/Decision/Ticket/Assignment/Subscription；同步命令 + 事务。
 - **Harness Router**：Sequence Point；批处理 Trigger；轻模型；理想无 bash；出站归 Router。
 - **Harness Worker**：隔离执行；强模型；只向 Router 报告；可订阅 Thread；Subagent 对 Router 不透明。
@@ -219,21 +236,21 @@ flowchart TB
 |---|------------|----|------|-----------------|
 | T01 | Continuous：不阻塞入站 | §1/§4.1 | M1 | `loop.ts`：`runTurn` 非阻塞；工具 `started`→job |
 | T02 | Efficient：吞吐 vs 连续折中 | §2 | M1+M3 | Router 批处理窗口；Eval 同 Thread batch |
-| T03 | Proactive：静默试探 | §3.4 | M7 | silent Assignment + `deliverGate` |
-| T04 | Persistent：状态可恢复 | §5 | M2+M1 | SQLite + Session 事件日志；daemon resume |
-| T05 | Dual-layer Router/Worker | §2 | M1+M3 | `SessionRole = 'router'\|'worker'\|'watchdog'`；分角色 tools/prompts/models |
-| T06 | Router = Sequence Point | §2 | M1 | Router tools 默认无 bash（`ROUTER_TOOLS` 白名单）；批 Triggers 进一轮 |
-| T07 | Router 轻模型 | §2 | M1 | `roleModels.router` 默认小模型 / Mock |
+| T03 | Proactive：静默试探 | §3.4 | M7 | silent Assignment + `DeliverGate` |
+| T04 | Persistent：状态可恢复 | §5 | M2+M1 | SQLite + `SessionJournal`；`Runtime.resume` 从 Store 续跑 |
+| T05 | Dual-layer Router/Worker | §2 | M1+M3 | `Role = 'router'\|'worker'\|'watchdog'`；分角色 tools/prompts/models |
+| T06 | Router = Sequence Point | §2 | M1 | Router tools 默认无 bash（`tools.ts` 的 `roles` 白名单）；批 Triggers 进一轮 |
+| T07 | Router 轻模型 | §2 | M1 | `models.router`（`roleModelsFromEnv`）默认小模型 / Mock |
 | T08 | Trigger batching during LLM round | §2 | M3+M1 | `Evals.evaluateDue` 合并同 Thread 积压；Router turn 开始时 drain inbox |
 | T09 | Future Router sharding / multi-filter | §2/§8 | 扩展 | `[~]` `RouterShardRegistry`（Runtime 常驻；`DS_AGENT_SHARDS` / `routerShards` 配置） |
-| T10 | Worker 隔离 / 最强模型 | §2 | M1+M9 | Worker Session + LocalEnv；`roleModels.worker` |
+| T10 | Worker 隔离 / 最强模型 | §2 | M1+M9 | Worker Session + LocalEnv；`models.worker` |
 | T11 | Worker 无直接用户 I/O | §2 | M8+M3 | Outbound 仅经 `RouterPorts.reply`；WorkerPorts 无 `reply`/`decide`/`receive`（类型 + 运行时） |
-| T12 | Worker 向 Router 报告 | §2 | M3 | `Assignments.report` → DomainEvents → Router inbox |
+| T12 | Worker 向 Router 报告 | §2 | M3 | `Assignments.report` → DomainEventName 事件 → Router inbox |
 | T13 | Workers subscribe Threads | §2/§3.2 | M5 | `Subscription` 多对多；fan-out |
-| T14 | Worker 内 Subagent/Team 对 Router 不透明 | §2 | M1 | Worker 可 spawn 子 job（`jobs` map）；Router 只见 Assignment 报告 |
+| T14 | Worker 内 Subagent/Team 对 Router 不透明 | §2 | M1 | Worker 可 spawn 子 job（Store `jobs` 表）；Router 只见 Assignment 报告 |
 | T15 | 个人助手多话题 → 多 Worker / 一 UI | §2 | M3+M11 | 同 chat Thread 多 Ticket；CLI 列 Tickets |
-| T16 | Fast Path 过滤（source/group/whitelist） | §3.1 | M4 | `ingress/fast-path.ts` 确定性规则 |
-| T17 | Slow Path LLM policy prompts | §3.1 | M4 | `ingress/slow-path.ts` + `prompts/policy-filter.md`；Mock 可跳过 |
+| T16 | Fast Path 过滤（source/group/whitelist） | §3.1 | M4 | `ingress/filter.ts` `fastPath` 确定性规则 |
+| T17 | Slow Path policy classifier | §3.1 | M4 | `ingress/filter.ts` `ruleClassify`/`filterTrigger`；确定性规则，模型策略未接线 |
 | T18 | Thread = 事件流 | §3.2 | M0+M2 | `Thread` + `trigger_thread` 表 |
 | T19 | Subscribe Fast Path bypass Router | §3.2 | M5 | 人消息达 Ticket → `bypass=subscription`；日志含 ticketId |
 | T20 | 多对多 Worker↔Thread | §3.2 | M5 | Subscriptions on Thread；`followForContext` |
@@ -245,19 +262,19 @@ flowchart TB
 | T26 | Speculative：静默 Assignment | §3.4 | M7 | `speculate:true` 创建 Assignment；对外不可见 |
 | T27 | Deliver only if valuable else discard | §3.4 | M7 | `deliverGate.evaluate(report)` → deliver \| discard |
 | T28 | 例：silent reproduce-and-fix | §3.4 | M7+M11 | demo 场景：静默跑测，有价值才 reply |
-| T29 | Async ReAct start/stop | §4.1 | M1 | `Harness.start(sessionId)` / `stop`；非 `run()` 阻塞 |
+| T29 | Async ReAct start/stop | §4.1 | M1 | `Harness.launch` / `resume` / `deliver` 入队 turn；非 `run()` 阻塞 |
 | T30 | Started ack | §4.1 | M1+M3 | 工具/Assignment `started` → 立即 ack 事件 |
-| T31 | Completion as new session event | §4.1 | M1 | job 完成 → append SessionEvent → 下一 turn |
+| T31 | Completion as new session event | §4.1 | M1 | job 完成 → `JOB_DONE` prompt → 下一 turn |
 | T32 | Duplex | §4.1 | M1 | 入站事件与工具结果并行入队 |
 | T33 | IM ≤100 words / 低打断 | §4.2 | M8 | `channels/norms.ts` `imMaxWords=100` |
-| T34 | GitHub/email 结构化高密度 | §4.2 | M8 | `formatGithub` / `formatEmail` 模板 |
+| T34 | GitHub 结构化高密度 | §4.2 | M8 | `formatGithub` 模板 |
 | T35 | Router owns outbound | §4.2 | M3+M8 | Worker 禁直写 Channel；仅 `orchestrator_reply` 类经 Router |
 | T36 | Stateless compute + durable Session DB | §5.1 | M1+M2 | 计算进程可杀；Session/领域在 SQLite |
 | T37 | Env stays on machine | §5.2 | M9 | LocalEnv workdir 在 stateDir |
 | T38 | Lightweight daemon 无 session state | §5.2 | M1 | `daemon.ts` 只调度；状态在 Store |
 | T39 | BYOM | §5.2 | M1 | `HttpOpenAIModel` + `DS_AGENT_API_*` |
 | T40 | Brain/hands；间歇设备 | §5.2 | M9+M1 | brain=Harness/Model；hands=Env；断线后 Store 续 |
-| T41 | Watchdog Session = 外部 Control Loop | §6 | M10 | 独立 SessionRole watchdog |
+| T41 | Watchdog Session = 外部 Control Loop | §6 | M10 | 独立 `Role='watchdog'` Session |
 | T42 | Timer-driven | §6 | M10 | `setInterval` / due tick 表 |
 | T43 | Infra faults + task progress / goal drift | §6 | M10 | health + stalled Assignment + NL drift check |
 | T44 | NL maintainability prompts/rules | §6 | M10 | `prompts/watchdog.md`；规则 YAML/JSON |
@@ -271,9 +288,34 @@ flowchart TB
 
 ---
 
-## 4. 冻结 TypeScript 接口
+## 4. 历史设计草案（非冻结接口）
 
-路径：`src/shared/types.ts` + `src/shared/ports.ts`（M0）。实现不得改形状；扩字段须先改本计划。
+> **状态：历史设计草图，不是当前 API 契约。** 本节记录 M0–M11 开工前的接口设想，代码已按演进后的形状落地。文中 `SessionRole`、`Assignment.status` / `AssignmentStatus`、`Harness.start/stop`、`SessionEvent`、`TurnResult` 等名字在实现中并不存在；不要据此实现或 review 代码。需要以代码为准的契约见下表与 [`docs/MODULES.md`](docs/MODULES.md)。
+
+### 4.1 当前契约（as shipped）
+
+| 契约 | 代码位置 | 实际形状 |
+|------|----------|----------|
+| `Role` | `src/shared/types.ts:1` | `'router' \| 'worker' \| 'watchdog'`；没有 `SessionRole`。 |
+| `Strength` | `src/shared/types.ts:5` | `'explicit' \| 'inferred' \| 'maybe'`（含 `maybe`）。 |
+| `Assignment.state` | `src/shared/types.ts:128`（字段 :130） | `'pending' \| 'running' \| 'ended'`；没有 `Assignment.status`/`AssignmentStatus`。另有 `workerSessionId?`、`node?`、`startedAt?`、`endedAt?`、内联 `report?`。 |
+| `ReceiveResult` / `DecisionKind` | `src/shared/types.ts:3` / `:7` | `'stored' \| 'duplicate' \| 'filtered'`；`'accept' \| 'ignore' \| 'stop' \| 'unavailable'`。 |
+| `TriggerTrust` | `src/shared/types.ts:57` | ingress 持有的事实（`spillId`、`strength`、`filterText`、`shards`）；绝不从 `trigger.meta` 读取。 |
+| `Trigger` / `Thread` / `Mandate` / `Assignment` / `Ticket` / `Decision` | `src/shared/types.ts:29` / `:72` / `:94` / `:128` / `:173` / `:191` | 领域文档形状；`Ticket` 内联 `assignments`，没有独立 `Report`/`ReportKind` 导出。 |
+| `DomainEventName` | `src/shared/events.ts:1` | 见下方事件名清单；没有 `DomainEvents`，也没有 `thread.unsubscribed`。 |
+| `RouterPorts` / `WorkerPorts` / `WatchdogPorts` | `src/shared/ports.ts:49` / `:65` / `:81` | `reply(ticketId, text, purpose)`、`decide(...): Decision`；Worker/Watchdog 端口在类型和 Proxy 运行时都没有 `reply`/`decide`/`receive`（调用抛 `worker cannot reply` 等）。 |
+| `Harness` | `src/harness/loop.ts:39` | `armRouter(shard?)` :57 · `launch(ticket)` :65 · `deliver(ticketId, trigger, spillId?)` :170 · `resume(ticket)` :195 · `scheduleJob({id, sessionId, ticketId})` :287 · `routerTurn(prompt)` :336 · `watchdogTurn()` :354 · `drain()` :364 · `jobsSettled()` :375。没有 `ensureSession`/`start`/`stop`/`runTurn` 方法。 |
+| `runTurn(input)` | `src/harness/loop.ts:450` | 独立 async 函数，接收 `{model, tools, journal, log, metrics, redact, session, prompt, maxSteps?, pause?}`，返回 `Promise<void>`（没有 `TurnResult`）。 |
+| `Daemon` | `src/harness/daemon.ts:4` | `start()` :14 · `stop()` :43；构造为 `new Daemon(watchdog, log, machines?)`。 |
+| `SessionJournal` | `src/harness/session.ts:25` | 会话日志；session id 由 `routerSessionId(shard)` :20 / `workerSessionId(ticketId)` :15 生成。 |
+| `ToolRegistry` / `ToolContext` | `src/harness/tools.ts:67` / `:21` | 按 `Role` 过滤 `specsFor(role)`；工具以 `roles: Role[]` 声明可用角色，没有独立 roles 文件。 |
+| `Model` | `src/harness/model.ts:41` | `MockModel` :86、`HttpOpenAI` :156、`createModelFromEnv` :252。 |
+| `Engine` | `src/core/engine.ts:26` | 唯一领域写入口；Runtime 通过 `bindRolePorts(engine)`（`src/core/role-ports.ts`）切出三套端口。 |
+| `ChannelNorms` | `src/channels/norms.ts` | `format(source, kind, text)` 仅实现 `formatGithub`（及 IM 100 词）；**没有 email 信道/来源，也没有 `formatEmail`；email 不在范围内**（适配器需扩展 ingress 与 norms）。 |
+
+**事件名（`DomainEventName`）**：`trigger.received` · `eval.started` · `decision.recorded` · `ticket.created` · `ticket.paused` · `ticket.resumed` · `ticket.ended` · `assignment.started` · `assignment.ended` · `thread.subscribed` · `trigger.requeued` · `subscription.removed` · `collab.guidance` · `collab.guidance_injected` · `collab.delivery_held` · `collab.reply_held` · `collab.report_held` · `speculate.delivered` · `speculate.discarded` · `watchdog.nudge` · `watchdog.fail` · `assignment.placed`。
+
+以下为**原始草案**（仅用于追溯设计意图，不是实现依据）：
 
 ```ts
 /** Roles — dual-layer + watchdog */
@@ -562,7 +604,7 @@ export interface DeliverGate {
 /** Channels norms */
 export interface ChannelNorms {
   format(source: string, kind: ReplyRequest['kind'], text: string): string
-  // im: ≤100 words; github/email: structured dense
+  // im: ≤100 words; github: structured dense
 }
 
 /** Env — hands on the machine */
@@ -615,14 +657,14 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/shared/` |
-| Files | `types.ts`, `ports.ts`, `errors.ts`, `ids.ts`, `events.ts`, `index.ts` |
-| Data | 上节全部类型；`USER_ERRORS`；`DomainEvents` 联合 |
-| Tests | `test/shared/types.test.ts`（threadKey、isoTime） |
+| Files | `types.ts`, `ports.ts`, `errors.ts`, `events.ts`, `log.ts`, `boundary.ts`, `index.ts` |
+| Data | 上节当前契约中的类型；`USER_ERRORS`；`DomainEventName` 联合 |
+| Tests | `test/ports.test.ts`（角色端口；`threadKey` 见 `test/subscription.test.ts`） |
 | Accept | 可被 M1/M2/M8/M9 import；无 Node I/O |
 | Deps | — |
 | Wave | A（先行） |
 
-`DomainEvents`：`trigger.received` · `eval.started` · `decision.recorded` · `ticket.created` · `ticket.resumed` · `ticket.ended` · `assignment.started` · `assignment.ended` · `thread.subscribed` · `thread.unsubscribed` · `trigger.requeued` · `speculate.delivered` · `speculate.discarded` · `watchdog.nudge` · `watchdog.fail`
+`DomainEventName` 的完整清单以 `src/shared/events.ts` 为准（含 `ticket.paused`/`ticket.resumed`、`subscription.removed`、`collab.*`、`assignment.placed` 等；没有 `thread.unsubscribed`）。
 
 ---
 
@@ -631,14 +673,14 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/harness/` |
-| Files | `session.ts`, `loop.ts`, `model.ts`, `tools.ts`, `daemon.ts`, `roles.ts`, `jobs.ts`, `index.ts` |
-| Data | `SessionEvent[]` 追加日志（也可落 Store）；`Job { id, sessionId, status, result? }` |
-| Interfaces | `Harness`, `Tool`, `ToolResult`, `TurnResult`；`Model { complete(messages): Promise<AssistantMessage> }` |
-| Models | `MockModel`（脚本化 tool_calls）；`HttpOpenAIModel`（`DS_AGENT_API_BASE/KEY/MODEL`） |
-| Roles | `roles.ts`：`ROUTER_TOOLS`（无 bash）；`WORKER_TOOLS`（含 env.exec、read_object、report…）；`WATCHDOG_TOOLS`（nudge/fail/read） |
-| Async ReAct | `start(sessionId)` 启动；工具返回 `started` → `jobs.register` → turn 结束；job 完成 `injectJobResult` → 自动下一 `runTurn` |
-| Daemon | 进程保活、SIGTERM 优雅停、启动时 `resume` 未完成 Session/Jobs（状态从 Store 读） |
-| Tests | loop async started；MockModel 一轮 tool；daemon resume 假状态 |
+| Files | `session.ts`, `loop.ts`, `model.ts`, `providers.ts`, `tools.ts`, `daemon.ts`, `team.ts`, `machines.ts`, `mesh.ts`, `index.ts` |
+| Data | `JournalEntry` 追加日志；`jobs`/`sessions` 表由 Store 持久化 |
+| Interfaces | `Harness`/`HarnessOptions`, `runTurn`, `ToolRegistry`/`ToolContext`, `Model`；没有 `ToolResult`/`TurnResult` |
+| Models | `MockModel`（脚本化 tool_calls）；`HttpOpenAI`；`createModelFromEnv` / `roleModelsFromEnv`（`DS_AGENT_API_*`） |
+| Roles | 无独立 roles 文件；`tools.ts` 用 `roles: Role[]` 声明：Router 无 bash，Worker 有 `bash`/`read_object`/`report_to_router`，Watchdog 仅 nudge/fail |
+| Async ReAct | `Harness.launch/resume` 入队 turn；`start_job` 工具返回 `{ status: 'started', jobId }` → `Harness.scheduleJob` → turn 结束；job 完成后以 `JOB_DONE` / `TEAM_MEMBER_DONE` prompt 触发下一 `runTurn` |
+| Daemon | `start()`/`stop()` 定时唤醒 Watchdog；不持有 Session 状态；机器离线时 brain 仍从 Store 继续（`tick`/`onMachineResume`） |
+| Tests | `test/job.test.ts`、`test/ports.test.ts`、`test/daemon-machines.test.ts` |
 | Accept | 单测：长工具不阻塞；completion 成新事件；Router 工具集无 bash |
 | Deps | M0 |
 | Wave | A |
@@ -650,11 +692,11 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/store/` |
-| Files | `db.ts`, `schema.ts`, `repos.ts`, `spill.ts`, `migrate.ts`, `index.ts` |
-| Schema | tables: `trigger`, `disposition`, `trigger_thread`, `thread`, `ticket`, `decision`, `effect`, `outbox`, `session_event`, `job`, `spill_meta`, `kv` |
-| Spill | 文件 `<stateDir>/spill/<id>` + meta 行；`SpillStore` 实现 |
-| Repos | `Repositories`：atomic / triggers / threads / tickets / decisions / sessions / jobs |
-| Tests | roundtrip Trigger；atomic rollback；spill put/get |
+| Files | `sqlite.ts`, `schema.ts`, `spill.ts`, `index.ts` |
+| Schema | tables: `id_seq`, `documents`, `spills`, `spill_grants`, `jobs`, `sessions`, `messages`, `replies`, `outbox`, `subscriptions`, `artifacts`, `events` |
+| Spill | SQLite blob（`Store.putSpill`/`getSpill`）+ `spill_grants` 权限行；`spillPort(store)` 适配 `SpillPort` |
+| Repos | 无独立 `Repositories` 层；`Store`（`sqlite.ts`）直接提供文档/事件/Job/Session/Spill API |
+| Tests | `test/spill.test.ts`、`test/runtime-integration.test.ts` |
 | Accept | 进程重启后 Ticket/Session 可读 |
 | Deps | M0 |
 | Wave | A |
@@ -666,7 +708,7 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/core/` |
-| Files | `engine.ts`, `part.ts`, `intake.ts`, `evals.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `stage.ts`, `reasons.ts`, `policy.ts`, `memory-repos.ts`（测用）, `index.ts` |
+| Files | `engine.ts`, `intake.ts`, `evals.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `subscribe.ts`, `stage.ts`, `reasons.ts`, `assessment.ts`, `collab.ts`, `host.ts`, `lifecycle.ts`, `model.ts`, `role-ports.ts`, `session-role.ts`, `index.ts` |
 | Parts | Intake → Evals → Tickets → Assignments → Replies（依赖单向） |
 | Gate | 确定性：白名单 actor / addressed / admission table |
 | Assessment | 经 Assessor port → Router Session（Mock 可直接 decide） |
@@ -684,10 +726,10 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/ingress/` |
-| Files | `fast-path.ts`, `slow-path.ts`, `thread-keys.ts`, `index.ts` |
-| Fast Path | source allow、group/chat allow、actor whitelist、drop bot-self |
-| Slow Path | 可选 LLM policy（Mock：关键词）；结果缓存 |
-| Thread keys | 每 Source 映射规则：`im:chatId` · `github:issue:n` · `cli:session` |
+| Files | `filter.ts`, `batch.ts`, `shards.ts`, `thread.ts`, `index.ts` |
+| Fast Path | `filter.ts` 的 `fastPath(trigger)`：source allow、group/chat allow、actor whitelist、drop bot-self |
+| Slow Path | 同文件的 `ruleClassify` / `filterTrigger`：确定性规则 + 可选 `SemanticModel`（Mock 可跳过） |
+| Thread keys | `thread.ts`：`threadKey` / `parseThreadKey`；每 Source 映射 `im:chatId` · `github:issue:n` · `cli:session` |
 | Tests | 噪声丢弃；白名单通过；slow-path mock |
 | Accept | demo 噪声 Trigger → `filtered` |
 | Deps | M0, M3 |
@@ -714,10 +756,10 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/memory/` |
-| Files | `inline.ts`, `spill-bridge.ts`, `read-object.ts`, `graph.ts`, `index.ts` |
-| Inline | 写入 Session 的只有 InlineRef |
-| Locality | `read_object(id)` → summary；可选 neighbors；大 body truncate+`nextOffset` |
-| Chain of Recall | `graph.ts`：Trigger→Thread→Ticket→Assignment→SessionEvent 引用 |
+| Files | `acl.ts`, `recall.ts`, `long-term.ts`, `index.ts` |
+| Inline | `recall.ts` 的 `inlineOrSpill`：写入 Session 的只有 summary + spill id |
+| Locality | `read_object` 工具（`tools.ts`）+ `acl.ts` 的 `readSpillFor`/`SPILL_PAGE`：按 ID 读取、分页、截断续读 |
+| Chain of Recall | 无独立 graph 文件：对象以 ID 引用，读取受 `spill_grants`（`acl.ts`）约束；`long-term.ts` 按标题召回 |
 | Tools | 注册 `read_object` 给 router+worker |
 | Tests | spill 链式召回；截断续读 |
 | Accept | demo Spill + read_object |
@@ -748,7 +790,7 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/channels/` |
-| Files | `norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `index.ts`（禁止 fake-* 验收路径） |
+| Files | `norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `github.ts`, `im.ts`, `outbox-adapter.ts`, `a2a.ts`, `index.ts`（禁止 fake-* 验收路径） |
 | Norms | IM：≤100 words、低打断、合并进度；GitHub：结构化（标题/清单/链接）；CLI：纯文本 |
 | Real sources | Feishu event webhook + GitHub webhook/API；demo 必须走真实信道 |
 | Tests | im 截断到 100 words；github 格式含 headings |
@@ -763,10 +805,10 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/env/` |
-| Files | `local.ts`, `prepare.ts`, `sanitize.ts`, `index.ts` |
-| LocalEnv | `<stateDir>/work/<shortName>/`；`exec` 捕获输出；大输出 Spill |
+| Files | `local-env.ts`, `sanitize.ts`, `seccomp.ts`, `vault.ts`, `index.ts` |
+| LocalEnv | `<home>/workspaces/<workerId>/`；speculative 写入 `<home>/workspaces/speculative/`；`exec` 捕获输出，超限截断 |
 | Sanitize | **凭据值永不进 tool result 正文**（红线替换）；描述可进 prompt |
-| Prepare | 可选 `DS_AGENT_PREPARE_CMD`；默认空目录 |
+| Prepare | 无 prepare 脚本钩子；`LocalEnv` 构造时按需建目录 |
 | Tests | exec echo；大输出 spill；sanitize 屏蔽 |
 | Accept | Worker 经 Env 跑命令；重启目录仍在 |
 | Deps | M0 |
@@ -779,11 +821,11 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/watchdog/` |
-| Files | `timer.ts`, `detect.ts`, `actions.ts`, `session.ts`, `index.ts` |
-| Timer | 默认 5s tick（可配） |
-| Detect | (1) Assignment running > threshold 无 report (2) job failed N 次 (3) NL drift：对比 Mandate.scope vs 最近 report（Mock 规则） |
-| Actions | `nudge` 注入 Worker Session；`fail` Assignment；通知 Router |
-| Session | 可选轻量 watchdog Session 用 NL 规则；默认规则引擎即可过 demo |
+| Files | `watchdog.ts`, `health.ts`, `rules.ts`, `rules.json`, `index.ts` |
+| Timer | `Watchdog` 由 `Daemon` 按 `intervalMs` 驱动；Runtime 默认 15s（`RuntimeOptions.watchdogIntervalMs`） |
+| Detect | `stuckAssignments` / `stuckSessions` / `driftAssignments`：卡住、job 连续失败 N 次、规则标记的 scope 漂移 |
+| Actions | `nudge` 写入 Session journal；`fail` 走 Engine report；不直接对外发言 |
+| Session | 默认规则引擎；需要时可用 `Harness.watchdogTurn()` 跑独立 `Role='watchdog'` turn |
 | Tests | 卡住 Worker 被 nudge；三次后 fail |
 | Accept | demo Watchdog tick |
 | Deps | M1, M3 |
@@ -795,10 +837,10 @@ export interface RawEvent {
 
 | 项 | 内容 |
 |----|------|
-| Path | `src/cli/` · `scripts/demo.ts` · `src/app/runtime.ts` · `prompts/` · `README.md` |
-| Files | `cli.ts`（bin `ds-agent`）, `runtime.ts` 装配, `demo.ts` 场景脚本 |
-| CLI | `ds-agent init` · `serve`（daemon）· `trigger` · `tickets` · `demo` |
-| Prompts | `router.md` · `worker.md` · `watchdog.md` · `policy-filter.md` · `admission.md`（精简自原型） |
+| Path | `src/cli/` · `src/runtime.ts` · `prompts/` · `README.md` |
+| Files | `src/cli/main.ts`（入口 `pnpm ds-agent`）、`src/runtime.ts` 装配、`src/cli/demo.ts`、`src/cli/demos/*`、`src/cli/bakeoff.ts` |
+| CLI | `init` · `chat` · `tasks` · `health` · `metrics` · `memory` · `a2a` · `status` · `team`/`teams` · `pause` · `intervene` · `resume` · `collab` · `emit im\|github` · `demo` |
+| Prompts | 只有 `prompts/watchdog.md`；Router/Worker 的 system prompt 由 `harness/model.ts` 的 `systemPrompt(role)` 内联生成 |
 | Accept | 见 §7 清单全绿；`pnpm test && pnpm demo` |
 | Deps | all |
 | Wave | D |
@@ -864,16 +906,16 @@ pnpm install && pnpm test && pnpm demo
 
 | 缺口 | 博客 | 我们的设计 | 文件 |
 |------|------|------------|------|
-| 真双 Router/Worker Session（非 DSH preset） | §2 | 自研 `SessionRole` + 分角色 model/tools/prompts；Router=Sequence Point | `harness/roles.ts`, `session.ts` |
-| Async start/stop ReAct | §4.1 | `Harness.start/stop` + `ToolResult.started` + `jobs.ts` 完成回注 | `harness/loop.ts`, `jobs.ts` |
+| 真双 Router/Worker Session（非 DSH preset） | §2 | 自研 `Role` + 分角色 model/tools/prompts；Router=Sequence Point | `harness/loop.ts`, `harness/model.ts`, `harness/tools.ts` |
+| Async start/stop ReAct | §4.1 | `Harness.launch/resume` + `start_job` 返回 `{status:'started'}` + `Harness.scheduleJob` 完成回注 | `harness/loop.ts`, `harness/tools.ts` |
 | Spill + Chain of Recall 工具 | §3.3 | `SpillStore` + `read_object` + InlineRef 图 | `store/spill.ts`, `memory/*` |
 | Speculative deliver gate | §3.4 | `Ticket.speculative` + `DeliverGate` + 静默 Assignment | `speculate/*` |
 | Multi-channel reply norms | §4.2 | `ChannelNorms`；IM 100 words；GH 结构化；Router 独占 Outbox | `channels/norms.ts` |
 | BYOM daemon（无会话状态） | §5.2 | `HttpOpenAIModel` + `daemon.ts` 只调度；状态全在 SQLite | `harness/model.ts`, `daemon.ts` |
 | Watchdog Session | §6 | 独立 role + timer + detect/nudge/fail | `watchdog/*` |
-| Fast/Slow ingress | §3.1 | `fast-path.ts` 确定性 + `slow-path.ts` policy | `ingress/*` |
+| Fast/Slow ingress | §3.1 | `filter.ts` 的 `fastPath` 确定性规则 + `ruleClassify` 语义规则 | `ingress/filter.ts` |
 | Batching into Router turn | §2 | Eval 批 + Router inbox drain at turn start | `core/evals.ts`, `harness/loop.ts` |
-| 无 Cordis 装配 | — | `app/runtime.ts` 显式 DI 组合根 | `app/runtime.ts` |
+| 无 Cordis 装配 | — | `src/runtime.ts` 显式 DI 组合根 | `src/runtime.ts` |
 | Real Feishu + GitHub Sources | 边界 | Feishu/Lark + GitHub webhook/API；CLI 仅运维 | `channels/*` |
 
 ---
@@ -894,49 +936,47 @@ pnpm install && pnpm test && pnpm demo
 
 ---
 
-## 10. 仓库布局树
+## 10. 仓库布局（与 tracked tree 一致）
+
+以下按 `git ls-files` 的实际模块归类；文件清单以仓库为准，模块边界说明见 [`docs/MODULES.md`](docs/MODULES.md)。
 
 ```
-deepseek-super-agent/          # public GitHub name
-  package.json                 # name: ds-agent; bin: { "ds-agent": "dist/cli.js" }
+deepseek-super-agent/
+  package.json                 # name: ds-agent; scripts 直接跑 tsx，没有 bin/dist 产物
   LICENSE                      # MIT
-  README.md                    # 免责 + 快速开始 + demo
+  README.md
   pnpm-lock.yaml
   tsconfig.json
   vitest.config.ts
   prompts/
-    router.md
-    worker.md
     watchdog.md
-    policy-filter.md
-    admission.md
   src/
     shared/                    # M0
       types.ts
       ports.ts
       errors.ts
-      ids.ts
       events.ts
+      log.ts
+      boundary.ts
       index.ts
     harness/                   # M1
-      session.ts
       loop.ts
+      session.ts
       model.ts
+      providers.ts
       tools.ts
       daemon.ts
-      roles.ts
-      jobs.ts
+      team.ts
+      machines.ts
+      mesh.ts
       index.ts
     store/                     # M2
-      db.ts
+      sqlite.ts
       schema.ts
-      repos.ts
       spill.ts
-      migrate.ts
       index.ts
     core/                      # M3 + M5
       engine.ts
-      part.ts
       intake.ts
       evals.ts
       tickets.ts
@@ -945,78 +985,90 @@ deepseek-super-agent/          # public GitHub name
       subscribe.ts
       stage.ts
       reasons.ts
+      assessment.ts
       policy.ts
+      panel.ts
+      collab.ts
+      host.ts
+      lifecycle.ts
+      model.ts
+      role-ports.ts
+      session-role.ts
       index.ts
     ingress/                   # M4
-      fast-path.ts
-      slow-path.ts
-      thread-keys.ts
+      filter.ts
+      batch.ts
+      shards.ts
+      thread.ts
       index.ts
     memory/                    # M6
-      inline.ts
-      spill-bridge.ts
-      read-object.ts
-      graph.ts
+      acl.ts
+      recall.ts
+      long-term.ts
       index.ts
     speculate/                 # M7
       gate.ts
       silent.ts
       index.ts
-    channels/                  # M8 (real sources; fake-* is not an acceptance path)
+    channels/                  # M8
       norms.ts
-      cli.ts                    # ops only; not demo acceptance
-      feishu.ts                 # real Feishu IM Source + message API Outbox
-      github-source.ts          # real GitHub issue/comment Source + API Outbox
-      outbox-adapter.ts         # durable outbox dispatcher
+      cli.ts                   # ops only; not demo acceptance
+      feishu.ts
+      github-source.ts
+      github.ts
+      im.ts
+      outbox-adapter.ts
+      a2a.ts
       index.ts
     env/                       # M9
-      local.ts
-      prepare.ts
+      local-env.ts
       sanitize.ts
+      seccomp.ts
+      vault.ts
       index.ts
     watchdog/                  # M10
-      timer.ts
-      detect.ts
-      actions.ts
-      session.ts
+      watchdog.ts
+      health.ts
+      rules.ts
+      rules.json
       index.ts
-    app/
-      runtime.ts               # composition root
+    metrics/                   # 常驻功能域（T45）
+      metrics.ts
+      curve.ts
+      bakeoff.ts
+      batching-bench.ts
+      index.ts
+    runtime.ts                 # composition root
+    index.ts                   # public exports
     cli/                       # M11
       main.ts
-  scripts/
-    demo.ts
-  test/
-    shared/
-    harness/
-    store/
-    core/
-    ingress/
-    memory/
-    speculate/
-    channels/
-    env/
-    watchdog/
-    demo/
+      demo.ts
+      bakeoff.ts
+      demos/
+        run.ts
+        lib.ts
+        parallel.ts
+        spill-memory.ts
+        watchdog.ts
+        feishu-smoke.ts
+  test/                        # flat vitest files
+    *.test.ts
+    fixtures.ts
+    scripted-model.ts
+    setup-live.ts
 ```
 
 ---
 
 ## 附录 A — Runtime 装配顺序
 
-```ts
-// src/app/runtime.ts（示意）
-const store = openStore(stateDir)
-const spill = new FileSpill(stateDir)
-const engine = new Engine({ repos: store.repos, policy, assessor, executor, outbox })
-const harness = new Harness({ store, models: roleModels, tools: registry })
-const env = new LocalEnv(stateDir)
-const memory = new MemoryApi(spill, store)
-const speculate = new DeliverGate(/* ... */)
-const ingress = new Ingress({ fast, slow, engine })
-const watchdog = new Watchdog({ engine, harness, intervalMs: 5000 })
-const daemon = new Daemon({ harness, engine, watchdog, store })
-```
+组合根是 `src/runtime.ts` 的 `Runtime.create(opts)`（`RuntimeOptions`）；以下为示意顺序，实际以该文件为准：
+
+1. `new Store(home)`、`new Metrics(home)`、`new LocalEnv(<home>/workspaces)`、`new SessionJournal(<home>/sessions)`。
+2. 常驻服务：`RouterShardRegistry`、`WorkerMeshRegistry`、`SpillBackedLongTermMemory`、`LifecycleBus`、`A2ARouter`。
+3. `new Engine(host)`，再用 `bindRolePorts(engine)` 切出 Router/Worker/Watchdog 端口。
+4. `ToolRegistry` → `Harness`（`launch`/`deliver`/`resume`/`scheduleJob`/`routerTurn`）→ `Watchdog` → `Daemon`。
+5. 最后构造 `Runtime`，统一暴露 `receive`/`resume`/`sendA2A` 等入口。
 
 ## 附录 B — 决策记录
 
@@ -1029,7 +1081,7 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 
 ---
 
-*契约文档 · 改契约先改本文 · LofiSu · MIT*
+*设计/路线图文档；当前 API 以 `src/` 与 `docs/MODULES.md` 为准 · LofiSu · MIT*
 
 
 ---
@@ -1042,12 +1094,12 @@ const daemon = new Daemon({ harness, engine, watchdog, store })
 |--------|----------|-------------|----------|------|
 | §1 四特质 | T01–T04 | 有 | Harness/Engine/Store/Speculate | — |
 | §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding；T14/T15 部分 |
-| §3.1 Fast/Slow | T16–T17 | 有 | ingress | Slow Path 真 LLM 策略可再加强 |
+| §3.1 Fast/Slow | T16–T17 | 有 | ingress | Slow Path 是确定性规则；LLM 策略未接线，可再加强 |
 | §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | T21 handback 弱 |
 | §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object | 多跳图可再密 |
 | §3.4 投机 | T26–T28 | 有 | speculate + deliver | — |
 | §4.1 异步 ReAct | T29–T32 | 有 | loop/jobs | — |
-| §4.2 信道规范 | T33–T35 | 有 | channels/norms | email 模板可再补 |
+| §4.2 信道规范 | T33–T35 | 有 | channels/norms | 无 email 信道/来源，也未实现 `formatEmail`；email 不在范围内（适配器需扩展 ingress 与 norms） |
 | §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
 | §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
 | §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |

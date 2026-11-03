@@ -14,6 +14,9 @@ export interface ReportResult {
 
 const TERMINAL = new Set(['ready', 'failed', 'dropped'])
 
+/** Who is reporting. Only the watchdog counts toward `watchdog.fail`. */
+export type ReportOrigin = 'worker' | 'watchdog'
+
 export class Assignments {
   private readonly gate: DeliverGate
 
@@ -34,14 +37,25 @@ export class Assignments {
   }
 
   /**
-   * Record a worker report. User-facing text is sent by the router, not here.
+   * Record a report. User-facing text is sent by the router, not here.
    * A speculative discard ends the assignment and the ticket with no outbound copy.
+   * Reports on an ended ticket never rewrite it.
    */
-  report(ticketId: string, report: WorkerReport): ReportResult {
+  report(ticketId: string, report: WorkerReport, origin: ReportOrigin = 'worker'): ReportResult {
     const ticket = this.must(ticketId)
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
     if (ticket.ended?.by === 'human') return { surfaced: false, verdict: 'hold' }
+    if (ticket.ended) {
+      // A late worker report must never reopen or rewrite an ended ticket,
+      // even when an earlier stop left a pause in place.
+      // The watchdog failing an already-ended ticket is a no-op, not an error.
+      if (origin === 'watchdog') {
+        this.host.log(`[watchdog] ticket already ended ticketId=${ticket.id} outcome=${ticket.ended.outcome}`)
+        return { surfaced: false, verdict: 'hold' }
+      }
+      throw new UserError(`ticket ${ticketId} has already ended (${ticket.ended.outcome})`)
+    }
     if (ticket.collab?.paused) {
       assignment.report = {
         kind: report.kind,
@@ -63,8 +77,11 @@ export class Assignments {
     const wasSpeculative = ticket.speculative
     const terminal = TERMINAL.has(report.kind)
     let verdict: SurfaceVerdict = 'hold'
-    if (wasSpeculative && terminal) verdict = this.gate.evaluate({ ticket, report })
-    else if (!wasSpeculative && report.deliver === true) verdict = 'deliver'
+    if (wasSpeculative && (terminal || report.deliver === true)) {
+      verdict = this.gate.evaluate({ ticket, report })
+    } else if (!wasSpeculative && report.deliver === true) {
+      verdict = 'deliver'
+    }
     assignment.report = {
       kind: report.kind,
       text: report.text,
@@ -72,7 +89,11 @@ export class Assignments {
       verdict,
       at: this.host.now(),
     }
-    if (report.kind === 'failed') this.host.metrics.increment('watchdog.fail')
+    // A failed Executor report is not a Watchdog failure. Keep both metrics honest.
+    if (report.kind === 'failed') {
+      if (origin === 'watchdog') this.host.metrics.increment('watchdog.fail')
+      else this.host.metrics.increment('executor.fail')
+    }
 
     if (wasSpeculative && verdict === 'hold') {
       this.host.repo.putDoc('ticket', ticket.id, ticket)
@@ -106,25 +127,57 @@ export class Assignments {
       this.host.log(`deliver=true ticketId=${ticket.id}`)
     }
 
-    if (terminal) this.finish(ticket, assignment, report.kind, report.kind)
+    if (report.kind === 'ready' || report.kind === 'dropped') {
+      this.finish(ticket, assignment, report.kind, report.kind)
+    } else if (report.kind === 'failed' || report.kind === 'blocked' || report.kind === 'waiting') {
+      // Failure and waiting end the Assignment, not the Ticket. The same Ticket
+      // can start a new Assignment later with the same Session and directory.
+      this.endAssignment(ticket, assignment, report.kind)
+    }
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     const surfaced = wasSpeculative ? verdict === 'deliver' : report.deliver === true
     return { surfaced, verdict }
   }
 
-  private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {
+  /** Start a new Assignment for an open Ticket after failure or a blocked turn. */
+  retry(ticketId: string, reason = 'retry'): Assignment {
+    const ticket = this.must(ticketId)
+    if (ticket.ended) throw new UserError(`ticket ${ticketId} has ended; open a new Ticket instead`)
+    const active = ticket.assignments.find(item => item.state !== 'ended')
+    if (active) throw new UserError(`ticket ${ticketId} already has an active assignment`)
+    const assignment: Assignment = {
+      id: this.host.repo.nextId('asg'),
+      state: 'pending',
+      speculative: ticket.speculative,
+    }
+    ticket.assignments.push(assignment)
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    this.host.repo.addEvent('assignment.retried', {
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      reason,
+    })
+    this.host.log(`[engine] Assignments.retry ticketId=${ticket.id} assignmentId=${assignment.id} reason=${reason}`)
+    return assignment
+  }
+
+  private endAssignment(ticket: Ticket, assignment: Assignment, kind: string): void {
     assignment.state = 'ended'
     assignment.endedAt = this.host.now()
-    ticket.ended = {
-      at: this.host.now(),
-      outcome,
-      by: kind === 'failed' ? 'watchdog' : 'executor',
-    }
     this.host.repo.addEvent('assignment.ended', {
       ticketId: ticket.id,
       assignmentId: assignment.id,
       kind,
     })
+  }
+
+  private finish(ticket: Ticket, assignment: Assignment, kind: string, outcome: string): void {
+    this.endAssignment(ticket, assignment, kind)
+    ticket.ended = {
+      at: this.host.now(),
+      outcome,
+      by: 'executor',
+    }
     this.host.repo.addEvent('ticket.ended', { ticketId: ticket.id, outcome })
     try {
       this.host.onTicketEnded?.(ticket)

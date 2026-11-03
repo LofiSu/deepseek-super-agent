@@ -1,6 +1,7 @@
 node_modules
 dist
-.ds-agent*
+coverage
+.ds-agent
 *.log
 uploads
 *.tsbuildinfo

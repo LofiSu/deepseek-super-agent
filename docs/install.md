@@ -17,6 +17,10 @@ cd deepseek-super-agent
 pnpm install
 ```
 
+This repository is source-only. It is not published to npm and has no `bin` or
+`build` step, so there is no `npm install -g ds-agent`. Run the CLI in the
+checkout with `pnpm ds-agent ...`.
+
 `pnpm test` and `pnpm demo` both need a live OpenAI-compatible model. MockModel is not used on that path. `pnpm demo:local` is an in-memory fixture smoke check. It is not the acceptance path.
 
 Set `DS_AGENT_API_BASE`, `DS_AGENT_API_KEY`, and `DS_AGENT_API_MODEL` before `pnpm test`. If any of the three is missing, the `test` script fills a local Magpie default: base `http://127.0.0.1:3425/v1`, key `magpie`, model `workbuddy/deepseek-v4.1-flash`. Without that gateway, the tests cannot reach a model. A provider key alone, such as `DEEPSEEK_API_KEY`, does not replace those defaults. The script sets `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY` itself, so the preset path never sees the lone key.

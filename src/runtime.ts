@@ -7,7 +7,10 @@ import type {
   PauseOutcome,
   ResumeOutcome,
 } from './core/collab.ts'
+import { assessWithMainAgent } from './core/assessment.ts'
 import { Engine } from './core/engine.ts'
+import { arbitrateSubscribers } from './core/intake.ts'
+import { withSessionRole } from './core/session-role.ts'
 import { bindRolePorts } from './core/role-ports.ts'
 import type { Host } from './core/host.ts'
 import { LocalEnv } from './env/local-env.ts'
@@ -17,9 +20,9 @@ import { Harness } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, roleModelsFromEnv, type Model } from './harness/model.ts'
-import { SessionJournal } from './harness/session.ts'
+import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
-import { filterTrigger } from './ingress/filter.ts'
+import { filterTrigger, type AdmissionRules } from './ingress/filter.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
 import { inlineOrSpill } from './memory/recall.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
@@ -28,7 +31,7 @@ import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
 import { Logger } from './shared/log.ts'
-import type { Disposition, ReceiveResult, Ticket, Trigger, TriggerTrust } from './shared/types.ts'
+import type { Disposition, ReceiveResult, Thread, Ticket, Trigger, TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
 import { settleSpeculation } from './speculate/silent.ts'
@@ -58,6 +61,11 @@ export interface RuntimeOptions {
   routerShards?: RouterShard[]
   /** T45 bake-off baseline: run one Worker chain with no Router turn. */
   singleSession?: boolean
+  /**
+   * T16 deterministic admission rules. Overrides `DS_AGENT_ACTOR_ALLOWLIST`,
+   * `DS_AGENT_GROUP_ALLOWLIST`, and `DS_AGENT_DROP_SELF`.
+   */
+  admission?: AdmissionRules
   /**
    * Long-term memory retention. Overrides `DS_AGENT_MEMORY_MAX_ENTRIES` /
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
@@ -98,6 +106,48 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback
 }
 
+/** Comma-separated ids: trimmed, empty entries ignored, empty result is unset. */
+function parseIdList(raw: string | undefined): string[] | undefined {
+  if (raw == null || raw.trim() === '') return undefined
+  const ids = raw.split(',').map(id => id.trim()).filter(id => id.length > 0)
+  return ids.length ? ids : undefined
+}
+
+/** Admission log field: trimmed non-empty ids, or `-` when the list is empty. */
+function logList(ids: string[] | undefined): string {
+  const clean = (ids ?? []).map(id => id.trim()).filter(id => id.length > 0)
+  return clean.length ? clean.join(',') : '-'
+}
+
+/** Trim and drop empty entries; an explicit `[]` stays `[]` so it disables the rule. */
+function normalizeIdList(ids: string[] | undefined): string[] | undefined {
+  if (ids === undefined) return undefined
+  return ids.map(id => id.trim()).filter(id => id.length > 0)
+}
+
+/**
+ * Resolve T16 admission rules. Explicit `admission` fields win over env; an
+ * explicit empty list disables that rule. Unset lists stay `undefined` so the
+ * fast path behaves exactly as before. Both sources are trimmed and empty
+ * entries are dropped, so the resolved rules and the log line agree.
+ */
+export function admissionRulesFromEnv(
+  env: NodeJS.ProcessEnv,
+  override: AdmissionRules = {},
+): AdmissionRules {
+  return {
+    actors: override.actors !== undefined
+      ? normalizeIdList(override.actors)
+      : parseIdList(env.DS_AGENT_ACTOR_ALLOWLIST),
+    groups: override.groups !== undefined
+      ? normalizeIdList(override.groups)
+      : parseIdList(env.DS_AGENT_GROUP_ALLOWLIST),
+    dropSelf: override.dropSelf !== undefined
+      ? normalizeIdList(override.dropSelf)
+      : parseIdList(env.DS_AGENT_DROP_SELF),
+  }
+}
+
 class RedactingLogger extends Logger {
   constructor(private readonly clean: (line: string) => string) {
     super()
@@ -131,6 +181,7 @@ export class Runtime {
 
   private readonly redact: (text: string) => string
   private readonly batchWindowMs: number
+  private readonly admission: AdmissionRules
   private evalTimer: ReturnType<typeof setTimeout> | undefined
 
   private constructor(parts: {
@@ -152,6 +203,7 @@ export class Runtime {
     a2aRouter: A2ARouter
     redact: (text: string) => string
     batchWindowMs: number
+    admission: AdmissionRules
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -171,6 +223,7 @@ export class Runtime {
     this.a2aRouter = parts.a2aRouter
     this.redact = parts.redact
     this.batchWindowMs = parts.batchWindowMs
+    this.admission = parts.admission
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -182,6 +235,7 @@ export class Runtime {
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
+    const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const now = opts.now ?? (() => new Date().toISOString())
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
@@ -209,8 +263,16 @@ export class Runtime {
     const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
     const lifecycle = new LifecycleBus()
     const a2aRouter = new A2ARouter(store)
+    // T16 admission is deterministic and runs before mention/keyword. Ids only.
+    const admission = admissionRulesFromEnv(baseEnv, opts.admission)
     log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} shards=${routerShards.list().length}`)
     log.info(`[runtime] model=${model.name}`)
+    // An explicitly empty list disables that rule; do not log a misleading allowlist.
+    if (admission.actors?.length || admission.groups?.length || admission.dropSelf?.length) {
+      log.info(
+        `[ingress] admission actors=${logList(admission.actors)} groups=${logList(admission.groups)} dropSelf=${logList(admission.dropSelf)}`,
+      )
+    }
     const host: Host = {
       repo: store,
       now,
@@ -220,7 +282,7 @@ export class Runtime {
         // Admission is computed here every time. `trigger.meta` is untrusted and
         // never short-circuits the filter (docs/REVIEW.md C1).
         admit: trigger => {
-          const verdict = filterTrigger(trigger, model)
+          const verdict = filterTrigger(trigger, model, admission)
           if (verdict.action === 'drop') return { listened: false, reason: `${verdict.layer}:${verdict.reason}` }
           return { listened: true, reason: verdict.reason }
         },
@@ -255,9 +317,9 @@ export class Runtime {
         metrics.increment('memory.remembered')
         log.info(`[memory] ticket.ended ticketId=${ticket.id} memory=${entry.id}`)
       },
+      discardScratch: ticketId => env.discardIsolated?.(workerSessionId(ticketId)),
     }
     const engine = new Engine(host)
-    const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const late: { harness?: Harness } = {}
     const teams = new TeamRegistry(store)
@@ -354,7 +416,10 @@ export class Runtime {
       a2aRouter,
       redact,
       batchWindowMs: opts.batchWindowMs ?? 0,
+      admission,
     })
+    // Gate-deferred work goes to the Main Agent, not to an automatic accept.
+    host.onAssessmentNeeded = () => runtime.assessPending()
     // Local A2A endpoint: an envelope addressed to this instance becomes a normal,
     // untrusted Trigger and goes through the same ingress filter.
     a2aRouter.register(instanceId, envelope => {
@@ -370,8 +435,79 @@ export class Runtime {
     return runtime
   }
 
-  start(): void {
+  private assessments = new Set<Promise<void>>()
+  private assessingThreads = new Set<string>()
+  /**
+   * A keyless serve process must not assess deferred human work with MockModel:
+   * an invalid assessment commits `unavailable` and clears the thread queue.
+   */
+  private assessmentsEnabled = true
+
+  private assessPending(): void {
+    if (!this.assessmentsEnabled || !this.store.isOpen) return
+    for (const thread of this.store.listDocs<Thread>('thread')) {
+      if (!thread.deferred || !thread.pending.length || this.assessingThreads.has(thread.key)) continue
+      this.assessingThreads.add(thread.key)
+      const work = Promise.resolve().then(async () => {
+        // The snapshot is taken when the queued Router turn starts, coalescing same-tick ingress.
+        const current = this.store.getDoc<Thread>('thread', thread.key)
+        const pending = [...(current?.pending ?? [])]
+        if (!pending.length) return
+        // Assessment is a second entrypoint to accept; ingress-denied triggers must
+        // not survive in the queue. Clear them and persist even if others remain.
+        const filtered = pending.filter(id => this.store.getDoc<Disposition>('disposition', id)?.filtered !== undefined)
+        const ids = pending.filter(id => !filtered.includes(id))
+        if (filtered.length) {
+          const cleaned = this.store.getDoc<Thread>('thread', thread.key) ?? thread
+          cleaned.pending = cleaned.pending.filter(id => !filtered.includes(id))
+          if (!cleaned.pending.length) cleaned.deferred = false
+          this.store.putDoc('thread', cleaned.key, cleaned)
+          this.log.info(`[engine] assess.skip-filtered thread=${thread.key} triggerIds=${filtered.join(',')}`)
+        }
+        if (!ids.length) return
+        const triggers = ids.map(id => this.store.getDoc<Trigger>('trigger', id))
+          .filter((trigger): trigger is Trigger => trigger != null)
+        const live = arbitrateSubscribers(this.store.listDocs<Ticket>('ticket').filter(ticket =>
+          current!.subscriptions.includes(ticket.id) && !ticket.ended))
+        const outcome = await assessWithMainAgent(this.model, triggers, live)
+        if (!this.store.isOpen) return
+        const decision = withSessionRole('router', () => this.engine.commitAssessed(thread.key, ids, outcome))
+        if (decision?.kind === 'accept' && decision.ticketId) {
+          const ticket = this.store.getDoc<Ticket>('ticket', decision.ticketId)
+          if (ticket) this.harness.launch(ticket)
+        }
+      }).catch(error => {
+        this.log.info(`[engine] Router assessment failed thread=${thread.key} error=${String(error)}`)
+      }).finally(() => {
+        this.assessingThreads.delete(thread.key)
+        this.assessments.delete(work)
+        if (this.store.isOpen) this.assessPending()
+      })
+      this.assessments.add(work)
+    }
+  }
+
+  /**
+   * Start the daemon timer. `assessPending: false` also disables every later
+   * assessment path (including `onAssessmentNeeded` from flushEvals), so a
+   * MockModel process leaves Gate-deferred work queued instead of consuming it.
+   */
+  start(options: { assessPending?: boolean } = {}): void {
+    this.assessmentsEnabled = options.assessPending !== false
     this.daemon.start()
+    if (this.assessmentsEnabled) {
+      // Resume Gate-deferred work left in SQLite by a previous process.
+      this.assessPending()
+    }
+  }
+
+  /** Wait until every in-flight Main Agent assessment has committed. */
+  async assessmentsSettled(): Promise<void> {
+    for (let wave = 0; wave < 40; wave += 1) {
+      if (this.assessments.size === 0) return
+      await Promise.allSettled([...this.assessments])
+    }
+    throw new Error('main-agent assessments did not settle')
   }
 
   /**
@@ -386,7 +522,7 @@ export class Runtime {
       return result
     }
     const safe: Trigger = { ...trigger, text: this.redact(trigger.text) }
-    const verdict = filterTrigger(safe, this.model)
+    const verdict = filterTrigger(safe, this.model, this.admission)
     if (verdict.action === 'pass') this.metrics.increment('ingress.admit')
     else this.metrics.increment('ingress.drop')
     this.log.info(
@@ -414,7 +550,11 @@ export class Runtime {
     const result = this.engine.receive(incoming, trust)
     this.log.info(`[engine] Intake.receive id=${incoming.id} result=${result}`)
     if (result === 'filtered') {
-      this.log.info('noise dropped')
+      const disposition = this.store.getDoc<Disposition>('disposition', incoming.id)
+      const reason = disposition?.filtered ?? `${verdict.layer}:${verdict.reason}`
+      // Keep the historical keyword for actual noise; every other drop names its cause.
+      if (reason === 'fast:noise' || reason === 'semantic:noise') this.log.info('noise dropped')
+      else this.log.info(`[ingress] dropped reason=${reason}`)
       return result
     }
     if (result !== 'stored') return result
@@ -513,6 +653,14 @@ export class Runtime {
     return this.engine.collaboration(ticketId)
   }
 
+  /** New Assignment on the same Ticket, then launch its Executor session. */
+  async retry(ticketId: string, reason = 'retry'): Promise<Ticket | undefined> {
+    this.engine.retryTicket(ticketId, reason)
+    const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
+    if (ticket && !ticket.ended) await this.harness.launch(ticket)
+    return ticket
+  }
+
   watchdogTurn(): Promise<void> {
     return this.harness.watchdogTurn()
   }
@@ -527,12 +675,43 @@ export class Runtime {
     await this.harness.jobsSettled()
   }
 
-  /** Wait for jobs, stop the daemon, and close SQLite. */
+  /** Wait for assessments and jobs, stop the daemon, and close SQLite. */
   async finish(): Promise<void> {
-    this.flushEvals()
-    await this.harness.jobsSettled()
-    this.daemon.stop()
-    if (this.store.isOpen) this.store.close()
+    let failure: unknown
+    let failed = false
+    const remember = (error: unknown): void => {
+      // Preserve the first failure instead of masking a drain error with a
+      // later metrics/close error.
+      if (failed) return
+      failed = true
+      failure = error
+    }
+    try {
+      await this.assessmentsSettled()
+      this.flushEvals()
+      await this.harness.jobsSettled()
+    } catch (error) {
+      remember(error)
+    } finally {
+      // The daemon timer and SQLite handle must be released even when a drain
+      // step rejects; otherwise the process stays alive after a failed shutdown.
+      this.daemon.stop()
+      try {
+        this.metrics.flush()
+      } catch (error) {
+        remember(error)
+      } finally {
+        // A failed metrics write must not leave SQLite open for other finish() callers.
+        if (this.store.isOpen) {
+          try {
+            this.store.close()
+          } catch (error) {
+            remember(error)
+          }
+        }
+      }
+    }
+    if (failed) throw failure
   }
 }
 
@@ -553,8 +732,10 @@ function a2aTrigger(envelope: A2AEnvelope, store: Store, at: string): Trigger | 
     source: 'a2a',
     threads: [{ source: 'a2a', id: thread }],
     actor: { source: 'a2a', id: envelope.from },
-    // A2A has no authenticated human identity in this process. An adapter that
-    // verifies a peer may mark the Trigger human after transport, never the body.
+    // A2A has no authenticated human identity in this process, and this ingress
+    // always produces a non-human Trigger. Peer authentication is external;
+    // attributing a human identity through this path (or by bypassing `ingest`)
+    // is not supported.
     human: false,
     addressed: 'direct',
     at,

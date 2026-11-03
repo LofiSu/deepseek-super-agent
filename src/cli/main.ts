@@ -3,6 +3,7 @@ import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
 import { Engine } from '../core/engine.ts'
 import type { Host } from '../core/host.ts'
+import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
@@ -15,11 +16,6 @@ import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
 import { defaultHome, runDemo } from './demo.ts'
-import { runGatewayCommand } from './gateway.ts'
-import { runImessageCommand } from './imessage.ts'
-import { runSetupCommand } from './setup.ts'
-import { runProfileCommand, runWireCommand } from './wiring.ts'
-import { startEmbeddedGateway } from '../gateway/embedded.ts'
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`)
@@ -106,16 +102,14 @@ function help(): void {
   pnpm demo:feishu          real Feishu message API smoke (needs app creds)
   pnpm ds-agent init
   pnpm ds-agent tasks
+  pnpm ds-agent panel            # Panel · Execution (tickets, mandate, executor, outbox)
+  pnpm ds-agent retry <ticketId> # new Assignment on the same Ticket
   pnpm ds-agent status
   pnpm ds-agent health
+  pnpm ds-agent serve            # daemon timer over persisted state; SIGINT/SIGTERM drain
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent emit im --thread bug-login --text "login still 500"
   pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
-  pnpm ds-agent imessage [--once] [--interval 2000] [--handle <you>]  # two-way iMessage channel
-  pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
-  pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLM products, write gateway.config.json
-  pnpm ds-agent wire <file> --set KEY=VALUE [--env]  # merge gateway settings into an agent's config file
-  pnpm ds-agent profile list|save <name>|use <name>|rm <name>  # gateway config profiles
   pnpm ds-agent metrics
   pnpm ds-agent memory [--limit 10]   # persisted cross-ticket memories
   pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
@@ -135,7 +129,16 @@ Worker-internal teams (persisted in SQLite, offline reads):
 pause freezes Router/Worker turns, reports, and outbound replies.
 intervene records guidance and pauses by default, so the note lands before more work.
 resume clears the pause and continues with the unseen guidance in the next turn.
-resume needs a live model; pause/intervene/collab/team/teams are offline.
+demo/retry/resume need a live model; chat may use MockModel.
+pause/intervene/collab/team/teams are offline.
+
+serve starts the in-process watchdog/daemon timer over persisted SQLite state. It
+has no inbound channel loop: triggers written by a separate emit/chat process are
+not picked up. The model is fixed at Runtime.create, so mount credentials before
+starting and restart to change them. With no provider key the idle daemon uses
+MockModel, and Gate-deferred assessments stay queued for a live-model start.
+The first SIGINT/SIGTERM drains through Runtime.finish() (assessments, jobs,
+daemon timer, SQLite) and exits 0; a second signal force-exits 1 if it hangs.
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
 Section 7 counters are written to <stateDir>/metrics.json and printed by metrics.
@@ -172,21 +175,75 @@ async function withRuntime(
 }
 
 /**
- * If a gateway.config.json exists and no DS_AGENT_GATEWAY_URL is set, start the
- * gateway in-process for the duration of `run`, so chat/imessage need no
- * separate gateway process.
+ * Daemon timer over persisted SQLite state: one Runtime for the process lifetime.
+ *
+ * Scope: starts the in-process watchdog/daemon timer and, when a live model is
+ * configured, assesses Gate-deferred threads already in SQLite at startup. It
+ * starts no inbound channel loop, so triggers written by a separate `emit`/`chat`
+ * process are never picked up. The model is resolved once at Runtime.create;
+ * changing credentials requires a restart. A keyless process falls back to
+ * MockModel and leaves deferred assessments queued for a live-model start.
+ * chat and serve may run on MockModel; demo/retry/resume require a live model.
+ *
+ * Shutdown is signal-driven. The first SIGINT/SIGTERM runs Runtime.finish(), which
+ * waits for Main Agent assessments and Harness jobs, stops the Daemon timer, and
+ * closes SQLite before exiting 0. A second signal force-exits 1 in case a live
+ * turn or finish() itself hangs. In-flight turns are not reconstructed after a
+ * restart; that boundary is documented in docs/MODULES.md.
  */
-async function runWithEmbeddedGateway(home: string, run: () => Promise<void>): Promise<void> {
-  const embedded = await startEmbeddedGateway(home)
-  if (embedded) {
-    process.env.DS_AGENT_GATEWAY_URL = embedded.url
-    process.env.DS_AGENT_GATEWAY_TOKEN = embedded.token
+async function serve(home: string): Promise<void> {
+  const runtime = Runtime.create({
+    home,
+    jobDelayMs: 20,
+    watchdogIntervalMs: 60_000,
+  })
+  const canAssess = runtime.model.name !== 'MockModel'
+  let stopping = false
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (stopping) {
+      runtime.log.info(`[serve] second signal=${signal}; force exit`)
+      process.exit(1)
+    }
+    stopping = true
+    runtime.log.info(`[serve] shutdown signal=${signal}; draining (send again to force exit)`)
+    void runtime.finish()
+      .then(() => {
+        runtime.log.info('[serve] stopped')
+        // Let the event loop drain so buffered stdout is flushed; the daemon
+        // timer is stopped, so nothing keeps the process alive.
+        process.exitCode = 0
+      })
+      .catch(error => {
+        console.error(`[serve] shutdown failed: ${error instanceof Error ? error.message : String(error)}`)
+        // Runtime.finish() releases both on its own, but keep shutdown safe if
+        // a future finish() path rejects before it reaches that block.
+        runtime.daemon.stop()
+        if (runtime.store.isOpen) {
+          try {
+            runtime.store.close()
+          } catch {
+            // The signal path is already failing; preserve the exit code.
+          }
+        }
+        process.exitCode = 1
+      })
   }
+  // Install handlers before start() so a signal cannot race the ready line.
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
   try {
-    await run()
-  } finally {
-    if (embedded) await embedded.close()
+    runtime.start({ assessPending: canAssess })
+  } catch (error) {
+    await runtime.finish().catch(() => undefined)
+    throw error
   }
+  if (!canAssess) {
+    runtime.log.info('[serve] MockModel: deferred assessments left queued until a live-model start')
+  }
+  runtime.log.info(`ds-agent serve ready home=${home} pid=${process.pid} model=${runtime.model.name}`)
+  // Keep the CLI promise pending; the daemon timer keeps the process alive and a
+  // signal handler exits after the drain.
+  await new Promise<void>(() => undefined)
 }
 
 async function main(): Promise<void> {
@@ -216,6 +273,35 @@ async function main(): Promise<void> {
     store.close()
     return
   }
+  if (cmd === 'panel' || cmd === 'execution') {
+    const store = new Store(home)
+    try {
+      console.log(formatExecution(executionView(store, home)))
+    } finally {
+      store.close()
+    }
+    return
+  }
+  if (cmd === 'retry') {
+    const ticketRef = bare(3)[0]
+    const resolved = (() => {
+      const store = new Store(home)
+      try {
+        return resolveTicket(store, ticketRef)
+      } finally {
+        store.close()
+      }
+    })()
+    await withRuntime(async runtime => {
+      const ticket = await runtime.retry(resolved.id, option('reason') ?? 'manual retry')
+      if (!ticket) {
+        console.log(`unknown ticket ${resolved.id}`)
+        return
+      }
+      console.log(`retry queued ${ticket.id} "${ticket.title}" (new Assignment, stage ${ticketStage(ticket)})`)
+    }, requireLiveModelFromEnv())
+    return
+  }
   if (cmd === 'health') {
     const store = new Store(home)
     try {
@@ -223,6 +309,10 @@ async function main(): Promise<void> {
     } finally {
       store.close()
     }
+    return
+  }
+  if (cmd === 'serve') {
+    await serve(home)
     return
   }
   if (cmd === 'metrics') {
@@ -272,7 +362,7 @@ async function main(): Promise<void> {
     for (const session of sessions) console.log(`  ${sessionLine(session)}`)
     console.log(`jobs ${jobs.length}`)
     for (const job of jobs) console.log(`  ${jobLine(job)}`)
-    console.log(`tickets ${store.listDocs<Ticket>('ticket').length}`)
+    console.log(`tickets ${visibleTickets(store.listDocs<Ticket>('ticket')).length}`)
     store.close()
     return
   }
@@ -415,27 +505,7 @@ async function main(): Promise<void> {
   if (cmd === 'chat') {
     const text = process.argv.slice(3).filter(part => !part.startsWith('--')).join(' ').trim()
     if (!text) throw new Error('chat needs text')
-    await runWithEmbeddedGateway(home, () => withRuntime(runtime => { runtime.ingest(cliTrigger({ text })) }))
-    return
-  }
-  if (cmd === 'imessage') {
-    await runWithEmbeddedGateway(home, () => runImessageCommand(home))
-    return
-  }
-  if (cmd === 'gateway') {
-    await runGatewayCommand(home)
-    return
-  }
-  if (cmd === 'setup') {
-    await runSetupCommand(home)
-    return
-  }
-  if (cmd === 'wire') {
-    runWireCommand()
-    return
-  }
-  if (cmd === 'profile') {
-    runProfileCommand(home)
+    await withRuntime(runtime => { runtime.ingest(cliTrigger({ text })) })
     return
   }
   if (cmd === 'emit' && sub === 'im') {

@@ -71,10 +71,32 @@ export class SpillBackedLongTermMemory {
     this.clock = retention.now ?? (() => new Date())
   }
 
+  /**
+   * Store a note. Dedupe policy: for the same ticket, text that is identical
+   * after redaction + normalization (whitespace collapsed, trimmed,
+   * case-insensitive) reuses the existing entry, unions its tags, and creates
+   * no second document or spill. Only entries with a readable spill body can
+   * match; a zombie entry (missing spill) is never matched against its
+   * truncated summary, so the write creates a fresh, recallable entry instead.
+   * Different text (or the same text for another ticket) is stored as before.
+   */
   put(ticketId: string, text: string, opts: { tags?: string[] } = {}): LongTermMemoryEntry {
     if (!ticketId.trim() || !text.trim()) throw new Error('ticketId and text are required')
     const safe = this.redact(text)
+    const wanted = normalizeTags(opts.tags)
+    const dedupeKey = normalizeForDedupe(safe)
     return this.store.atomic(() => {
+      const existing = this.store.listDocs<LongTermMemoryEntry>('ltm')
+        .find(entry => entry.ticketId === ticketId && dedupeKeyOf(this.store, entry) === dedupeKey)
+      if (existing) {
+        const entry: LongTermMemoryEntry = {
+          ...existing,
+          tags: normalizeTags([...(existing.tags ?? []), ...wanted]),
+        }
+        this.store.putDoc('ltm', entry.id, entry)
+        this.prune(entry.id)
+        return entry
+      }
       const spillId = this.store.putSpill(safe)
       const entry: LongTermMemoryEntry = {
         id: this.store.nextId('ltm'),
@@ -83,7 +105,7 @@ export class SpillBackedLongTermMemory {
         text: summarize(safe),
         createdAt: this.clock().toISOString(),
         kind: 'note',
-        tags: normalizeTags(opts.tags),
+        tags: wanted,
       }
       this.store.putDoc('ltm', entry.id, entry)
       grantTicketSpill(this.store, spillId, ticketId)
@@ -122,21 +144,49 @@ export class SpillBackedLongTermMemory {
     })
   }
 
+  /**
+   * Recall formula (also documented in docs/MODULES.md M6):
+   *
+   *   tagHits  = number of entry tags whose trimmed, lower-cased form equals
+   *              a distinct query word or a requested tag (trimmed, lower-cased)
+   *   textHits = sum over each distinct query word of its occurrences in the
+   *              lower-cased spill body, with each word capped at 5
+   *   order    = tagHits desc, then textHits desc, then createdAt desc,
+   *              then id desc
+   *
+   * Matching is unchanged: every query word must appear in the body and
+   * requested tags remain an AND filter, compared exactly (trimmed,
+   * case-sensitive). The final `id` key is a lexicographic string comparison,
+   * not numeric recency; it makes the order total and stable when timestamps
+   * collide.
+   */
   query(query: LongTermMemoryQuery): LongTermMemoryEntry[] {
     if (!query.ticketId?.trim()) throw new Error('ticketId is required to query memory')
-    const words = query.text.toLowerCase().trim().split(/\s+/).filter(Boolean)
+    const words = [...new Set(query.text.toLowerCase().trim().split(/\s+/).filter(Boolean))]
     if (words.length === 0) return []
     const wanted = normalizeTags(query.tags)
+    const tagNeedles = new Set([...words, ...wanted.map(tag => tag.toLowerCase())])
     const limit = Math.max(0, Math.floor(query.limit ?? 10))
     return this.store.atomic(() => {
-      const matches = this.store.listDocs<LongTermMemoryEntry>('ltm')
-        .filter(entry => {
-          if (wanted.length && !wanted.every(tag => entry.tags?.includes(tag))) return false
-          const body = this.store.getSpill(entry.spillId)?.toLowerCase() ?? ''
-          return words.every(word => body.includes(word))
-        })
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      const scored: { entry: LongTermMemoryEntry; tagHits: number; textHits: number }[] = []
+      for (const entry of this.store.listDocs<LongTermMemoryEntry>('ltm')) {
+        if (wanted.length && !wanted.every(tag => entry.tags?.includes(tag))) continue
+        const body = this.store.getSpill(entry.spillId)?.toLowerCase() ?? ''
+        if (!words.every(word => body.includes(word))) continue
+        const tagHits = (entry.tags ?? [])
+          .filter(tag => tagNeedles.has(tag.trim().toLowerCase()))
+          .length
+        let textHits = 0
+        for (const word of words) textHits += Math.min(5, countOccurrences(body, word))
+        scored.push({ entry, tagHits, textHits })
+      }
+      const matches = scored
+        .sort((a, b) => b.tagHits - a.tagHits
+          || b.textHits - a.textHits
+          || b.entry.createdAt.localeCompare(a.entry.createdAt)
+          || b.entry.id.localeCompare(a.entry.id))
         .slice(0, limit)
+        .map(hit => hit.entry)
       for (const entry of matches) grantTicketSpill(this.store, entry.spillId, query.ticketId!)
       return matches
     })
@@ -216,4 +266,29 @@ function summarize(text: string): string {
 
 function normalizeTags(tags: readonly string[] | undefined): string[] {
   return [...new Set((tags ?? []).map(tag => tag.trim()).filter(Boolean))]
+}
+
+/** Dedupe key: collapse whitespace, trim, and compare case-insensitively. */
+function normalizeForDedupe(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+/**
+ * Compare against the full body only. A missing spill yields `undefined`, so a
+ * zombie entry can never match via its truncated summary.
+ */
+function dedupeKeyOf(store: Store, entry: LongTermMemoryEntry): string | undefined {
+  const body = store.getSpill(entry.spillId)
+  return body == null ? undefined : normalizeForDedupe(body)
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0
+  let count = 0
+  let from = haystack.indexOf(needle)
+  while (from !== -1) {
+    count += 1
+    from = haystack.indexOf(needle, from + needle.length)
+  }
+  return count
 }

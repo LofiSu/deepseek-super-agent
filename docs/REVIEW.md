@@ -1,5 +1,7 @@
 # ds-agent review
 
+> **Historical snapshot** — this review describes the tree as of 2026-10-31. Findings may already be fixed; see [`docs/ROADMAP.md`](./ROADMAP.md) for current status. It is not a statement about current `main`.
+
 Author: LofiSu  
 Date: 2026-10-31  
 Scope: `PLAN.md` (the M0–M11 contract) against the TypeScript in `src/`. Read-only except for one shutdown crash, called out at the bottom. This is not an official DeepSeek review.

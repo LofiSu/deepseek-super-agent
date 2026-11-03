@@ -10,7 +10,7 @@ their owning M module; they are not a separate feature gate.
 | Worker mesh | M1 Harness | `src/harness/mesh.ts` |
 | Long-term memory | M6 Memory | `src/memory/long-term.ts` |
 | Lifecycle events | M3 Engine | `src/core/lifecycle.ts` |
-| A2A | M8 Channels | `src/channels/a2a.ts` |
+| A2A | M8 Channels | `src/channels/a2a.ts`, `src/channels/a2a-transport.ts` |
 
 ```bash
 DS_AGENT_INSTANCE_ID=alpha pnpm ds-agent chat "fix the login timeout"
@@ -38,7 +38,28 @@ keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
 - `release` frees the slot on every terminal ticket path.
 
 Placement is logical: this process still executes the turn. A remote hands
-transport is an integration concern outside this repo.
+transport is an integration concern outside this repo. Capacity is a placement
+preference, not backpressure: when every node is full, `pickNode` records
+`node=none capacity-full` and the turn still runs — there is no queue, rejection,
+or admission failure.
+
+`ds-agent serve` runs the in-process watchdog/daemon timer over persisted SQLite
+state and owns one Runtime for the process lifetime. It starts no inbound channel
+loop, so triggers written by a separate `emit`/`chat` process are not picked up.
+The model is resolved once at `Runtime.create`; changing credentials requires a
+restart. With no provider key it falls back to MockModel, and Gate-deferred
+assessments stay queued for a live-model start (they run at startup only when a
+live model is configured). `chat` and `serve` may run on MockModel;
+`demo`/`retry`/`resume` require a live model.
+
+On the first SIGINT/SIGTERM, `serve` calls `Runtime.finish()` — settling Main
+Agent assessments and Harness jobs, stopping the daemon timer, and closing SQLite
+— then exits 0. A second signal force-exits 1 if that drain hangs. `finish()`
+stops the daemon and closes SQLite even when a drain step rejects.
+
+Restart replay remains a boundary: an in-flight turn is not reconstructed after a
+restart, and unfinished jobs/sessions are not replayed. This is deliberate and
+documented, not hidden behavior.
 
 ## M2 — store
 
@@ -57,16 +78,51 @@ is the read-model event bus:
   never holds a Session.
 - The Runtime publishes from `onTicketCreated`/`onTicketEnded` and from
   pause/intervene/resume.
+- History is a bounded ring: the newest 1000 events are kept by default
+  (constructor-configurable, invalid capacities throw). It is **in-memory only**,
+  so a panel can replay the current process but not a process that has exited.
 
-`assessment.ts` is the deterministic Gate; the Router can veto with
-`assess_trigger`. Stop/ignore paths still end the ticket before the Worker chain.
+`policy.ts` is the deterministic Gate: it handles stop/ignore/unavailable
+commands and the configured auto-accept classes, and defers the rest.
+`assessment.ts` then runs the Main Agent, which originates
+`accept`/`ignore`/`stop`/`unavailable` (and `title`/`scope`/`strength` on accept)
+before any Ticket is created. The Gate is rule/policy based; it is not a model
+verdict, and the Main Agent is not consulted when the Gate already decided.
 
 ## M4 — ingress
 
-`filter.ts` is the fast path plus the semantic rule classifier; admission is
-computed from the ingress-owned `TriggerTrust`, never from `trigger.meta`.
+`filter.ts` is the fast path plus the deterministic semantic classifier
+(`ruleClassify`), which both `MockModel` and `HttpOpenAI` use; no model-backed
+policy classifier is wired, and `test/slow-path-policy.test.ts` pins that
+classification is network-free. Admission is computed from the ingress-owned
+`TriggerTrust`, never from `trigger.meta`.
 `shards.ts` adds ordered predicates over `source`, `thread`, `actor`, `human`,
 and `text`; comma joins with AND.
+
+`filter.ts` also owns the T16 admission rules (`AdmissionRules`): an actor
+allowlist, a group/chat allowlist, and a drop-self deny list. They run on the
+fast path before mention/keyword, so a denied trigger cannot be admitted by an
+@-mention. The group id comes from the channel address
+(`trigger.channel.address.group`); `trigger.meta` is never consulted, and a
+missing group is denied while the group list is active. The shipped Feishu
+adapter maps `message.chat_id` to both `address.chat_id` and `address.group`;
+other adapters must populate `address.group` if they want group admission,
+otherwise every trigger they emit is denied while the list is active. These
+are admission filters, not authentication: a channel adapter must still verify
+its peer.
+A trigger that failed admission is persisted with `Disposition.filtered`.
+Assessment (`Runtime.assessPending`) and Eval (`Evals.evaluateDue`) skip and
+clear such an id from `Thread.pending`; handback throws a `UserError`, and
+eval-driven accept (`Evals.commitAssessed`/`decide`) refuses as well. A denied
+trigger therefore cannot become a Ticket without a fresh admission decision.
+Configure with `RuntimeOptions.admission` or the comma-separated
+`DS_AGENT_ACTOR_ALLOWLIST`, `DS_AGENT_GROUP_ALLOWLIST`, and
+`DS_AGENT_DROP_SELF` variables; explicit options win, entries are trimmed and
+empty entries are dropped for both env and explicit options, and unset lists
+leave the fast path unchanged. An explicit `[]` still disables that rule.
+Active rules are logged once at `Runtime.create` as
+`[ingress] admission ...` (empty lists are not logged); a non-noise drop logs
+`[ingress] dropped reason=<layer>:<reason>`.
 
 - `RouterShardRegistry.route(trigger)` returns every matching non-default shard
   in priority order, or `['default']`.
@@ -79,6 +135,8 @@ and `text`; comma joins with AND.
 
 `core/subscribe.ts` implements handback: it removes the ticket from the Thread,
 requeues the trigger for Eval, and drops `bypass=subscription` for that ticket.
+It throws `UserError` for a trigger whose `Disposition.filtered` is defined
+instead of requeueing it (the requeue would bypass admission).
 `intake.ts` handles fan-out, context-only subscriptions, and the human follow-up
 bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
 
@@ -104,19 +162,43 @@ a delivered one clears `speculative` and emits `speculate.delivered`.
 ## M8 — channels
 
 `norms.ts` enforces channel formatting; `cli.ts`, `feishu.ts`,
-`github-source.ts`, and `outbox-adapter.ts` are the real adapters. `a2a.ts` is
-the inter-instance channel:
+`github-source.ts`, and `outbox-adapter.ts` are the real adapters. `a2a.ts` and
+`a2a-transport.ts` are the inter-instance channel:
+
+- `feishu.ts` maps an inbound message to a Trigger and sets
+  `channel.address.group` to `message.chat_id` (alongside `chat_id`), so
+  `DS_AGENT_GROUP_ALLOWLIST=<chat id>` admits that chat. Other adapters must
+  populate `address.group` themselves to opt into group admission; `meta` is
+  never read.
 
 - `A2ARouter` validates non-empty `from`/`to`, serializable bodies, and a 64 KiB
-  cap; `send` assigns `id`/`at` and persists them.
+  UTF-8 byte cap. `send` copies only `{ from, to, body }`, assigns a fresh
+  `id`/`at`, drops caller-supplied `id`/`at` and unknown fields, and persists
+  the normalized envelope. `route` remains the trusted local path.
 - Delivery status is `delivered | unroutable | failed`.
+- `a2a-transport.ts` exports the `A2ATransport` contract: `send(envelope)` may
+  return an `A2ADelivery` or a promise of one, and an optional
+  `receive(listener)` supplies inbound envelopes. A transport moves bytes only;
+  it does not validate, persist, admit, or mint identity.
+- `LocalA2ATransport` is the in-repo reference implementation and test double.
+  It wraps `A2ARouter.send`, so it inherits validation, the 64 KiB UTF-8 byte
+  cap, persistence, and delivery statuses. It is not an authentication boundary.
 - The Runtime registers its instance id as a local recipient. An envelope body
   `{ text, thread? }` (or a plain string) becomes a normal `a2a` source Trigger;
   it still passes the ingress filter and cannot self-admit. `human` is always
-  false here; only an authenticated adapter may construct a human Trigger.
+  false here: the in-repo A2A ingress always produces a non-human Trigger.
+  Attributing a human identity through this contract is not supported, and an
+  adapter must not do it by bypassing ingress through `runtime.ingest` either.
+  Peer authentication is external and fail-closed.
 - `runtime.sendA2A(to, body)` is the outbound API. Cross-process delivery uses
-  the same envelope over an external transport; transport authentication is
-  external. Do not expose the local endpoint over an unauthenticated wire.
+  the same envelope over an external `A2ATransport` implementation; network I/O
+  and peer authentication (mTLS, signed envelopes, bearer tokens, etc.) are
+  external. This repo ships no network transport and no peer authentication, so
+  an adapter must add both and hand inbound bytes back through `A2ARouter.send`
+  (which normalizes identity/timestamps and drops unknown fields). Do not expose
+  the local endpoint over an unauthenticated wire. `test/a2a-transport.test.ts`
+  covers the contract, delivery outcomes, validation/cap, persistence, and the
+  non-human boundary.
 
 ## M9 — env
 
@@ -139,12 +221,14 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 ## M11 — CLI and demo
 
-`src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `chat`, `emit`,
-`metrics`, `memory`, `a2a`, `pause`, `intervene`, `resume`, `collab`, `team`,
-and `teams`. `src/cli/demos/run.ts` drives the acceptance scenarios against the
+`src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `serve`, `chat`,
+`emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`, `resume`, `collab`,
+`team`, and `teams`. `src/cli/demos/run.ts` drives the acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the
-dual-layer path with `RuntimeOptions.singleSession`.
+dual-layer path with `RuntimeOptions.singleSession`. `serve` runs the daemon
+timer over persisted state, has no inbound channel loop, and fixes its model at
+startup.
 
 `ds-agent memory [--limit N]` prints persisted long-term memories;
 `ds-agent a2a [--limit N]` prints persisted A2A envelopes. Both are offline
@@ -163,9 +247,9 @@ reads over SQLite.
 ## T51 — security and privacy
 
 In-repo controls: env allowlist, redaction before spill and memory storage,
-`[redacted]` tool output, FileVault names only, optional OS sandbox, spill ACL,
-and untrusted `meta` rejection. Managed credentials and host-level seccomp stay
-external as PLAN §9 says.
+`[redacted]` tool output, FileVault names only, default-on fail-closed OS
+sandbox, spill ACL, and untrusted `meta` rejection. Managed credentials and
+host-level seccomp stay external as PLAN §9 says.
 
 ## Tests
 
@@ -179,7 +263,10 @@ npx vitest run test/runtime-wiring.test.ts         default-path service construc
 npx vitest run test/cli-memory-a2a.test.ts         offline operator views
 npx vitest run test/metrics-curve.test.ts          percentiles + bake-off math
 pnpm typecheck                                     pass
-offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         195 passed, 15 skipped, 34 files
+pnpm lint                                          pass
+pnpm format:check                                  pass
+pnpm test:coverage                                 302 passed, 39 files; 81 src files; lines 82.40%, branches 82.40%, functions 89.32% (no threshold)
+offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         303 passed, 15 skipped, 43 files
 pnpm test (live Magpie, final tree)                207 passed, 3 skipped, 34 files (431.12 s)
 ```
 

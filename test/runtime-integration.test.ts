@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
+import { bindRolePorts } from '../src/core/role-ports.ts'
+import { LocalEnv } from '../src/env/local-env.ts'
+import { ToolRegistry } from '../src/harness/tools.ts'
 import type { Runtime } from '../src/runtime.ts'
-import type { Disposition, Ticket } from '../src/shared/types.ts'
+import type { Decision, Disposition, Ticket } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 import { field, lastPrompt, ScriptedModel, silentModel } from './scripted-model.ts'
 
@@ -30,6 +33,36 @@ function start(opts: { model?: ScriptedModel; env?: NodeJS.ProcessEnv; singleSes
   })
   runtimes.push(runtime)
   return runtime
+}
+
+/** Create a ticket with an explicit shard list, without starting the Harness. */
+function shardedTicket(
+  runtime: Runtime,
+  id: string,
+  shards: string[],
+  thread = 'topic/guard',
+): { triggerId: string; ticketId: string } {
+  runtime.engine.receive(imTrigger({
+    id,
+    thread,
+    text: '@ds-agent please fix the login timeout on checkout',
+  }), { shards })
+  const decision = runtime.engine.evaluateDue()[0]
+  if (!decision?.ticketId) throw new Error('expected a ticket')
+  return { triggerId: id, ticketId: decision.ticketId }
+}
+
+function toolRegistry(runtime: Runtime): ToolRegistry {
+  return new ToolRegistry({
+    store: runtime.store,
+    ports: bindRolePorts(runtime.engine),
+    env: new LocalEnv(`${runtime.home}/workspaces`),
+    metrics: runtime.metrics,
+    redact: text => text,
+    log: () => undefined,
+    scheduleJob: () => undefined,
+    routerTurn: async () => undefined,
+  })
 }
 
 /** Reports one ready result, which ends a non-speculative ticket. */
@@ -76,12 +109,274 @@ describe('Runtime service integration', () => {
     const disposition = runtime.store.getDoc<Disposition>('disposition', 'trg_shard')
     expect(disposition?.shards).toEqual(['im'])
     expect(runtime.log.text()).toContain('[routing] shards=im')
-    expect(runtime.log.text()).toContain('RouterSession start session=router:im')
+    expect(runtime.log.text()).toContain('MainSession start session=router:im')
     expect(runtime.log.text()).toContain('[mesh] place')
 
     const [ticket] = runtime.store.listDocs<Ticket>('ticket')
     expect(ticket?.assignments[0]?.node).toBe('alpha')
     expect(runtime.store.listEvents().some(event => event.type === 'assignment.placed')).toBe(true)
+  })
+
+  it('arbitrates overlapping shards into one ticket, one terminal decision, and one reply owner', async () => {
+    const model = new ScriptedModel(request => {
+      const prompt = lastPrompt(request)
+      const lastUser = request.messages.map(message => message.role).lastIndexOf('user')
+      const turn = request.messages.slice(lastUser)
+      const repliedThisTurn = turn.some(message => message.role === 'tool' && message.name === 'reply_user')
+      if (request.role === 'router') {
+        if (prompt.startsWith('REPORT')) {
+          return repliedThisTurn
+            ? { text: 'router-done' }
+            : {
+              toolCalls: [{
+                id: 'reply_result',
+                name: 'reply_user',
+                args: {
+                  ticketId: field(prompt, 'ticketId'),
+                  text: 'result from owner',
+                  purpose: 'result',
+                },
+              }],
+            }
+        }
+        if (!repliedThisTurn) {
+          const shard = field(prompt, 'shard')
+          return {
+            toolCalls: [{
+              id: `reply_${shard}`,
+              name: 'reply_user',
+              args: {
+                ticketId: field(prompt, 'ticketId'),
+                text: `launch reply from ${shard}`,
+                purpose: 'launch',
+              },
+            }],
+          }
+        }
+        return { text: 'router-idle' }
+      }
+      const reported = turn.some(message => message.role === 'tool' && message.name === 'report_to_router')
+      if (!reported) {
+        return {
+          toolCalls: [{
+            id: 'report_1',
+            name: 'report_to_router',
+            args: {
+              ticketId: field(prompt, 'ticketId'),
+              text: 'ready: login timeout fixed',
+              deliver: true,
+              kind: 'ready',
+            },
+          }],
+        }
+      }
+      return { text: 'worker-done' }
+    })
+
+    const runtime = start({
+      model,
+      env: isolatedEnv({
+        DS_AGENT_SHARDS: JSON.stringify([
+          { id: 'ci', filter: 'source:im,text:timeout', priority: 5 },
+          { id: 'topic', filter: 'thread:topic/overlap', priority: 5 },
+          { id: 'later', filter: 'source:im', priority: 1 },
+          { id: 'default' },
+        ]),
+      }),
+    })
+
+    runtime.ingest(imTrigger({
+      id: 'trg_overlap',
+      thread: 'topic/overlap',
+      text: '@ds-agent please fix the login timeout on checkout',
+    }))
+    await runtime.jobsSettled()
+
+    // Exactly the ordered matches: no default appended and no second disposition.
+    const disposition = runtime.store.getDoc<Disposition>('disposition', 'trg_overlap')
+    expect(disposition?.shards).toEqual(['ci', 'topic', 'later'])
+    expect(runtime.store.listDocs<Disposition>('disposition')).toHaveLength(1)
+    expect(runtime.store.listDocs<Ticket>('ticket')).toHaveLength(1)
+
+    // Every matching shard ran its Router session, in arbitration order, before the Worker.
+    const log = runtime.log.text()
+    const routerTurns = [...log.matchAll(/\[harness\] MainSession turn session=(router(?::\S+)?)/g)]
+      .map(match => match[1])
+    expect(routerTurns.slice(0, 3)).toEqual(['router:ci', 'router:topic', 'router:later'])
+    const workerStart = log.indexOf('ExecutorSession start')
+    expect(workerStart).toBeGreaterThan(0)
+    for (const session of ['router:ci', 'router:topic', 'router:later']) {
+      expect(log.indexOf(`MainSession turn session=${session}`)).toBeLessThan(workerStart)
+    }
+
+    // One terminal decision and one terminal ticket event for the trigger.
+    expect(runtime.store.listDocs<{ triggerIds: string[]; kind: string }>('decision')).toEqual([
+      expect.objectContaining({ triggerIds: ['trg_overlap'], kind: 'accept' }),
+    ])
+    const events = runtime.store.listEvents()
+    expect(events.filter(event => event.type === 'decision.recorded')).toHaveLength(1)
+    expect(events.filter(event => event.type === 'ticket.created')).toHaveLength(1)
+    expect(events.filter(event => event.type === 'ticket.ended')).toHaveLength(1)
+
+    // Both shards tried to speak at launch; only the first shard's reply exists.
+    const replies = runtime.store.listReplies()
+    const launch = replies.filter(reply => reply.purpose === 'launch')
+    expect(launch).toHaveLength(1)
+    expect(launch[0]!.text).toContain('launch reply from ci')
+    const result = replies.filter(reply => reply.purpose === 'result')
+    expect(result).toHaveLength(1)
+    expect(result[0]!.text).toContain('result from owner')
+    expect(runtime.store.listOutbox().filter(row => row.replyId === result[0]!.id)).toHaveLength(1)
+
+    // The follow-up after the Worker report went to the first shard only.
+    const journal = (session: string) => runtime.store
+      .listMessages(session)
+      .map(row => row.body)
+      .join('\n')
+    expect(journal('router:ci')).toContain('REPORT')
+    expect(journal('router:topic')).not.toContain('REPORT')
+    expect(journal('router')).not.toContain('REPORT')
+    expect(journal('router:topic')).toContain('does not own ticket')
+    expect(routerTurns.at(-1)).toBe('router:ci')
+  })
+
+  it('rejects non-owner shard replies and terminal calls without side effects', async () => {
+    const runtime = start()
+    const { triggerId, ticketId } = shardedTicket(runtime, 'trg_guard', ['ci', 'topic'])
+    const tools = toolRegistry(runtime)
+    const nonOwner = { sessionId: 'router:topic', role: 'router' as const }
+    const beforeDecisions = runtime.store.listDocs<Decision>('decision').length
+    const beforeReplies = runtime.store.listReplies().length
+    const beforeOutbox = runtime.store.listOutbox().length
+
+    await expect(tools.invoke(
+      { id: 'g_stop', name: 'assess_trigger', args: { triggerId, ticketId, kind: 'stop', reason: 'hijack' } },
+      nonOwner,
+    )).rejects.toThrow(/does not own ticket/)
+    await expect(tools.invoke(
+      { id: 'g_unavailable_no_ticket', name: 'assess_trigger', args: { triggerId, kind: 'unavailable', reason: 'hijack' } },
+      nonOwner,
+    )).rejects.toThrow(/does not own ticket/)
+    await expect(tools.invoke(
+      { id: 'g_unavailable_ticket', name: 'assess_trigger', args: { triggerId, ticketId, kind: 'unavailable', reason: 'hijack' } },
+      nonOwner,
+    )).rejects.toThrow(/does not own ticket/)
+    await expect(tools.invoke(
+      { id: 'g_stop_worker', name: 'stop_worker', args: { ticketId } },
+      nonOwner,
+    )).rejects.toThrow(/does not own ticket/)
+    await expect(tools.invoke(
+      { id: 'g_reply', name: 'reply_user', args: { ticketId, text: 'hijack', purpose: 'result' } },
+      nonOwner,
+    )).rejects.toThrow(/does not own ticket/)
+
+    expect(runtime.store.listDocs<Decision>('decision')).toHaveLength(beforeDecisions)
+    expect(runtime.store.listReplies()).toHaveLength(beforeReplies)
+    expect(runtime.store.listOutbox()).toHaveLength(beforeOutbox)
+    expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.ended).toBeUndefined()
+
+    const owner = { sessionId: 'router:ci', role: 'router' as const }
+    await tools.invoke(
+      { id: 'o_reply', name: 'reply_user', args: { ticketId, text: 'owner reply', purpose: 'result' } },
+      owner,
+    )
+    expect(runtime.store.listReplies()).toHaveLength(beforeReplies + 1)
+    await tools.invoke(
+      { id: 'o_stop', name: 'assess_trigger', args: { triggerId, ticketId, kind: 'stop', reason: 'owner veto' } },
+      owner,
+    )
+    expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.ended?.outcome).toBe('stopped')
+    expect(runtime.store.listDocs<Decision>('decision').filter(decision =>
+      decision.triggerIds.includes(triggerId) && decision.kind === 'stop')).toHaveLength(1)
+  })
+
+  it('rejects a trigger that does not belong to the supplied ticket', async () => {
+    const runtime = start()
+    const first = shardedTicket(runtime, 'trg_ci_owned', ['ci'], 'topic/first')
+    const second = shardedTicket(runtime, 'trg_topic_owned', ['topic'], 'topic/second')
+    const tools = toolRegistry(runtime)
+
+    // router:topic owns the second ticket; origin-only resolution would wrongly allow this.
+    await expect(tools.invoke(
+      {
+        id: 'borrow_first',
+        name: 'assess_trigger',
+        args: { triggerId: first.triggerId, ticketId: second.ticketId, kind: 'stop', reason: 'borrow' },
+      },
+      { sessionId: 'router:topic', role: 'router' },
+    )).rejects.toThrow(/does not belong to ticket/)
+    await expect(tools.invoke(
+      {
+        id: 'borrow_second',
+        name: 'assess_trigger',
+        args: { triggerId: second.triggerId, ticketId: first.ticketId, kind: 'stop', reason: 'borrow' },
+      },
+      { sessionId: 'router:ci', role: 'router' },
+    )).rejects.toThrow(/does not belong to ticket/)
+
+    expect(runtime.store.getDoc<Ticket>('ticket', first.ticketId)?.ended).toBeUndefined()
+    expect(runtime.store.getDoc<Ticket>('ticket', second.ticketId)?.ended).toBeUndefined()
+    expect(runtime.store.listDocs<Decision>('decision').filter(decision => decision.kind === 'stop')).toHaveLength(0)
+  })
+
+  it('fails closed when a ticket-scoped call cannot resolve an owner', async () => {
+    const runtime = start()
+    const tools = toolRegistry(runtime)
+    const owner = { sessionId: 'router:ci', role: 'router' as const }
+    const reply = (ticketId: string) => tools.invoke(
+      { id: `reply_${ticketId}`, name: 'reply_user', args: { ticketId, text: 'x', purpose: 'result' } },
+      owner,
+    )
+
+    await expect(reply('ticket_missing')).rejects.toThrow(/unknown ticket/)
+
+    const base: Ticket = {
+      id: 'ticket_orphan',
+      title: 'orphan',
+      brief: 'orphan',
+      mandate: {
+        strength: 'inferred',
+        policyVersion: 'policy-v1',
+        scope: 'orphan',
+        actor: { source: 'im', id: 'alex' },
+        basis: 'inferred',
+      },
+      threadKeys: ['im:topic/orphan'],
+      channels: [{ source: 'im', thread: 'topic/orphan' }],
+      inputs: [],
+      assignments: [],
+      speculative: false,
+      originTriggerId: 'trg_absent',
+      createdAt: new Date().toISOString(),
+    }
+    runtime.store.putDoc('ticket', base.id, base)
+    await expect(reply(base.id)).rejects.toThrow(/no disposition for trigger trg_absent/)
+
+    runtime.store.putDoc('ticket', 'ticket_no_origin', { ...base, id: 'ticket_no_origin', originTriggerId: '' })
+    await expect(reply('ticket_no_origin')).rejects.toThrow(/has no origin trigger/)
+  })
+
+  it('records one terminal Router decision per trigger and skips repeated owner stops', async () => {
+    const runtime = start()
+    const { triggerId, ticketId } = shardedTicket(runtime, 'trg_idem', ['ci', 'topic'])
+    const decisionsFor = () => runtime.store.listDocs<Decision>('decision')
+      .filter(decision => decision.triggerIds.includes(triggerId))
+    expect(decisionsFor().map(decision => decision.kind)).toEqual(['accept'])
+
+    const first = runtime.engine.decide(triggerId, { kind: 'stop', ticketId, reason: 'first stop' })
+    for (let step = 0; step < 9; step += 1) {
+      expect(runtime.engine.decide(triggerId, {
+        kind: 'stop',
+        ticketId,
+        reason: `repeat ${step}`,
+      }).id).toBe(first.id)
+    }
+
+    // The accept is the upstream Eval record. The Router contributes exactly one terminal decision.
+    expect(decisionsFor().filter(decision => decision.kind === 'stop')).toHaveLength(1)
+    expect(decisionsFor().filter(decision => decision.kind === 'accept')).toHaveLength(1)
+    expect(decisionsFor()).toHaveLength(2)
+    expect(runtime.log.text()).toContain(`Evals.decide skipped triggerId=${triggerId} kind=stop`)
   })
 
   it('ignores malformed shard config instead of failing startup', () => {
@@ -213,6 +508,6 @@ describe('Runtime service integration', () => {
     expect(singleCalls).toBe(1)
     expect(dualCalls).toBeGreaterThan(singleCalls)
     expect(single.log.text()).toContain('[harness] single-session')
-    expect(single.log.text()).not.toContain('RouterSession start')
+    expect(single.log.text()).not.toContain('MainSession start')
   })
 })

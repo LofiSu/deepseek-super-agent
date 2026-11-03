@@ -11,6 +11,13 @@ export function handback(host: Host, ticketId: string, triggerId: string, reason
   const disposition = host.repo.getDoc<Disposition>('disposition', triggerId)
   const trigger = host.repo.getDoc<Trigger>('trigger', triggerId)
   if (!disposition || !trigger) throw new UserError(`unknown trigger ${triggerId}`)
+  // A filtered trigger never passed admission. Requeueing it would let Eval turn
+  // it into a Ticket without a fresh admission decision, so refuse instead.
+  if (disposition.filtered !== undefined) {
+    throw new UserError(
+      `trigger ${triggerId} was filtered (${disposition.filtered || 'filtered'}) and cannot be handed back without re-admission`,
+    )
+  }
   const at = host.now()
   disposition.handbacks = [...(disposition.handbacks ?? []), { ticketId, reason, at }]
   host.repo.putDoc('disposition', triggerId, disposition)
@@ -19,6 +26,7 @@ export function handback(host: Host, ticketId: string, triggerId: string, reason
   const thread = host.repo.getDoc<Thread>('thread', key)
   if (thread) {
     thread.subscriptions = thread.subscriptions.filter(id => id !== ticketId)
+    thread.contextOnly = (thread.contextOnly ?? []).filter(id => id !== ticketId)
     if (!thread.pending.includes(triggerId)) thread.pending.push(triggerId)
     host.repo.putDoc('thread', key, thread)
     host.onQueued?.(key, triggerId, thread.pending)
@@ -27,6 +35,7 @@ export function handback(host: Host, ticketId: string, triggerId: string, reason
   const ticket = host.repo.getDoc<Ticket>('ticket', ticketId)
   if (ticket) {
     ticket.threadKeys = ticket.threadKeys.filter(item => item !== key)
+    ticket.contextOnlyThreads = (ticket.contextOnlyThreads ?? []).filter(item => item !== key)
     host.repo.putDoc('ticket', ticketId, ticket)
   }
 

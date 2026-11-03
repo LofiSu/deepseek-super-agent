@@ -4,10 +4,10 @@ import { readSpillFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
-import type { Role, Ticket } from '../shared/types.ts'
+import type { Disposition, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
-import { workerSessionId } from './session.ts'
+import { routerSessionId, workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 import { MAX_TEAM_MEMBERS, type TeamRegistry } from './team.ts'
 
@@ -73,8 +73,8 @@ export class ToolRegistry {
     const { store, log, metrics } = deps
     this.tools = [
       listTasks(store),
-      ...routerTools(deps.ports.router, { log }),
-      ...workerTools(deps.ports.worker, {
+      ...mainAgentTools(deps.ports.router, { store, log }),
+      ...executorTools(deps.ports.worker, {
         store,
         env: deps.env,
         log,
@@ -124,12 +124,60 @@ function listTasks(store: Store): ToolDef {
   }
 }
 
-/** Router tools close over RouterPorts. That is the only session allowed to speak. */
-function routerTools(
+/**
+ * Shard arbitration (P2-2): the first shard in `Disposition.shards` is the
+ * ticket's reply owner. Every matching shard runs its own Router session, but
+ * only that session may speak to the user or end the ticket, so a trigger has
+ * at most one terminal Router decision and one reply path.
+ *
+ * A call that names a trigger is resolved from that trigger's Disposition, not
+ * from the supplied ticket's origin. When both ids are present they must agree;
+ * otherwise a session could borrow another trigger's ownership. Missing ticket
+ * or disposition is fail-closed because every Ticket is created with an origin
+ * trigger and every admitted trigger has a Disposition.
+ */
+function assertShardOwner(
+  store: Store,
+  sessionId: string,
+  call: { ticketId?: string; triggerId?: string },
+): void {
+  const ticket = call.ticketId ? store.getDoc<Ticket>('ticket', call.ticketId) : undefined
+  if (call.ticketId && !ticket) throw new UserError(`unknown ticket ${call.ticketId}`)
+  if (call.triggerId && ticket && ticket.originTriggerId !== call.triggerId) {
+    throw new UserError(
+      `trigger ${call.triggerId} does not belong to ticket ${call.ticketId}; `
+      + 'refusing cross-trigger shard ownership',
+    )
+  }
+  const dispositionKey = call.triggerId ?? ticket?.originTriggerId
+  if (!dispositionKey) {
+    // A ticket-scoped call without an origin is not a known path: Tickets.create
+    // always sets originTriggerId. Fail closed instead of falling back to default.
+    if (call.ticketId) {
+      throw new UserError(`ticket ${call.ticketId} has no origin trigger; cannot resolve shard owner`)
+    }
+    return
+  }
+  const disposition = store.getDoc<Disposition>('disposition', dispositionKey)
+  if (!disposition) {
+    throw new UserError(`no disposition for trigger ${dispositionKey}; cannot resolve shard owner`)
+  }
+  const shard = disposition.shards?.[0] ?? 'default'
+  const owner = routerSessionId(shard)
+  if (sessionId !== owner) {
+    throw new UserError(
+      `router shard session ${sessionId} does not own ticket ${call.ticketId ?? '-'} (owner=${owner}); `
+      + 'only the first matching shard may reply or decide',
+    )
+  }
+}
+
+/** Main Agent tools close over Route-level ports. That is the only session allowed to speak. */
+function mainAgentTools(
   ports: RolePortFor<'router'>,
-  deps: { log: (line: string) => void },
+  deps: { store: Store; log: (line: string) => void },
 ): ToolDef[] {
-  const { log } = deps
+  const { store, log } = deps
   return [
     {
       name: 'create_worker',
@@ -146,8 +194,9 @@ function routerTools(
       description: 'Stop a ticket and end its running assignment.',
       parameters: schema({ ticketId: { type: 'string' } }),
       roles: ['router'],
-      run: guard('router', 'stop_worker', async args => {
+      run: guard('router', 'stop_worker', async (args, ctx) => {
         const ticketId = String(args.ticketId ?? '')
+        assertShardOwner(store, ctx.sessionId, { ticketId })
         // Actually end the work; a log line alone told the model a lie.
         ports.stop(ticketId, 'router stop_worker')
         log(`[harness] stop_worker ticketId=${ticketId}`)
@@ -156,15 +205,22 @@ function routerTools(
     },
     {
       name: 'reply_user',
-      description: 'Send a user-facing reply through the channel adapter.',
-      parameters: schema({ ticketId: { type: 'string' }, text: { type: 'string' }, purpose: { type: 'string' } }),
+      description: 'Send a user-facing reply to the Thread that produced the input.',
+      parameters: schema({
+        ticketId: { type: 'string' },
+        text: { type: 'string' },
+        purpose: { type: 'string' },
+        thread: { type: 'string', description: 'Thread key (source:id). Defaults to the Ticket channel.' },
+      }),
       roles: ['router'],
-      run: guard('router', 'reply_user', async args => {
+      run: guard('router', 'reply_user', async (args, ctx) => {
         const ticketId = String(args.ticketId ?? '')
+        assertShardOwner(store, ctx.sessionId, { ticketId })
         const text = String(args.text ?? '')
         const purpose = String(args.purpose ?? 'result')
-        ports.reply(ticketId, text, purpose)
-        return { sent: true, ticketId, purpose }
+        const thread = typeof args.thread === 'string' && args.thread ? args.thread : undefined
+        ports.reply(ticketId, text, purpose, thread)
+        return { sent: true, ticketId, purpose, thread: thread ?? null }
       }),
     },
     {
@@ -204,7 +260,7 @@ function routerTools(
         reason: { type: 'string' },
       }),
       roles: ['router'],
-      run: guard('router', 'assess_trigger', async args => {
+      run: guard('router', 'assess_trigger', async (args, ctx) => {
         const triggerId = String(args.triggerId ?? '')
         const kind = String(args.kind ?? '')
         const reason = String(args.reason ?? 'router-assessment')
@@ -212,11 +268,16 @@ function routerTools(
         if (kind === 'stop') {
           const ticketId = String(args.ticketId ?? '')
           if (!ticketId) throw new UserError('assess_trigger stop needs a ticketId')
+          assertShardOwner(store, ctx.sessionId, { ticketId, triggerId })
           const decision = ports.decide(triggerId, { kind: 'stop', ticketId, reason })
           log(`[harness] router veto ticketId=${ticketId} triggerId=${triggerId} reason=${reason}`)
           return { decision: decision.kind, ticketId: decision.ticketId }
         }
         if (kind === 'unavailable') {
+          assertShardOwner(store, ctx.sessionId, {
+            ticketId: String(args.ticketId ?? '') || undefined,
+            triggerId,
+          })
           const decision = ports.decide(triggerId, { kind: 'unavailable', reason })
           return { decision: decision.kind }
         }
@@ -235,8 +296,8 @@ interface WorkerToolDeps {
   teams?: TeamRegistry
 }
 
-/** Worker tools close over WorkerPorts. reply, decide, and receive are not in this scope. */
-function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDef[] {
+/** Executor tools close over ExecutorPorts. reply, decide, and receive are not in this scope. */
+function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDef[] {
   const { store, env, log } = deps
   return [
     {
@@ -308,22 +369,34 @@ function workerTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): ToolDe
       }),
       roles: ['worker'],
       run: guard('worker', 'report_to_router', async (args, ctx) => {
-        const ticketId = String(args.ticketId ?? ctx.ticketId ?? '')
+        // A worker may only report on the ticket its session owns. Never trust
+        // the model-supplied id over the harness context.
+        if (!ctx.ticketId) throw new UserError('report_to_router needs a ticket')
+        const requested = args.ticketId == null ? '' : String(args.ticketId)
+        if (requested && requested !== ctx.ticketId) {
+          throw new UserError(`report_to_router ticketId ${requested} does not match this session`)
+        }
+        const ticketId = ctx.ticketId
         const deliver = args.deliver === true
         const text = String(args.text ?? '').replace(/\n/g, ' ')
         const kind = String(args.kind ?? (deliver ? 'ready' : 'progress'))
         const result = ports.report(ticketId, { kind, text, deliver })
         settleSpeculation(env, ctx.sessionId, result.verdict)
         if (result.verdict === 'discard') log(`[speculate] rollback workdir session=${ctx.sessionId}`)
-        const prompt = ['REPORT', `deliver=${deliver ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
+        // The gate, not the model, decides whether the router may speak.
+        const announced = result.verdict === 'deliver'
+        const prompt = ['REPORT', `deliver=${announced ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
         await deps.routerTurn(prompt)
-        return { ...result, deliver }
+        return { ...result, deliver: announced }
       }),
     },
     {
       name: 'subscribe_thread',
-      description: 'Subscribe this ticket to another thread. contextOnly=true grants context but no follow-up bypass.',
-      parameters: schema({ thread: { type: 'string' }, contextOnly: { type: 'boolean' } }),
+      description: 'Subscribe this ticket to another thread. contextOnly means read but do not wake.',
+      parameters: schema({
+        thread: { type: 'string' },
+        contextOnly: { type: 'boolean', description: 'Read for context; never a follow-up wake-up.' },
+      }),
       roles: ['worker'],
       run: guard('worker', 'subscribe_thread', async (args, ctx) => {
         if (!ctx.ticketId) throw new UserError('subscribe_thread needs a ticket')
@@ -524,9 +597,14 @@ function ticketOf(store: Store, ctx: { ticketId?: string }): Ticket | undefined 
 /** Speculative mutations stay in a scratch workdir, or are refused when isolation is unavailable. */
 function mutableMode(store: Store, env: EnvPort, ctx: { ticketId?: string }): EnvRunOptions {
   const ticket = ticketOf(store, ctx)
+  // A worker turn can outlive its ticket (watchdog failure, human stop, discard).
+  // It must not keep mutating the durable workspace after that.
+  if (ticket?.ended) throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome})`)
   if (!ticket?.speculative) return { isolated: false }
-  if (ticket.ended) throw new UserError('speculative assignment was discarded')
-  if (!env.discardIsolated) throw new UserError('speculative workers are read-only without an isolated workdir')
+  // Delivery is only safe when scratch can be promoted as well as discarded.
+  if (!env.discardIsolated || !env.promoteIsolated) {
+    throw new UserError('speculative workers are read-only without an isolated workdir')
+  }
   return { isolated: true }
 }
 

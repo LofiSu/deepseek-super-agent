@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { readSpillFor } from '../src/memory/acl.ts'
 import { SpillBackedLongTermMemory } from '../src/memory/long-term.ts'
 import { memoryRetentionFromEnv } from '../src/runtime.ts'
@@ -35,6 +35,153 @@ describe('Long-term memory', () => {
     expect(memory.query({ ticketId: 'ticket_b', text: 'unique stack' })).toHaveLength(1)
     expect(memory.query({ ticketId: 'ticket_b', text: 'missing' })).toEqual([])
     expect(() => memory.query({ text: 'auth' })).toThrow(/ticketId/)
+    store.close()
+  })
+
+  it('ranks a tag match above a newer untagged entry', () => {
+    const store = new Store(tempHome())
+    let tick = 0
+    const memory = new SpillBackedLongTermMemory(store, {
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick++ * 1_000),
+    })
+    const tagged = memory.put('ticket_a', 'auth middleware failure', { tags: ['auth'] })
+    const newer = memory.put('ticket_b', 'auth middleware failure')
+
+    expect(newer.createdAt > tagged.createdAt).toBe(true)
+    expect(memory.query({ ticketId: 'reader', text: 'auth' }).map(entry => entry.id))
+      .toEqual([tagged.id, newer.id])
+    store.close()
+  })
+
+  it('ranks more body hits above a newer entry when tag hits tie', () => {
+    const store = new Store(tempHome())
+    let tick = 0
+    const memory = new SpillBackedLongTermMemory(store, {
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick++ * 1_000),
+    })
+    const moreHits = memory.put('ticket_a', 'token token token failure')
+    const newer = memory.put('ticket_b', 'token failure')
+
+    const hits = memory.query({ ticketId: 'reader', text: 'token failure' })
+    expect(hits.map(entry => entry.id)).toEqual([moreHits.id, newer.id])
+    store.close()
+  })
+
+  it('caps each query word at five body hits when scoring', () => {
+    const store = new Store(tempHome())
+    let tick = 0
+    const memory = new SpillBackedLongTermMemory(store, {
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick++ * 1_000),
+    })
+    // Older has 7 hits and newer has 6. Both cap at 5, so recency decides;
+    // without the cap the older entry would win 7 to 6.
+    const uncappedMore = memory.put('ticket_a', 'token token token token token token token')
+    const uncappedLess = memory.put('ticket_b', 'token token token token token token')
+
+    expect(memory.query({ ticketId: 'reader', text: 'token' }).map(entry => entry.id))
+      .toEqual([uncappedLess.id, uncappedMore.id])
+    store.close()
+  })
+
+  it('uses createdAt before lexicographic id when the clock moves backwards', () => {
+    const store = new Store(tempHome())
+    let tick = 1
+    const memory = new SpillBackedLongTermMemory(store, {
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick-- * 1_000),
+    })
+    const newerCreated = memory.put('ticket_a', 'alpha')
+    const olderCreated = memory.put('ticket_b', 'alpha')
+
+    expect(newerCreated.createdAt > olderCreated.createdAt).toBe(true)
+    // Id-desc order conflicts with recency here: ltm_2 > ltm_1.
+    expect(newerCreated.id < olderCreated.id).toBe(true)
+    expect(memory.query({ ticketId: 'reader', text: 'alpha' }).map(entry => entry.id))
+      .toEqual([newerCreated.id, olderCreated.id])
+    store.close()
+  })
+
+  it('tie-breaks equal scores by recency and then id descending', () => {
+    const store = new Store(tempHome())
+    let tick = 0
+    const memory = new SpillBackedLongTermMemory(store, {
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick++ * 1_000),
+    })
+    const older = memory.put('ticket_a', 'alpha')
+    const newer = memory.put('ticket_b', 'alpha')
+    expect(memory.query({ ticketId: 'reader', text: 'alpha' }).map(entry => entry.id))
+      .toEqual([newer.id, older.id])
+    store.close()
+
+    const fixedStore = new Store(tempHome())
+    const fixed = () => new Date('2026-01-01T00:00:00.000Z')
+    const sameClock = new SpillBackedLongTermMemory(fixedStore, { now: fixed })
+    const first = sameClock.put('ticket_a', 'alpha')
+    const second = sameClock.put('ticket_b', 'alpha')
+    expect(second.createdAt).toBe(first.createdAt)
+    expect(sameClock.query({ ticketId: 'reader', text: 'alpha' }).map(entry => entry.id))
+      .toEqual([second.id, first.id])
+    fixedStore.close()
+  })
+
+  it('dedupes normalized text per ticket without a new entry or spill', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store)
+    const first = memory.put('ticket_a', 'Auth   FAILED\n on token', { tags: ['seen'] })
+    const spillSpy = vi.spyOn(store, 'putSpill')
+    const second = memory.put('ticket_a', '  auth failed on TOKEN  ', { tags: ['prod'] })
+
+    expect(second.id).toBe(first.id)
+    expect(second.spillId).toBe(first.spillId)
+    expect(second.createdAt).toBe(first.createdAt)
+    expect(second.tags).toEqual(['seen', 'prod'])
+    expect(store.getDoc('ltm', first.id)).toEqual(second)
+    expect(store.listDocs('ltm')).toHaveLength(1)
+    expect(spillSpy).not.toHaveBeenCalled()
+    spillSpy.mockRestore()
+    expect(store.getSpill(first.spillId)).toBe('Auth   FAILED\n on token')
+
+    // Different text is still a new entry, and the same text for another
+    // ticket is not deduped.
+    const different = memory.put('ticket_a', 'a different note')
+    expect(different.id).not.toBe(first.id)
+    const otherTicket = memory.put('ticket_b', 'auth failed on token')
+    expect(otherTicket.id).not.toBe(first.id)
+    expect(store.listDocs('ltm')).toHaveLength(3)
+    store.close()
+  })
+
+  it('never reuses a zombie entry whose spill is missing', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store)
+    const first = memory.put('ticket_a', 'auth failed on token')
+    store.deleteSpill(first.spillId)
+
+    const second = memory.put('ticket_a', 'auth failed on token')
+    expect(second.id).not.toBe(first.id)
+    expect(second.spillId).not.toBe(first.spillId)
+    expect(store.getSpill(second.spillId)).toBe('auth failed on token')
+    expect(readSpillFor(store, second.spillId, { ticketId: 'ticket_a' }).text)
+      .toBe('auth failed on token')
+    // The summary-only zombie is not recallable; the fresh entry is.
+    expect(memory.query({ ticketId: 'reader', text: 'auth' }).map(entry => entry.id))
+      .toEqual([second.id])
+    store.close()
+  })
+
+  it('keeps requested tags as an AND filter while tag hits drive ranking', () => {
+    const store = new Store(tempHome())
+    let tick = 0
+    const memory = new SpillBackedLongTermMemory(store, {
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick++ * 1_000),
+    })
+    const both = memory.put('ticket_a', 'common failure text', { tags: ['auth', 'prod'] })
+    const one = memory.put('ticket_b', 'common failure text', { tags: ['auth'] })
+    memory.put('ticket_c', 'common failure text')
+
+    expect(memory.query({ ticketId: 'reader', text: 'common', tags: ['auth', 'prod'] })
+      .map(entry => entry.id)).toEqual([both.id])
+    expect(memory.query({ ticketId: 'reader', text: 'common', tags: ['auth'] })
+      .map(entry => entry.id).sort()).toEqual([both.id, one.id].sort())
     store.close()
   })
 

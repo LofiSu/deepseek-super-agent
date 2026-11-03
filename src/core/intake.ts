@@ -49,15 +49,17 @@ export class Intake {
     this.host.repo.putDoc('trigger', trigger.id, owned)
     const keys = trigger.threads.map(threadKey)
     let primary: Thread | undefined
-    const eligible: Ticket[] = []
+    const fanout: string[] = []
+    const context: string[] = []
     const seen = new Set<string>()
+    const command = commandOf(owned.text)
     for (const ref of trigger.threads) {
       const thread = this.ensure(ref)
       if (!primary) primary = thread
       if (!thread.lastAt || trigger.at > thread.lastAt) thread.lastAt = trigger.at
       thread.correlated = [...new Set([...thread.correlated, ...keys.filter(key => key !== thread.key)])]
-      // Stop / ignore / unavailable stay on the Eval queue instead of bypassing into the worker.
-      if (!commandOf(trigger.text)) {
+      // Stop / ignore / unavailable stay on the Eval queue instead of bypassing into an Executor.
+      if (!command) {
         const live: string[] = []
         for (const ticketId of thread.subscriptions) {
           if (seen.has(ticketId)) continue
@@ -66,42 +68,40 @@ export class Intake {
           // Drop stale ids instead of resurrecting an ended ticket on a later follow-up.
           if (!ticket || ticket.ended) continue
           live.push(ticketId)
-          if (!bypassEligible(ticket, trigger, thread.subscriptionMeta?.[ticketId])) continue
-          eligible.push(ticket)
+          const meta = thread.subscriptionMeta?.[ticketId]
+          if (!subscriptionEligible(ticket)) continue
+          const contextOnly = meta?.contextOnly === true || isContextOnly(thread, ticketId)
+            || ticket.contextOnlyThreads?.includes(thread.key) === true
+          // A human follow-up on a live, non-context-only subscription is actionable.
+          // A bot/CI event and a context-only subscription only add background.
+          const actionable = bypassEligible(ticket, trigger, meta) && !contextOnly
+          addInput(this.host, ticket, owned, actionable ? 'trigger' : 'context', at)
+          if (actionable) fanout.push(ticket.id)
+          else context.push(ticket.id)
         }
         thread.subscriptions = live
       }
       this.host.repo.putDoc('thread', thread.key, thread)
     }
 
-    const winner = arbitrateSubscribers(eligible)
-    if (winner) {
-      winner.inputs.push({
-        id: this.host.repo.nextId('input'),
-        kind: 'trigger',
-        triggerId: trigger.id,
-        text: trigger.text,
-        spillId: trust.spillId,
-        at,
-        human: trigger.human,
-      })
-      grantTicketSpill(this.host.repo, trust.spillId, winner.id)
-      this.host.repo.putDoc('ticket', winner.id, winner)
-    }
-
-    const fanout = winner ? [winner.id] : []
     const primaryKey = primary?.key ?? threadKey(trigger.threads[0]!)
     for (const ticketId of fanout) {
       this.host.log(`bypass=subscription ticketId=${ticketId} thread=${primaryKey} triggerId=${trigger.id}`)
     }
     if (fanout.length > 0) this.host.metrics.increment('bypass.fanout', fanout.length)
-    if (fanout.length === 0 && primary) {
+    if (context.length > 0) this.host.metrics.increment('bypass.context', context.length)
+
+    // Human follow-ups that reached an actionable subscriber do not need Eval.
+    // Bot/CI events and context-only subscriptions still become new-work candidates.
+    const needsEval = command != null || trigger.human === false || fanout.length === 0
+    if (needsEval && primary) {
       primary.pending = [...primary.pending, trigger.id]
       this.host.repo.putDoc('thread', primary.key, primary)
       this.host.onQueued?.(primary.key, trigger.id, primary.pending)
     }
     const disposition: Disposition = {
       fanout,
+      context,
       ...(trust.shards?.length ? { shards: trust.shards } : {}),
       at,
     }
@@ -110,6 +110,7 @@ export class Intake {
       triggerId: trigger.id,
       result: 'stored',
       fanout,
+      context,
       ...(trust.shards?.length ? { shards: trust.shards } : {}),
     })
     return 'stored'
@@ -152,6 +153,41 @@ export function bypassEligible(
   return !mandateActor || !trigger.actor.id || mandateActor === trigger.actor.id
 }
 
+/** A live Ticket with a non-empty Mandate can receive Trigger context. */
+export function subscriptionEligible(ticket: Ticket): boolean {
+  if (ticket.ended) return false
+  const scope = ticket.mandate?.scope
+  return typeof scope === 'string' && scope.trim().length > 0
+}
+
+export function isContextOnly(thread: Thread, ticketId: string): boolean {
+  return (thread.contextOnly ?? []).includes(ticketId)
+}
+
+function spillOf(trigger: Trigger): string | undefined {
+  return typeof trigger.meta.spillId === 'string' ? trigger.meta.spillId : undefined
+}
+
+function addInput(
+  host: Host,
+  ticket: Ticket,
+  trigger: Trigger,
+  kind: 'trigger' | 'context',
+  at: string,
+): void {
+  ticket.inputs.push({
+    id: host.repo.nextId('input'),
+    kind,
+    triggerId: trigger.id,
+    text: trigger.text,
+    spillId: spillOf(trigger),
+    at,
+    human: trigger.human,
+  })
+  grantTicketSpill(host.repo, spillOf(trigger), ticket.id)
+  host.repo.putDoc('ticket', ticket.id, ticket)
+}
+
 /** One subscriber wins: an active assignment outranks a finished one, then the latest activity. */
 export function arbitrateSubscribers(tickets: Ticket[]): Ticket | undefined {
   if (!tickets.length) return undefined
@@ -164,7 +200,8 @@ function higherSubscriber(left: Ticket, right: Ticket): Ticket {
   if (a.rank !== b.rank) return a.rank > b.rank ? left : right
   if (a.at !== b.at) return a.at > b.at ? left : right
   if (left.createdAt !== right.createdAt) return left.createdAt > right.createdAt ? left : right
-  return left.id > right.id ? left : right
+  // Natural order: ticket_10 is later than ticket_9, unlike a raw string compare.
+  return left.id.localeCompare(right.id, 'en', { numeric: true }) > 0 ? left : right
 }
 
 function subscriberScore(ticket: Ticket): { rank: number; at: string } {

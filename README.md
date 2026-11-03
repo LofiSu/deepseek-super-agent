@@ -21,7 +21,9 @@ Shorter pages, same facts: [install](docs/install.md), [architecture](docs/archi
 Two layers.
 
 - **Harness.** Session log, async ReAct loop, OpenAI-compatible calls, tools by role, daemon.
-- **Engine.** Intake → Eval → Ticket → Assignment → Reply. Domain writes stay in the Engine.
+- **Engine.** Intake → Eval (Gate + Assessment) → Mandate/Ticket → Assignment → Outbox. Domain writes stay in the Engine.
+
+Domain naming follows [从零打造 Personal Agent（三）](https://my.feishu.cn/docx/YtDVdzfxdobjAkxKZiIcl5Emnth): the `router` role is the **Main Agent / Main Session**, the `worker` role is the **Executor**, and `Subscription` is a context-only Ticket ↔ Thread relation. The audit and corrections are in [docs/DOMAIN_ALIGNMENT.md](./docs/DOMAIN_ALIGNMENT.md).
 
 ## Inspiration
 
@@ -45,11 +47,11 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 ### §2 Dual Router / Worker
 
-- [x] **Continuity vs throughput.** Two layers. The Router talks and dispatches. Workers execute alone (`SessionRole`).
+- [x] **Continuity vs throughput.** Two layers. The Router talks and dispatches. Workers execute alone (`Role`).
 - [x] **Router is the sequence point.** Inbound goes through the Engine. Outbound goes through Router/Outbox.
 - [x] **Router stays light.** Workers hold the execution tools. The Router tool set is smaller.
-- [x] **Small model on the Router.** `roleModels.router`. Workers can use a stronger model.
-- [x] **Trigger batching.** Under load, same-Thread Triggers fold into the next Eval. Demo and tests cover it.
+- [x] **Small model on the Router.** `models.router` from `roleModelsFromEnv`. Workers can use a stronger model.
+- [x] **Trigger batching.** A positive `batchWindowMs` folds same-Thread Triggers into one Eval. Covered by `test/batching-bench.test.ts`; the real-channel demo uses the default window (0), so it does not exercise folding.
 - [~] **Router sharding / multi-layer filter.** `RouterShardRegistry` is always wired into the Runtime (PLAN T09/T46). Configure with `DS_AGENT_SHARDS` or `RuntimeOptions.routerShards`; the default shard always exists.
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
@@ -61,7 +63,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 - [x] **Triggers.** Semi-structured events from IM / GitHub-style sources.
 - [x] **Fast Path.** Deterministic source and noise rules (`ingress/filter`).
-- [x] **Slow Path.** Semantic or policy filter. It can call a model. Rules can stand in.
+- [x] **Slow Path.** Semantic or policy filter. The shipped classifier is deterministic (`ruleClassify`) for both `MockModel` and `HttpOpenAI`; a model-backed policy classifier is not wired, so rules stand in. `test/slow-path-policy.test.ts` pins this and proves classification never calls the network.
 - [x] **Thread.** One topic or PR. One event stream. Thread key.
 - [x] **Already subscribed.** Straight to the Worker. Log line `bypass=subscription` plus `ticketId`.
 - [x] **Not subscribed.** Cold start: Intake → Eval → Ticket.
@@ -76,9 +78,9 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 ### §4 Talking to people
 
-- [x] **Async ReAct.** `start` returns at once. The foreground does not wait.
+- [x] **Async ReAct.** The `start_job` tool returns `{status:'started',jobId}` at once and ends the turn; `Harness.launch` enqueues the next turn. The foreground does not wait. Covered by `test/job.test.ts`; the real-channel demo does not call `start_job`.
 - [x] **Started notice.** A job-started log event.
-- [x] **Completion comes back.** The result is a new Session event on the Worker.
+- [x] **Completion comes back.** A finished job re-enters the Worker as a `JOB_DONE` prompt and triggers the next turn.
 - [x] **Duplex.** New input still arrives while a job runs.
 - [x] **IM norms.** Short replies. Low interruption (`channels/norms`, with a word cap).
 - [x] **GitHub-style output.** Structured text from the GitHub channel formatter.
@@ -115,6 +117,7 @@ Kept out of M11.
 - [~] Memory that spans tickets (§8.1) — always-wired `SpillBackedLongTermMemory` (not month-scale yet)
 - [~] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model; no default UI yet
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
+- [x] Panel · Execution — `ds-agent panel` derives Open/Pending/Working/Waiting/Blocked/Awaiting from Ticket facts, with Mandate, Executor Session, directory, report, and Outbox delivery counts (`src/core/panel.ts`)
 - [~] A2A across instances (§8.3) — always-wired `A2ARouter` (in-process; `runtime.sendA2A`)
 - [~] **Credentials stay out of tool output.** LocalEnv allowlist + `[redacted]` for secret-named env values of at least 8 characters (shorter values and other names are left as-is) + FileVault `describe()` (names only). Every worker bash is wrapped: `sandbox-exec` on macOS, `bwrap` on Linux; a missing wrapper is a hard error with no plain-bash fallback, and network is denied unless the policy allows it. The wrapper confines writes and network, not reads: both platforms still allow broad reads, so process-level read isolation, including the SQLite DB, remains an external/container boundary (§8.4, T51). Host vault/seccomp policy still external.
 
@@ -219,7 +222,7 @@ A subscribed Thread uses `bypass=subscription`. It skips Router Eval and goes to
 
 ## Quick start
 
-Node.js 22+. See `engines` in [package.json](./package.json). The store uses `node:sqlite`. Install [pnpm](https://pnpm.io/).
+Node.js 22+. See `engines` in [package.json](./package.json). The store uses `node:sqlite`. Install [pnpm](https://pnpm.io/). This is a source-only repository: no npm package, no `bin`, no `build`; run `pnpm ds-agent ...` from the checkout.
 
 ```bash
 pnpm install
@@ -260,12 +263,14 @@ export DS_AGENT_GH_REPO=your-account/your-writable-repo
 pnpm demo
 ```
 
-[GitHub Actions](./.github/workflows/ci.yml) runs `pnpm typecheck` and `pnpm test` on pushes to `main` and on pull requests. The demo job runs `pnpm demo:local` (in-memory fixture smoke, no repository writes) when `DEEPSEEK_API_KEY` or `DS_AGENT_API_KEY` is set; real-channel acceptance is `pnpm demo` run by an operator with `gh` auth.
+[GitHub Actions](./.github/workflows/ci.yml) runs `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test`, and `pnpm test:coverage` on pushes to `main` and on pull requests. `pnpm lint` checks repo-specific invariants (roadmap board shape, removed-extension-switch naming, tracked build paths, and `console` usage outside the CLI); `pnpm format:check` uses `git diff --check`. `pnpm test:coverage` runs the offline fixture suite with a text and JSON summary and no failure threshold. The demo job runs `pnpm demo:local` (in-memory fixture smoke, no repository writes) when `DEEPSEEK_API_KEY` or `DS_AGENT_API_KEY` is set; real-channel acceptance is `pnpm demo` run by an operator with `gh` auth.
 
 State lives in `DS_AGENT_HOME`, or in `./.ds-agent` (SQLite).
 
 ```bash
 pnpm ds-agent tasks
+pnpm ds-agent panel
+pnpm ds-agent retry <ticketId>
 pnpm ds-agent status
 pnpm ds-agent metrics
 pnpm ds-agent emit im --thread bug-login --text "login still 500"

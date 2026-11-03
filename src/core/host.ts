@@ -14,4 +14,8 @@ export interface Host {
   onTicketCreated?: (ticket: Ticket) => void
   /** Lifecycle hook for every terminal ticket path (deliver, discard, stop, fail). */
   onTicketEnded?: (ticket: Ticket) => void
+  /** Gate deferred this Thread; the Main Agent should assess the queued Triggers. */
+  onAssessmentNeeded?: (threadKey: string) => void
+  /** Infrastructure cleanup for a speculative ticket that ends without delivering. */
+  discardScratch?: (ticketId: string) => void
 }

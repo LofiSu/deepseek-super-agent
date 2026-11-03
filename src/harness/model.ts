@@ -1,6 +1,4 @@
-import path from 'node:path'
 import { ruleClassify, type SemanticHit, type SemanticModel } from '../ingress/filter.ts'
-import { readGatewayToken } from '../gateway/token.ts'
 import type { Role } from '../shared/types.ts'
 import type { Trigger } from '../shared/types.ts'
 import { resolveLiveApi } from './providers.ts'
@@ -46,10 +44,10 @@ export interface Model extends SemanticModel {
 
 export function systemPrompt(role: Role): string {
   if (role === 'router') {
-    return 'You are the RouterSession. The Engine already acknowledged an accepted ticket; do not send a second acknowledgement. Speak to the user with reply_user only when a worker report delivers a result. Do not run bash. Stay quiet on speculative work until a report delivers.'
+    return 'You are the MainSession. The Engine already acknowledged an accepted ticket; do not send a second acknowledgement. Speak to the user with reply_user only when a worker report delivers a result. Do not run bash. Stay quiet on speculative work until a report delivers.'
   }
   if (role === 'worker') {
-    return 'You are a WorkerSession. Investigate with tools and report_to_router. Never message the user directly. Shell env is allowlisted (PATH, HOME, USER, LANG, TMPDIR); credential values are omitted.'
+    return 'You are an ExecutorSession. Investigate with tools and report_to_router. Never message the user directly. Shell env is allowlisted (PATH, HOME, USER, LANG, TMPDIR); credential values are omitted.'
   }
   return 'You are the WatchdogSession. Check stuck workers. Do not reply to users.'
 }
@@ -250,27 +248,8 @@ function timeoutFromEnv(env: NodeJS.ProcessEnv): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 60_000
 }
 
-/**
- * A local gateway takes priority when `DS_AGENT_GATEWAY_URL` is set. The bearer
- * token is read from `DS_AGENT_GATEWAY_TOKEN` or the gateway's persisted token
- * file, so the agent reuses the gateway's self-issued token automatically.
- */
-function gatewayApiFromEnv(env: NodeJS.ProcessEnv): { base: string; apiKey: string; model: string } | undefined {
-  const raw = env.DS_AGENT_GATEWAY_URL?.trim()
-  if (!raw) return undefined
-  const trimmed = raw.replace(/\/+$/, '')
-  const base = trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`
-  const home = env.DS_AGENT_HOME?.trim() || path.join(process.cwd(), '.ds-agent')
-  const token = env.DS_AGENT_GATEWAY_TOKEN?.trim() || readGatewayToken(home)
-  if (!token) return undefined
-  const model = env.DS_AGENT_GATEWAY_MODEL?.trim() || env.DS_AGENT_API_MODEL?.trim() || 'auto'
-  return { base, apiKey: token, model }
-}
-
 /** MockModel when no provider is configured. A partial key/base pair throws instead of returning MockModel. */
 export function createModelFromEnv(env: NodeJS.ProcessEnv = process.env): Model {
-  const gateway = gatewayApiFromEnv(env)
-  if (gateway) return new HttpOpenAI(gateway.base, gateway.apiKey, gateway.model, timeoutFromEnv(env))
   const live = resolveLiveApi(env)
   if (!live) return new MockModel()
   return new HttpOpenAI(live.base, live.apiKey, live.model, timeoutFromEnv(env))
@@ -307,10 +286,8 @@ export function roleModelsFromEnv(
   return models
 }
 
-/** Live HttpOpenAI (or the local gateway), or an error. Never returns MockModel. */
+/** Live HttpOpenAI, or an error. Never returns MockModel. */
 export function requireLiveModelFromEnv(env: NodeJS.ProcessEnv = process.env): HttpOpenAI {
-  const gateway = gatewayApiFromEnv(env)
-  if (gateway) return new HttpOpenAI(gateway.base, gateway.apiKey, gateway.model, timeoutFromEnv(env))
   const live = resolveLiveApi(env)
   if (!live) throw new Error('No live model configured; refusing MockModel.')
   return new HttpOpenAI(live.base, live.apiKey, live.model, timeoutFromEnv(env))

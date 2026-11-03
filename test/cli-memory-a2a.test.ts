@@ -17,7 +17,7 @@ afterEach(() => {
   for (const dir of homes.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
 })
 
-function command(name: 'memory' | 'a2a', env: NodeJS.ProcessEnv): string {
+function command(name: 'memory' | 'a2a' | 'status', env: NodeJS.ProcessEnv): string {
   const result = spawnSync(
     process.execPath,
     ['--import', 'tsx', 'src/cli/main.ts', name],
@@ -28,6 +28,16 @@ function command(name: 'memory' | 'a2a', env: NodeJS.ProcessEnv): string {
 }
 
 describe('ds-agent memory / a2a', () => {
+  it('counts only visible tickets in status', () => {
+    const dir = home()
+    const store = new Store(dir)
+    store.putDoc('ticket', 'ticket_1', { id: 'ticket_1', speculative: false })
+    store.putDoc('ticket', 'ticket_2', { id: 'ticket_2', speculative: true })
+    store.close()
+
+    expect(command('status', { DS_AGENT_HOME: dir })).toContain('tickets 1')
+  })
+
   it('reports an empty memory index', () => {
     const state = JSON.parse(command('memory', {
       DS_AGENT_HOME: home(),
