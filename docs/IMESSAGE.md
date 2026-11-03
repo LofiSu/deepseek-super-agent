@@ -46,7 +46,15 @@ The error is shown before `chat.db` is opened.
   group row's (`chat.style = 43` or a non-empty room name) chat id is exposed
   as `channel.address.group`; ambiguous/unknown groups leave it unset, so
   `DS_AGENT_GROUP_ALLOWLIST` and outbound fail closed instead of reusing a 1:1
-  chat id.
+  chat id. When a message joins several positive group rows, the first non-empty
+  chat guid and the first non-empty identifier are aggregated independently, so
+  an identifier-only row cannot hide a usable guid from a later row.
+- **Group and 1:1 conversations use separate thread keys.** A chat guid yields
+  `chat:<chatGuid>`. Without one, a group yields `group:<chatIdentifier>` when
+  a positive identifier exists and `group-unknown:<handle>` otherwise, while a
+  1:1 message yields `handle:<handle>`. An ambiguous group can never share a
+  thread, and therefore ticket context, with a 1:1 message from the same
+  sender.
 - **Missing schema fails closed.** If `chat.style` or `chat.room_name` is absent,
   the channel reports a compatibility error instead of treating every row as
   1:1; it does not retry the incompatible query on every poll.
