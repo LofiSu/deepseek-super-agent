@@ -39,9 +39,19 @@ The error is shown before `chat.db` is opened.
   normal admission rules.
 - **Group chats are skipped by default.** Group detection reads `chat.style`
   (`43` = group) and `chat.room_name`, never message text. Enable ingestion with
-  `--allow-groups` / `DS_AGENT_IMESSAGE_ALLOW_GROUPS=1`.
+  `--allow-groups` / `DS_AGENT_IMESSAGE_ALLOW_GROUPS=1`. A message joined to
+  both a 1:1 and a group chat is a group. A message with no chat row, or with
+  chat metadata that is neither a known 1:1 nor a known group, is treated as a
+  group/unknown and skipped by default. For group messages, the chat id is
+  exposed as `channel.address.group`, so `DS_AGENT_GROUP_ALLOWLIST` can gate it.
+- **Missing schema fails closed.** If `chat.style` or `chat.room_name` is absent,
+  the channel reports a compatibility error instead of treating every row as
+  1:1; it does not retry the incompatible query on every poll.
 - **`--allow-any` is an explicit opt-out.** It logs a prominent warning at
   startup. Prefer a sender allowlist.
+- **`--handle` is trimmed once.** The same trimmed value is used for the startup
+  admission decision and the SQL sender filter. Missing, whitespace-only, or
+  flag-like values are rejected rather than silently idling.
 
 ## Prerequisites (one-time, manual)
 

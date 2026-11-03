@@ -67,6 +67,27 @@ export interface ImessagePullOptions {
 /** chat.db `chat.style` value for a group chat (1:1 chats use 45). */
 export const IMESSAGE_GROUP_CHAT_STYLE = 43
 
+/** chat.db `chat.style` value for a known 1:1 chat. */
+export const IMESSAGE_DIRECT_CHAT_STYLE = 45
+
+/**
+ * Raised when chat.db lacks the `chat.style` / `chat.room_name` columns this
+ * channel needs to tell 1:1 messages from group messages. It is cached and
+ * rethrown, so a poll loop neither re-queries the schema nor guesses 1:1.
+ */
+export class ImessageSchemaError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ImessageSchemaError'
+  }
+}
+
+function nonEmptyText(value: unknown): string | undefined {
+  if (value == null) return undefined
+  const text = String(value)
+  return text.trim() === '' ? undefined : text
+}
+
 /**
  * Group detection uses chat.db metadata only (`chat.style`, `chat.room_name`),
  * never message text. Any positive signal wins, so an inconsistent row fails
@@ -184,9 +205,12 @@ export function imessageThreadFor(message: { handle: string; chatGuid?: string }
 }
 
 /**
- * Map a real inbound message to a Trigger. Only a 1:1 message from the
- * configured sender is addressed directly. A group message is explicitly not
- * `direct`, so it still has to pass the normal admission rules.
+ * Map a real inbound message to a Trigger. Only a 1:1 message is addressed
+ * directly; group messages and messages whose chat metadata is missing or
+ * ambiguous are not. "Direct" describes the conversation shape, not a verified
+ * sender: the SQL `handle` filter may be unset (for example when
+ * `DS_AGENT_ACTOR_ALLOWLIST` is the gate), so runtime admission still evaluates
+ * the actor allowlist for every Trigger.
  */
 export function imessageTrigger(message: ImessageInbound): Trigger {
   const thread = imessageThreadFor(message)
@@ -306,6 +330,8 @@ function nextExternalId(): string {
 /** Real API: reads chat.db read-only and sends through Messages.app. */
 export class ChatDbImessageApi implements ImessageApi {
   private db?: DatabaseSync
+  private schemaChecked = false
+  private schemaError?: ImessageSchemaError
 
   constructor(
     private readonly dbPath: string = imessageDbPath(),
@@ -326,6 +352,33 @@ export class ChatDbImessageApi implements ImessageApi {
     return this.db
   }
 
+  /**
+   * Check the chat metadata columns once per connection and cache the result.
+   * Without `style`/`room_name` there is no safe way to tell a group from a
+   * 1:1 chat, so this fails closed instead of running a query that would make
+   * every row look direct on every poll.
+   */
+  private ensureChatSchema(db: DatabaseSync): void {
+    if (this.schemaChecked) {
+      if (this.schemaError) throw this.schemaError
+      return
+    }
+    const columns = db.prepare('PRAGMA table_info(chat)').all() as Array<{ name?: unknown }>
+    const names = new Set(columns.map(column => String(column.name ?? '')))
+    const missing = ['style', 'room_name'].filter(name => !names.has(name))
+    if (missing.length > 0) {
+      this.schemaError = new ImessageSchemaError(
+        'iMessage chat.db schema is not compatible with this channel: '
+        + `missing column(s) ${missing.map(name => `chat.${name}`).join(', ')}. `
+        + 'Both chat.style and chat.room_name are required to distinguish 1:1 messages from '
+        + 'group messages; refusing to guess or treat rows as 1:1.',
+      )
+      this.schemaChecked = true
+      throw this.schemaError
+    }
+    this.schemaChecked = true
+  }
+
   close(): void {
     this.db?.close()
     this.db = undefined
@@ -340,20 +393,33 @@ export class ChatDbImessageApi implements ImessageApi {
 
   async pull(afterRowId: number, opts: ImessagePullOptions = {}): Promise<ImessageInbound[]> {
     const limit = Math.min(Math.max(Math.floor(opts.limit ?? 50), 1), 200)
+    const db = this.open()
+    this.ensureChatSchema(db)
     // Skip rows with no text payload at all (tapbacks, pure attachments) in
-    // SQL so they cannot occupy the page and stall the ROWID cursor.
-    const where = ['m.ROWID > ?', 'm.is_from_me = 0', '(m.text IS NOT NULL AND m.text <> \'\' OR m.attributedBody IS NOT NULL)']
+    // SQL so they cannot occupy the page and stall the ROWID cursor. Page by
+    // message ROWID, not by joined row: every chat of a selected message is
+    // returned so groupness can be aggregated over all of its joins.
+    const innerWhere = [
+      'm2.ROWID > ?',
+      'm2.is_from_me = 0',
+      '(m2.text IS NOT NULL AND m2.text <> \'\' OR m2.attributedBody IS NOT NULL)',
+    ]
     const params: Array<number | string> = [afterRowId]
     if (opts.handle) {
-      where.push('h.id = ?')
+      innerWhere.push('h2.id = ?')
       params.push(opts.handle)
     }
     if (opts.chatGuid) {
-      where.push('c.guid = ?')
+      // Match the message through any of its chats, but still join all chats
+      // below: restricting the join would hide a group row from the aggregate.
+      innerWhere.push(
+        'EXISTS (SELECT 1 FROM chat_message_join cmj_filter '
+        + 'JOIN chat c_filter ON c_filter.ROWID = cmj_filter.chat_id '
+        + 'WHERE cmj_filter.message_id = m2.ROWID AND c_filter.guid = ?)',
+      )
       params.push(opts.chatGuid)
     }
     params.push(limit)
-    // One message can join multiple chats; dedupe by guid below.
     const sql = `
       SELECT m.ROWID AS rowId, m.guid AS guid, m.text AS text, m.attributedBody AS attributedBody,
              m.date AS date, m.service AS service,
@@ -363,36 +429,93 @@ export class ChatDbImessageApi implements ImessageApi {
       LEFT JOIN handle h ON m.handle_id = h.ROWID
       LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
       LEFT JOIN chat c ON c.ROWID = cmj.chat_id
-      WHERE ${where.join(' AND ')}
-      ORDER BY m.ROWID ASC
-      LIMIT ?`
-    const rows = this.open().prepare(sql).all(...params) as Array<Record<string, unknown>>
-    const seen = new Set<string>()
-    const out: ImessageInbound[] = []
+      WHERE m.ROWID IN (
+        SELECT m2.ROWID
+        FROM message m2
+        LEFT JOIN handle h2 ON m2.handle_id = h2.ROWID
+        WHERE ${innerWhere.join(' AND ')}
+        ORDER BY m2.ROWID ASC
+        LIMIT ?
+      )
+      ORDER BY m.ROWID ASC, c.ROWID ASC`
+    const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>
+
+    interface Aggregate {
+      row: Record<string, unknown>
+      groupSignal: boolean
+      chatRows: number
+      directRows: number
+      firstChatGuid?: string
+      firstChatIdentifier?: string
+      groupChatGuid?: string
+      groupChatIdentifier?: string
+    }
+    // One message can join multiple chats. Aggregate every joined row first;
+    // taking the first row's chat metadata loses groupness when the 1:1 join
+    // happens to sort first.
+    const aggregates = new Map<string, Aggregate>()
     for (const row of rows) {
       const guid = String(row.guid ?? `row_${String(row.rowId)}`)
-      if (seen.has(guid)) continue
-      seen.add(guid)
+      let aggregate = aggregates.get(guid)
+      if (!aggregate) {
+        aggregate = { row, groupSignal: false, chatRows: 0, directRows: 0 }
+        aggregates.set(guid, aggregate)
+      }
+      const chatGuid = nonEmptyText(row.chatGuid)
+      const chatIdentifier = nonEmptyText(row.chatIdentifier)
+      const style = row.chatStyle == null ? undefined : Number(row.chatStyle)
+      const roomName = nonEmptyText(row.roomName)
+      const hasChatRow = chatGuid !== undefined || chatIdentifier !== undefined
+      if (hasChatRow) {
+        aggregate.chatRows += 1
+        if (aggregate.firstChatGuid === undefined && aggregate.firstChatIdentifier === undefined) {
+          aggregate.firstChatGuid = chatGuid
+          aggregate.firstChatIdentifier = chatIdentifier
+        }
+      }
+      // A positive group signal wins. `style = 43` or a non-empty room name
+      // marks a group; a chat row with any other style (or no style at all) is
+      // ambiguous and therefore treated as a group too.
+      if (style === IMESSAGE_GROUP_CHAT_STYLE || roomName !== undefined) {
+        aggregate.groupSignal = true
+        if (aggregate.groupChatGuid === undefined && aggregate.groupChatIdentifier === undefined) {
+          aggregate.groupChatGuid = chatGuid
+          aggregate.groupChatIdentifier = chatIdentifier
+        }
+      }
+      if (hasChatRow && style === IMESSAGE_DIRECT_CHAT_STYLE && roomName === undefined) {
+        aggregate.directRows += 1
+      }
+    }
+
+    const out: ImessageInbound[] = []
+    for (const aggregate of aggregates.values()) {
+      const { row } = aggregate
+      // Direct only when every joined chat row is a known 1:1 chat. No chat
+      // row, a group row, or any ambiguous metadata fails closed as a group.
+      const isGroup = aggregate.groupSignal
+        || aggregate.chatRows === 0
+        || aggregate.directRows !== aggregate.chatRows
+      const chatGuid = isGroup
+        ? aggregate.groupChatGuid ?? aggregate.firstChatGuid
+        : aggregate.firstChatGuid
+      const chatIdentifier = isGroup
+        ? aggregate.groupChatIdentifier ?? aggregate.firstChatIdentifier
+        : aggregate.firstChatIdentifier
       const body = row.text != null && String(row.text).length > 0
         ? String(row.text)
         : decodeAttributedBody(row.attributedBody)
-      const chatStyle = row.chatStyle == null ? undefined : Number(row.chatStyle)
-      const roomName = row.roomName == null || String(row.roomName).trim() === ''
-        ? undefined
-        : String(row.roomName)
       // Keep empty decodes so the caller's cursor advances past them; the
       // source filters them out of the Trigger list.
       out.push({
         rowId: Number(row.rowId),
-        guid,
+        guid: String(row.guid ?? `row_${String(row.rowId)}`),
         text: body,
-        handle: String(row.handle ?? row.chatIdentifier ?? 'unknown'),
+        handle: String(row.handle ?? aggregate.firstChatIdentifier ?? chatIdentifier ?? 'unknown'),
         ...(row.service ? { service: String(row.service) } : {}),
-        ...(row.chatGuid ? { chatGuid: String(row.chatGuid) } : {}),
-        ...(row.chatIdentifier ? { chatIdentifier: String(row.chatIdentifier) } : {}),
-        ...(chatStyle === undefined || !Number.isFinite(chatStyle) ? {} : { chatStyle }),
-        ...(roomName === undefined ? {} : { roomName }),
-        isGroup: isGroupMessage({ chatStyle, roomName }),
+        ...(chatGuid ? { chatGuid } : {}),
+        ...(chatIdentifier ? { chatIdentifier } : {}),
+        isGroup,
         at: appleDateToIso(row.date),
       })
     }
