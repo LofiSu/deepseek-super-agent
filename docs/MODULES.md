@@ -286,13 +286,14 @@ npx vitest run test/metrics-curve.test.ts          percentiles + bake-off math
 pnpm typecheck                                     pass
 pnpm lint                                          pass
 pnpm format:check                                  pass
-pnpm test:coverage                                 302 passed, 39 files; 81 src files; lines 82.40%, branches 82.40%, functions 89.32% (no threshold)
-offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         303 passed, 15 skipped, 43 files
-pnpm test (live Magpie, final tree)                207 passed, 3 skipped, 34 files (431.12 s)
+pnpm test:coverage                                 413 passed, 51 files; statements/lines 81.81%, branches 80.06%, functions 89.77% (no threshold)
+offline CI (DS_AGENT_ALLOW_MOCK_FIXTURE=1)         414 passed, 15 skipped, 429 tests in 55 files (52 active, 3 fully skipped)
+pnpm test (live Magpie, operator-only reference)    207 passed, 3 skipped, 34 files (431.12 s)
 ```
 
 The service contract suite is deterministic and offline; none of it needs a
-model key.
+model key. The live Magpie line is operator-only and was not reproduced in the
+final audit (P1-9).
 
 Live reference run (Magpie, 45 s deadline per mode):
 
