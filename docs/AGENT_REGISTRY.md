@@ -22,13 +22,14 @@
 
 | Task | Role | Branch | Start | Checkpoint | PR | Status |
 |------|------|--------|-------|------------|----|--------|
-| IMESSAGE-ADMISSION | Infrastructure/Security | `agent/imessage-group-aggregation` | 2026-11-03 | #77 merged; #81 fixes group aggregation | #81 | review pending |
-| P1-3 | Orchestration | `agent/P1-3-mesh-backpressure` | 2026-11-03 | implementer complete | #79 | review in progress |
+| IMESSAGE-ADMISSION | Infrastructure/Security | `agent/imessage-group-aggregation` | 2026-11-03 | #81 merged, APPROVE | #81 | integrated |
+| P1-3 | Orchestration | `agent/P1-3-mesh-backpressure` | 2026-11-03 | #79 merged with blocking review | #79 | integrated; corrected by #84 |
+| MESH-RELEASE-ORDER | Orchestration | `agent/mesh-release-order` | 2026-11-03 | #84 merged, APPROVE | #84 | integrated |
 | GATEWAY-HARDENING | Infrastructure/Security | `agent/gateway-hardening` | 2026-11-03 | merged | #76 | integrated |
-| GATEWAY-TOKEN-SYMLINK | Infrastructure/Security | `agent/GATEWAY-TOKEN-SYMLINK` | 2026-11-03 | dispatched | pending | implementing |
-| AUDIT-REFRESH | Chief Engineer | `docs/final-audit` | 2026-11-03 | PR #74 open, stale | #74 | blocked on P1-3 |
-| P1-6 | Core Runtime | `agent/P1-6-restart-recovery` | — | blocked on P1-3 | — | blocked |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76 APPROVE; #77 REQUEST_CHANGES | — | continuing |
+| GATEWAY-TOKEN-SYMLINK | Infrastructure/Security | `agent/GATEWAY-TOKEN-SYMLINK` | 2026-11-03 | #82 merged, APPROVE | #82 | integrated |
+| AUDIT-REFRESH | Chief Engineer | `docs/final-audit` | 2026-11-03 | PR #74 open, stale | #74 | ready to rebase |
+| P1-6 | Core Runtime | `agent/P1-6-restart-recovery` | — | ready | — | ready |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 

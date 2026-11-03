@@ -4,6 +4,44 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-03 — Cycle 2, checkpoint 1 (corrections merged)
+
+### Observed
+
+- #81 merged at `f4ba77a` after an independent APPROVE review. The multi-chat
+  group dedupe, missing-metadata, handle-trim, and schema-error findings are
+  fixed. Residual: two test gaps and an ambiguous group-id fallback.
+- #82 merged at `1c165ef` after an independent APPROVE review. Symlink,
+  hard-link, and non-regular token paths are rejected; fail-closed/SSE/401/CLI
+  tests are added. Residual: first-create race, ELOOP fallback, two test gaps.
+- #79 merged at `1dc9500` before its review completed. The review returned
+  REQUEST_CHANGES: release hooks fire before terminal persistence, so a queued
+  Worker can start after its ticket ended. #84 merged at `34aef25` after an
+  independent APPROVE review; the pump now waits for committed state and
+  revalidates before start.
+- `34aef25` gates: typecheck/lint (224 files)/format pass; 414 passed,
+  15 skipped (429); coverage 81.81% lines, 80.05% branches, 89.77% functions.
+- `#80` merged as a docs checkpoint at `2c02f4b`; its P1-3 statement was stale
+  before merge and is superseded here.
+
+### Decided
+
+- Merge #81 and #82 only after clean reviews and green CI; both are now merged.
+- Do not call the mesh queue correct until #84 merges; it is now merged.
+- Refresh PR #74 after #84, not before.
+
+### Verified
+
+- Independent reviews: #81 APPROVE, #82 APPROVE, #79 REQUEST_CHANGES,
+  #84 APPROVE.
+- The #84 regression fails on the pre-fix base and passes on the fix.
+- No live model or real-channel writes were performed.
+
+### Pending
+
+- Rebase and refresh PR #74.
+- Dispatch P1-6.
+
 ## 2026-11-03 — Cycle 1, checkpoint 3 (integration at `03a4c02`)
 
 ### Observed

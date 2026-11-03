@@ -114,9 +114,20 @@ sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
 - **Reported evidence:** CI `typecheck and test` pass; focused iMessage suite
   29 passed; full offline suite 395 passed / 15 skipped; typecheck, lint (224
   files), and format pass.
-- **Verdict:** pending independent review. Re-check the aggregation query, page
-  boundary behavior, missing/ambiguous metadata, and that a group message can
-  never become `direct`.
+- **Independent review:** **APPROVE**. Aggregation is order-independent and
+  page-safe: the inner query selects message ROWIDs and the outer query joins
+  every chat, so a page cannot split a message's joins. `isGroup` is true if any
+  row is style 43 or has a room name, and also when there are no chat rows or
+  any non-direct row. Missing metadata is never direct. Handle trimming uses one
+  value for gate and SQL; the schema error is cached and rethrown. Cursor
+  advancement is preserved. The reviewer verified the multi-chat and no-chat
+  tests are non-vacuous.
+- **Non-blocking findings:** no test for group-then-1:1 order or page-boundary
+  joins; an ambiguous/group row can fall back to another chat's GUID as the
+  group id; the CLI poll-loop rethrow is inspection-only; the schema check
+  covers only `chat.style`/`chat.room_name`.
+- **Merged:** `f4ba77a` (2026-11-03T06:30:31Z). CI green on the updated head.
+- **Verdict:** **APPROVE** and merge.
 
 ## PR #79 — `feat(harness): enforce worker-mesh capacity and queue`
 
@@ -129,8 +140,56 @@ sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
   `Assignment.node`.
 - **Reported evidence:** full suite 380 passed / 15 skipped; typecheck, lint,
   format pass; CI `typecheck and test` pass.
-- **Verdict:** pending independent review. Check queue drain vs settle, promise
-  resolution, release ordering, duplicate starts, and the direct-write removal.
+- **Independent review:** **REQUEST_CHANGES** after merge. Release hooks fire
+  before the terminal ticket `putDoc`; `pump()` re-reads a pre-terminal ticket
+  and can start a queued Worker after its ticket ended. A capacity-1
+  interleaving with a `deliver()` follow-up reproduces it deterministically.
+  The queue bound, FIFO, full-queue resolution, settle-vs-drain split, metrics,
+  and Engine-owned placement were verified good.
+- **Corrected by:** PR #84, merged `34aef25` after an APPROVE review. The fix
+  defers release via `queueMicrotask`, runs hooks after persistence, revalidates
+  queue entries at the head and immediately before start, cleans reservations
+  on start errors, and adds regressions that fail on the pre-fix base.
+- **Merged:** `1dc9500` (2026-11-03T06:21:46Z). The merge preceded the review
+  verdict, so the finding is recorded as a post-merge incident.
+
+## PR #82 — `fix(gateway): reject redirected token files and cover security branches`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN head `a39b566`; 6 files; base lagged main by two
+  docs commits with no conflict.
+- **Independent review:** **APPROVE**. lstat rejects symlinks, hard links, and
+  non-regular files; reads use `O_NOFOLLOW` with fstat dev/ino identity; creation
+  is exclusive; fail-closed chmod throws `GatewayTokenPermissionError` without
+  returning the token; RFC 7235 `Bearer` parsing keeps the credential compare
+  constant-time and the 401 uniform; SSE/JSON headers are correct; tests are
+  non-vacuous. No new dependencies, no credential logging.
+- **Non-blocking findings:** concurrent first-create can return a token that
+  differs from the persisted file (EEXIST + empty in-progress file); ELOOP after
+  an lstat→open swap is swallowed as "not found"; no dedicated tests for the
+  EEXIST path or the explicit-token CLI label; the SSE test cannot fully
+  distinguish `writeHead` from the buffered path; the hard-link test covers only
+  `readGatewayToken`.
+- **Merged:** `1c165ef` (2026-11-03T06:33:52Z). CI green on the updated head.
+- **Verdict:** **APPROVE** and merge; follow-ups tracked.
+
+## PR #84 — `fix(harness): defer mesh pump until terminal state is committed`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN head `e8614b9`, parent `1dc9500`; 4 files.
+- **Independent review:** **APPROVE**. Hooks run after the terminal `putDoc` on
+  normal and discard paths; `Runtime` defers release with `queueMicrotask`;
+  `queueState()` rejects missing/ended/paused/no-assignment/terminal entries;
+  `startQueued()` re-reads immediately before start and cleans the reservation
+  on synchronous failure; programmatic queue limits are sanitized. The two
+  regression tests reproduce the capacity-1 and capacity-2 interleavings and
+  fail on the pre-fix base. Full offline suite 400 passed / 15 skipped.
+- **Non-blocking findings:** no dedicated `queueState` tests for
+  `ended`/`failed`/`blocked`/missing-ticket branches; the non-queued
+  `startOrQueue` synchronous error path still lacks cleanup; `mesh.assigned` can
+  over-count on a rare cross-process skip.
+- **Merged:** `34aef25` (2026-11-03T06:45:36Z). CI green on the updated head.
+- **Verdict:** **APPROVE** and merge.
 
 ## PR #64 — `feat: iMessage channel + local OpenAI-compatible gateway`
 
@@ -155,8 +214,5 @@ sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
 
 ## Pending reviews
 
-- PR #81 iMessage group aggregation
-- PR #79 mesh capacity/backpressure
-- GATEWAY-TOKEN-SYMLINK follow-up
-- `docs/final-audit` refresh after P1-3
-- `agent/P1-6-restart-recovery` after P1-3
+- `docs/final-audit` refresh (PR #74)
+- `agent/P1-6-restart-recovery`

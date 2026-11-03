@@ -1,6 +1,6 @@
 # Development status
 
-> Checkpoint: 2026-11-03 · `main` = `03a4c02`
+> Checkpoint: 2026-11-03 · `main` = `34aef25`
 > Source of truth: `git`, GitHub PRs/checks, and the evidence in
 > `docs/PROJECT_AUDIT.md`. Do not trust this file without re-verifying.
 
@@ -8,57 +8,49 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `03a4c02` |
-| Last merged PR | #77 iMessage fail-closed admission |
-| Merged this cycle | #75 docs (`08ea78f`), #76 gateway hardening (`aae182c`), #77 iMessage admission (`03a4c02`) |
-| Open PRs at checkpoint | #79 (mesh backpressure), #81 (iMessage group fix), this docs reconciliation, #74 (stale audit) |
+| Commit | `34aef25` |
+| Last merged PR | #84 mesh release-order correction |
+| Merged this cycle | #75 docs, #76 gateway, #77 iMessage, #78 orchestration, #79 mesh, #80 docs, #81 group fix, #82 token hardening, #84 mesh correction |
+| Open PRs at checkpoint | #74 (stale audit, refreshable), #83 (this reconciliation) |
 | Required check | `typecheck and test` |
-| Offline suite | 388 passed / 15 skipped (403 tests, 55 files) |
-| Coverage | 81.00% statements/lines, 79.84% branches, 89.37% functions |
+| Offline suite | 414 passed / 15 skipped (429 tests, 55 files) |
+| Coverage | 81.81% statements/lines, 80.05% branches, 89.77% functions |
 
 ## Active workstreams
 
 | Task | Priority | Branch | Owner | State |
 |------|----------|--------|-------|-------|
-| IMESSAGE-ADMISSION — iMessage fail-closed admission | P0 | `agent/imessage-group-aggregation` | implementer | #77 merged; #81 fixes multi-chat group misclassification, CI green, review pending |
-| P1-3 — mesh capacity/backpressure | P1 | `agent/P1-3-mesh-backpressure` | implementer | PR #79, review in progress |
-| GATEWAY-HARDENING — gateway hardening | P1 | `agent/gateway-hardening` | implementer | #76 merged (`aae182c`), APPROVE with non-blocking follow-ups |
-| GATEWAY-TOKEN-SYMLINK — token file hardening | P1 | `agent/GATEWAY-TOKEN-SYMLINK` | implementer | implementing |
-| AUDIT-REFRESH — refresh PR #74 audit | P2 | `docs/final-audit` | chief engineer | blocked on P1-3 docs edits |
-| P1-6 — restart recovery | P1 | `agent/P1-6-restart-recovery` | unassigned | blocked on P1-3 |
-| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76 reviewed; #77 reviewed |
+| IMESSAGE-GROUP-FIX — group aggregation | P0 | `agent/imessage-group-aggregation` | implementer | merged (#81), APPROVE |
+| MESH-RELEASE-ORDER — defer pump past terminal commit | P0 | `agent/mesh-release-order` | implementer | merged (#84), APPROVE |
+| GATEWAY-TOKEN-SYMLINK — token file hardening | P1 | `agent/GATEWAY-TOKEN-SYMLINK` | implementer | merged (#82), APPROVE |
+| AUDIT-REFRESH — refresh PR #74 audit | P2 | `docs/final-audit` | chief engineer | unblocked; rebase on `34aef25` |
+| P1-6 — restart recovery | P1 | `agent/P1-6-restart-recovery` | unassigned | ready to dispatch |
+| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84 APPROVE; #77 corrected |
 
 ## Completed this cycle
 
-- Audited `03a4c02` in a detached worktree; typecheck, lint (224 tracked files),
+- Audited `34aef25` in a detached worktree; typecheck, lint (224 tracked files),
   format, offline suite, and coverage.
-- Merged the first implementation batch: #75 project-state docs, #76 gateway
-  hardening, #77 iMessage fail-closed admission.
-- Recorded the #76 APPROVE review and the #77 REQUEST_CHANGES review. #77 was
-  merged before its blocking group-dedupe finding was fixed, so #81 is a
-  post-merge correction and must not be skipped.
-- Dispatched GATEWAY-TOKEN-SYMLINK for the symlink redirection and missing
-  security-branch tests.
-- Reconciled this checkpoint to `03a4c02`; the earlier `cb32a17`/`bb11c96`
-  figures are historical only.
+- Merged #75, #76, #77, #79, #80, #81, #82, and #84. #76, #81, #82, and #84
+  received APPROVE reviews; #77 was merged before its blocking group-dedupe
+  finding was fixed and is corrected by #81; #79 was merged before its blocking
+  release-ordering finding was reported and is corrected by #84.
+- Opened #83 (this reconciliation) and corrected both post-merge incidents
+  rather than calling the surfaces clean.
 
 ## Blockers
 
-- #81 must land before the iMessage surface is called fail-closed: a group
-  message joined to multiple chats can still become `direct` on `main`.
-- P1-6 must wait for P1-3 because both change the Harness scheduler and runtime
-  release hooks.
-- PR #74 must wait for P1-3's `docs/MODULES.md`/`ROADMAP.md` edits to avoid a
-  merge conflict; then rebase and refresh its evidence to `03a4c02`.
+- #74 can now be rebased because #79 updated `docs/MODULES.md` and
+  `docs/ROADMAP.md`; refresh its evidence to `34aef25`.
 - Live model and real-channel acceptance remain operator-only; no credentials
   were used in this cycle.
+- Non-blocking follow-ups remain: two iMessage test gaps, gateway first-create
+  race/ELOOP, and two mesh `queueState` branch tests.
 
 ## Next actions
 
-1. Independently review #81 and merge when green and clean.
-2. Complete the #79 review; merge only if the queue/promise/shutdown semantics
-   hold.
-3. Review and merge GATEWAY-TOKEN-SYMLINK.
-4. Then dispatch P1-6 and rebase PR #74.
-5. Re-run the full offline gate on `main` after each merge and update
-   `.super-agent/state.json` at this checkpoint.
+1. Rebase and merge PR #74 with `34aef25` evidence.
+2. Dispatch P1-6 restart recovery.
+3. Keep the non-blocking follow-ups in the queue; do not reopen merged PRs.
+4. Update `.super-agent/state.json` at each checkpoint; only the main
+   orchestrator writes it.

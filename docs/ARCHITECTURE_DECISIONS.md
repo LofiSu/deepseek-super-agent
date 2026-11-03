@@ -6,7 +6,7 @@ rewrite `PLAN.md`; link to the contract instead.
 ## ADR-001 — iMessage admission fails closed
 
 - **Date:** 2026-11-03
-- **Status:** accepted; #77 merged the gate, corrective #81 is in review
+- **Status:** accepted; #77 merged the gate, #81 merged the group correction
 - **Context:** `#64` marked every iMessage trigger `addressed: 'direct'`. The
   ingress `admissionDeny` already runs before `addressed`, but a default run
   configures no admission rules, so nothing is denied and the always-`direct`
@@ -33,15 +33,17 @@ rewrite `PLAN.md`; link to the contract instead.
 ## ADR-002 — Mesh backpressure is process-local and Harness-owned
 
 - **Date:** 2026-11-03
-- **Status:** accepted, implementation in review (`P1-3`, PR #79)
+- **Status:** accepted; #79 merged, corrected by #84
 - **Context:** `WorkerMeshRegistry` reports capacity, but `Harness.launch`
   ignored `undefined` and ran the Worker anyway. Capacity was advisory.
 - **Decision:** keep the registry as pure accounting. Add a bounded FIFO pending
   queue to the Harness. A Worker starts only after `pickNode` succeeds. Pump the
   queue on ticket release. Route `Assignment.node` placement through
   `Engine.assignmentPlaced`; the Harness must not write the ticket aggregate.
-  The queue is explicitly process-local; restart recovery is a separate concern
-  (ADR-004) and does not claim persistence.
+  Release the slot and pump only after the terminal ticket state is committed,
+  and re-validate the queued ticket immediately before start. The queue is
+  explicitly process-local; restart recovery is a separate concern (ADR-004)
+  and does not claim persistence.
 - **Consequences:** no Worker runs above configured capacity. A full queue
   rejects the launch without throwing; the ticket remains open for retry/drain.
   Drain clears the queue and resolves waiters instead of hanging; ordinary

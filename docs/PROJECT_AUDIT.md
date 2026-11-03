@@ -1,21 +1,22 @@
 # Project audit — 2026-11-03
 
-> Audit base: `main` at `03a4c02` (`fix(imessage): fail closed admission and
-> gate group chats (#77)`). Commands were run in a detached worktree at
-> `origin/main`; the primary clone contained unrelated uncommitted WIP and was
-> not used. This audit supersedes the stale `fa974ca` evidence in PR #74 and
-> the earlier `bb11c96`/`cb32a17` checkpoints.
+> Audit base: `main` at `34aef25` (`[SUPER-AGENT][P1-3] Defer mesh pump until
+> terminal state is committed (#84)`). Commands were run in a detached worktree
+> at `origin/main`; the primary clone contained unrelated uncommitted WIP and
+> was not used. This audit supersedes the stale `fa974ca` evidence in PR #74 and
+> the earlier `bb11c96`/`cb32a17`/`03a4c02`/`1dc9500`/`f4ba77a`/`1c165ef`
+> checkpoints.
 
 ## 1. Repository state
 
 | Item | Observation |
 |------|-------------|
 | Branch | `main`, clean in the detached audit worktree |
-| HEAD | `03a4c02` |
+| HEAD | `34aef25` |
 | Remote | `git@github.com:LofiSu/deepseek-super-agent.git` |
-| Last merged PR | **#77** iMessage fail-closed admission (merged 2026-11-03T06:12:32Z) |
-| Merged this cycle | #75 project-state docs (`08ea78f`), #76 gateway hardening (`aae182c`), #77 iMessage admission (`03a4c02`) |
-| Open PRs at checkpoint | **#79** (`agent/P1-3-mesh-backpressure`) and this documentation reconciliation PR |
+| Last merged PR | **#84** mesh release-order correction (merged 2026-11-03T06:45:36Z) |
+| Merged this cycle | #75 docs (`08ea78f`), #76 gateway (`aae182c`), #77 iMessage (`03a4c02`), #78 orchestration (`cb32a17`), #79 mesh (`1dc9500`), #80 docs (`2c02f4b`), #81 group fix (`f4ba77a`), #82 token hardening (`1c165ef`), #84 mesh correction (`34aef25`) |
+| Open PRs at checkpoint | #74 (stale audit, refreshable), #83 (this reconciliation) |
 | Issues | GitHub Issues disabled |
 | Branch protection | required check `typecheck and test`; strict; admins enforced; conversation resolution required |
 | Node / pnpm | Node v22.23.4 / pnpm 9.15.9 |
@@ -25,11 +26,14 @@
 definitions, a stop guard, and the `autonomous-engineering` skill. It makes the
 main session the only orchestrator, caps the validating pipeline at three
 implementation agents, caps a session at four completed cycles, and requires
-the main session alone to write `.super-agent/state.json`.
+the main session alone to write `.super-agent/state.json`. The Stop guard was
+verified against block, idle, owner-stop, only-blocked, stale-progress, paused,
+active/terminal background, and missing-state cases.
 
 `#75` merged the first project-state checkpoint, but its final reconciliation
-commit (`bdce7ea`) landed after the merge and is not on `main`. This PR carries
-the reconciled state forward; it does not rewrite the merged commit.
+commit (`bdce7ea`) landed after the merge and is not on `main`. `#80` then
+reconciled part of the state. This PR carries the corrected state forward; it
+does not rewrite merged commits.
 
 ## 2. Verified quality gates
 
@@ -37,14 +41,14 @@ the reconciled state forward; it does not rewrite the merged commit.
 pnpm typecheck                                         exit 0
 pnpm lint                                              lint ok (224 tracked files)
 pnpm format:check                                      exit 0
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   388 passed, 15 skipped (403)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   414 passed, 15 skipped (429)
                                                       55 files: 52 with passing tests,
                                                       3 fully skipped
-pnpm test:coverage                                     387 passed, 51 files
-                                                       statements 81.00% (7280/8987)
-                                                       branches   79.84% (2528/3166)
-                                                       functions  89.37% (656/734)
-                                                       lines      81.00% (7280/8987)
+pnpm test:coverage                                     413 passed, 51 files
+                                                       statements 81.81% (7667/9371)
+                                                       branches   80.05% (2702/3375)
+                                                       functions  89.77% (685/763)
+                                                       lines      81.81% (7667/9371)
 ```
 
 File-count detail for the plain offline run:
@@ -57,9 +61,10 @@ File-count detail for the plain offline run:
   or real-channel acceptance run was performed in this audit.
 
 Coverage note: the earlier `bb11c96` run reported 79.69% branches
-(2469/3098), and the `cb32a17` run reported 79.67% (2465/3094). The current
-`03a4c02` run reports 79.84% (2528/3166); it includes the new gateway and
-iMessage tests from #76/#77. The figures above are the audited `03a4c02`
+(2469/3098), `cb32a17` 79.67% (2465/3094), `03a4c02` 79.84% (2528/3166),
+`1dc9500` 80.04% (2587/3232), `f4ba77a` 80.42% (2646/3290), and `1c165ef`
+80.14% (2689/3355). The current `34aef25` run reports 80.05% (2702/3375); the
+new #84 tests add branches. The figures above are the audited `34aef25`
 numbers.
 
 ## 3. Architecture state
@@ -105,21 +110,32 @@ returns nothing, and the always-`direct` marker then passes the fast path with
 group metadata is read, so a default run ingests any sender in any chat,
 including group chats. Any party who can message the agent's Apple ID can
 trigger work. PR #77 merged the fail-closed gate, but its independent review
-returned REQUEST_CHANGES before merge: a message joined to multiple chats is
-deduped to one row, so a group message can still be classified as 1:1. Missing
-chat metadata also defaults to 1:1 through the `LEFT JOIN`. The merged code
-therefore does not yet satisfy "a group message is never `direct`". A follow-up
-PR aggregates groupness across all `chat_message_join` rows, treats missing
-metadata as unknown/group, trims the handle before SQL, and adds the missing
-fixtures.
+returned REQUEST_CHANGES before merge: a message joined to multiple chats was
+deduped to one row, so a group message could still be classified as 1:1, and
+missing chat metadata defaulted to 1:1. PR #81 merged the correction at
+`f4ba77a`: groupness is aggregated across every joined chat, missing/ambiguous
+metadata is unknown/group, the group GUID is retained in
+`channel.address.group`, the handle is trimmed once for both gate and SQL, and
+old schemas raise a clear cached error. Independent review: APPROVE. Residual
+non-blocking items: tests for group-then-1:1 join order and page-boundary joins
+are absent; an ambiguous row can fall back to another joined chat's GUID as the
+group id; the CLI rethrow path is covered only by inspection.
 
-### P1-3 — Worker-mesh capacity is advisory
+### P1-3 — Worker-mesh capacity and release ordering
 
-`Harness.launch` logs `[mesh] ... capacity-full` and runs the Worker anyway.
-`WorkerMeshRegistry` correctly reports no free node, but no scheduler consumes
-that signal on `main`. With `DS_AGENT_MESH_CAPACITY=1`, two Workers can run
-concurrently. PR #79 is open with a bounded queue and Engine-owned placement;
-its independent review is in progress.
+On the pre-#79 tree, `Harness.launch` logged `[mesh] ... capacity-full` and ran
+the Worker anyway. #79 merged a bounded FIFO, Engine-owned placement, and
+metrics at `1dc9500`, but its independent review returned REQUEST_CHANGES after
+merge: `Assignments.report()` fired the `onAssignmentEnded`/`onTicketEnded`
+hooks before the terminal `putDoc`, so the pump could re-read a pre-terminal
+ticket and start a queued Worker after the ticket ended. Turns started by
+`deliver()`, `resume()`, and job completion were not in `activeWorkers`, making
+the capacity-1 interleaving deterministic. #84 merged at `34aef25`: both hooks
+now run after persistence, `Runtime` defers release via `queueMicrotask`,
+`queueState()` rejects missing/ended/paused/no-assignment/terminal entries, and
+`startQueued()` re-reads immediately before start. Independent review: APPROVE.
+Residual non-blocking items: two narrow `queueState` branch tests and the
+pre-existing non-queued start-error cleanup.
 
 ### P1-6 — No restart replay
 
@@ -131,28 +147,34 @@ the mesh change because both touch `Harness.launch`/`drain` and runtime release.
 
 ### GATEWAY-HARDENING — Gateway auth/exposure edges
 
-`#76` merged the following fixes: constant-time bearer comparison, empty-token
-refusal, a non-loopback exposure warning, token-file `0600` repair with a
-fail-closed error, `nosniff`/`no-store` headers, and no token in the dashboard.
-Residual findings:
+`#76` merged constant-time bearer comparison, empty-token refusal, a
+non-loopback exposure warning, token-file `0600` repair with a fail-closed
+error, `nosniff`/`no-store` headers, and no token in the dashboard. `#82` merged
+at `1c165ef` the symlink/hard-link/non-regular rejection, `O_NOFOLLOW` reads,
+exclusive creation, RFC 7235 `Bearer` parsing, explicit-token CLI labeling, and
+the fail-closed/SSE/identical-401/CLI-warning tests. Independent review of #82:
+APPROVE.
 
-- Token-file reads and chmods follow symlinks. A writable `DS_AGENT_HOME` can
-  redirect the credential; the GATEWAY-TOKEN-SYMLINK follow-up rejects
-  symlinks/non-regular files, uses `O_NOFOLLOW`, and adds the missing security
+Residual non-blocking findings from the #82 review:
+
+- A concurrent first-create race can return a token that differs from the
+  persisted file (EEXIST + empty in-progress file). Both tokens are local and
+  0600; no leak or bypass.
+- `O_NOFOLLOW` ELOOP after an lstat→open swap is swallowed as "not found"
+  rather than raised as `GatewayTokenFileError`; the credential is still not
+  read or chmodded.
+- Mode enforcement is skipped on Windows, documented as POSIX-only.
+- The EEXIST/empty-file path and the explicit-token CLI label lack dedicated
   tests.
-- Mode enforcement is skipped on Windows; this is documented as a POSIX-only
-  guarantee.
-- The CLI can label a token file that was not written when `--token` or
-  `DS_AGENT_GATEWAY_TOKEN` supplied the credential.
 
 ### GATEWAY-REVIEW — #64 has no independent review record
 
 `#64` added 4,390 lines and 12 test files after the last roadmap audit.
-Coverage on `03a4c02` is 81.00% lines / 79.84% branches, up from the
+Coverage on `34aef25` is 81.81% lines / 80.05% branches, up from the
 pre-hardening 80.68% / 79.67% but still below the 82.40% historical baseline
 recorded for `fa974ca`. The absolute difference is explained by the new
-surface. `#76` now has an independent APPROVE review; `#77` has a
-REQUEST_CHANGES review with a post-merge fix follow-up. Reviews are recorded in
+surface. `#76`, `#81`, and `#82` have independent APPROVE reviews; `#77` has a
+REQUEST_CHANGES review corrected by #81. Reviews are recorded in
 `docs/PR_REVIEW_LOG.md`.
 
 ### SERVE-CHANNEL-LOOP — `serve` has no inbound channel loop
@@ -171,8 +193,8 @@ This is documented; it remains a production limitation rather than a bug.
 
 ## 6. Audit conclusion
 
-The offline gate is green on `03a4c02` and the architecture still matches its
-contracts, with the documented `Assignment.node` deviation until #79 merges.
-The highest-value work is not new features: it is closing the merged iMessage
-group-classification gap, making mesh capacity real, adding restart recovery,
-and completing the gateway token-file hardening.
+The offline gate is green on `34aef25` and the architecture matches its
+contracts. The iMessage group-classification, gateway token-redirection, and
+mesh release-ordering gaps are fixed by #81, #82, and #84. Next work is restart
+recovery (P1-6) and the stale PR #74 audit; the non-blocking review follow-ups
+remain tracked in the review log.

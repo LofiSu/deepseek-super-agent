@@ -1,32 +1,33 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `03a4c02` (`fix(imessage): fail closed admission and gate group chats (#77)`)
+> Baseline: `main` at `34aef25` (`[SUPER-AGENT][P1-3] Defer mesh pump until terminal state is committed (#84)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
 ## 0. Verified baseline (2026-11-03)
 
-All evidence below was produced on this machine against `03a4c02` in a detached
+All evidence below was produced on this machine against `34aef25` in a detached
 worktree at `origin/main`:
 
 ```text
 pnpm typecheck                                         exit 0
 pnpm lint                                              lint ok (224 tracked files)
 pnpm format:check                                      exit 0
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   388 passed, 15 skipped (403)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   414 passed, 15 skipped (429)
                                                       55 files: 52 with passing tests,
                                                       3 fully skipped
-pnpm test:coverage                                     387 passed; statements/lines 81.00%,
-                                                       branches 79.84%, functions 89.37%
+pnpm test:coverage                                     413 passed; statements/lines 81.81%,
+                                                       branches 80.05%, functions 89.77%
 ```
 
 The 3 fully skipped files are `test/demos-real-channels.test.ts`,
 `test/live-e2e.test.ts`, and `test/team-live.test.ts`;
 `test/live-demo.test.ts` runs one offline test and skips three live ones. The
-earlier `bb11c96` branch figure was 79.69%, and `cb32a17` measured 79.67%; the
-current run includes the new #76/#77 tests and is the one used by this plan.
+earlier `bb11c96` branch figure was 79.69%, `cb32a17` measured 79.67%,
+`03a4c02` 79.84%, and `1dc9500` 80.04%; the current run includes the new
+#76/#77/#79/#81/#82/#84 tests and is the one used by this plan.
 
 Repository facts:
 
@@ -34,12 +35,12 @@ Repository facts:
   orchestrator; at most 3 implementation agents run while the pipeline is being
   validated; at most 4 development cycles complete per session; subagents never
   merge and never write `.super-agent/state.json`.
-- `#75`, `#76`, and `#77` merged into `main` at `08ea78f`, `aae182c`, and
-  `03a4c02`. `#75` merged before its final reconciliation commit, so this PR
-  carries the corrected checkpoint forward.
-- Open PR at this checkpoint: **#79** (`agent/P1-3-mesh-backpressure`), plus this
-  documentation reconciliation PR. PR **#74** remains open, `BEHIND`, with a
-  stale `fa974ca` base.
+- `#75`, `#76`, `#77`, `#79`, `#80`, `#81`, `#82`, and `#84` merged into `main`
+  at `08ea78f`, `aae182c`, `03a4c02`, `1dc9500`, `2c02f4b`, `f4ba77a`,
+  `1c165ef`, and `34aef25`. `#75` merged before its final reconciliation commit,
+  so this PR carries the corrected checkpoint forward.
+- Open PRs at this checkpoint: **#83** (this documentation reconciliation) and
+  **#74** (stale audit, now refreshable).
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
 - GitHub Issues are disabled, so work items live in this plan and the roadmap.
@@ -50,13 +51,14 @@ Repository facts:
 
 | ID | Priority | Gap | Evidence | Status |
 |----|----------|-----|----------|--------|
-| IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate, but a message joined to multiple chats is deduped to a 1:1 row and can still become `direct`; missing metadata also defaults to 1:1. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | #77 merged; post-merge fix PR pending |
-| P1-3 | P1 | Worker-mesh capacity is advisory on `main`: when `pickNode` returns `undefined`, the Worker still runs. The Harness also writes `Assignment.node` directly to the ticket aggregate. | `src/harness/loop.ts:84-89,134-135`; `test/worker-mesh.test.ts` | PR #79 open, review in progress |
-| P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/cli/main.ts` serve comment; `docs/MODULES.md:60`; `docs/ROADMAP.md` P1-6 | blocked on P1-3 |
-| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, and no re-chmod were merged fixed in #76. Residual: symlink redirection, missing fail-closed/SSE/401 tests, POSIX-only mode caveat, CLI token-file label. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76 merged; GATEWAY-TOKEN-SYMLINK dispatched |
-| GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods follow symlinks; a writable `DS_AGENT_HOME` can redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | implementing |
-| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76 reviewed; #77 review recorded |
-| AUDIT-REFRESH | P2 | `docs/final-audit` (#74) is stale against `03a4c02`; the roadmap audit does not include `#64`, `#75`, `#76`, `#77`, or `#78`. | PR #74; `git merge-base` = `fa974ca` | Cycle 2, after P1-3 docs edits |
+| IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 (`f4ba77a`); non-blocking test gaps |
+| P1-3 | P1 | Worker-mesh capacity was advisory and the Harness wrote `Assignment.node` directly. #79 merged the queue and Engine-owned placement; its release-ordering bug is fixed by #84. | `src/harness/loop.ts`; `src/core/assignments.ts`; `test/worker-mesh.test.ts` | fixed by #79 + #84 |
+| MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`); APPROVE |
+| P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/cli/main.ts` serve comment; `docs/MODULES.md:60`; `docs/ROADMAP.md` P1-6 | ready to dispatch |
+| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. Residual: concurrent first-create token race, ELOOP fallback, POSIX-only mode caveat, two missing tests. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76 and #82 merged; non-blocking follow-ups |
+| GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
+| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84 reviewed; #77 corrected |
+| AUDIT-REFRESH | P2 | `docs/final-audit` (#74) is stale against `34aef25`; the roadmap audit does not include `#64`, `#75`-`#84`. | PR #74; `git merge-base` = `fa974ca` | ready to rebase |
 | SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:206-221`; `docs/ROADMAP.md` | bounded design decision |
 
 ## 2. Workstream ordering
@@ -69,13 +71,15 @@ Cycle 1 (parallel, disjoint files; max 3 implementation agents)
   (project-state docs are coordination work, not a fourth task)
 
 Cycle 2 (post-merge corrections; touches harness/runtime, gateway token, docs)
+  MESH-RELEASE-ORDER  Defer the pump until the terminal ticket/assignment
+                      state is committed; re-validate before start
   IMESSAGE-GROUP-FIX  Aggregate groupness across all joined chats
   GATEWAY-TOKEN-SYMLINK  Reject symlink/non-regular token files; add
                          fail-closed, SSE, and identical-401 tests
-  P1-6  Restart recovery for interrupted assignments/jobs
   AUDIT-REFRESH  Rebase PR #74 on current main and update ROADMAP/MODULES
 
 Cycle 3
+  P1-6  Restart recovery (after MESH-RELEASE-ORDER)
   SERVE-CHANNEL-LOOP Channel loop for serve (reuse Feishu/iMessage sources)
   Evaluate semantic long-term memory (roadmap open item)
 ```
@@ -184,7 +188,8 @@ defaults to 1:1 through the `LEFT JOIN`. A group message must never be
 ## Task 2: P1-3 — Worker-mesh capacity enforcement and backpressure
 
 **Owner:** implementation agent · **Branch:** `agent/P1-3-mesh-backpressure`
-**PR:** #79, review in progress · **Depends on:** none ·
+**PR:** #79 merged (`1dc9500`); #84 corrective merged (`34aef25`) ·
+**Depends on:** none ·
 **Files:** `src/harness/loop.ts`, `src/harness/mesh.ts`,
 `src/core/host.ts`, `src/core/assignments.ts`, `src/runtime.ts`,
 `src/metrics/metrics.ts`, `test/worker-mesh.test.ts`,
@@ -283,16 +288,16 @@ SSE headers, and identical 401 bodies across malformed/wrong/missing tokens.
 - Starting on `0.0.0.0` prints an explicit exposure warning.
 - Offline suite and docs are consistent.
 
-## Task 4: AUDIT-REFRESH — Refresh the final audit for `03a4c02`
+## Task 4: AUDIT-REFRESH — Refresh the final audit for `34aef25`
 
 **Owner:** chief engineer · **Branch:** `docs/final-audit` (PR #74)
 **Depends on:** Task 2 merged · **Files:** `docs/ROADMAP.md`, `docs/MODULES.md`
 
 Rebase PR #74 on current `main`, replace the stale `fa974ca` evidence with the
-verified `03a4c02` baseline above, add revision-history rows for `#64`, `#75`,
-`#76`, `#77`, and `#78`, and state that the audit covers the iMessage/gateway
-surface. Do not claim a live Magpie run. This task follows P1-3 because both
-edit `docs/ROADMAP.md` and `docs/MODULES.md`.
+verified `34aef25` baseline above, add revision-history rows for `#64` and
+`#75`-`#82`, and state that the audit covers the iMessage/gateway/mesh surface.
+Do not claim a live Magpie run. #79 has updated `docs/ROADMAP.md` and
+`docs/MODULES.md`, so the rebase is unblocked.
 
 ## Task 5: P1-6 — Restart recovery for interrupted assignments
 
@@ -342,7 +347,7 @@ fix PR #81.
 ## Task 7: GATEWAY-TOKEN-SYMLINK — Reject redirected token files
 
 **Owner:** implementation agent · **Branch:** `agent/GATEWAY-TOKEN-SYMLINK`
-**PR:** in progress · **Depends on:** #76 merged ·
+**PR:** #82 merged (`1c165ef`) · **Depends on:** #76 merged ·
 **Files:** `src/gateway/token.ts`, `test/gateway.test.ts`, `docs/GATEWAY.md`
 
 ### Problem
@@ -369,6 +374,45 @@ but `statSync`/`chmodSync`/`readFileSync` follow symlinks. A writable
 - A symlink or non-regular token file is refused before any read or chmod.
 - Security-relevant branches above have regression tests.
 - Offline suite and docs are consistent.
+
+## Task 8: MESH-RELEASE-ORDER — Defer the pump past terminal commit
+
+**Owner:** implementation agent · **Branch:** `agent/mesh-release-order`
+**PR:** #84 merged (`34aef25`), APPROVE · **Depends on:** #79 merged (`1dc9500`) ·
+**Files:** `src/core/assignments.ts`, `src/runtime.ts`, `src/harness/loop.ts`,
+`test/worker-mesh.test.ts`
+
+### Problem
+
+`Assignments.report()` emits `onAssignmentEnded`/`onTicketEnded` before the
+terminal ticket `putDoc`. `Runtime` releases the mesh slot and calls
+`harness.release()`, whose pump re-reads the pre-terminal ticket and can start a
+queued Worker for a ticket that just ended. Turns started by `deliver()`,
+`resume()`, and job completion are not in `activeWorkers`, so the capacity-1
+interleaving is deterministic.
+
+### Required behavior
+
+1. Fire both hooks only after the terminal ticket is persisted, on normal and
+   discard paths; do not pump inside the Engine transaction.
+2. Defer the release/pump (for example `queueMicrotask`) so the pump observes
+   committed state.
+3. Re-read and reject missing, ended, paused, no-assignment, `ended`, `failed`,
+   and `blocked` entries at the queue head and again immediately before start.
+4. Release the mesh reservation and delete the `activeWorkers` marker if a
+   queued start throws.
+5. Sanitize programmatic queue limits: NaN, negative, fractional, and Infinity
+   fall back to 100; explicit 0 stays 0.
+6. Preserve `jobsSettled` waiting, drain-only clearing, full-queue rejection
+   without throwing, FIFO, and metrics.
+
+### Tests
+
+- Capacity 1, A holds the slot, B/C queued; A reports ready; a `deliver()`
+  follow-up ends C; assert no C task turn and no assignment start after
+  `ticket.ended`, and C's promise resolves.
+- The regression fails on the pre-fix source and passes on the fix.
+- Existing mesh/runtime tests stay green.
 
 ## 4. Definition of done for a cycle
 
