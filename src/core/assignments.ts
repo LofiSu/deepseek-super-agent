@@ -19,6 +19,12 @@ export interface Recovery {
   interruptedAssignmentIds: string[]
   /** The single replacement `pending` assignment queued for the next turn. */
   replacementAssignmentId: string
+  /**
+   * True when a previous recovery already committed the replacement and the
+   * process died before the Worker started. The Runtime relaunches it as-is;
+   * no Assignment is created and no RECOVERED prompt is appended.
+   */
+  relaunchOnly?: boolean
 }
 
 const TERMINAL = new Set(['ready', 'failed', 'dropped'])
@@ -234,10 +240,12 @@ export class Assignments {
       at,
       human: false,
     })
-    // Commit the ended Assignment and the recovered prompt before `retry`
-    // re-reads the Ticket and creates the single pending replacement.
+    // Commit the ended Assignment and the recovered prompt before creating the
+    // single pending replacement. A malformed snapshot that already has a
+    // pending Assignment keeps it instead of creating a second one.
     this.host.repo.putDoc('ticket', ticket.id, ticket)
-    const replacement = this.retry(ticket.id, 'restart-recovery')
+    const existing = ticket.assignments.find(item => item.state === 'pending')
+    const replacement = existing ?? this.retry(ticket.id, 'restart-recovery')
     this.host.log(
       `[engine] Assignments.recover ticketId=${ticket.id} interrupted=${interruptedAssignmentIds.join(',')} replacementId=${replacement.id}`,
     )
@@ -245,6 +253,30 @@ export class Assignments {
       ticketId: ticket.id,
       interruptedAssignmentIds,
       replacementAssignmentId: replacement.id,
+    }
+  }
+
+  /**
+   * Crash boundary for at-least-once recovery: a previous recovery committed
+   * the ended Assignment, one RECOVERED prompt, and a pending replacement, but
+   * the process died before the Worker started. Return the existing pending
+   * Assignment so the Runtime can relaunch it without mutating the Ticket.
+   * Ordinary pending work (no RECOVERED prompt) is out of scope.
+   */
+  pendingRecovery(ticketId: string): Recovery | undefined {
+    const ticket = this.must(ticketId)
+    if (ticket.ended || ticket.collab?.paused) return undefined
+    if (ticket.assignments.some(item => item.state === 'running')) return undefined
+    const latest = ticket.assignments.at(-1)
+    if (!latest || latest.state !== 'pending') return undefined
+    const recovered = ticket.inputs.some(input =>
+      input.kind === 'context' && input.text?.startsWith('RECOVERED:'))
+    if (!recovered) return undefined
+    return {
+      ticketId: ticket.id,
+      interruptedAssignmentIds: [],
+      replacementAssignmentId: latest.id,
+      relaunchOnly: true,
     }
   }
 

@@ -190,6 +190,8 @@ export class Runtime {
   private readonly batchWindowMs: number
   private readonly admission: AdmissionRules
   private evalTimer: ReturnType<typeof setTimeout> | undefined
+  /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
+  private recoveryAttempted = false
 
   private constructor(parts: {
     home: string
@@ -556,7 +558,11 @@ export class Runtime {
    * a keyless process records the deferral and leaves the state untouched.
    */
   private recoverInterrupted(): void {
-    if (!this.store.isOpen) return
+    if (!this.store.isOpen || this.recoveryAttempted) return
+    // One scan per Runtime. A real restart constructs a new Runtime, so it
+    // still recovers; repeated start() calls must not end a live replacement
+    // that our own asynchronous launch has already marked `running`.
+    this.recoveryAttempted = true
     if (this.model.name === 'MockModel') {
       this.log.info('[recovery] deferred reason=mock-model')
       return
@@ -574,9 +580,27 @@ export class Runtime {
       // The Engine committed the ended Assignment, the RECOVERED prompt, and
       // the single pending replacement before this launch.
       this.log.info(
-        `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',')} replacementId=${outcome.replacementAssignmentId}`,
+        `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',') || '-'} replacementId=${outcome.replacementAssignmentId} mode=${outcome.relaunchOnly ? 'pending' : 'recovered'}`,
       )
-      void this.harness.launch(ticket)
+      this.launchRecovered(outcome.ticketId, ticket)
+    }
+  }
+
+  /**
+   * Relaunch one recovered Ticket without letting a failure abort the others
+   * or surface as an unhandled rejection. A launch failure changes no state:
+   * the replacement stays `pending`, so a later restart can relaunch it.
+   */
+  private launchRecovered(ticketId: string, ticket: Ticket): void {
+    const failed = (error: unknown): void => {
+      this.log.info(
+        `[recovery] launch failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    try {
+      void this.harness.launch(ticket).catch(failed)
+    } catch (error) {
+      failed(error)
     }
   }
 

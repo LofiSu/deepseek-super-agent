@@ -216,7 +216,105 @@ describe('restart recovery', () => {
     const afterRestart = second.store.getDoc<Ticket>('ticket', 'ticket_twice')!
     expect(afterRestart.assignments).toHaveLength(2)
     expect(recoveredInputs(afterRestart)).toHaveLength(1)
-    expect(relaunch).not.toHaveBeenCalled()
+    // The replacement committed before the mocked crash was still pending, so
+    // a real restart relaunches that same Assignment at-least-once (N3).
+    expect(relaunch).toHaveBeenCalledTimes(1)
+    expect(relaunch.mock.calls[0]?.[0]?.id).toBe('ticket_twice')
+  })
+
+  it('scans once per Runtime so a second start() does not end the live relaunch', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home, { singleSession: true })
+    runtime.store.putDoc('ticket', 'ticket_live_again', runningTicket('ticket_live_again'))
+
+    runtime.start({ assessPending: false })
+    await runtime.jobsSettled()
+    const relaunched = runtime.store.getDoc<Ticket>('ticket', 'ticket_live_again')!
+    expect(relaunched.assignments).toHaveLength(2)
+    expect(relaunched.assignments.at(-1)?.state).toBe('running')
+
+    runtime.start({ assessPending: false })
+    await runtime.jobsSettled()
+
+    const after = runtime.store.getDoc<Ticket>('ticket', 'ticket_live_again')!
+    expect(after.assignments).toHaveLength(2)
+    expect(after.assignments.at(-1)?.state).toBe('running')
+    expect(recoveredInputs(after)).toHaveLength(1)
+    expect(recoveredEvents(runtime)).toHaveLength(1)
+  })
+
+  it('logs sync and async launch failures and keeps every recovered ticket consistent', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_sync_throw', runningTicket('ticket_sync_throw'))
+    runtime.store.putDoc('ticket', 'ticket_async_reject', runningTicket('ticket_async_reject'))
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(ticket => {
+      if (ticket.id === 'ticket_sync_throw') throw new Error('sync launch boom')
+      return Promise.reject(new Error('async launch boom'))
+    })
+
+    expect(() => runtime.start({ assessPending: false })).not.toThrow()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(runtime.log.text()).toContain('[recovery] launch failed ticketId=ticket_sync_throw')
+    expect(runtime.log.text()).toContain('[recovery] launch failed ticketId=ticket_async_reject')
+    for (const id of ['ticket_sync_throw', 'ticket_async_reject']) {
+      const ticket = runtime.store.getDoc<Ticket>('ticket', id)!
+      expect(ticket.assignments).toHaveLength(2)
+      expect(ticket.assignments.at(-1)?.state).toBe('pending')
+      expect(recoveredInputs(ticket)).toHaveLength(1)
+    }
+  })
+
+  it('relaunches a pending replacement left by a crash before launch without duplicating state', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    const at = new Date().toISOString()
+    const crashed = runningTicket('ticket_committed', {
+      assignments: [
+        { id: 'asg_ticket_committed_old', state: 'ended', speculative: false, endedAt: at },
+        { id: 'asg_ticket_committed_replacement', state: 'pending', speculative: false },
+      ],
+      inputs: [{
+        id: 'input_ticket_committed_recovered',
+        kind: 'context',
+        text: 'RECOVERED: assignment asg_ticket_committed_old was interrupted by a process restart.',
+        at,
+        human: false,
+      }],
+    })
+    const ordinary = runningTicket('ticket_ordinary_pending', {
+      assignments: [{ id: 'asg_ticket_ordinary_pending_1', state: 'pending', speculative: false }],
+    })
+    runtime.store.putDoc('ticket', crashed.id, crashed)
+    runtime.store.putDoc('ticket', ordinary.id, ordinary)
+    const launch = vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.resolve())
+
+    runtime.start({ assessPending: false })
+
+    expect(launch).toHaveBeenCalledTimes(1)
+    expect(launch.mock.calls[0]?.[0]?.id).toBe('ticket_committed')
+    const current = runtime.store.getDoc<Ticket>('ticket', 'ticket_committed')!
+    expect(current.assignments).toEqual(crashed.assignments)
+    expect(recoveredInputs(current)).toHaveLength(1)
+    expect(recoveredEvents(runtime)).toHaveLength(0)
+    expect(runtime.store.getDoc<Ticket>('ticket', ordinary.id)).toEqual(ordinary)
+  })
+
+  it('isolates a malformed ticket so other interrupted tickets still recover', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    const malformed = { ...runningTicket('ticket_malformed'), assignments: null }
+    runtime.store.putDoc('ticket', 'ticket_malformed', malformed)
+    runtime.store.putDoc('ticket', 'ticket_good', runningTicket('ticket_good'))
+
+    const recovered = runtime.engine.recoverInterrupted()
+
+    expect(recovered.map(item => item.ticketId)).toEqual(['ticket_good'])
+    expect(runtime.log.text()).toContain('[recovery] ticket failed ticketId=ticket_malformed')
+    const good = runtime.store.getDoc<Ticket>('ticket', 'ticket_good')!
+    expect(good.assignments).toHaveLength(2)
+    expect(recoveredInputs(good)).toHaveLength(1)
   })
 
   it('injects the RECOVERED notice and interrupted assignment id into the Worker prompt only on relaunch', async () => {

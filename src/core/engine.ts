@@ -95,10 +95,22 @@ export class Engine {
     return this.host.repo.atomic(() => {
       const recovered: Recovery[] = []
       for (const ticket of this.host.repo.listDocs<Ticket>('ticket')) {
-        if (ticket.ended || ticket.collab?.paused) continue
-        if (!ticket.assignments.some(assignment => assignment.state === 'running')) continue
-        const outcome = this.assignments.recover(ticket.id)
-        if (outcome) recovered.push(outcome)
+        // One malformed Ticket must not roll back recovery for the others.
+        try {
+          if (ticket.ended || ticket.collab?.paused) continue
+          if (ticket.assignments.some(assignment => assignment.state === 'running')) {
+            const outcome = this.assignments.recover(ticket.id)
+            if (outcome) recovered.push(outcome)
+            continue
+          }
+          const pending = this.assignments.pendingRecovery(ticket.id)
+          if (pending) recovered.push(pending)
+        } catch (error) {
+          const id = typeof ticket?.id === 'string' ? ticket.id : '-'
+          this.host.log(
+            `[recovery] ticket failed ticketId=${id} error=${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
       }
       return recovered
     })
