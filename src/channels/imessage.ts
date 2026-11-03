@@ -215,7 +215,10 @@ export function imessageThreadFor(message: { handle: string; chatGuid?: string }
 export function imessageTrigger(message: ImessageInbound): Trigger {
   const thread = imessageThreadFor(message)
   const group = isGroupMessage(message)
-  const groupId = message.chatGuid ?? message.chatIdentifier ?? thread
+  // A group address must come from a positive group chat row. Falling back to
+  // the thread (or a joined 1:1 chat's guid) would let an ambiguous group reply
+  // into a direct conversation, so leave it unset and let admission fail closed.
+  const groupId = group ? message.chatGuid ?? message.chatIdentifier : undefined
   return {
     id: `imessage_${message.guid}`,
     source: 'imessage',
@@ -233,8 +236,9 @@ export function imessageTrigger(message: ImessageInbound): Trigger {
         handle: message.handle,
         ...(message.chatGuid ? { chatGuid: message.chatGuid } : {}),
         // Group admission reads only `address.group`; a group message is never
-        // direct and must earn its way through the normal filter.
-        ...(group ? { group: groupId } : {}),
+        // direct and must earn its way through the normal filter. Only a
+        // positive group chat row can supply this address.
+        ...(group && groupId ? { group: groupId } : {}),
       },
     },
     meta: {},
@@ -496,11 +500,15 @@ export class ChatDbImessageApi implements ImessageApi {
       const isGroup = aggregate.groupSignal
         || aggregate.chatRows === 0
         || aggregate.directRows !== aggregate.chatRows
+      // A group address comes only from a positive group row (`style = 43` or
+      // a non-empty room name). Never fall back to another joined chat's guid:
+      // an ambiguous group joined to a 1:1 chat must fail closed, not reply to
+      // that direct conversation.
       const chatGuid = isGroup
-        ? aggregate.groupChatGuid ?? aggregate.firstChatGuid
+        ? aggregate.groupChatGuid
         : aggregate.firstChatGuid
       const chatIdentifier = isGroup
-        ? aggregate.groupChatIdentifier ?? aggregate.firstChatIdentifier
+        ? aggregate.groupChatIdentifier
         : aggregate.firstChatIdentifier
       const body = row.text != null && String(row.text).length > 0
         ? String(row.text)
