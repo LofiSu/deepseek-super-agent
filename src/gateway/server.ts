@@ -5,7 +5,7 @@ import type { GatewayConfig, GatewayProvider } from './config.ts'
 import { upstreamUrl } from './config.ts'
 import { GatewayRouter } from './router.ts'
 import { PluginHost, type JsonObject, type RouteSeat } from './plugins.ts'
-import { maskingPlugin } from './mask.ts'
+import { maskingPlugin, Masker, deepUnmask } from './mask.ts'
 import { strategyPlugin } from './builtin-plugins.ts'
 import { GatewayLimits } from './limits.ts'
 import { UsageLedger, type UsageRow } from './usage.ts'
@@ -113,6 +113,19 @@ function textOf(content: unknown): string {
     }).join('')
   }
   return ''
+}
+
+/** Restore placeholders inside one SSE `data:` line; other lines pass through. */
+export function maskSseLine(line: string, masker: Masker): string {
+  const match = /^data:(.*)$/.exec(line.replace(/\r?\n$/, ''))
+  if (!match) return line
+  const payload = match[1]!.trim()
+  if (!payload || payload === '[DONE]') return line
+  try {
+    return `data: ${JSON.stringify(deepUnmask(JSON.parse(payload), masker))}\n`
+  } catch {
+    return line
+  }
 }
 
 /** Anthropic Messages request -> OpenAI chat request (text only). */
@@ -256,6 +269,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     stream: boolean,
     clientRes: ServerResponse,
     key: string,
+    streamMasker?: Masker,
   ): Promise<'streamed' | ForwardResult> => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), provider.timeoutMs ?? 60_000)
@@ -272,10 +286,27 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       if (stream && response.ok && contentType.includes('text/event-stream') && response.body) {
         clientRes.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
         const reader = response.body.getReader()
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          clientRes.write(Buffer.from(value))
+        if (streamMasker) {
+          const decoder = new TextDecoder()
+          let buffer = ''
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            let index: number
+            while ((index = buffer.indexOf('\n')) >= 0) {
+              const line = buffer.slice(0, index + 1)
+              buffer = buffer.slice(index + 1)
+              clientRes.write(maskSseLine(line, streamMasker))
+            }
+          }
+          if (buffer) clientRes.write(maskSseLine(buffer, streamMasker))
+        } else {
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            clientRes.write(Buffer.from(value))
+          }
         }
         clientRes.end()
         return 'streamed'
@@ -324,6 +355,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     protocol: string,
     session?: string,
     routing?: string,
+    streamMasker?: Masker,
   ): Promise<'streamed' | ForwardResult> => {
     const candidates = applyStrategy(router.candidates(modelInput), routing)
     if (session) {
@@ -352,7 +384,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       const started = Date.now()
       const key = router.pickKey(candidate.provider)
       try {
-        const result = await forward(candidate.provider, upstreamPath, body, candidate.model, stream, res, key)
+        const result = await forward(candidate.provider, upstreamPath, body, candidate.model, stream, res, key, streamMasker)
         const latency = Date.now() - started
         if (result === 'streamed') {
           router.recordSuccess(candidate.provider.id)
@@ -413,15 +445,15 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     let body = await readJson(req, res)
     if (!body) return
     if (options.transformReq) body = options.transformReq(body)
-    if (config.masking && body.stream === true) body = { ...body, stream: false }
     const model = modelOf(body)
     const state: Record<string, unknown> = {}
     body = await plugins.runRequest(body, { protocol: options.protocol, model }, state)
-    const stream = body.stream === true && !config.masking
+    const streamMasker = config.masking && state.masker instanceof Masker ? state.masker : undefined
+    const stream = body.stream === true
       && (options.upstreamPath.endsWith('/chat/completions') || options.upstreamPath.endsWith('/responses'))
     const routing = typeof req.headers['x-gateway-routing'] === 'string' ? req.headers['x-gateway-routing'] : undefined
     const session = sessionIdOf(req, body)
-    const result = await routeForward(res, options.upstreamPath, body, stream, modelOf(body), options.protocol, session, routing)
+    const result = await routeForward(res, options.upstreamPath, body, stream, modelOf(body), options.protocol, session, routing, streamMasker)
     if (result === 'streamed') return
     let outBody = result.body
     if (result.status < 400 && options.transformRes) {

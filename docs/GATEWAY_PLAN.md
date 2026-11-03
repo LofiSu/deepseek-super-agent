@@ -39,7 +39,7 @@ scraping or quota bypass.
 - [x] Allowance-aware failover: 402/429 rest a provider; `dailyTokens` budget exhaustion rests it.
 - [x] Concurrency lanes (`maxConcurrency`) + RPM (`maxRpm`); saturated → 429 with Retry-After.
 - [x] `/v1/gateway/quotas` reports in-flight, rpm used, tokens today, exhausted.
-- [ ] Streaming masking (currently buffers when masking on).
+- [x] Streaming masking (SSE events unmasked per line; no longer buffered).
 
 ### Phase 2 — Ledger & session
 - [x] Per-call usage ledger (provider/model, status, latency, tokens) + `onUsage` plugin hook + `/v1/gateway/usage`. (Price/cost still pending.)

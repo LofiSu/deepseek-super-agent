@@ -75,3 +75,8 @@ export function maskingPlugin(): GatewayPlugin {
     },
   }
 }
+
+/** Recursively restore placeholders in a parsed JSON value (used per SSE event). */
+export function deepUnmask(value: unknown, masker: Masker): unknown {
+  return mapStrings(value, text => masker.unmask(text))
+}
