@@ -348,6 +348,14 @@ A provider key alone fills in the base and default model. The first matching row
 
 Use a small model for the Router and Watchdog. Use a stronger one for the Worker. The table is one model for the process.
 
+## Local gateway and iMessage
+
+`ds-agent gateway` is a local OpenAI-compatible proxy in front of the providers you already configure. It speaks `POST /v1/chat/completions` (JSON and SSE), `/v1/messages` (Anthropic), `/v1/responses`, `/v1/embeddings`, and Gemini `generateContent`, and routes by model, priority, or a `provider/model` prefix with failover and per-provider metering. It mints a local bearer token at `<stateDir>/gateway.token` (0600), and the CLI reuses it when `DS_AGENT_GATEWAY_URL` is set. With a `gateway.config.json` present, `chat` and `imessage` start it in-process. See [docs/GATEWAY.md](./docs/GATEWAY.md).
+
+`ds-agent setup --write` discovers local OpenAI-compatible products (Magpie, Ollama, LM Studio, llama.cpp, vLLM) and scaffolds `gateway.config.json`. Fill `apiKey` for any provider that needs auth; the gateway never reads a product's stored credentials.
+
+`ds-agent imessage` is a two-way iMessage channel for a dedicated Apple ID: inbound from `~/Library/Messages/chat.db` (read-only, `is_from_me = 0` only), outbound through Messages.app via `osascript` with the text passed in the environment. It needs macOS Full Disk Access plus Automation permission. See [docs/IMESSAGE.md](./docs/IMESSAGE.md).
+
 ## Credits
 
 Author: LofiSu. Co-written with Grokbot (CoderBot).

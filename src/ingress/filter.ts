@@ -70,6 +70,7 @@ export function fastPath(
     && trigger.source !== 'github'
     && trigger.source !== 'cli'
     && trigger.source !== 'a2a'
+    && trigger.source !== 'imessage'
   ) {
     return { pass: false, reason: 'source-not-allowlisted' }
   }
