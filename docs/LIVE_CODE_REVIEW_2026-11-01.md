@@ -1,5 +1,7 @@
 # Live code review — 2026-11-01 (Session D)
 
+> **Historical snapshot** — this review describes the tree as of 2026-11-01. Findings may already be fixed; see [`docs/ROADMAP.md`](./ROADMAP.md) for current status. It is not a statement about current `main`.
+
 Scope: the `live-real-model` tree in this repository. The review is a full-tree pass, not a diff, because the branch is the artifact under review. `docs/REVIEW.md` (2026-10-31) is the earlier baseline; it is stale in several places and is treated here as a claim to re-check, not as evidence.
 
 Method: [`docs/CODE_REVIEW_METHOD.md`](./CODE_REVIEW_METHOD.md). Every finding names a file and a line. A behavior that is only asserted by a log substring is marked as such. The live model was the local Magpie gateway (`workbuddy/deepseek-v4.1-flash`); the demo and the default test suite both refuse `MockModel` (`src/cli/demo.ts:33-45`, `test/fixtures.ts:11-23`).

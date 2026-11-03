@@ -82,11 +82,11 @@ not evidence (see `docs/CODE_REVIEW_METHOD.md`).
 | **M1 harness** | done | `src/harness/loop.ts` (Router-before-Worker sequence at `145-160`, async jobs, batch window), `session.ts`, `model.ts`, `tools.ts`, `daemon.ts`, `machines.ts`, `team.ts`, `mesh.ts`; `test/job.test.ts`, `team-harness.test.ts`, `daemon-machines.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | Worker-mesh capacity is a logical placement rule in one process: `pickNode` records the least-loaded node and logs `capacity-full`, but still runs the turn — there is no queue, rejection, or backpressure (P1-3, documented in `docs/MODULES.md`). `ds-agent serve` wraps the in-process `Daemon` timer over persisted state (no inbound channel loop) with SIGINT/SIGTERM drain and exit 0; an in-flight turn is still not reconstructed after restart (P1-6). |
 | **M2 store** | done | `src/store/sqlite.ts` (`node:sqlite` at `:3`, `ds-agent.db` at `:16`), `schema.ts`, `spill.ts`, document/spill upsert; `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` (reopen) | No migration/version table; `node:sqlite` is experimental and needs Node ≥22. The §10 file-tree contradiction was resolved by #56: the plan now describes the real `sqlite.ts`/`schema.ts`/`spill.ts` tree. |
 | **M3 engine** | done | `src/core/engine.ts`, `intake.ts`, `policy.ts`, `assessment.ts`, `tickets.ts`, `assignments.ts`, `replies.ts`, `subscribe.ts`, `collab.ts`, `lifecycle.ts`; `test/domain-alignment.test.ts`, `subscription.test.ts`, `speculate.test.ts`, `mid-task-collab.test.ts`, `hardening.test.ts`, `live-modules.test.ts` | P1-2 is resolved by #39: the deterministic `gateTriggers` handles commands and the configured auto-accept classes, and deferred triggers go to `assessWithMainAgent`, which originates `accept`/`ignore`/`stop`/`unavailable` (with `title`/`scope`/`strength`) before any Ticket exists. The gate remains rule/policy based by design; it is not a model verdict. |
-| **M4 ingress** | partial | `src/ingress/filter.ts`, `shards.ts`, `thread.ts`, `batch.ts`; `test/filter.test.ts`, `router-shards.test.ts`, `runtime-integration.test.ts` | Fast Path is source + T16 admission (actor allowlist, group/chat allowlist read from `trigger.channel.address.group`, drop-self deny) + mention + keyword + noise; `test/filter.test.ts` covers each rule and the runtime env wiring. No shipped adapter populates `address.group` yet, so the group list is opt-in after the adapter supplies it. Admission is not authentication: a channel adapter must still verify its peer, and `meta` is never read. Slow Path is deterministic `ruleClassify` for both Mock and `HttpOpenAI` and is documented as such (#60); a model-backed policy is still open (P2-4). P2-2 is resolved: precedence is priority-desc then registration order, `default` is fallback-only, and the first matching shard owns the reply and terminal decision. Ownership is resolved from the trigger named by the call, and `Evals.decide` is idempotent per trigger, so only one terminal Router decision is recorded. Shards are routing metadata, not multi-process placement. |
+| **M4 ingress** | partial | `src/ingress/filter.ts`, `shards.ts`, `thread.ts`, `batch.ts`; `test/filter.test.ts`, `router-shards.test.ts`, `runtime-integration.test.ts` | Fast Path is source + T16 admission (actor allowlist, group/chat allowlist read from `trigger.channel.address.group`, drop-self deny) + mention + keyword + noise; `test/filter.test.ts` covers each rule and the runtime env wiring. The shipped Feishu adapter maps `message.chat_id` to `address.group`, so `DS_AGENT_GROUP_ALLOWLIST` works with it; other adapters must populate `address.group` to opt in (#70). Admission is not authentication: a channel adapter must still verify its peer, and `meta` is never read. Slow Path is deterministic `ruleClassify` for both Mock and `HttpOpenAI` and is documented as such (#60 and the README); P2-4 is resolved by `test/slow-path-policy.test.ts`, which pins the deterministic classifier — no model-backed policy is claimed or shipped. P2-2 is resolved: precedence is priority-desc then registration order, `default` is fallback-only, and the first matching shard owns the reply and terminal decision. Ownership is resolved from the trigger named by the call, and `Evals.decide` is idempotent per trigger, so only one terminal Router decision is recorded. Shards are routing metadata, not multi-process placement. |
 | **M5 subscribe** | done | `src/core/subscribe.ts`, `intake.ts` fan-out; `test/subscription.test.ts`, `hardening.test.ts` (contextOnly, unsubscribe) | `handback` is not exposed as a CLI action. The tests cover unsubscribe but not the full requeue-and-drop lifecycle as an operator flow. |
 | **M6 memory** | partial | `src/memory/recall.ts`, `acl.ts`, `long-term.ts`; `src/store/sqlite.ts` (`deleteSpill`); `test/spill.test.ts`, `long-term-memory.test.ts`, `live-modules.test.ts` | Recall is word-AND substring matching over a spill, not semantic or multi-hop. Retention landed in #54: `maxEntries`/`maxAgeDays` prune inside the same transaction as `put`/`remember`, `forget` deletes the spill and grants, and `DS_AGENT_MEMORY_MAX_ENTRIES`/`DS_AGENT_MEMORY_MAX_AGE_DAYS` configure it (defaults 1000/90). Dedupe and ranking are resolved (#68): `put()` reuses an existing same-ticket entry whose redacted text matches after whitespace/case normalization (tags unioned, no new row or spill), and `query()` orders by tagHits desc, textHits desc (each word capped at 5), createdAt desc, id desc; the exact formula is in `docs/MODULES.md` M6 and `test/long-term-memory.test.ts` proves it with an injected clock. Remaining: semantic search and the month-scale story. `README.md:115` still says "not month-scale"; that part is accurate. |
 | **M7 speculate** | done | `src/speculate/silent.ts`, `gate.ts`; `test/speculate.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | The gate is a clause-local keyword heuristic, documented as a stand-in (`docs/HARDENING_2026-11-01.md:25`). It is not a model verdict; a real value judgment remains open. |
-| **M8 channels** | done | `src/channels/norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `a2a.ts`, `a2a-transport.ts`; `test/channels-feishu.test.ts`, `channels-github-source.test.ts`, `outbox.test.ts`, `lifecycle-a2a.test.ts`, `a2a-transport.test.ts`; real demos in `src/cli/demos/*` | Real-channel acceptance is operator-only: `test/demos-real-channels.test.ts` is skipped offline (3 tests), and `pnpm demo` needs `gh auth` plus a live model. There is no email adapter (the plan calls it optional). |
+| **M8 channels** | done | `src/channels/norms.ts`, `cli.ts`, `feishu.ts`, `github-source.ts`, `outbox-adapter.ts`, `a2a.ts`, `a2a-transport.ts`; `test/channels-feishu.test.ts`, `channels-github-source.test.ts`, `outbox.test.ts`, `lifecycle-a2a.test.ts`, `a2a-transport.test.ts`; real demos in `src/cli/demos/*` | Real-channel acceptance is operator-only: `test/demos-real-channels.test.ts` is skipped offline (3 tests), and `pnpm demo` needs `gh auth` plus a live model. There is no email adapter; email is out of scope (see P2-8). |
 | **M9 env** | partial | `src/env/local-env.ts`, `sanitize.ts`, `vault.ts`, `seccomp.ts` (`sandboxEnabledFromEnv` returns true); `test/sanitize.test.ts`, `vault.test.ts`, `hardening.test.ts`, `local-env-timeout.test.ts`, `live-modules.test.ts`, `credential-sentinel.test.ts` | #44 made the sandbox default-on and fail-closed: a missing `sandbox-exec`/`bwrap` throws. Host vault/seccomp policy is still external. Credential non-leakage now has a single sentinel test (#53) covering SQLite tables, session JSONL, tool results, replies/outbox, and captured model request bodies, plus Worker port/tool rejection. #55 corrected the user-facing pages and historical reviews; this audit also fixed the remaining "optional OS sandbox" line in the `docs/MODULES.md` T51 section. C15/P1-10 are resolved. Host read isolation remains external. |
 | **M10 watchdog** | partial | `src/watchdog/watchdog.ts`, `rules.ts`, `rules.json`, `health.ts`; `test/health.test.ts`, `daemon-machines.test.ts`, `live-modules.test.ts`, `hardening.test.ts` | Goal-drift detection is marker-based ("a running report that says it left the scope"), not a general NL comparison. `PLAN.md` T43–T44 ask for NL rules; `README.md:100` already calls this "thin". |
 | **M11 CLI / demo** | partial | `src/cli/main.ts` (init/tasks/status/health/serve/chat/emit/metrics/memory/a2a/pause/intervene/resume/collab/team/teams), `src/cli/demos/run.ts`, `src/cli/bakeoff.ts`; `test/cli-memory-a2a.test.ts`, `cli-serve.test.ts`, `mid-task-collab.test.ts`, `live-demo.test.ts`, `live-e2e.test.ts` | `pnpm demo` (real GitHub issues/comments) is not in the automatic PR gate; it runs through the manual `acceptance.yml` dispatch and needs an operator with `gh auth`. `package.json` has no `bin`, no `build`, and `tsconfig` is `noEmit`, so the `PLAN.md` §10 `dist/cli.js` bin does not exist. `serve` runs the daemon timer over persisted state (no inbound channel loop) with clean SIGINT/SIGTERM shutdown; restart replay remains a boundary (P1-6). The `MODULES.md` runner claim is fixed by #46. |
@@ -421,17 +421,18 @@ Acceptance: `test/filter.test.ts` covers each rule plus runtime env wiring,
 `test/channels-feishu.test.ts` proves the Feishu chat-id mapping, and
 `test/subscription.test.ts` proves a filtered trigger cannot be requeued,
 assessed, evaluated, or decided into a Ticket.
-**P2-4. Slow-path live policy:** optional model policy behind a flag, or keep
-the rule classifier and remove "can call a model" from README. Acceptance: one
-of the two is true and tested.
-**P2-5. Test coverage and lint:** `pnpm test:coverage` runs the offline fixture
+**P2-4. Slow-path live policy:** resolved by keeping the deterministic rule
+classifier and stating that no model-backed policy is wired. `test/slow-path-policy.test.ts`
+pins the classifier for both Mock and `HttpOpenAI`; README and PLAN now agree.
+Acceptance: the slow-path policy test passes (#72).
+**P2-5. Test coverage and lint:** resolved by #71. `pnpm test:coverage` runs the offline fixture
 suite (`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1`) with the V8 provider and
 text-summary + json-summary reporters. It excludes the live-model and
 real-channel demo test files; the report counts `src/**/*.ts` except
 `src/cli/demos/**`. No failure threshold is configured. Measured on the PR head
-after the #70 rebase (81 source files, 299 coverage tests): lines 82.38%
-(5793/7032), branches 82.41% (1945/2360), functions 89.14% (501/562);
-statements track lines at 82.38%. V8 branch totals move by a few across runs, so
+after the #70/#71/#72 merges (81 source files, 302 coverage tests): lines 82.40%
+(5795/7032), branches 82.40% (1944/2359), functions 89.32% (502/562);
+statements track lines at 82.40%. V8 branch totals move by a few across runs, so
 treat these as informational until a later change picks a floor.
 
 `pnpm lint` runs `scripts/lint.ts`: section 7 board rows have exactly seven
@@ -447,13 +448,18 @@ when `DS_AGENT_FORMAT_BASE` names a base, `git diff --check` against that base.
 CI runs `pnpm lint`, `pnpm format:check`, and
 `pnpm test:coverage` in the required `typecheck and test` job. Acceptance:
 thresholds documented, not enforced.
-**P2-6. Repo hygiene:** confirm the untracked `repro-h9*.ts` diagnostics are
-gone from `main`; acceptance: `git status` clean after merge.
-**P2-7. Doc snapshots:** add the "historical" banner to `docs/REVIEW.md` and
-`docs/LIVE_CODE_REVIEW_2026-11-01.md` (the zh architecture review already has
-one via #51).
-**P2-8. Email channel:** either implement `formatEmail` + an email source or
-remove the optional mention from PLAN §3/T34. Acceptance: PLAN and code agree.
+**P2-6. Repo hygiene:** resolved. `git ls-files | grep -i repro-h9` returns
+no rows on the merged tree, and `git status --porcelain` is empty once this
+branch is committed (the installed `node_modules/` is ignored). Acceptance: no tracked `repro-h9*` paths; worktree clean.
+**P2-7. Doc snapshots:** resolved. `docs/REVIEW.md` (2026-10-31) and
+`docs/LIVE_CODE_REVIEW_2026-11-01.md` (2026-11-01) each start with a
+**Historical snapshot** banner pointing at this roadmap (the zh architecture
+review already had one via #51).
+**P2-8. Email channel:** resolved by scope decision. No email channel/source
+and no `formatEmail` are implemented; email is out of scope, and an adapter
+would need to extend ingress and norms. PLAN T34, the §4.1 contract table, the
+`ChannelNorms` comment, and the §4.2 coverage row now say so; the ingress fast
+path still drops `source: 'email'`. Acceptance: PLAN and code agree.
 
 ## 7. Dynamic task board
 
@@ -480,11 +486,11 @@ the work is already public.
 | P2-1 | LTM retention/ranking |  | `feat/ltm-retention`, `feat/ltm-ranking-dedupe` | #54, #68 | resolved | Retention 1000/90 + spill cleanup (#54); dedupe (same-ticket normalized text, tag union, no extra row/spill) and tagHits/textHits/createdAt/id ranking tested with an injected clock; formula in `docs/MODULES.md` M6 |
 | P2-2 | Shard arbitration | LofiSu | `feat/shard-arbitration` | #69 | resolved | Precedence documented + tests: priority-desc/registration order, default fallback-only, first shard owns reply + terminal decision; owner resolved from the supplied trigger; idempotent decisions; one ticket/decision per trigger |
 | P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists`, `feat/ingress-adapter-wiring` | #67, #70 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address (Feishu maps `chat_id`); filtered triggers cannot be handed back, assessed, evaluated, or decided into a Ticket; tests cover each rule, env, and resurrection |
-| P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
-| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #71 | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 82.38% lines / 82.41% branches / 89.14% functions over 81 files; no threshold |
-| P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
-| P2-7 | Status banners on review snapshots |  |  |  | todo | Historical banner on each |
-| P2-8 | Email channel decision |  |  |  | todo | PLAN and code agree |
+| P2-4 | Slow-path policy vs claim |  | `test/slow-path-deterministic` | #72 | resolved | Deterministic `ruleClassify` kept; `test/slow-path-policy.test.ts` pins it for Mock and `HttpOpenAI`; README and PLAN agree |
+| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #71 | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 82.40% lines / 82.40% branches / 89.32% functions over 81 files; no threshold |
+| P2-6 | Confirm `repro-h9*.ts` removed |  | `docs/p2-closeout` | #73 | resolved | The tracked file list has no `repro-h9*` paths; worktree `git status --porcelain` is empty after the branch commit (build output ignored) |
+| P2-7 | Status banners on review snapshots |  | `docs/p2-closeout` | #73 | resolved | **Historical snapshot** banner at the top of `docs/REVIEW.md` (2026-10-31) and `docs/LIVE_CODE_REVIEW_2026-11-01.md` (2026-11-01), both pointing at this roadmap |
+| P2-8 | Email channel decision |  | `docs/p2-closeout` | #73 | resolved | Email is out of scope: no email channel/source and no `formatEmail`; PLAN T34 and the §4.1 table say so, and the code agrees (fast path drops `source: 'email'`) |
 | R-1 | This audit | planning-review agent | `docs/roadmap` | #43 | resolved | File merged; board updated when gaps move |
 
 ## 8. Verification log

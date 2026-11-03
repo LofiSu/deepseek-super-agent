@@ -82,8 +82,8 @@
                                     ▼
 ┌─ Ingress 层 ─────────────────────────────────────────────────────────────┐
 │  Fast Path：来源/群组/白名单等确定性过滤                                  │
-│  Slow Path：LLM Policy 语义是否行动                                       │
-│  Thread key 映射（IM topic / PR / email thread）                          │
+│  Slow Path：确定性规则 ruleClassify（模型策略未接线）                    │
+│  Thread key 映射（IM topic / PR）                                         │
 └───────────────────────────────────┬───────────────────────────────────────┘
                                     ▼
 ┌─ Domain Engine 层（唯一写领域聚合）──────────────────────────────────────┐
@@ -120,8 +120,8 @@
 Source event
   → Channel adapter（半结构化 → Trigger 形状）
   → Ingress Fast Path（source/group/whitelist 确定性过滤）
-  → Ingress Slow Path（LLM policy；可 Mock）
-  → Thread key（IM topic / PR / email thread）
+  → Ingress Slow Path（确定性 ruleClassify；模型策略未接线）
+  → Thread key（IM topic / PR）
   → Engine.receive(trigger)
        → Intake：去重入库 Trigger + disposition；记入 Thread
        → Subscription fan-out
@@ -192,7 +192,7 @@ flowchart TB
 | 组件 | 做什么 | 不做什么 | 关键 ports / 文件 | 模块 |
 |------|--------|----------|-------------------|------|
 | **Channels** | 入站适配（CLI / 真实 Feishu / 真实 GitHub）→ Trigger；出站 ChannelNorms（IM≤100 words；GH 结构化）；Outbox 发到真实信道 | 写领域聚合；跑 LLM 循环 | `Outbox`, `ChannelNorms` · `src/channels/` | M8 |
-| **Ingress** | Fast Path 确定性过滤；Slow Path LLM policy；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
+| **Ingress** | Fast Path 确定性过滤；Slow Path 确定性规则（模型策略未接线）；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
 | **Engine** | **领域唯一写者**：Intake / Evals(Gate+Assessment) / Tickets / Assignments / Replies / Subscribe；同步命令+事务 | Node I/O；模型 HTTP；文件系统；Channel 协议细节 | `Engine`, `Repositories`, `Assessor`, `Executor`, `Outbox` · `src/core/` | M3+M5 |
 | **Harness** | Session 事件日志；async ReAct `start/stop/runTurn`；角色工具；Mock/BYOM；daemon 调度；Router=Sequence Point；Worker 隔离；Watchdog Session 宿主 | 领域状态机；直接写 Channel；解释 Policy | `Harness`, `Tool`, `Model` · `src/harness/` | M1 |
 | **Store** | SQLite Repositories + Spill 对象；atomic；session_event/job 持久化 | 业务 Decision；出站格式；跑工具 | `Repositories`, `SpillStore` · `src/store/` | M2 |
@@ -219,7 +219,7 @@ flowchart TB
 
 ### 2.7 职责一句话（速查）
 
-- **Ingress**：两级过滤 + Thread key；Fast Path 白名单；Slow Path LLM policy（可 Mock）。
+- **Ingress**：两级过滤 + Thread key；Fast Path 白名单；Slow Path 确定性规则（模型策略未接线）。
 - **Engine**：唯一写 Trigger/Thread/Decision/Ticket/Assignment/Subscription；同步命令 + 事务。
 - **Harness Router**：Sequence Point；批处理 Trigger；轻模型；理想无 bash；出站归 Router。
 - **Harness Worker**：隔离执行；强模型；只向 Router 报告；可订阅 Thread；Subagent 对 Router 不透明。
@@ -250,7 +250,7 @@ flowchart TB
 | T14 | Worker 内 Subagent/Team 对 Router 不透明 | §2 | M1 | Worker 可 spawn 子 job（Store `jobs` 表）；Router 只见 Assignment 报告 |
 | T15 | 个人助手多话题 → 多 Worker / 一 UI | §2 | M3+M11 | 同 chat Thread 多 Ticket；CLI 列 Tickets |
 | T16 | Fast Path 过滤（source/group/whitelist） | §3.1 | M4 | `ingress/filter.ts` `fastPath` 确定性规则 |
-| T17 | Slow Path LLM policy prompts | §3.1 | M4 | `ingress/filter.ts` `ruleClassify`/`filterTrigger`；Mock 可跳过 |
+| T17 | Slow Path policy classifier | §3.1 | M4 | `ingress/filter.ts` `ruleClassify`/`filterTrigger`；确定性规则，模型策略未接线 |
 | T18 | Thread = 事件流 | §3.2 | M0+M2 | `Thread` + `trigger_thread` 表 |
 | T19 | Subscribe Fast Path bypass Router | §3.2 | M5 | 人消息达 Ticket → `bypass=subscription`；日志含 ticketId |
 | T20 | 多对多 Worker↔Thread | §3.2 | M5 | Subscriptions on Thread；`followForContext` |
@@ -267,7 +267,7 @@ flowchart TB
 | T31 | Completion as new session event | §4.1 | M1 | job 完成 → `JOB_DONE` prompt → 下一 turn |
 | T32 | Duplex | §4.1 | M1 | 入站事件与工具结果并行入队 |
 | T33 | IM ≤100 words / 低打断 | §4.2 | M8 | `channels/norms.ts` `imMaxWords=100` |
-| T34 | GitHub/email 结构化高密度 | §4.2 | M8 | `formatGithub` / `formatEmail` 模板 |
+| T34 | GitHub 结构化高密度 | §4.2 | M8 | `formatGithub` 模板 |
 | T35 | Router owns outbound | §4.2 | M3+M8 | Worker 禁直写 Channel；仅 `orchestrator_reply` 类经 Router |
 | T36 | Stateless compute + durable Session DB | §5.1 | M1+M2 | 计算进程可杀；Session/领域在 SQLite |
 | T37 | Env stays on machine | §5.2 | M9 | LocalEnv workdir 在 stateDir |
@@ -311,6 +311,7 @@ flowchart TB
 | `ToolRegistry` / `ToolContext` | `src/harness/tools.ts:67` / `:21` | 按 `Role` 过滤 `specsFor(role)`；工具以 `roles: Role[]` 声明可用角色，没有独立 roles 文件。 |
 | `Model` | `src/harness/model.ts:41` | `MockModel` :86、`HttpOpenAI` :156、`createModelFromEnv` :252。 |
 | `Engine` | `src/core/engine.ts:26` | 唯一领域写入口；Runtime 通过 `bindRolePorts(engine)`（`src/core/role-ports.ts`）切出三套端口。 |
+| `ChannelNorms` | `src/channels/norms.ts` | `format(source, kind, text)` 仅实现 `formatGithub`（及 IM 100 词）；**没有 email 信道/来源，也没有 `formatEmail`；email 不在范围内**（适配器需扩展 ingress 与 norms）。 |
 
 **事件名（`DomainEventName`）**：`trigger.received` · `eval.started` · `decision.recorded` · `ticket.created` · `ticket.paused` · `ticket.resumed` · `ticket.ended` · `assignment.started` · `assignment.ended` · `thread.subscribed` · `trigger.requeued` · `subscription.removed` · `collab.guidance` · `collab.guidance_injected` · `collab.delivery_held` · `collab.reply_held` · `collab.report_held` · `speculate.delivered` · `speculate.discarded` · `watchdog.nudge` · `watchdog.fail` · `assignment.placed`。
 
@@ -603,7 +604,7 @@ export interface DeliverGate {
 /** Channels norms */
 export interface ChannelNorms {
   format(source: string, kind: ReplyRequest['kind'], text: string): string
-  // im: ≤100 words; github/email: structured dense
+  // im: ≤100 words; github: structured dense
 }
 
 /** Env — hands on the machine */
@@ -1093,12 +1094,12 @@ deepseek-super-agent/
 |--------|----------|-------------|----------|------|
 | §1 四特质 | T01–T04 | 有 | Harness/Engine/Store/Speculate | — |
 | §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding；T14/T15 部分 |
-| §3.1 Fast/Slow | T16–T17 | 有 | ingress | Slow Path 真 LLM 策略可再加强 |
+| §3.1 Fast/Slow | T16–T17 | 有 | ingress | Slow Path 是确定性规则；LLM 策略未接线，可再加强 |
 | §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | T21 handback 弱 |
 | §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object | 多跳图可再密 |
 | §3.4 投机 | T26–T28 | 有 | speculate + deliver | — |
 | §4.1 异步 ReAct | T29–T32 | 有 | loop/jobs | — |
-| §4.2 信道规范 | T33–T35 | 有 | channels/norms | email 模板可再补 |
+| §4.2 信道规范 | T33–T35 | 有 | channels/norms | 无 email 信道/来源，也未实现 `formatEmail`；email 不在范围内（适配器需扩展 ingress 与 norms） |
 | §5 存算/环境 | T36–T40 | 有 | store/env/daemon/BYOM | 真跨机 daemon 弱 |
 | §6 Watchdog | T41–T44 | 有 | watchdog | NL 改规则未齐 |
 | §7 实验 | T45 | 计数已做；端到端曲线未做 | `metrics/` | 压测曲线仍可选 |
