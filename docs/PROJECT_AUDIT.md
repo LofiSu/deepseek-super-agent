@@ -205,5 +205,10 @@ there reports 429 passed / 15 skipped (444), 58 files, 82.27% lines, 80.52%
 branches (2779/3451), and 89.97% functions. #88 merged the iMessage group edge
 and outbound fail-closed fix at `d3beb9c`; CI there reports 440 passed / 15
 skipped (455), 58 files, 82.29% lines, 80.57% branches (2787/3459), and 89.97%
-functions. The non-blocking review follow-ups remain tracked in the review log
-and the current status lives in `docs/DEVELOPMENT_STATUS.md`.
+functions. #90, #91, and #92 then merged at `8fa3a79`: group/1:1 thread-key
+separation, the re-landed live-suite test determinism changes, and mesh queue
+branch tests plus non-queued start cleanup. CI at `8fa3a79` reports 452 passed
+/ 15 skipped (467), 58 files, 82.39% lines (7837/9512), 80.97% branches
+(2814/3475), and 90.11% functions (693/769). The non-blocking review follow-ups
+remain tracked in the review log and the current status lives in
+`docs/DEVELOPMENT_STATUS.md`.

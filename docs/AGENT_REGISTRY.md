@@ -31,8 +31,12 @@
 | P1-6 | Core Runtime | `agent/P1-6-restart-recovery` | 2026-11-03 | merged `10e9f3c`, APPROVE | #85 | integrated |
 | IMESSAGE-GROUP-EDGES | Infrastructure/Security | `agent/imessage-group-edge-tests` | 2026-11-03 | merged `d3beb9c`, APPROVE after fix `890f238` | #88 | integrated |
 | GATEWAY-TOKEN-RACE | Infrastructure/Security | `agent/gateway-token-race` | 2026-11-03 | merged `5fbfb00`, security APPROVE | #87 | integrated |
-| STATE-DOCS | Chief Engineer | `docs/cycle-3-status` | 2026-11-03 | PR #89; docs REQUEST_CHANGES corrected, re-review pending | #89 | in progress |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87 APPROVE; #77 corrected | — | continuing |
+| STATE-DOCS | Chief Engineer | `docs/cycle-3-status` | 2026-11-03 | merged `ed8980d`, APPROVE after corrections | #89 | integrated |
+| IMESSAGE-THREAD-KEY | Infrastructure/Security | `agent/imessage-thread-key` | 2026-11-03 | merged `8fa3a79`, APPROVE | #90 | integrated |
+| LIVE-SUITE-SALVAGE | QA/Testing | `test/live-suite-salvage` | 2026-11-03 | merged `1dd426a`, APPROVE; #86 closed | #91 | integrated |
+| MESH-QUEUE-TESTS | Orchestration | `agent/mesh-queue-tests` | 2026-11-03 | merged `60bb9ae`, APPROVE | #92 | integrated |
+| CYCLE-4-CHECKPOINT | Chief Engineer | `docs/cycle-4-checkpoint` | 2026-11-03 | docs update; PR under review | — | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 
@@ -51,7 +55,13 @@
   `test/cli-gateway.test.ts` (after #82 and the #87 merge).
 - IMESSAGE-GROUP-EDGES: `src/channels/imessage.ts`,
   `test/channels-imessage.test.ts`, `docs/IMESSAGE.md` (after #81; merged #88).
-- STATE-DOCS: the seven project-state docs on `docs/cycle-3-status`.
+- IMESSAGE-THREAD-KEY: the same three iMessage files (after #88; merged #90).
+- MESH-QUEUE-TESTS: `src/harness/loop.ts`, `test/worker-mesh.test.ts` (after
+  #84; merged #92).
+- LIVE-SUITE-SALVAGE: `test/credential-sentinel.test.ts`, `test/fixtures.ts`,
+  `test/metrics.test.ts`, `test/team-live.test.ts` (merged #91).
+- STATE-DOCS: the seven project-state docs on `docs/cycle-3-status`; the cycle-4
+  checkpoint uses `docs/cycle-4-checkpoint`.
 - AUDIT-REFRESH: `docs/ROADMAP.md`, `docs/MODULES.md` (after P1-3 merges).
 - State reconciliation: the seven project-state docs in this PR.
 - No two active agents may edit the same file. If a shared interface change is

@@ -110,3 +110,48 @@ rewrite `PLAN.md`; link to the contract instead.
 - **Alternatives rejected:** a per-agent scheduler (duplicate loops and races);
   allowing implementers to merge their own work (no independent gate); unlimited
   concurrency (unbounded cost and conflicting writes).
+
+## ADR-006 — iMessage conversation keys are namespaced by conversation shape
+
+- **Date:** 2026-11-03
+- **Status:** accepted; implemented by #90
+- **Context:** `imessageThreadFor` fell back to `handle:<sender>` whenever a
+  message had no chat guid. An ambiguous group message therefore shared a
+  thread — and therefore ticket context — with a 1:1 message from the same
+  sender. #88 fixed the outbound address but not the thread identity.
+- **Decision:** a chat guid always wins (`chat:<guid>`). Without one, a group
+  message yields `group:<chatIdentifier>` when a positive identifier exists and
+  `group-unknown:<handle>` otherwise; a 1:1 message yields `handle:<handle>`.
+  Group and 1:1 keys are disjoint by prefix. The group flag comes from the
+  resolved `isGroupMessage` result, not from raw caller metadata. Positive-group
+  guids and identifiers aggregate independently so an identifier-only row
+  cannot hide a later guid.
+- **Consequences:** group content cannot enter a 1:1 ticket's context. Existing
+  group threads keyed under the old `handle:` key do not correlate after the
+  upgrade; this is a one-time context split, not a data migration. An ambiguous
+  group from one sender across distinct group chats still shares one key; it
+  never shares with 1:1.
+- **Alternatives rejected:** keeping the handle fallback (context mixing);
+  keying each ambiguous message by its own guid (fragments every turn into a new
+  thread); treating the first joined chat's identifier as the group (unsafe,
+  order-dependent).
+
+## ADR-007 — Deliberate MockModel tests opt in per call
+
+- **Date:** 2026-11-03
+- **Status:** accepted; implemented by #91
+- **Context:** the credential-sentinel test injects a capturing MockModel and
+  therefore needs to run under the live `pnpm test` default without a provider
+  key. The global `DS_AGENT_ALLOW_MOCK_FIXTURE=1` flag was the only opt-in and
+  weakened the fixture guard for every test in the process.
+- **Decision:** `freshRuntime` accepts an explicit `allowMockModel: true` option.
+  The default remains a refusal: a MockModel is rejected unless the caller opts
+  in or the environment flag is set. The option is stripped before
+  `Runtime.create`, and only the credential sentinel uses it.
+- **Consequences:** the sentinel is deterministic under the live suite without
+  changing the default guard. A new test that intends to use MockModel must say
+  so at the call site. The offline CI path continues to use the environment
+  flag.
+- **Alternatives rejected:** enabling MockModel by default (removes the safety
+  guard); a second fixture factory (duplicates runtime setup); skipping the
+  sentinel under a live run (loses the credential-leak check).
