@@ -429,9 +429,9 @@ suite (`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1`) with the V8 provider and
 text-summary + json-summary reporters. It excludes the live-model and
 real-channel demo test files; the report counts `src/**/*.ts` except
 `src/cli/demos/**`. No failure threshold is configured. Measured on the PR head
-after the #69 rebase (81 source files, 282 offline tests): lines 81.78%
-(5706/6977), branches 82.00% (1882/2295), functions 89.10% (499/560);
-statements track lines at 81.78%. V8 branch totals move by a few across runs, so
+after the #70 rebase (81 source files, 299 coverage tests): lines 82.38%
+(5793/7032), branches 82.41% (1945/2360), functions 89.14% (501/562);
+statements track lines at 82.38%. V8 branch totals move by a few across runs, so
 treat these as informational until a later change picks a floor.
 
 `pnpm lint` runs `scripts/lint.ts`: section 7 board rows have exactly seven
@@ -481,7 +481,7 @@ the work is already public.
 | P2-2 | Shard arbitration | LofiSu | `feat/shard-arbitration` | #69 | resolved | Precedence documented + tests: priority-desc/registration order, default fallback-only, first shard owns reply + terminal decision; owner resolved from the supplied trigger; idempotent decisions; one ticket/decision per trigger |
 | P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists`, `feat/ingress-adapter-wiring` | #67, #70 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address (Feishu maps `chat_id`); filtered triggers cannot be handed back, assessed, evaluated, or decided into a Ticket; tests cover each rule, env, and resurrection |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
-| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #71 | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 81.78% lines / 82.00% branches / 89.10% functions over 81 files; no threshold |
+| P2-5 | Coverage + lint in CI |  | `feat/coverage-and-lint` | #71 | resolved | `pnpm lint`, `pnpm format:check`, and `pnpm test:coverage` run in CI; baseline 82.38% lines / 82.41% branches / 89.14% functions over 81 files; no threshold |
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
 | P2-7 | Status banners on review snapshots |  |  |  | todo | Historical banner on each |
 | P2-8 | Email channel decision |  |  |  | todo | PLAN and code agree |
