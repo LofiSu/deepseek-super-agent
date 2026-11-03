@@ -533,7 +533,7 @@ CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   414 passed, 15 skipped (4
                                                       3 fully skipped
 pnpm test:coverage                                     413 passed, 51 files
                                                        statements 81.81% (7667/9371)
-                                                       branches   80.05% (2702/3375)
+                                                       branches   80.06% (2703/3376)
                                                        functions  89.77% (685/763)
                                                        lines      81.81% (7667/9371)
 ```
