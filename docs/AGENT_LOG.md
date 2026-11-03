@@ -4,6 +4,104 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-03 — Cycle 1, checkpoint 3 (integration at `03a4c02`)
+
+### Observed
+
+- Another session integrated #75, #76, and #77 into `main` at `08ea78f`,
+  `aae182c`, and `03a4c02`. CI was green on each exact head.
+- #77 was merged despite the independent REQUEST_CHANGES verdict on multi-chat
+  group dedupe. The merged code still classifies a message joined to a 1:1 chat
+  first and a group chat second as 1:1, and missing chat metadata defaults to
+  1:1.
+- #75 merged at `deed616`, before the final reconciliation commit `bdce7ea`.
+  The merged docs still carry the `bb11c96` baseline and stale counts.
+- #76 merged the gateway hardening with an APPROVE review. The symlink
+  redirection and missing fail-closed/SSE/401 tests remain.
+- P1-3 finished as PR #79 with Engine-owned placement; independent review is
+  running.
+- `03a4c02` gates: typecheck/lint (224 files)/format pass; 388 passed,
+  15 skipped (403); coverage 81.00% lines, 79.84% branches, 89.37% functions.
+
+### Decided
+
+- Treat the #77 merge as a process incident. Open the corrective PR #81
+  immediately; do not call the iMessage surface fail-closed until it merges.
+- Ship the reconciled docs in a new PR from `main`; do not rewrite history or
+  force-push a merged branch.
+- Review #79 and the gateway token follow-up independently before merge.
+
+### Dispatched
+
+- IMESSAGE-GROUP-FIX: #81, aggregate groupness across all joined chats.
+- GATEWAY-TOKEN-SYMLINK: symlink/non-regular token rejection and
+  security-branch tests.
+- P1-3 review: independent concurrency review of #79.
+
+### Verified
+
+- #81 reports CI green and 395 passed / 15 skipped; independent review pending.
+- No live model or real-channel writes were performed.
+
+### Pending
+
+- Merge #81 and #79 only after clean independent review.
+- Merge the gateway token follow-up.
+- Then P1-6 and PR #74 refresh.
+
+## 2026-11-03 — Cycle 1, checkpoint 2 (main advanced to `cb32a17`)
+
+### Observed
+
+- PR #78 merged while the first batch was running, adding the single-orchestrator
+  contract, 3-implementation-agent cap, 4-cycle session cap, and
+  `.super-agent/state.json` protocol. `main` is now `cb32a17`.
+- #76 and #77 both merged current `main`; their effective diffs stayed limited
+  to the assigned files. CI is green on both heads.
+- Independent gateway review returned **APPROVE** with non-blocking follow-ups:
+  token-file symlinks are followed, and fail-closed/SSE/identical-401 tests are
+  missing.
+- Independent iMessage review returned **REQUEST_CHANGES**: a message joined to
+  multiple chats is deduped to the first row, so a group message can still be
+  classed 1:1 and marked `direct`; missing chat metadata also defaults to 1:1.
+- P1-3 implementer completed PR #79: bounded queue, FIFO pump, explicit shutdown
+  drain, metrics, and Engine-owned `Assignment.node` placement. Full suite
+  reported 380 passed / 15 skipped.
+- Fresh `cb32a17` gates: typecheck/lint (217 files)/format pass; 372 passed,
+  15 skipped (387); coverage 80.68% statements/lines, 79.67% branches,
+  89.72% functions.
+
+### Decided
+
+- Keep the project-state docs in their own PR; do not count them as a fourth
+  implementation task.
+- Move AUDIT-REFRESH from Cycle 1 to Cycle 2: it shares `docs/ROADMAP.md` and
+  `docs/MODULES.md` with P1-3 and must follow it.
+- Record the `Assignment.node` write as a known deviation from "Engine is the
+  only writer"; P1-3 now removes it through `Engine.assignmentPlaced`.
+- Do not merge #77 until groupness is aggregated across all joined chat rows and
+  missing metadata fails closed.
+- Accept #76 on its APPROVE verdict; track symlink hardening and missing
+  security-branch tests as GATEWAY-TOKEN-SYMLINK.
+
+### Dispatched
+
+- iMessage fix round on `agent/imessage-admission`: aggregate group metadata,
+  trim the handle before SQL, fail clearly on old schema, add the missing
+  fixtures.
+
+### Verified
+
+- Docs corrections and the new baseline are in this PR.
+- No live model or real-channel writes were performed.
+
+### Pending
+
+- Re-review #77 and review #79.
+- Merge #76, then dispatch GATEWAY-TOKEN-SYMLINK.
+- P1-6 and AUDIT-REFRESH after P1-3 merges.
+- Update `.super-agent/state.json` at the next checkpoint.
+
 ## 2026-11-03 — Cycle 1
 
 ### Observed

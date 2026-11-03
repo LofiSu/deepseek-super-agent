@@ -1,38 +1,66 @@
 # Project audit — 2026-11-03
 
-> Audit base: `main` at `bb11c96` (`feat: iMessage channel + local
-> OpenAI-compatible gateway (#64)`). All commands were run locally on this tree.
-> This audit supersedes the stale `fa974ca` evidence in open PR #74.
+> Audit base: `main` at `03a4c02` (`fix(imessage): fail closed admission and
+> gate group chats (#77)`). Commands were run in a detached worktree at
+> `origin/main`; the primary clone contained unrelated uncommitted WIP and was
+> not used. This audit supersedes the stale `fa974ca` evidence in PR #74 and
+> the earlier `bb11c96`/`cb32a17` checkpoints.
 
 ## 1. Repository state
 
 | Item | Observation |
 |------|-------------|
-| Branch | `main`, clean working tree |
-| HEAD | `bb11c96` |
+| Branch | `main`, clean in the detached audit worktree |
+| HEAD | `03a4c02` |
 | Remote | `git@github.com:LofiSu/deepseek-super-agent.git` |
-| Open PRs | **#74** only (`docs/final-audit`) |
+| Last merged PR | **#77** iMessage fail-closed admission (merged 2026-11-03T06:12:32Z) |
+| Merged this cycle | #75 project-state docs (`08ea78f`), #76 gateway hardening (`aae182c`), #77 iMessage admission (`03a4c02`) |
+| Open PRs at checkpoint | **#79** (`agent/P1-3-mesh-backpressure`) and this documentation reconciliation PR |
 | Issues | GitHub Issues disabled |
 | Branch protection | required check `typecheck and test`; strict; admins enforced; conversation resolution required |
 | Node / pnpm | Node v22.23.4 / pnpm 9.15.9 |
 | Package scripts | `lint`, `format:check`, `typecheck`, `test`, `test:coverage`, `demo`, `demo:local`, `demo:feishu`, `bench:bakeoff` |
 
+`#78` added the project orchestration contract in `CLAUDE.md`, agent
+definitions, a stop guard, and the `autonomous-engineering` skill. It makes the
+main session the only orchestrator, caps the validating pipeline at three
+implementation agents, caps a session at four completed cycles, and requires
+the main session alone to write `.super-agent/state.json`.
+
+`#75` merged the first project-state checkpoint, but its final reconciliation
+commit (`bdce7ea`) landed after the merge and is not on `main`. This PR carries
+the reconciled state forward; it does not rewrite the merged commit.
+
 ## 2. Verified quality gates
 
 ```text
 pnpm typecheck                                         exit 0
-pnpm lint                                              lint ok (208 tracked files)
+pnpm lint                                              lint ok (224 tracked files)
 pnpm format:check                                      exit 0
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   372 passed, 15 skipped, 52 files
-pnpm test:coverage                                     371 passed, 51 files
-                                                       statements 80.68% (7171/8888)
-                                                       branches   79.69% (2469/3098)
-                                                       functions  89.72% (646/720)
-                                                       lines      80.68% (7171/8888)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   388 passed, 15 skipped (403)
+                                                      55 files: 52 with passing tests,
+                                                      3 fully skipped
+pnpm test:coverage                                     387 passed, 51 files
+                                                       statements 81.00% (7280/8987)
+                                                       branches   79.84% (2528/3166)
+                                                       functions  89.37% (656/734)
+                                                       lines      81.00% (7280/8987)
 ```
 
-The 15 skips are the live and real-channel suites (`live-*`, `demos-real-channels`).
-No live model or real-channel acceptance run was performed in this audit.
+File-count detail for the plain offline run:
+
+- 52 files execute at least one passing test. `test/live-demo.test.ts` is one of
+  them: it passes one offline test and skips three live tests.
+- 3 files are fully skipped: `test/demos-real-channels.test.ts` (3 tests),
+  `test/live-e2e.test.ts` (7), and `test/team-live.test.ts` (2).
+- The 15 skipped tests are the live model and real-channel suites. No live model
+  or real-channel acceptance run was performed in this audit.
+
+Coverage note: the earlier `bb11c96` run reported 79.69% branches
+(2469/3098), and the `cb32a17` run reported 79.67% (2465/3094). The current
+`03a4c02` run reports 79.84% (2528/3166); it includes the new gateway and
+iMessage tests from #76/#77. The figures above are the audited `03a4c02`
+numbers.
 
 ## 3. Architecture state
 
@@ -53,29 +81,45 @@ present in `src/`:
 - `src/gateway` — local OpenAI/Anthropic/Gemini-compatible proxy.
 - `src/runtime.ts` — composition root.
 
-The Engine remains the only writer of domain aggregates. `src/harness/loop.ts`
-reads tickets and calls `assignmentStarted`; it does not mutate tickets except
-through the Engine-owned host callback. The gateway is an infrastructure
-surface, not a domain actor.
+The Engine owns ticket/assignment transitions. One direct-write deviation exists:
+`Harness.launch` assigns the chosen node and then calls
+`this.opts.store.putDoc('ticket', started.id, started)` at
+`src/harness/loop.ts:134-135`. That is a scheduler write to the ticket
+aggregate, even though it does not change ticket status or make a domain
+decision. PR #79 moves placement to `Engine.assignmentPlaced`; until it merges,
+the accurate claim is "Engine owns domain transitions", not "Engine is the only
+writer". No new direct writes are permitted.
+
+The gateway is an infrastructure surface, not a domain actor.
 
 ## 4. Findings
 
 ### IMESSAGE-ADMISSION — iMessage admission is default-open
 
-`imessageTrigger()` sets `addressed: 'direct'` for every message. Admission
-rules are optional: with none configured, the fast path accepts a `direct`
-trigger without any admission, mention, or noise check. `--handle` is optional,
-so a default run ingests any sender in any chat, including group chats, and any
-party who can message the agent's Apple ID can trigger work. The docs call the handle
-"strongly recommended", which is not a boundary. This is being fixed in
-`agent/imessage-admission`.
+`imessageTrigger()` sets `addressed: 'direct'` for every message
+(`src/channels/imessage.ts:110-132`). Admission ordering is not the defect:
+`src/ingress/filter.ts:36-58` runs `admissionDeny` before checking `addressed`.
+The defect is that the default run supplies no admission rules, so `deny`
+returns nothing, and the always-`direct` marker then passes the fast path with
+`mention-or-direct`. `--handle` / `DS_AGENT_IMESSAGE_HANDLE` is optional and no
+group metadata is read, so a default run ingests any sender in any chat,
+including group chats. Any party who can message the agent's Apple ID can
+trigger work. PR #77 merged the fail-closed gate, but its independent review
+returned REQUEST_CHANGES before merge: a message joined to multiple chats is
+deduped to one row, so a group message can still be classified as 1:1. Missing
+chat metadata also defaults to 1:1 through the `LEFT JOIN`. The merged code
+therefore does not yet satisfy "a group message is never `direct`". A follow-up
+PR aggregates groupness across all `chat_message_join` rows, treats missing
+metadata as unknown/group, trims the handle before SQL, and adds the missing
+fixtures.
 
 ### P1-3 — Worker-mesh capacity is advisory
 
 `Harness.launch` logs `[mesh] ... capacity-full` and runs the Worker anyway.
 `WorkerMeshRegistry` correctly reports no free node, but no scheduler consumes
-that signal. With `DS_AGENT_MESH_CAPACITY=1`, two Workers can run concurrently.
-This is being fixed in `agent/P1-3-mesh-backpressure`.
+that signal on `main`. With `DS_AGENT_MESH_CAPACITY=1`, two Workers can run
+concurrently. PR #79 is open with a bounded queue and Engine-owned placement;
+its independent review is in progress.
 
 ### P1-6 — No restart replay
 
@@ -87,23 +131,29 @@ the mesh change because both touch `Harness.launch`/`drain` and runtime release.
 
 ### GATEWAY-HARDENING — Gateway auth/exposure edges
 
-- Bearer token comparison is `===`, not constant-time.
-- An empty token is accepted at server start (all requests with `Bearer ` may
-  then pass depending on header parsing).
-- `/`, `/ui`, `/health` are unauthenticated; `/health` exposes provider IDs,
-  plugin names, and metrics.
-- A non-loopback `--host` bind is accepted without an exposure warning.
-- A pre-existing token file is reused without re-applying `0600`.
-- The dashboard is read-only and does not embed the token; that part is sound.
+`#76` merged the following fixes: constant-time bearer comparison, empty-token
+refusal, a non-loopback exposure warning, token-file `0600` repair with a
+fail-closed error, `nosniff`/`no-store` headers, and no token in the dashboard.
+Residual findings:
 
-### GATEWAY-REVIEW — #64 review recorded; hardening and coverage remain
+- Token-file reads and chmods follow symlinks. A writable `DS_AGENT_HOME` can
+  redirect the credential; the GATEWAY-TOKEN-SYMLINK follow-up rejects
+  symlinks/non-regular files, uses `O_NOFOLLOW`, and adds the missing security
+  tests.
+- Mode enforcement is skipped on Windows; this is documented as a POSIX-only
+  guarantee.
+- The CLI can label a token file that was not written when `--token` or
+  `DS_AGENT_GATEWAY_TOKEN` supplied the credential.
 
-`#64` added 4,390 lines and 13 test files after the last roadmap audit. Coverage
-on the merged tree is 80.68% lines / 79.69% branches. The 82.40% figure recorded
-for `fa974ca` is a historical baseline, not a target. The independent review and
-verdict are recorded in `docs/PR_REVIEW_LOG.md`. Remaining work is iMessage
-admission and gateway hardening, plus focused coverage for security-relevant
-gateway/iMessage branches.
+### GATEWAY-REVIEW — #64 has no independent review record
+
+`#64` added 4,390 lines and 12 test files after the last roadmap audit.
+Coverage on `03a4c02` is 81.00% lines / 79.84% branches, up from the
+pre-hardening 80.68% / 79.67% but still below the 82.40% historical baseline
+recorded for `fa974ca`. The absolute difference is explained by the new
+surface. `#76` now has an independent APPROVE review; `#77` has a
+REQUEST_CHANGES review with a post-merge fix follow-up. Reviews are recorded in
+`docs/PR_REVIEW_LOG.md`.
 
 ### SERVE-CHANNEL-LOOP — `serve` has no inbound channel loop
 
@@ -121,7 +171,8 @@ This is documented; it remains a production limitation rather than a bug.
 
 ## 6. Audit conclusion
 
-The offline gate is green and the architecture still matches its contracts. The
-highest-value work is not new features: it is closing the default-open iMessage
-admission path, making mesh capacity real, adding restart recovery, and
-reviewing/hardening the newly merged gateway surface.
+The offline gate is green on `03a4c02` and the architecture still matches its
+contracts, with the documented `Assignment.node` deviation until #79 merges.
+The highest-value work is not new features: it is closing the merged iMessage
+group-classification gap, making mesh capacity real, adding restart recovery,
+and completing the gateway token-file hardening.
