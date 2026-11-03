@@ -37,9 +37,10 @@ sufficient. Verdicts: APPROVE / REQUEST_CHANGES / REJECT / BLOCKED.
     string interpolation; outbound env is filtered; gateway token is generated
     with 24 random bytes and written 0600; provider credentials are not exposed
     by `/health`.
-- **Verdict (retrospective):** APPROVE WITH FOLLOW-UPS. No protocol-breaking
-  defect found in the reviewed paths; the admission and auth edges must be
-  hardened before this surface is called production-ready.
+- **Verdict (retrospective):** **APPROVE**. No protocol-breaking defect found in
+  the reviewed paths. Follow-ups are tracked as IMESSAGE-ADMISSION and
+  GATEWAY-HARDENING; both must merge before this surface is called
+  production-ready.
 
 ## Pending reviews
 
@@ -47,4 +48,5 @@ sufficient. Verdicts: APPROVE / REQUEST_CHANGES / REJECT / BLOCKED.
 - `agent/P1-3-mesh-backpressure`
 - `agent/gateway-hardening`
 - `docs/final-audit` refresh
+- `GATEWAY-REVIEW` (focused security-relevant coverage)
 - `agent/P1-6-restart-recovery` (after P1-3)

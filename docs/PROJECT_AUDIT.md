@@ -62,10 +62,11 @@ surface, not a domain actor.
 
 ### IMESSAGE-ADMISSION — iMessage admission is default-open
 
-`imessageTrigger()` sets `addressed: 'direct'` for every message. The fast path
-accepts `direct` before any admission rule. `--handle` is optional. A default run
-therefore ingests any sender in any chat, including group chats, and any party
-who can message the agent's Apple ID can trigger work. The docs call the handle
+`imessageTrigger()` sets `addressed: 'direct'` for every message. Admission
+rules are optional: with none configured, the fast path accepts a `direct`
+trigger without any admission, mention, or noise check. `--handle` is optional,
+so a default run ingests any sender in any chat, including group chats, and any
+party who can message the agent's Apple ID can trigger work. The docs call the handle
 "strongly recommended", which is not a boundary. This is being fixed in
 `agent/imessage-admission`.
 
@@ -95,13 +96,14 @@ the mesh change because both touch `Harness.launch`/`drain` and runtime release.
 - A pre-existing token file is reused without re-applying `0600`.
 - The dashboard is read-only and does not embed the token; that part is sound.
 
-### GATEWAY-REVIEW — #64 has no independent review record
+### GATEWAY-REVIEW — #64 review recorded; hardening and coverage remain
 
 `#64` added 4,390 lines and 13 test files after the last roadmap audit. Coverage
-on the merged tree is 80.68% lines / 79.69% branches, below the 82.40% baseline
-recorded for `fa974ca`. The absolute drop is explained by the new surface, but
-there is no independent review artifact for the gateway/iMessage code. This
-cycle records reviews in `docs/PR_REVIEW_LOG.md`.
+on the merged tree is 80.68% lines / 79.69% branches. The 82.40% figure recorded
+for `fa974ca` is a historical baseline, not a target. The independent review and
+verdict are recorded in `docs/PR_REVIEW_LOG.md`. Remaining work is iMessage
+admission and gateway hardening, plus focused coverage for security-relevant
+gateway/iMessage branches.
 
 ### SERVE-CHANNEL-LOOP — `serve` has no inbound channel loop
 

@@ -7,9 +7,10 @@ rewrite `PLAN.md`; link to the contract instead.
 
 - **Date:** 2026-11-03
 - **Status:** accepted, implementation in progress (`IMESSAGE-ADMISSION`)
-- **Context:** `#64` marked every iMessage trigger `addressed: 'direct'`. The
-  fast path admits `direct` before admission rules, and `--handle` was optional.
-  Any sender in any chat could trigger work.
+- **Context:** `#64` marked every iMessage trigger `addressed: 'direct'`.
+  Admission rules are optional; with none configured the fast path admits
+  `direct`, and `--handle` was optional. Any sender in any chat could trigger
+  work.
 - **Decision:** require a sender allowlist (`--handle` or
   `DS_AGENT_ACTOR_ALLOWLIST`) unless the operator passes an explicit
   `--allow-any` opt-out. Group chats are closed by default and require an

@@ -46,8 +46,8 @@ with a new entry.
 
 ## 2026-11-03 — Cycle 0 (initial audit)
 
-- Located the canonical clone at `/Users/sulin/deepseek-super-agent`.
-- Confirmed GitHub auth as `LofiSu` and Node/pnpm versions.
+- Located the canonical clone at the repository root.
+- Confirmed GitHub authentication and Node/pnpm versions.
 - Read `PLAN.md` structure, `docs/ROADMAP.md` status board, module tree, and the
   new gateway/iMessage code.
 - Created the project-state documents and the master plan.

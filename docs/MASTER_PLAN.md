@@ -34,11 +34,11 @@ Repository facts:
 
 | ID | Priority | Gap | Evidence | Status |
 |----|----------|-----|----------|--------|
-| IMESSAGE-ADMISSION | P0 | iMessage accepts any sender by default and marks every message `addressed: direct`, including group chats. `--handle` is only "strongly recommended". | `src/channels/imessage.ts` `imessageTrigger`; `src/ingress/filter.ts` accepts `direct` before admission; `docs/IMESSAGE.md` | open |
+| IMESSAGE-ADMISSION | P0 | iMessage accepts any sender by default and marks every message `addressed: direct`, including group chats. `--handle` is only "strongly recommended". | `src/channels/imessage.ts` `imessageTrigger`; `src/ingress/filter.ts` admits `direct` when no admission rules are configured; `docs/IMESSAGE.md` | open |
 | P1-3 | P1 | Worker-mesh capacity is advisory: when `pickNode` returns `undefined`, the Worker still runs (`[mesh] ... capacity-full`). No queue, rejection, or backpressure. | `src/harness/loop.ts:84-89`; `test/worker-mesh.test.ts` | open |
 | P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/cli/main.ts` serve comment; `docs/MODULES.md:60`; `docs/ROADMAP.md` P1-6 | open |
 | GATEWAY-HARDENING | P1 | Gateway auth uses a non-constant-time string compare; `/`, `/ui`, and `/health` are unauthenticated; non-loopback bind is unwarned; a reused token file is not re-chmodded. | `src/gateway/server.ts`; `src/gateway/token.ts`; `src/cli/gateway.ts` | open |
-| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code has no independent review record and coverage is below the pre-#64 baseline (80.68% vs 82.40% lines). | `docs/ROADMAP.md`; coverage run above | open |
+| GATEWAY-REVIEW | P2 | `#64` review is recorded in `docs/PR_REVIEW_LOG.md`; remaining work is admission/auth hardening plus focused coverage (80.68% vs the historical 82.40% baseline). | `docs/PR_REVIEW_LOG.md`; `docs/ROADMAP.md` | open |
 | AUDIT-REFRESH | P2 | `docs/final-audit` (#74) is stale against `bb11c96`; the audit table does not include `#64`. | PR #74; `git merge-base` = `fa974ca` | open |
 | SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:206-221`; `docs/ROADMAP.md` | bounded design decision |
 
@@ -49,10 +49,10 @@ Cycle 1 (parallel, disjoint files)
   IMESSAGE-ADMISSION  iMessage fail-closed admission + group handling
   P1-3  Worker-mesh capacity/backpressure
   GATEWAY-HARDENING Gateway auth/hardening
-  AUDIT-REFRESH Refresh PR #74 audit evidence
 
-Cycle 2 (after P1-3 merges; touches harness/runtime)
+Cycle 2 (after P1-3 merges; touches harness/runtime and its docs)
   P1-6  Restart recovery for interrupted assignments/jobs
+  AUDIT-REFRESH Refresh PR #74 audit evidence (after P1-3's MODULES/ROADMAP edits)
   GATEWAY-REVIEW  Coverage + independent review of #64 surface
 
 Cycle 3
@@ -92,8 +92,9 @@ Do not start P1-6 before P1-3 is merged: both change `Harness.launch`,
 
 ### Problem
 
-`imessageTrigger()` always sets `addressed: 'direct'`, and the fast path accepts
-`direct` before any admission rule. `--handle` is optional, so a default run
+`imessageTrigger()` always sets `addressed: 'direct'`. Admission rules are
+optional: with none configured, the fast path accepts `direct` without any
+admission, mention, or noise check. `--handle` is optional, so a default run
 ingests messages from any sender in any chat, including group chats. Any party
 who can message the agent's Apple ID can trigger work.
 
