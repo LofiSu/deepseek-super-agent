@@ -18,6 +18,7 @@ import { defaultHome, runDemo } from './demo.ts'
 import { runGatewayCommand } from './gateway.ts'
 import { runImessageCommand } from './imessage.ts'
 import { runSetupCommand } from './setup.ts'
+import { startEmbeddedGateway } from '../gateway/embedded.ts'
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`)
@@ -164,6 +165,24 @@ async function withRuntime(
       runtime.daemon.stop()
       runtime.store.close()
     }
+  }
+}
+
+/**
+ * If a gateway.config.json exists and no DS_AGENT_GATEWAY_URL is set, start the
+ * gateway in-process for the duration of `run`, so chat/imessage need no
+ * separate gateway process.
+ */
+async function runWithEmbeddedGateway(home: string, run: () => Promise<void>): Promise<void> {
+  const embedded = await startEmbeddedGateway(home)
+  if (embedded) {
+    process.env.DS_AGENT_GATEWAY_URL = embedded.url
+    process.env.DS_AGENT_GATEWAY_TOKEN = embedded.token
+  }
+  try {
+    await run()
+  } finally {
+    if (embedded) await embedded.close()
   }
 }
 
@@ -393,11 +412,11 @@ async function main(): Promise<void> {
   if (cmd === 'chat') {
     const text = process.argv.slice(3).filter(part => !part.startsWith('--')).join(' ').trim()
     if (!text) throw new Error('chat needs text')
-    await withRuntime(runtime => { runtime.ingest(cliTrigger({ text })) })
+    await runWithEmbeddedGateway(home, () => withRuntime(runtime => { runtime.ingest(cliTrigger({ text })) }))
     return
   }
   if (cmd === 'imessage') {
-    await runImessageCommand(home)
+    await runWithEmbeddedGateway(home, () => runImessageCommand(home))
     return
   }
   if (cmd === 'gateway') {

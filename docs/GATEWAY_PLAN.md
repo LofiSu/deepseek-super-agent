@@ -49,7 +49,7 @@ scraping or quota bypass.
 
 ### Phase 3 — Wiring & shell
 - [ ] Agent config wiring: rewrite each agent's model config to point at the gateway; profiles.
-- [ ] `ds-agent gateway` embedded mode (auto-start in-process for chat/imessage).
+- [x] `ds-agent gateway` embedded mode (auto-start in-process for chat/imessage when a config file exists).
 - [ ] TUI/web panels (later).
 
 ## Definition of done (phase 1)

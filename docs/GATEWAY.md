@@ -99,6 +99,11 @@ pnpm ds-agent chat "fix the login timeout"
 `DS_AGENT_GATEWAY_URL` is set, and read the self-issued token automatically — no
 manual key juggling.
 
+If `<stateDir>/gateway.config.json` exists and `DS_AGENT_GATEWAY_URL` is unset,
+`ds-agent chat` and `ds-agent imessage` start the gateway **in-process** on an
+ephemeral port for the duration of the command — no separate `ds-agent gateway`
+process is needed.
+
 ## Endpoints
 
 | Method | Path | Auth | Purpose |
