@@ -1,6 +1,6 @@
 # Development status
 
-> Checkpoint: 2026-11-03 · `main` = `03a4c02`
+> Checkpoint: 2026-11-03 · `main` = `34aef25`
 > Source of truth: `git`, GitHub PRs/checks, and the evidence in
 > `docs/PROJECT_AUDIT.md`. Do not trust this file without re-verifying.
 
@@ -8,51 +8,49 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `03a4c02` |
-| Last merged PR | #77 iMessage admission |
-| Open PRs | #74 (docs audit, stale) |
+| Commit | `34aef25` |
+| Last merged PR | #84 mesh release-order correction |
+| Merged this cycle | #75 docs, #76 gateway, #77 iMessage, #78 orchestration, #79 mesh, #80 docs, #81 group fix, #82 token hardening, #84 mesh correction |
+| Open PRs at checkpoint | #74 (refreshed audit, re-review), #83 (this reconciliation), #85 (P1-6 restart recovery) |
 | Required check | `typecheck and test` |
-| Offline suite | 376 passed / 50 files |
-| Coverage | not re-measured this cycle; historical 80.68% lines / 79.69% branches |
+| Offline suite | 414 passed / 15 skipped (429 tests, 55 files) |
+| Coverage | 81.81% statements/lines, 80.06% branches, 89.77% functions |
 
 ## Active workstreams
 
 | Task | Priority | Branch | Owner | State |
 |------|----------|--------|-------|-------|
-| IMESSAGE-ADMISSION — iMessage fail-closed admission | P0 | `agent/imessage-admission` | implementer | merged (#77) |
-| P1-3 — mesh capacity/backpressure | P1 | `agent/P1-3-mesh-backpressure` | implementer | in progress; worktree edits, no PR |
-| GATEWAY-HARDENING — gateway hardening | P1 | `agent/gateway-hardening` | implementer | merged (#76) |
-| AUDIT-REFRESH — refresh PR #74 audit | P2 | `docs/final-audit` | chief engineer | queued (blocked by P1-3 docs edits) |
-| P1-6 — restart recovery | P1 | `agent/P1-6-restart-recovery` | unassigned | blocked on P1-3 |
-| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | queued |
+| IMESSAGE-GROUP-FIX — group aggregation | P0 | `agent/imessage-group-aggregation` | implementer | merged (#81), APPROVE |
+| MESH-RELEASE-ORDER — defer pump past terminal commit | P0 | `agent/mesh-release-order` | implementer | merged (#84), APPROVE |
+| GATEWAY-TOKEN-SYMLINK — token file hardening | P1 | `agent/GATEWAY-TOKEN-SYMLINK` | implementer | merged (#82), APPROVE |
+| AUDIT-REFRESH — refresh PR #74 audit | P2 | `docs/final-audit` | chief engineer | head `cb6cdf2`; CI green; re-review after #83 merges |
+| P1-6 — restart recovery | P1 | `agent/P1-6-restart-recovery` | implementer | dispatched; contract issued |
+| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84 APPROVE; #77 corrected |
 
 ## Completed this cycle
 
-- Fresh audit of `bb11c96`; typecheck, lint, format, offline suite, coverage.
-- Identified IMESSAGE-ADMISSION (default-open iMessage admission) and P1-3/P1-6/GATEWAY-HARDENING gaps.
-- Created `docs/MASTER_PLAN.md`, `docs/PROJECT_AUDIT.md`, and this checkpoint.
-- Reconciled PR #74: docs-only, green, but based on `fa974ca`; must not merge
-  until refreshed against `bb11c96`.
-- Merged #75 (engineering state docs), #76 (gateway hardening), #77 (iMessage
-  admission), and #78 (orchestration layer: CLAUDE.md, agents, skill, Stop guard).
-- Verified the Stop guard with nine local cases (block, idle, owner stop, only
-  blocked, stale progress, paused, active/terminal background, missing state).
+- Audited `34aef25` in a detached worktree; typecheck, lint (224 tracked files),
+  format, offline suite, and coverage.
+- Merged #75, #76, #77, #78, #79, #80, #81, #82, and #84. #76, #81, #82, and
+  #84 received APPROVE reviews; #77 was merged before its blocking group-dedupe
+  finding was fixed and is corrected by #81; #79 was merged before its blocking
+  release-ordering finding was reported and is corrected by #84.
+- Opened #83 (this reconciliation) and corrected both post-merge incidents
+  rather than calling the surfaces clean.
 
 ## Blockers
 
-- P1-6 must wait for P1-3 because both change the Harness scheduler and runtime
-  release hooks.
-- PR #74 must wait for P1-3's `docs/MODULES.md`/`ROADMAP.md` edits to avoid a
-  merge conflict; then rebase and refresh its evidence.
+- #74 can now be rebased because #79 updated `docs/MODULES.md` and
+  `docs/ROADMAP.md`; refresh its evidence to `34aef25`.
 - Live model and real-channel acceptance remain operator-only; no credentials
   were used in this cycle.
-- P1-3 is the only in-flight implementation task. Its worktree has uncommitted
-  edits and no PR; a fresh cycle should either finish it or abandon it.
+- Non-blocking follow-ups remain: two iMessage test gaps, gateway first-create
+  race/ELOOP, and two mesh `queueState` branch tests.
 
 ## Next actions
 
-1. Review and merge the first three implementation PRs when green.
-2. Rebase PR #74, update evidence, review, merge.
-3. Dispatch P1-6 restart recovery.
-4. Publish the project-state docs PR and the PR review log.
-5. Re-run the full offline gate on `main` after each merge.
+1. Rebase and merge PR #74 with `34aef25` evidence.
+2. Dispatch P1-6 restart recovery.
+3. Keep the non-blocking follow-ups in the queue; do not reopen merged PRs.
+4. Update `.super-agent/state.json` at each checkpoint; only the main
+   orchestrator writes it.
