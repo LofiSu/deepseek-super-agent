@@ -53,6 +53,9 @@ function runtimeFor(model: MockModel, sentinel: string): Runtime {
   const runtime = freshRuntime({
     home: tempHome(),
     model,
+    // This sentinel is deliberately offline: it injects a capturing MockModel
+    // so it can run under the live `pnpm test` default without a provider key.
+    allowMockModel: true,
     env: baseEnv(sentinel),
     jobDelayMs: 0,
     watchdogIntervalMs: 60_000,
