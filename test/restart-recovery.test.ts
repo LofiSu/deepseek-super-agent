@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SemanticHit } from '../src/ingress/filter.ts'
-import { MockModel, type Completion, type Model } from '../src/harness/model.ts'
+import { MockModel, type Completion, type CompletionRequest, type Model } from '../src/harness/model.ts'
 import { Runtime, type RuntimeOptions } from '../src/runtime.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import { shutdown, tempHome } from './fixtures.ts'
@@ -19,6 +19,21 @@ class StubLiveModel implements Model {
 
   async complete(): Promise<Completion> {
     return { text: 'stub' }
+  }
+}
+
+/** Records every prompt so a test can prove what the Worker turn actually saw. */
+class CapturingModel implements Model {
+  readonly name = 'CapturingLiveModel'
+  readonly prompts: string[] = []
+
+  classify(): SemanticHit {
+    return { pass: true, strength: 'explicit', reason: 'capture' }
+  }
+
+  async complete(request: CompletionRequest): Promise<Completion> {
+    this.prompts.push(request.messages.map(message => message.content).join('\n'))
+    return { text: 'done' }
   }
 }
 
@@ -202,6 +217,29 @@ describe('restart recovery', () => {
     expect(afterRestart.assignments).toHaveLength(2)
     expect(recoveredInputs(afterRestart)).toHaveLength(1)
     expect(relaunch).not.toHaveBeenCalled()
+  })
+
+  it('injects the RECOVERED notice and interrupted assignment id into the Worker prompt only on relaunch', async () => {
+    const home = tempHome()
+    const model = new CapturingModel()
+    const runtime = createRuntime(home, { model, singleSession: true })
+    runtime.store.putDoc('ticket', 'ticket_prompt', runningTicket('ticket_prompt'))
+    runtime.start({ assessPending: false })
+
+    const normal = runningTicket('ticket_normal', {
+      assignments: [{ id: 'asg_ticket_normal_1', state: 'pending', speculative: false }],
+    })
+    runtime.store.putDoc('ticket', normal.id, normal)
+    const normalLaunch = runtime.harness.launch(runtime.store.getDoc<Ticket>('ticket', normal.id)!)
+    await Promise.all([normalLaunch, runtime.jobsSettled()])
+
+    expect(model.prompts).toHaveLength(2)
+    const recoveryPrompt = model.prompts.find(prompt => prompt.includes('ticketId=ticket_prompt'))
+    const normalPrompt = model.prompts.find(prompt => prompt.includes('ticketId=ticket_normal'))
+    expect(recoveryPrompt).toContain('RECOVERED:')
+    expect(recoveryPrompt).toContain('asg_ticket_prompt_1')
+    expect(normalPrompt).toBeDefined()
+    expect(normalPrompt).not.toContain('RECOVERED:')
   })
 
   it('never writes an environment credential into recovery state, events, or logs', () => {
