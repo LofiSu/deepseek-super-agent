@@ -42,8 +42,11 @@ The error is shown before `chat.db` is opened.
   `--allow-groups` / `DS_AGENT_IMESSAGE_ALLOW_GROUPS=1`. A message joined to
   both a 1:1 and a group chat is a group. A message with no chat row, or with
   chat metadata that is neither a known 1:1 nor a known group, is treated as a
-  group/unknown and skipped by default. For group messages, the chat id is
-  exposed as `channel.address.group`, so `DS_AGENT_GROUP_ALLOWLIST` can gate it.
+  group/unknown and skipped by default. For group messages, only a positive
+  group row's (`chat.style = 43` or a non-empty room name) chat id is exposed
+  as `channel.address.group`; ambiguous/unknown groups leave it unset, so
+  `DS_AGENT_GROUP_ALLOWLIST` and outbound fail closed instead of reusing a 1:1
+  chat id.
 - **Missing schema fails closed.** If `chat.style` or `chat.room_name` is absent,
   the channel reports a compatibility error instead of treating every row as
   1:1; it does not retry the incompatible query on every poll.
@@ -115,8 +118,10 @@ are handled. Pass `--since <rowid>` to replay from an explicit point.
 - **Group chats are closed by default.** `--allow-groups` /
   `DS_AGENT_IMESSAGE_ALLOW_GROUPS=1` opens ingestion, but group triggers are
   never `addressed: 'direct'`; they pass the normal admission filter (keyword,
-  noise, semantic). Sending uses `chat id` when a `chatGuid` target exists,
-  otherwise `buddy <handle>`.
+  noise, semantic). A group reply is sent with `chat id` only when a positive
+  group row supplied a `chatGuid`; a group target without a `chatGuid` fails
+  closed and is never sent as `buddy <handle>`. 1:1 replies still use
+  `buddy <handle>` when no `chatGuid` is present.
 - **externalId is synthetic** (`imessage_<ts>_<n>`) — osascript does not return
   the provider message GUID, so outbox rows cannot be re-read for acceptance
   the way GitHub comments are.
