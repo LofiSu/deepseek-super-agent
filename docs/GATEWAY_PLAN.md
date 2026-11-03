@@ -42,7 +42,7 @@ scraping or quota bypass.
 - [ ] Streaming masking (currently buffers when masking on).
 
 ### Phase 2 — Ledger & session
-- [ ] Per-call usage/price ledger (tokens, latency, cost per provider/model).
+- [x] Per-call usage ledger (provider/model, status, latency, tokens) + `onUsage` plugin hook + `/v1/gateway/usage`. (Price/cost still pending.)
 - [ ] Session aggregation by conversation id.
 - [ ] Affinity: keep a conversation on the account that answered it; `affinity.json`.
 - [ ] Usage strategies: `usage` / `pace` / `free` / `fast` over real usage data.

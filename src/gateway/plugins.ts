@@ -42,6 +42,8 @@ export interface GatewayPlugin {
   onRequest?: (body: JsonObject, ctx: PluginCtx) => JsonObject | undefined | Promise<JsonObject | undefined>
   onResponse?: (body: JsonObject, ctx: PluginCtx) => JsonObject | undefined | Promise<JsonObject | undefined>
   strategies?: Record<string, StrategyFn>
+  /** Fire-and-forget usage hook (mirrors Magpie's onUsage). */
+  onUsage?: (row: JsonObject, ctx: PluginCtx) => void | Promise<void>
 }
 
 export interface PluginEntry {
@@ -159,5 +161,18 @@ export class PluginHost {
       }
     }
     return current
+  }
+
+  /** Fire-and-forget usage hook. Fail open; a returned promise is not awaited. */
+  runUsage(row: JsonObject): void {
+    for (const { plugin, options } of this.entries) {
+      if (!plugin.onUsage) continue
+      try {
+        const out = plugin.onUsage(row, { protocol: '', options, state: {} })
+        if (out && typeof (out as Promise<void>).then === 'function') void (out as Promise<void>).catch(() => undefined)
+      } catch {
+        // Fail open.
+      }
+    }
   }
 }

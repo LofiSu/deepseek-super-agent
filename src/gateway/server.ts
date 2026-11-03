@@ -7,6 +7,7 @@ import { PluginHost, type JsonObject, type RouteSeat } from './plugins.ts'
 import { maskingPlugin } from './mask.ts'
 import { strategyPlugin } from './builtin-plugins.ts'
 import { GatewayLimits } from './limits.ts'
+import { UsageLedger, type UsageRow } from './usage.ts'
 
 interface Usage {
   prompt_tokens?: number
@@ -225,6 +226,11 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     const provider = config.providers.find(item => item.id === id)
     return { maxConcurrency: provider?.maxConcurrency, maxRpm: provider?.maxRpm, dailyTokens: provider?.dailyTokens }
   })
+  const usage = new UsageLedger()
+  const recordUsage = (row: UsageRow): void => {
+    usage.record(row)
+    plugins.runUsage(row as unknown as JsonObject)
+  }
 
   const forward = async (
     provider: GatewayProvider,
@@ -299,6 +305,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     body: Record<string, unknown>,
     stream: boolean,
     modelInput: string | undefined,
+    protocol: string,
     routing?: string,
   ): Promise<'streamed' | ForwardResult> => {
     const candidates = applyStrategy(router.candidates(modelInput), routing)
@@ -323,22 +330,27 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
         if (result === 'streamed') {
           router.recordSuccess(candidate.provider.id)
           metrics.record(candidate.provider.id, latency, true)
+          recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: 200, latencyMs: latency, tokens: 0, ok: true, routing })
           return 'streamed'
         }
+        const tokens = Number(result.usage?.total_tokens ?? 0) || 0
         if (result.status >= 500 || result.status === 429 || result.status === 402) {
           router.recordFailure(candidate.provider.id)
           if (result.status === 429 || result.status === 402) limits.rest(candidate.provider.id)
           metrics.record(candidate.provider.id, latency, false, result.usage)
+          recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: result.status, latencyMs: latency, tokens, ok: false, routing })
           errors.push(`${candidate.provider.id}: ${result.status} ${result.body.slice(0, 200)}`)
           continue
         }
         router.recordSuccess(candidate.provider.id)
-        limits.recordTokens(candidate.provider.id, Number(result.usage?.total_tokens ?? 0) || 0)
+        limits.recordTokens(candidate.provider.id, tokens)
         metrics.record(candidate.provider.id, latency, true, result.usage)
+        recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: result.status, latencyMs: latency, tokens, ok: true, routing })
         return result
       } catch (error) {
         router.recordFailure(candidate.provider.id)
         metrics.record(candidate.provider.id, Date.now() - started, false)
+        recordUsage({ at: new Date().toISOString(), protocol, provider: candidate.provider.id, model: candidate.model, requested: modelInput, status: 0, latencyMs: Date.now() - started, tokens: 0, ok: false, routing })
         errors.push(`${candidate.provider.id}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       } finally {
@@ -379,7 +391,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     const stream = body.stream === true && !config.masking
       && (options.upstreamPath.endsWith('/chat/completions') || options.upstreamPath.endsWith('/responses'))
     const routing = typeof req.headers['x-gateway-routing'] === 'string' ? req.headers['x-gateway-routing'] : undefined
-    const result = await routeForward(res, options.upstreamPath, body, stream, modelOf(body), routing)
+    const result = await routeForward(res, options.upstreamPath, body, stream, modelOf(body), options.protocol, routing)
     if (result === 'streamed') return
     let outBody = result.body
     if (result.status < 400 && options.transformRes) {
@@ -419,6 +431,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       providers: router.providersState(),
       plugins: plugins.list(),
       limits: config.providers.map(provider => ({ id: provider.id, ...limits.snapshot(provider.id) })),
+      usage: usage.summary(),
       metrics: metrics.snapshot(),
     })
   }
@@ -442,6 +455,11 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     }
     if (url.pathname === '/v1/gateway/quotas' && req.method === 'GET') {
       handleQuotas(req, res)
+      return
+    }
+    if (url.pathname === '/v1/gateway/usage' && req.method === 'GET') {
+      const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') ?? 100) || 100))
+      sendJson(res, 200, { object: 'gateway.usage', summary: usage.summary(), recent: usage.recent(limit) })
       return
     }
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
