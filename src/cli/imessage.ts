@@ -3,6 +3,7 @@ import {
   DEFAULT_IMESSAGE_INTERVAL_MS,
   ImessageOutboxAdapter,
   ImessageSource,
+  decideImessageAdmission,
   imessageDbPath,
 } from '../channels/imessage.ts'
 import { Outbox } from '../channels/outbox-adapter.ts'
@@ -27,13 +28,27 @@ function sleep(ms: number): Promise<void> {
  *
  * Reads new inbound messages from chat.db and posts replies back through
  * Messages.app. Requires Full Disk Access (read) + Automation (send) and a
- * live model key. On the first run the cursor starts at the current max ROWID,
- * so only messages that arrive from now on are handled; pass `--since <rowid>`
- * to replay from an explicit point.
+ * live model key. Admission is default-deny: the command refuses to start
+ * unless `--handle`/`DS_AGENT_IMESSAGE_HANDLE` or `DS_AGENT_ACTOR_ALLOWLIST`
+ * names a sender, or `--allow-any` is an explicit opt-out. Group chats are
+ * skipped unless `--allow-groups` is passed. On the first run the cursor starts
+ * at the current max ROWID, so only messages that arrive from now on are
+ * handled; pass `--since <rowid>` to replay from an explicit point.
  */
 export async function runImessageCommand(home: string): Promise<void> {
   const dbPath = flag('db') ?? imessageDbPath()
   const handle = flag('handle') ?? process.env.DS_AGENT_IMESSAGE_HANDLE ?? undefined
+  const allowAny = has('allow-any') || process.env.DS_AGENT_IMESSAGE_ALLOW_ANY === '1'
+  const allowGroups = has('allow-groups') || process.env.DS_AGENT_IMESSAGE_ALLOW_GROUPS === '1'
+  const admission = decideImessageAdmission({
+    handle,
+    actorAllowlist: process.env.DS_AGENT_ACTOR_ALLOWLIST,
+    allowAny,
+  })
+  // Fail closed before the model, runtime, or chat.db is touched. Missing
+  // configuration must never turn into an implicit "any sender" channel.
+  if (!admission.allowed) throw new Error(admission.error)
+
   const once = has('once')
   const intervalMs = Math.max(
     1_000,
@@ -51,6 +66,18 @@ export async function runImessageCommand(home: string): Promise<void> {
   const api = new ChatDbImessageApi(dbPath)
   const runtime = Runtime.create({ home, model, jobDelayMs: 20, watchdogIntervalMs: 60_000 })
   runtime.start()
+  if (allowAny) {
+    runtime.log.info(
+      '[imessage] WARNING: --allow-any is active; any sender in a 1:1 chat can trigger work. '
+      + 'Prefer --handle or DS_AGENT_ACTOR_ALLOWLIST unless this is intentional.',
+    )
+  }
+  if (allowGroups) {
+    runtime.log.info(
+      '[imessage] WARNING: --allow-groups is active; group messages are ingested, '
+      + 'but they are never marked direct and still pass normal admission.',
+    )
+  }
   const outbox = new Outbox(
     runtime.store,
     [new ImessageOutboxAdapter(api, line => runtime.log.info(line))],
@@ -69,13 +96,14 @@ export async function runImessageCommand(home: string): Promise<void> {
   try {
     let cursor: number | undefined
     for (;;) {
-      const source = new ImessageSource(api, handle ? { handle } : {})
+      const source = new ImessageSource(api, { ...(handle ? { handle } : {}), allowGroups })
       try {
         if (cursor === undefined) {
           const stored = runtime.store.getDoc<{ rowId: number }>('imessage_cursor', 'cursor')
           cursor = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : stored?.rowId ?? (await api.maxRowId())
           runtime.log.info(
-            `[imessage] connected db=${dbPath} handle=${handle ?? 'any'} cursor=${cursor} intervalMs=${intervalMs} once=${once}`,
+            `[imessage] connected db=${dbPath} handle=${handle ?? 'any'} groups=${allowGroups ? 'allowed' : 'closed'} `
+            + `cursor=${cursor} intervalMs=${intervalMs} once=${once} allowAny=${allowAny}`,
           )
         }
         const from = cursor
