@@ -1,13 +1,19 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { bearerAuthorized, startGatewayServer, type GatewayHandle } from '../src/gateway/server.ts'
 import { GatewayRouter } from '../src/gateway/router.ts'
-import { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from '../src/gateway/token.ts'
+import {
+  GatewayTokenFileError,
+  GatewayTokenPermissionError,
+  gatewayTokenPath,
+  loadOrCreateGatewayToken,
+  readGatewayToken,
+} from '../src/gateway/token.ts'
 import { gatewayAliasesFromEnv, gatewayProvidersFromEnv, type GatewayProvider } from '../src/gateway/config.ts'
-import { gatewayHostWarning } from '../src/cli/gateway.ts'
+import { gatewayHostWarning, runGatewayCommand } from '../src/cli/gateway.ts'
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -121,7 +127,7 @@ describe('gateway server', () => {
     expect(gw.metrics.snapshot().byProvider.fake).toMatchObject({ requests: 1, errors: 0, tokens: 7 })
   })
 
-  it('rejects missing, malformed, and wrong bearer tokens without calling upstream', async () => {
+  it('rejects missing, malformed, and wrong bearer tokens with one uniform 401', async () => {
     const upstream = await startFakeUpstream()
     const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })], 'secret')
     const body = { model: 'm1', messages: [{ role: 'user', content: 'hi' }] }
@@ -130,17 +136,46 @@ describe('gateway server', () => {
       headers: { 'content-type': 'application/json', ...headers },
       body: JSON.stringify(body),
     })
-    const missing = await postJson({})
-    const malformed = await postJson({ authorization: 'Basic abc' })
-    const noCredential = await postJson({ authorization: 'Bearer' })
-    const wrong = await postJson({ authorization: 'Bearer wrong' })
-    const longer = await postJson({ authorization: 'Bearer secret-extra' })
-    for (const response of [missing, malformed, noCredential, wrong, longer]) {
+    const responses = [
+      await postJson({}),
+      await postJson({ authorization: 'Basic abc' }),
+      await postJson({ authorization: 'Bearer' }),
+      await postJson({ authorization: 'Bearer wrong' }),
+      await postJson({ authorization: 'Bearer secret-extra' }),
+      await postJson({ authorization: `Bearer ${'x'.repeat(4096)}` }),
+    ]
+    const bodies: string[] = []
+    for (const response of responses) {
       expect(response.status).toBe(401)
+      bodies.push(await response.text())
     }
-    expect(await missing.json()).toEqual({ error: { message: 'invalid gateway token' } })
-    expect(await wrong.json()).toEqual({ error: { message: 'invalid gateway token' } })
+    expect(new Set(bodies)).toEqual(new Set([JSON.stringify({ error: { message: 'invalid gateway token' } })]))
     expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('sets nosniff and no-store on SSE responses', async () => {
+    const server = createServer((req, res) => {
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.write('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n')
+        res.end('data: [DONE]\n\n')
+      })
+    })
+    const port = await listen(server)
+    cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())))
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${port}`, models: ['m1'] })])
+
+    const stream = await post(`${gw.url}/v1/chat/completions`, 'tok', {
+      model: 'm1',
+      stream: true,
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    expect(stream.status).toBe(200)
+    expect(stream.headers.get('content-type')).toContain('text/event-stream')
+    expect(stream.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(stream.headers.get('cache-control')).toBe('no-store')
+    expect(await stream.text()).toContain('data: [DONE]')
   })
 
   it('sets nosniff on every response and no-store on authenticated responses', async () => {
@@ -338,17 +373,78 @@ describe('gateway token', () => {
     expect(loadOrCreateGatewayToken(home)).toBe(token)
     expect(fs.statSync(file).mode & 0o777).toBe(0o600)
   })
+
+  posixOnly('rejects a symlinked token file without reading or chmodding its target', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-'))
+    cleanup.push(async () => { fs.rmSync(home, { recursive: true, force: true }) })
+    const target = path.join(home, 'redirected')
+    fs.writeFileSync(target, 'redirected-token\n', { mode: 0o644 })
+    fs.chmodSync(target, 0o644)
+    fs.symlinkSync(target, gatewayTokenPath(home))
+
+    expect(() => readGatewayToken(home)).toThrow(GatewayTokenFileError)
+    expect(() => loadOrCreateGatewayToken(home)).toThrow(GatewayTokenFileError)
+    expect(fs.statSync(target).mode & 0o777).toBe(0o644)
+  })
+
+  it('rejects a non-regular token path', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-'))
+    cleanup.push(async () => { fs.rmSync(home, { recursive: true, force: true }) })
+    fs.mkdirSync(gatewayTokenPath(home))
+
+    expect(() => readGatewayToken(home)).toThrow(GatewayTokenFileError)
+    expect(() => readGatewayToken(home)).toThrow(/not a regular file/)
+    expect(() => loadOrCreateGatewayToken(home)).toThrow(GatewayTokenFileError)
+  })
+
+  posixOnly('rejects a multiply-linked token file without chmodding the other name', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-'))
+    cleanup.push(async () => { fs.rmSync(home, { recursive: true, force: true }) })
+    const target = path.join(home, 'shared')
+    fs.writeFileSync(target, 'shared-token\n', { mode: 0o644 })
+    fs.chmodSync(target, 0o644)
+    fs.linkSync(target, gatewayTokenPath(home))
+
+    expect(() => readGatewayToken(home)).toThrow(/multiple hard links/)
+    expect(fs.statSync(target).mode & 0o777).toBe(0o644)
+  })
+
+  posixOnly('fails closed and never returns the token when 0600 cannot be applied', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-'))
+    cleanup.push(async () => { fs.rmSync(home, { recursive: true, force: true }) })
+    const token = loadOrCreateGatewayToken(home)
+    const file = gatewayTokenPath(home)
+    fs.chmodSync(file, 0o644)
+    const denied = Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' })
+    const chmod = vi.spyOn(fs, 'fchmodSync').mockImplementation(() => { throw denied })
+    try {
+      let returned: string | undefined
+      expect(() => { returned = readGatewayToken(home) }).toThrow(GatewayTokenPermissionError)
+      expect(returned).toBeUndefined()
+      expect(token).toMatch(/^gw_[0-9a-f]+$/)
+    } finally {
+      chmod.mockRestore()
+    }
+  })
 })
 
 describe('bearer authorization', () => {
-  it('accepts only an exact "Bearer <token>" header', () => {
+  it('accepts RFC 7235 bearer scheme case and whitespace variants', () => {
     expect(bearerAuthorized('Bearer abc', 'abc')).toBe(true)
+    expect(bearerAuthorized('bearer abc', 'abc')).toBe(true)
+    expect(bearerAuthorized('BEARER abc', 'abc')).toBe(true)
+    expect(bearerAuthorized('Bearer\tabc', 'abc')).toBe(true)
+    expect(bearerAuthorized('Bearer   abc', 'abc')).toBe(true)
+  })
+
+  it('rejects missing or malformed credentials', () => {
     expect(bearerAuthorized(undefined, 'abc')).toBe(false)
     expect(bearerAuthorized('', 'abc')).toBe(false)
     expect(bearerAuthorized('Bearer abd', 'abc')).toBe(false)
     expect(bearerAuthorized('Bearer ab', 'abc')).toBe(false)
-    expect(bearerAuthorized('bearer abc', 'abc')).toBe(false)
     expect(bearerAuthorized('Bearer abc ', 'abc')).toBe(false)
+    expect(bearerAuthorized('Bearer', 'abc')).toBe(false)
+    expect(bearerAuthorized('Token abc', 'abc')).toBe(false)
     expect(bearerAuthorized(['Bearer abc'], 'abc')).toBe(false)
   })
 })
@@ -369,6 +465,29 @@ describe('gateway host exposure', () => {
     expect(warning).toMatch(/unauthenticated/i)
     expect(gatewayHostWarning('192.168.0.10')).toBeDefined()
     expect(gatewayHostWarning('::')).toBeDefined()
+  })
+})
+
+describe('gateway CLI', () => {
+  it('runGatewayCommand emits the non-loopback warning before starting', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-'))
+    cleanup.push(async () => { fs.rmSync(home, { recursive: true, force: true }) })
+    const originalArgv = process.argv
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.stubEnv('DS_AGENT_GATEWAY_PROVIDERS', '')
+    vi.stubEnv('DS_AGENT_API_BASE', '')
+    vi.stubEnv('DS_AGENT_API_KEY', '')
+    vi.stubEnv('DS_AGENT_GATEWAY_TOKEN', '')
+    process.argv = ['node', 'ds-agent', 'gateway', '--host', '0.0.0.0']
+    try {
+      await expect(runGatewayCommand(home)).rejects.toThrow(/no providers configured/)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0]![0])).toContain('not a loopback address')
+    } finally {
+      process.argv = originalArgv
+      warn.mockRestore()
+      vi.unstubAllEnvs()
+    }
   })
 })
 
