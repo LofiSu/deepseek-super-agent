@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import path from 'node:path'
 import type { GatewayConfig, GatewayProvider } from './config.ts'
 import { upstreamUrl } from './config.ts'
@@ -93,8 +93,20 @@ function readBody(req: IncomingMessage): Promise<string> {
   })
 }
 
+/**
+ * Constant-time bearer check. A missing, non-string, or wrong header is
+ * rejected with the same result, and only an exact `Bearer <token>` matches.
+ */
+export function bearerAuthorized(header: string | string[] | undefined, token: string): boolean {
+  if (!token || typeof header !== 'string') return false
+  const expected = Buffer.from(`Bearer ${token}`, 'utf8')
+  const provided = Buffer.from(header, 'utf8')
+  if (provided.length !== expected.length) return false
+  return timingSafeEqual(provided, expected)
+}
+
 function authorized(req: IncomingMessage, token: string): boolean {
-  return (req.headers.authorization ?? '') === `Bearer ${token}`
+  return bearerAuthorized(req.headers.authorization, token)
 }
 
 function authHeaders(provider: GatewayProvider, key: string): Record<string, string> {
@@ -230,6 +242,9 @@ interface ProtocolOptions {
  * - `POST /v1beta/models/{m}:generateContent` — Gemini (translated to chat)
  */
 export async function startGatewayServer(config: GatewayConfig): Promise<GatewayHandle> {
+  if (!config.token || config.token.trim() === '') {
+    throw new Error('gateway token must not be empty; set --token or DS_AGENT_GATEWAY_TOKEN')
+  }
   const router = new GatewayRouter(config.providers, config.defaultModel, () => Date.now(), config.aliases ?? {})
   const metrics = new GatewayMetrics()
   const plugins = new PluginHost()
@@ -285,7 +300,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       })
       const contentType = response.headers.get('content-type') ?? 'application/json'
       if (stream && response.ok && contentType.includes('text/event-stream') && response.body) {
-        clientRes.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+        clientRes.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' })
         const reader = response.body.getReader()
         if (streamMasker) {
           const decoder = new TextDecoder()
@@ -542,6 +557,8 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
       sendJson(res, 401, { error: { message: 'invalid gateway token' } })
       return
     }
+    // Authenticated responses may contain provider status, usage, or model data.
+    res.setHeader('Cache-Control', 'no-store')
     if (url.pathname === '/v1/models' && req.method === 'GET') {
       sendJson(res, 200, {
         object: 'list',
@@ -592,6 +609,7 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
   }
 
   const server = createServer((req, res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
     void handle(req, res).catch(error => {
       if (!res.headersSent) sendJson(res, 500, { error: { message: error instanceof Error ? error.message : String(error) } })
       else res.end()

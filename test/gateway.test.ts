@@ -3,10 +3,11 @@ import { createServer, type Server } from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { startGatewayServer, type GatewayHandle } from '../src/gateway/server.ts'
+import { bearerAuthorized, startGatewayServer, type GatewayHandle } from '../src/gateway/server.ts'
 import { GatewayRouter } from '../src/gateway/router.ts'
 import { gatewayTokenPath, loadOrCreateGatewayToken, readGatewayToken } from '../src/gateway/token.ts'
 import { gatewayAliasesFromEnv, gatewayProvidersFromEnv, type GatewayProvider } from '../src/gateway/config.ts'
+import { gatewayHostWarning } from '../src/cli/gateway.ts'
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -118,6 +119,60 @@ describe('gateway server', () => {
     expect(upstream.calls[0]!.auth).toBe('Bearer k')
     expect(upstream.calls[0]!.body.model).toBe('m1')
     expect(gw.metrics.snapshot().byProvider.fake).toMatchObject({ requests: 1, errors: 0, tokens: 7 })
+  })
+
+  it('rejects missing, malformed, and wrong bearer tokens without calling upstream', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })], 'secret')
+    const body = { model: 'm1', messages: [{ role: 'user', content: 'hi' }] }
+    const postJson = (headers: Record<string, string>): Promise<Response> => fetch(`${gw.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    })
+    const missing = await postJson({})
+    const malformed = await postJson({ authorization: 'Basic abc' })
+    const noCredential = await postJson({ authorization: 'Bearer' })
+    const wrong = await postJson({ authorization: 'Bearer wrong' })
+    const longer = await postJson({ authorization: 'Bearer secret-extra' })
+    for (const response of [missing, malformed, noCredential, wrong, longer]) {
+      expect(response.status).toBe(401)
+    }
+    expect(await missing.json()).toEqual({ error: { message: 'invalid gateway token' } })
+    expect(await wrong.json()).toEqual({ error: { message: 'invalid gateway token' } })
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('sets nosniff on every response and no-store on authenticated responses', async () => {
+    const upstream = await startFakeUpstream()
+    const gw = await startGateway([provider({ baseUrl: `http://127.0.0.1:${upstream.port}`, models: ['m1'] })])
+
+    const health = await fetch(`${gw.url}/health`)
+    expect(health.status).toBe(200)
+    expect(health.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(health.headers.get('cache-control')).toBeNull()
+
+    const denied = await fetch(`${gw.url}/v1/models`)
+    expect(denied.status).toBe(401)
+    expect(denied.headers.get('x-content-type-options')).toBe('nosniff')
+
+    const models = await fetch(`${gw.url}/v1/models`, { headers: { authorization: 'Bearer tok' } })
+    expect(models.status).toBe(200)
+    expect(models.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(models.headers.get('cache-control')).toBe('no-store')
+
+    const chat = await post(`${gw.url}/v1/chat/completions`, 'tok', { model: 'm1', messages: [{ role: 'user', content: 'hi' }] })
+    expect(chat.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(chat.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('refuses to start when the bearer token is empty', async () => {
+    for (const token of ['', '   ']) {
+      const starting = startGatewayServer({ host: '127.0.0.1', port: 0, token, providers: [] })
+      // Keeps a failed RED run from leaving a listening server behind.
+      starting.then(handle => handle.close()).catch(() => undefined)
+      await expect(starting).rejects.toThrow(/token must not be empty/i)
+    }
   })
 
   it('serves /health without auth', async () => {
@@ -265,6 +320,55 @@ describe('gateway token', () => {
     cleanup.push(async () => { fs.rmSync(home, { recursive: true, force: true }) })
     expect(loadOrCreateGatewayToken(home, 'explicit')).toBe('explicit')
     expect(fs.existsSync(gatewayTokenPath(home))).toBe(false)
+  })
+
+  const posixOnly = process.platform === 'win32' ? it.skip : it
+  posixOnly('re-applies mode 0600 to an existing token file on read and reuse', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-'))
+    cleanup.push(async () => { fs.rmSync(home, { recursive: true, force: true }) })
+    const token = loadOrCreateGatewayToken(home)
+    const file = gatewayTokenPath(home)
+
+    fs.chmodSync(file, 0o644)
+    expect(fs.statSync(file).mode & 0o777).toBe(0o644)
+    expect(readGatewayToken(home)).toBe(token)
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+
+    fs.chmodSync(file, 0o644)
+    expect(loadOrCreateGatewayToken(home)).toBe(token)
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+  })
+})
+
+describe('bearer authorization', () => {
+  it('accepts only an exact "Bearer <token>" header', () => {
+    expect(bearerAuthorized('Bearer abc', 'abc')).toBe(true)
+    expect(bearerAuthorized(undefined, 'abc')).toBe(false)
+    expect(bearerAuthorized('', 'abc')).toBe(false)
+    expect(bearerAuthorized('Bearer abd', 'abc')).toBe(false)
+    expect(bearerAuthorized('Bearer ab', 'abc')).toBe(false)
+    expect(bearerAuthorized('bearer abc', 'abc')).toBe(false)
+    expect(bearerAuthorized('Bearer abc ', 'abc')).toBe(false)
+    expect(bearerAuthorized(['Bearer abc'], 'abc')).toBe(false)
+  })
+})
+
+describe('gateway host exposure', () => {
+  it('treats only loopback names as safe', () => {
+    for (const host of ['127.0.0.1', '::1', '[::1]', 'localhost', 'LOCALHOST', ' 127.0.0.1 ']) {
+      expect(gatewayHostWarning(host)).toBeUndefined()
+    }
+  })
+
+  it('warns about the unauthenticated endpoints when binding beyond loopback', () => {
+    const warning = gatewayHostWarning('0.0.0.0')
+    expect(warning).toBeDefined()
+    expect(warning).toContain('0.0.0.0')
+    expect(warning).toMatch(/not a loopback/i)
+    expect(warning).toContain('/health')
+    expect(warning).toMatch(/unauthenticated/i)
+    expect(gatewayHostWarning('192.168.0.10')).toBeDefined()
+    expect(gatewayHostWarning('::')).toBeDefined()
   })
 })
 

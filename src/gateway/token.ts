@@ -2,18 +2,48 @@ import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+const TOKEN_MODE = 0o600
+
+/** Thrown when an existing token file cannot be restricted to mode 0600. */
+export class GatewayTokenPermissionError extends Error {
+  constructor(file: string, cause: unknown) {
+    super(`gateway token file ${file} could not be secured to mode 0600`, { cause })
+    this.name = 'GatewayTokenPermissionError'
+  }
+}
+
 /** Local gateway bearer token lives here (mode 0600) so ds-agent can auto-read it. */
 export function gatewayTokenPath(home: string): string {
   return path.join(home, 'gateway.token')
 }
 
-export function readGatewayToken(home: string): string | undefined {
+/**
+ * Re-apply 0600 to a token file and verify it stuck. Fails closed: an
+ * unsecurable file is never used. Windows has no POSIX mode bits (chmod there
+ * only toggles the read-only flag), so the mode check is POSIX-only.
+ */
+function ensurePrivateMode(file: string): void {
+  if (process.platform === 'win32') return
   try {
-    const token = fs.readFileSync(gatewayTokenPath(home), 'utf8').trim()
-    return token || undefined
+    const current = fs.statSync(file).mode & 0o777
+    if (current !== TOKEN_MODE) fs.chmodSync(file, TOKEN_MODE)
+    const repaired = fs.statSync(file).mode & 0o777
+    if (repaired !== TOKEN_MODE) throw new Error(`mode is 0${repaired.toString(8)}`)
+  } catch (error) {
+    throw new GatewayTokenPermissionError(file, error)
+  }
+}
+
+export function readGatewayToken(home: string): string | undefined {
+  const file = gatewayTokenPath(home)
+  let token: string
+  try {
+    token = fs.readFileSync(file, 'utf8').trim()
   } catch {
     return undefined
   }
+  ensurePrivateMode(file)
+  return token || undefined
 }
 
 /**
@@ -29,7 +59,7 @@ export function loadOrCreateGatewayToken(home: string, override?: string): strin
   const token = `gw_${randomBytes(24).toString('hex')}`
   fs.mkdirSync(home, { recursive: true })
   const file = gatewayTokenPath(home)
-  fs.writeFileSync(file, `${token}\n`, { mode: 0o600 })
-  fs.chmodSync(file, 0o600)
+  fs.writeFileSync(file, `${token}\n`, { mode: TOKEN_MODE })
+  ensurePrivateMode(file)
   return token
 }
