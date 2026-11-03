@@ -541,10 +541,42 @@ export class Runtime {
    */
   start(options: { assessPending?: boolean } = {}): void {
     this.assessmentsEnabled = options.assessPending !== false
+    this.recoverInterrupted()
     this.daemon.start()
     if (this.assessmentsEnabled) {
       // Resume Gate-deferred work left in SQLite by a previous process.
       this.assessPending()
+    }
+  }
+
+  /**
+   * ADR-004 restart recovery: persisted SQLite state is the source of truth.
+   * The Engine owns every assignment/ticket transition; the Runtime only
+   * orchestrates the launch. `MockModel` must not consume interrupted work, so
+   * a keyless process records the deferral and leaves the state untouched.
+   */
+  private recoverInterrupted(): void {
+    if (!this.store.isOpen) return
+    if (this.model.name === 'MockModel') {
+      this.log.info('[recovery] deferred reason=mock-model')
+      return
+    }
+    let recovered: ReturnType<Engine['recoverInterrupted']>
+    try {
+      recovered = this.engine.recoverInterrupted()
+    } catch (error) {
+      this.log.info(`[recovery] failed error=${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    for (const outcome of recovered) {
+      const ticket = this.store.getDoc<Ticket>('ticket', outcome.ticketId)
+      if (!ticket || ticket.ended) continue
+      // The Engine committed the ended Assignment, the RECOVERED prompt, and
+      // the single pending replacement before this launch.
+      this.log.info(
+        `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',')} replacementId=${outcome.replacementAssignmentId}`,
+      )
+      void this.harness.launch(ticket)
     }
   }
 

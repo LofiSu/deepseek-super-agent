@@ -12,6 +12,15 @@ export interface ReportResult {
   verdict: SurfaceVerdict
 }
 
+/** One Ticket repaired on startup after a process restart (ADR-004). */
+export interface Recovery {
+  ticketId: string
+  /** Assignments that were still `running` when the process died. */
+  interruptedAssignmentIds: string[]
+  /** The single replacement `pending` assignment queued for the next turn. */
+  replacementAssignmentId: string
+}
+
 const TERMINAL = new Set(['ready', 'failed', 'dropped'])
 
 /** Who is reporting. Only the watchdog counts toward `watchdog.fail`. */
@@ -189,6 +198,54 @@ export class Assignments {
     })
     this.host.log(`[engine] Assignments.retry ticketId=${ticket.id} assignmentId=${assignment.id} reason=${reason}`)
     return assignment
+  }
+
+  /**
+   * Restart recovery (ADR-004): end the Assignment left `running` by the dead
+   * process, append exactly one RECOVERED context input, then queue exactly one
+   * replacement `pending` Assignment through `retry`. Returns undefined when
+   * the Ticket is ended, paused, or has nothing interrupted, which makes
+   * repeated `Runtime.start()` calls idempotent.
+   *
+   * The prompt carries only Ticket/Assignment ids from persisted state, never
+   * environment or credential values. Completion is at-least-once: prior side
+   * effects may already have happened.
+   */
+  recover(ticketId: string): Recovery | undefined {
+    const ticket = this.must(ticketId)
+    if (ticket.ended || ticket.collab?.paused) return undefined
+    const interrupted = ticket.assignments.filter(item => item.state === 'running')
+    if (interrupted.length === 0) return undefined
+    const at = this.host.now()
+    for (const assignment of interrupted) {
+      assignment.state = 'ended'
+      assignment.endedAt = at
+      this.host.repo.addEvent('assignment.ended', {
+        ticketId: ticket.id,
+        assignmentId: assignment.id,
+        kind: 'recovered',
+      })
+    }
+    const interruptedAssignmentIds = interrupted.map(assignment => assignment.id)
+    ticket.inputs.push({
+      id: this.host.repo.nextId('input'),
+      kind: 'context',
+      text: `RECOVERED: assignment ${interruptedAssignmentIds.join(',')} was interrupted by a process restart. Continue from persisted state and assume prior side effects may already have occurred (at-least-once).`,
+      at,
+      human: false,
+    })
+    // Commit the ended Assignment and the recovered prompt before `retry`
+    // re-reads the Ticket and creates the single pending replacement.
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    const replacement = this.retry(ticket.id, 'restart-recovery')
+    this.host.log(
+      `[engine] Assignments.recover ticketId=${ticket.id} interrupted=${interruptedAssignmentIds.join(',')} replacementId=${replacement.id}`,
+    )
+    return {
+      ticketId: ticket.id,
+      interruptedAssignmentIds,
+      replacementAssignmentId: replacement.id,
+    }
   }
 
   private endAssignment(ticket: Ticket, assignment: Assignment, kind: string): void {
