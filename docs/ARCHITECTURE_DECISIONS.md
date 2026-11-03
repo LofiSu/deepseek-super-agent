@@ -71,17 +71,21 @@ rewrite `PLAN.md`; link to the contract instead.
 ## ADR-004 — Restart recovery is at-least-once
 
 - **Date:** 2026-11-03
-- **Status:** proposed (P1-6, after P1-3)
+- **Status:** accepted; implemented by #85 (`10e9f3c`)
 - **Context:** a killed process leaves a running assignment and a session
   journal. Replaying the exact turn is not possible, and external side effects
   may already have occurred.
 - **Decision:** on startup, end the interrupted assignment through the Engine,
   create exactly one replacement assignment, append a `RECOVERED` prompt, and
-  relaunch only with a live model and an unpaused ticket. Document at-least-once
+  relaunch only with a live model and an unpaused ticket. Run the scan once per
+  `Runtime`; a real restart constructs a new one. A crash after the transaction
+  but before launch is repaired by relaunching the existing pending replacement
+  without creating another assignment or prompt. Document at-least-once
   semantics; do not claim exactly-once.
 - **Consequences:** no ticket stays permanently `running` after a restart.
-  Recovery is idempotent. A MockModel start records the recovery event but does
-  not consume deferred work.
+  Recovery is idempotent in-process and across restarts. A MockModel start logs
+  `[recovery] deferred reason=mock-model` and does not mutate or consume the
+  interrupted state. Launch failures are logged and isolated per ticket.
 - **Alternatives rejected:** silently re-running the journal (duplicates side
   effects without a record); leaving the watchdog to clean up (can take a full
   stale window and fails permanently if no daemon runs).

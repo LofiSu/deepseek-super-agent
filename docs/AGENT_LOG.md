@@ -4,6 +4,84 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-03 — Cycle 3 checkpoint 2 (gateway merged; iMessage fix and docs corrected)
+
+### Observed
+
+- The checkpoint-1 entry above first stated 80.09% branches for `10e9f3c`. The
+  CI job (`125790452074`) displays 80.05% (2746/3430); the entry was corrected
+  in place before merge. The 80.09% figure was a local V8 variance, not CI.
+- #87 merged at `5fbfb00` after an independent security review APPROVE. The
+  EEXIST race now fails closed instead of truncating the winner's file, ELOOP
+  raises `GatewayTokenFileError` on read and create, and both security tests
+  fail on `10e9f3c`. `main` CI at `5fbfb00` (run `41599524227`) is green:
+  429 passed / 15 skipped (444), 58 files; 82.27% statements/lines, 80.52%
+  branches (2779/3451), 89.97% functions.
+- PR #88's review reproduced a group-to-1:1 outbound leak: a group address
+  still carried the sender `handle`, and the outbox adapter fell back to buddy
+  mode when no `chatGuid` existed. A fix at `890f238` omits `handle` for groups
+  and makes the adapter reject a group target without a chat guid. The delta
+  re-review returned APPROVE; #88 merged at `d3beb9c`. `main` CI there (run
+  `41600424146`) is green: 440 passed / 15 skipped (455), 58 files; 82.29%
+  statements/lines, 80.57% branches (2787/3459), 89.97% functions.
+- PR #89's docs review returned REQUEST_CHANGES for a CI coverage misquote and
+  an open-PR snapshot that claimed "none" while #86/#88/#89 were open. The
+  docs were refreshed to `5fbfb00` and the duplicate #74 record marked
+  superseded.
+
+### Decided
+
+- The iMessage fix keeps the ambiguous-group thread-key issue out of scope; it
+  is recorded as IMESSAGE-THREAD-KEY for a later branch rather than widening
+  the security PR.
+- #86 is stale/DIRTY; its docs portion is superseded and only its three
+  test-only determinism changes are to be salvaged on a fresh branch.
+
+### Verified
+
+- No live model or real-channel run. All figures above come from the named CI
+  run logs and `git`/GitHub state.
+
+### Pending
+
+- Scoped re-review of PR #89; merge it only on green CI at the exact head.
+- Salvage #86's test-only determinism changes on a fresh branch, then close the
+  stale PR with a pointer to the replacement.
+
+## 2026-11-03 — Cycle 3 checkpoint 1 (cycle 2 integrated; edge work dispatched)
+
+### Observed
+
+- #83 merged at `cecfba0` after the scoped re-review APPROVE; all five blocking
+  doc findings and three CodeRabbit threads were resolved.
+- #74 merged at `299b908` after the final coverage-figure fix and delta APPROVE.
+  `main` now carries the `34aef25` audit evidence.
+- #85 merged at `10e9f3c` after the re-review APPROVE. The review reproduced a
+  same-process re-recovery bug; the final head has a per-Runtime guard, prompt
+  injection, launch-failure isolation, crash-boundary relaunch, and per-ticket
+  isolation. All 11 regression tests fail on the pre-fix base.
+- `main` CI at `10e9f3c`: `typecheck and test` success; 425 passed, 15 skipped
+  (440), 56 files; coverage 82% lines, 80.05% branches (2746/3430), 89.85%
+  functions. A local run on the same commit reported 80.09% branches
+  (2748/3431), a one-branch V8 variance.
+
+### Decided
+
+- Accept ADR-004 as implemented. The at-least-once boundary and the
+  malformed-doc partial-write edge stay documented as non-blocking.
+- Start cycle 3 with two disjoint security-edge tasks: iMessage group join/page/
+  ambiguity coverage and gateway first-create/ELOOP hardening.
+- Do not reopen merged PRs for non-blocking follow-ups; new branches only.
+
+### Verified
+
+- `main` CI green at `10e9f3c`; no live model or real-channel run.
+- Both cycle-3 branches are isolated; no file overlap with each other or docs.
+
+### Pending
+
+- PRs and independent reviews for IMESSAGE-GROUP-EDGES and GATEWAY-TOKEN-RACE.
+
 ## 2026-11-03 — Cycle 2, checkpoint 2 (state review corrected; P1-6 in review)
 
 ### Observed

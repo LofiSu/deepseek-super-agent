@@ -5,7 +5,7 @@ sufficient. Verdicts: **APPROVE** (may carry non-blocking follow-ups) /
 **REQUEST_CHANGES** / **REJECT** / **BLOCKED**.
 
 Provenance: this log records the orchestrator's independent review verdicts.
-GitHub review objects were not submitted for #75–#84; the external evidence is
+GitHub review objects were not submitted for #75–#87; the external evidence is
 each PR's required CI run and its merge SHA. Verdicts below name the reviewed
 head so a later reader can separate the reviewed tree from the merged tree.
 
@@ -33,7 +33,11 @@ head so a later reader can separate the reviewed tree from the merged tree.
   re-reviewed. The reconciliation is carried by the follow-up docs PR; do not
   treat `08ea78f` as the corrected checkpoint.
 
-## PR #74 — `docs: record the final 2026-11-03 audit on main`
+## PR #74 — `docs: record the final 2026-11-03 audit on main` (superseded record)
+
+> This is the initial `cb6cdf2` review record. The refreshed-head review and
+> merge are recorded in the second `PR #74` section below; this entry is kept
+> for append-only history and is not the current verdict.
 
 - **Author:** LofiSu (agent-assisted)
 - **State at review:** OPEN, `MERGEABLE`, `BEHIND`, docs-only.
@@ -248,25 +252,129 @@ head so a later reader can separate the reviewed tree from the merged tree.
   run reports 80.07% branches, consistent with the documented one-branch V8
   variance; the audit doc attributes 80.06% to the `34aef25` run.
 - **Verdict:** **APPROVE** and merge.
+- **Merged:** `cecfba0` (2026-11-03). CI green on `f7e545a`; all review threads
+  resolved.
+
+## PR #85 — `feat(harness): recover interrupted assignments on startup`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN heads `4b3ad35` → `04a421e` → `3bff7a5`; final merge
+  head `ba405c1`. Files: `src/core/assignments.ts`, `src/core/engine.ts`,
+  `src/runtime.ts`, `src/harness/loop.ts` (orchestrator-authorized for prompt
+  injection), `test/restart-recovery.test.ts`.
+- **Independent review:** **REQUEST_CHANGES** on the first heads. Blocking:
+  (1) same-process re-entrancy — a second `Runtime.start()` after the async
+  relaunch marked the replacement `running` re-recovered a live assignment,
+  producing 3 assignments and 2 RECOVERED inputs; the original test mocked
+  launch and masked it. (2) The RECOVERED context was persisted but never
+  rendered into the Worker prompt (`Harness.workerTask` did not read
+  `ticket.inputs`). Non-blocking: unhandled launch rejection, stranded pending
+  replacement, no per-ticket isolation.
+- **Re-review:** **APPROVE** at `3bff7a5`/`ba405c1`. Verified per-Runtime
+  one-shot guard, prompt injection, sync/async launch-failure isolation,
+  crash-boundary relaunch, malformed-ticket isolation, and 11 non-vacuous tests
+  that all fail on `34aef25`. Residual non-blocking: a malformed doc that
+  throws after a write can commit a partial effect (unreachable from valid
+  state); `recoveryAttempted` disables in-process retry after a scan failure.
+- **Merged:** `10e9f3c` (2026-11-03). CI green on `ba405c1`.
 
 ## PR #74 — `docs: record the final audit on main`
 
 - **Author:** LofiSu (agent-assisted)
-- **State at review:** initial head `cb6cdf2` (+34/−8); corrections pushed as
-  `3119369` (+36/−9); docs/ROADMAP.md and docs/MODULES.md only; CI passed on
-  both heads.
-- **Independent review:** **REQUEST_CHANGES**. The revision row claimed
-  "#75–#84 merged" although #83 is still open, and the `34aef25` headline
-  evidence is not in `docs/PROJECT_AUDIT.md` on `main` (main's audit doc still
-  carries the `bb11c96` baseline). The numbers match #83's unmerged audit, so
-  they are not fabricated, but they are not yet the documented main-tree
-  evidence.
-- **Resolution:** merge #83 first, then rebase/refresh #74 on the new `main` and
-  re-run the scoped review. Also correct "§1 status board" to §7, mark §5 as
-  last fully re-checked at `fa974ca`, and update the PR body diff counts.
-- **Verdict:** **REQUEST_CHANGES** (re-review pending).
+- **State at review:** initial head `cb6cdf2` (+34/−8); corrections at
+  `3119369` (+36/−9); post-#83 refresh `7a63284`; final coverage fix `6ce1c42`.
+  Docs/ROADMAP.md and docs/MODULES.md only; CI passed on every head.
+- **Independent review:** **REQUEST_CHANGES** twice. First: the revision row
+  claimed "#75–#84 merged" although #83 was still open, and the `34aef25`
+  evidence was not yet in `docs/PROJECT_AUDIT.md` on `main`. Second, at
+  `7a63284`: both docs still reported branches 80.05% (2702/3375) while the
+  merged audit doc and PR body said 80.06% (2703/3376).
+- **Resolution:** merge #83 first, merge `main` into the branch, add a
+  `cecfba0` revision row, and align the branch figure to 80.06% (2703/3376) in
+  `docs/ROADMAP.md:536` and `docs/MODULES.md:289`. Delta re-review APPROVE.
+- **Merged:** `299b908` (2026-11-03). CI green on `6ce1c42`.
+- **Verdict:** **APPROVE** and merge.
+
+## PR #87 — `fix(gateway): fail closed on token-file create races and ELOOP`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN, `MERGEABLE`, `CLEAN`; head `988e942`; base `main`
+  `10e9f3c`. Files: `src/gateway/token.ts`, new `test/gateway-token.test.ts`,
+  new `test/cli-gateway.test.ts`; +157/−21; no docs or project-state changes.
+- **Independent security review:** **APPROVE**. Verified that the EEXIST race
+  with an empty in-progress file throws `GatewayTokenFileError` and leaves the
+  winner's bytes untouched; the truncate/overwrite path is removed; ELOOP from
+  read and create paths is converted to `GatewayTokenFileError`; symlink,
+  hard-link, non-regular, `O_NOFOLLOW`, `O_EXCL`, fstat dev/ino identity,
+  fail-closed `0600`, uniform 401, and constant-time bearer behavior are
+  unchanged. Both security tests fail on `10e9f3c`; the CLI test asserts no
+  token is printed and `tokenPath: null` with an explicit `--token`.
+- **Verification:** typecheck, lint (227 tracked files), format pass; focused
+  gateway tests 36 passed; full offline suite 429 passed / 15 skipped (444),
+  58 files. CI `typecheck and test` passed on the exact head. No live listener,
+  network call, or credential value in tests or logs.
+- **Residual non-blocking:** the EEXIST winner-reuse branch and the create-path
+  ELOOP branch remain untested; a stale empty token file now blocks startup
+  until removed manually; the EEXIST wording is imprecise for a non-empty
+  unreadable file; a torn single-write winner token remains theoretically
+  observable but is accepted by the contract.
+- **Merged:** `5fbfb00` (2026-11-03); `main` CI green on the merge commit.
+
+## PR #88 — `[SUPER-AGENT][IMESSAGE-GROUP-EDGES] Fail closed on ambiguous group addresses`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; heads `7829b27` → `890f238` (after merging `main`
+  `5fbfb00`). Files: `src/channels/imessage.ts`,
+  `test/channels-imessage.test.ts`, `docs/IMESSAGE.md`.
+- **Independent review of `7829b27`:** **REQUEST_CHANGES**. Blocking: the
+  address-level fix left `address.handle` set for every group message, and
+  `ImessageOutboxAdapter.send` falls back to `{ handle }` (buddy / 1:1 mode)
+  when no `chatGuid` is present. An ambiguous group therefore produced
+  `{provider, handle}` and its reply would be sent as a DM to the sender. A
+  second variant: a positive group row with only `chat_identifier` produced
+  `{provider, handle, group}` and still sent buddy mode. The reviewer reproduced
+  the trigger→outbox hand-off with zero chat guid.
+- **Fix at `890f238`:** group addresses omit `handle`; the adapter refuses any
+  `target.group` without `target.chatGuid` before calling `api.send`; tests
+  cover ambiguous group rejection with zero sends, identifier-only group
+  rejection, a legacy group target carrying a handle, a guid-bearing group
+  sent in chat mode, and the unchanged 1:1 buddy fallback. Five regressions
+  fail against `7829b27`.
+- **Residual non-blocking:** ambiguous-group threads remain keyed
+  `handle:<sender>`, so group and 1:1 messages from one sender can share
+  context; tracked as IMESSAGE-THREAD-KEY for a later branch. Fail-closed
+  groups still create tickets and enqueue rows that retry to `failed`; a
+  positive group row with only an identifier can win over a later guid-bearing
+  row by join order.
+- **Re-review at `890f238`:** **APPROVE**. Verified the group address omits
+  `handle`, the adapter rejects `group` without `chatGuid` before any send, the
+  five regressions fail against `7829b27`, and `docs/IMESSAGE.md` matches the
+  implementation. Focused suite 40 passed; full offline suite 440 passed / 15
+  skipped (455), 58 files.
+- **Merged:** `d3beb9c` (2026-11-03). CI `typecheck and test` success on the
+  exact head `890f238`.
+
+## PR #89 — `[SUPER-AGENT][ENGINEERING-STATE] Reconcile status after #83/#74/#85`
+
+- **Author:** LofiSu (chief engineer)
+- **State at review:** OPEN, `CLEAN`; head `5b89ae3`; 7 docs files, +170/−82;
+  no code, runtime, or configuration change.
+- **Independent docs review:** **REQUEST_CHANGES** on two blocking findings:
+  (1) the branch figure was attributed to CI as 80.09% (2748/3431), but the
+  `10e9f3c` CI job reports 80.05% (2746/3430); (2) the open-PR snapshot claimed
+  "none" and that the cycle-3 branches had no PRs, while #86, #88, and #89 were
+  open and #88 was on the named branch. Non-blocking: a duplicate `## PR #74`
+  section and self-exclusion of #89 from pending reviews.
+- **Resolution:** all figures and PR snapshots refreshed to `main` `d3beb9c`
+  (run `41600424146`: 440 passed / 15 skipped (455), 58 files; 82.29%
+  statements/lines, 80.57% branches (2787/3459), 89.97% functions); #87 and
+  #88 merges recorded, with #88's REQUEST_CHANGES → fix `890f238` → APPROVE
+  history; #86 listed as stale; the duplicate #74 section marked superseded;
+  scoped re-review pending.
+- **Verdict:** corrections applied; not merged at this checkpoint.
 
 ## Pending reviews
 
-- PR #74 re-review after #83 merges
-- PR #85 (`agent/P1-6-restart-recovery`)
+- PR #89 — scoped re-review after the docs corrections.
+- PR #86 — stale/DIRTY; its test-only changes are to be re-landed on a fresh
+  branch before it is closed.
