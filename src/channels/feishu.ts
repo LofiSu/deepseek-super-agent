@@ -281,6 +281,8 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
       address: {
         provider: 'feishu',
         chat_id: message.chat_id,
+        // Group admission reads only `address.group`; a Feishu chat is the group.
+        group: message.chat_id,
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
       },

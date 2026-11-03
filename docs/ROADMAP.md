@@ -405,11 +405,21 @@ Decision. Shards select Router sessions only; they are not process placement.
 Status: resolved by #67. `AdmissionRules` runs on the fast path before
 mention/keyword, so an @-mention cannot bypass a deny rule. The group id comes
 from `trigger.channel.address.group`, never `meta`; a missing group is denied
-while the list is active. These are admission filters, not authentication.
+while the list is active. The shipped Feishu adapter sets `address.group` to
+`message.chat_id`, so `DS_AGENT_GROUP_ALLOWLIST=<chat id>` works with it; other
+adapters must populate `address.group` to opt into group admission. A filtered
+trigger cannot be resurrected: handback refuses it; assessment and Eval skip and
+clear any filtered id left in `Thread.pending`; `commitAssessed` returns
+undefined and `decide` throws for a filtered id. No Ticket is created without a
+fresh admission decision. These are admission filters, not authentication.
 Configure with `RuntimeOptions.admission` or the comma-separated
 `DS_AGENT_ACTOR_ALLOWLIST` / `DS_AGENT_GROUP_ALLOWLIST` / `DS_AGENT_DROP_SELF`
-variables; explicit options win, and unset lists leave admission unchanged.
-Acceptance: `test/filter.test.ts` covers each rule plus runtime env wiring.
+variables; explicit options win, values are trimmed and empty entries dropped
+for both sources, and unset or empty lists leave admission unchanged.
+Acceptance: `test/filter.test.ts` covers each rule plus runtime env wiring,
+`test/channels-feishu.test.ts` proves the Feishu chat-id mapping, and
+`test/subscription.test.ts` proves a filtered trigger cannot be requeued,
+assessed, evaluated, or decided into a Ticket.
 **P2-4. Slow-path live policy:** optional model policy behind a flag, or keep
 the rule classifier and remove "can call a model" from README. Acceptance: one
 of the two is true and tested.
@@ -447,7 +457,7 @@ the work is already public.
 | P1-10 | Correct sandbox docs to default-on/fail-closed |  | `docs/fail-closed-sandbox` | #55 | resolved | User docs no longer describe `DS_AGENT_SANDBOX=1` opt-in; reads not overclaimed |
 | P2-1 | LTM retention/ranking |  | `feat/ltm-retention`, `feat/ltm-ranking-dedupe` | #54, #68 | resolved | Retention 1000/90 + spill cleanup (#54); dedupe (same-ticket normalized text, tag union, no extra row/spill) and tagHits/textHits/createdAt/id ranking tested with an injected clock; formula in `docs/MODULES.md` M6 |
 | P2-2 | Shard arbitration | LofiSu | `feat/shard-arbitration` | #69 | resolved | Precedence documented + tests: priority-desc/registration order, default fallback-only, first shard owns reply + terminal decision; owner resolved from the supplied trigger; idempotent decisions; one ticket/decision per trigger |
-| P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists` | #67 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address; tests cover each rule + env |
+| P2-3 | Fast-path allowlists |  | `feat/ingress-allowlists`, `feat/ingress-adapter-wiring` | #67, #70 | resolved | `AdmissionRules` actor/group/drop-self before mention/keyword; group from channel address (Feishu maps `chat_id`); filtered triggers cannot be handed back, assessed, evaluated, or decided into a Ticket; tests cover each rule, env, and resurrection |
 | P2-4 | Slow-path policy vs claim |  |  |  | todo | Code or README changed, tested |
 | P2-5 | Coverage + lint in CI |  |  |  | todo | Scripts exist; policy documented |
 | P2-6 | Confirm `repro-h9*.ts` removed |  |  |  | todo | Root clean |
@@ -467,11 +477,11 @@ npx tsc --noEmit                                      pass
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  195 passed, 15 skipped, 34 files, 2.32 s
 ```
 
-### Current main (`e4ea8e9`, re-checked 2026-11-02)
+### Current tree (`feat/ingress-adapter-wiring`, rebased on `e3116bc`, re-checked 2026-11-02)
 
 ```text
 npx tsc --noEmit                                      pass
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  213 passed, 15 skipped, 35 files, 2.13 s
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run  278 passed, 15 skipped, 41 files, 2.26 s
 ```
 
 ### P2-2 branch (`feat/shard-arbitration`)

@@ -87,6 +87,11 @@ export interface WorkerPorts {
   subscribe(ticketId: string, threadKey: string, opts?: { contextOnly?: boolean }): void
   /** Stop following a thread without requeueing a trigger (compare `handback`). */
   unsubscribe(ticketId: string, threadKey: string, reason?: string): boolean
+  /**
+   * Requeue a trigger for Eval and stop following the thread.
+   * Throws `UserError` when ingress filtered the trigger; a denied trigger
+   * cannot be requeued without a fresh admission decision.
+   */
   handback(ticketId: string, triggerId: string, reason: string): boolean
 }
 

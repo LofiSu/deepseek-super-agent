@@ -254,4 +254,32 @@ describe('admission rules (T16)', () => {
     expect(runtime.ingest(groupTrigger({ id: 'unset-alex', actor: 'alex' }))).toBe('stored')
     expect(runtime.log.text()).not.toContain('[ingress] admission')
   })
+
+  it('does not log a misleading allowlist when every explicit list is empty', () => {
+    runtime = freshRuntime({ admission: { actors: [], groups: [], dropSelf: [] } })
+    expect(runtime.ingest(groupTrigger({ id: 'empty-rules', group: 'random' }))).toBe('stored')
+    expect(runtime.log.text()).not.toContain('[ingress] admission')
+  })
+
+  it('omits empty entries and logs a non-noise drop with its layer and reason', () => {
+    runtime = freshRuntime({ admission: { actors: ['bob', '  '], groups: [], dropSelf: [] } })
+    expect(runtime.log.text()).toContain('[ingress] admission actors=bob groups=- dropSelf=-')
+    expect(runtime.ingest(groupTrigger({ id: 'denied-alex', actor: 'alex', group: 'eng' }))).toBe('filtered')
+    const text = runtime.log.text()
+    expect(text).toContain('[ingress] dropped reason=fast:actor-not-allowlisted')
+    expect(text).not.toContain('noise dropped')
+  })
+
+  it('matches trimmed explicit ids, not their padded form', () => {
+    runtime = freshRuntime({ admission: { actors: [' bob '] } })
+    expect(runtime.log.text()).toContain('[ingress] admission actors=bob groups=- dropSelf=-')
+    expect(runtime.ingest(groupTrigger({ id: 'trimmed-bob', actor: 'bob' }))).toBe('stored')
+    expect(runtime.ingest(groupTrigger({ id: 'trimmed-alex', actor: 'alex' }))).toBe('filtered')
+  })
+
+  it('treats a whitespace-only explicit list as empty, disabling the rule', () => {
+    runtime = freshRuntime({ admission: { actors: ['  '] } })
+    expect(runtime.ingest(groupTrigger({ id: 'whitespace-alex', actor: 'alex' }))).toBe('stored')
+    expect(runtime.log.text()).not.toContain('[ingress] admission')
+  })
 })
