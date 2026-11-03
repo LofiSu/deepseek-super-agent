@@ -20,9 +20,9 @@
 
 | Task | Role | Branch | Start | Checkpoint | PR | Status |
 |------|------|--------|-------|------------|----|--------|
-| IMESSAGE-ADMISSION | Infrastructure/Security | `agent/imessage-admission` | 2026-11-03 | dispatched | pending | running |
-| P1-3 | Orchestration | `agent/P1-3-mesh-backpressure` | 2026-11-03 | dispatched | pending | running |
-| GATEWAY-HARDENING | Infrastructure/Security | `agent/gateway-hardening` | 2026-11-03 | dispatched | pending | running |
+| IMESSAGE-ADMISSION | Infrastructure/Security | `agent/imessage-admission` | 2026-11-03 | reviewed + merged | #77 | merged |
+| P1-3 | Orchestration | `agent/P1-3-mesh-backpressure` | 2026-11-03 | worktree edits, no commit | pending | in progress |
+| GATEWAY-HARDENING | Infrastructure/Security | `agent/gateway-hardening` | 2026-11-03 | reviewed + merged | #76 | merged |
 | AUDIT-REFRESH | Chief Engineer | `docs/final-audit` | 2026-11-03 | PR #74 open, stale | #74 | waiting |
 | P1-6 | Core Runtime | `agent/P1-6-restart-recovery` | — | blocked on P1-3 | — | blocked |
 | GATEWAY-REVIEW | QA/Review | review only | — | queued | — | queued |

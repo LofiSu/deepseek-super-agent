@@ -42,11 +42,49 @@ sufficient. Verdicts: APPROVE / REQUEST_CHANGES / REJECT / BLOCKED.
   GATEWAY-HARDENING; both must merge before this surface is called
   production-ready.
 
+## PR #78 — `chore: deploy the super agent orchestration layer`
+
+- **State at review:** OPEN, CI green (`typecheck and test`), lint clean.
+- **Scope:** 10 files, docs/agent/hook configuration only; no runtime code.
+- **Content review:** single-loop ownership is stated once; the Stop guard fails
+  open on malformed or missing state, and blocks only when mode is running, an
+  active action is set, a queue/background count is non-zero, and progress is
+  fresh. Nine behaviors were tested locally. Runtime state is gitignored.
+- **Verdict:** **APPROVE**.
+
+## PR #76 — `feat(gateway): harden authentication and exposure boundaries`
+
+- **Scope:** 6 files; constant-time bearer comparison, empty-token refusal,
+  loopback warning, token-file mode repair with fail-closed behavior, security
+  headers, no token printed by the CLI.
+- **Review:** matches the findings recorded for #64. `readGatewayToken()` now
+  throws when the file cannot be secured; `gatewayApiFromEnv` therefore fails
+  closed instead of silently using a loose token file.
+- **Verdict:** **APPROVE**. CI green.
+
+## PR #77 — `fix(imessage): fail closed admission and gate group chats`
+
+- **Scope:** 4 files; default-deny startup gate, group detection from `chat.style`
+  and `room_name`, group messages never `direct`, cursor still advances past
+  skipped groups.
+- **Review:** the gate is truthful: when only `DS_AGENT_ACTOR_ALLOWLIST` is set,
+  the runtime admission rules (wired in `src/runtime.ts`) still deny other
+  senders. Group detection never reads message text. Tests cover refusal,
+  detection, cursor progress, and CLI early exit.
+- **Verdict:** **APPROVE**. CI green.
+
+## PR #75 — `docs: establish the 2026-11-03 audit, master plan, and review log`
+
+- **State at review:** initially BEHIND/BLOCKED by six CodeRabbit threads.
+- **Resolution:** the six findings (local path, pending-review alignment,
+  AUDIT-REFRESH dependency, verdict vocabulary, admission-order wording, stale
+  gateway review status) were fixed in `deed616`; each thread was answered and
+  resolved.
+- **Verdict:** **APPROVE** after fixes. Merged as `08ea78f`.
+
 ## Pending reviews
 
-- `agent/imessage-admission`
-- `agent/P1-3-mesh-backpressure`
-- `agent/gateway-hardening`
+- `agent/P1-3-mesh-backpressure` (in progress; no PR yet)
 - `docs/final-audit` refresh
 - `GATEWAY-REVIEW` (focused security-relevant coverage)
 - `agent/P1-6-restart-recovery` (after P1-3)
