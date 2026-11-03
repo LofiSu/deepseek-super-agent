@@ -34,6 +34,15 @@ describe('gateway config file + sources', () => {
     expect(resolved.defaultModel).toBe('m1')
   })
 
+  it('carries the file masking flag into the resolved source', () => {
+    const home = tempHome()
+    fs.writeFileSync(gatewayConfigPath(home), JSON.stringify({
+      masking: true,
+      providers: [{ id: 'local', baseUrl: 'http://127.0.0.1:9/v1', apiKey: '', models: ['m1'] }],
+    }))
+    expect(gatewayFromSources(home, {} as NodeJS.ProcessEnv).masking).toBe(true)
+  })
+
   it('falls back to env when there is no config file', () => {
     const home = tempHome()
     const env = { DS_AGENT_API_BASE: 'http://y', DS_AGENT_API_KEY: 'k', DS_AGENT_API_MODEL: 'm2' } as NodeJS.ProcessEnv

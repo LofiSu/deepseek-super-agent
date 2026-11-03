@@ -17,12 +17,15 @@ export interface GatewayFile {
   providers?: unknown
   aliases?: Record<string, string[]>
   defaultModel?: string
+  /** Turn on the built-in privacy masking plugin for requests routed here. */
+  masking?: boolean
 }
 
 export interface GatewaySource {
   providers: GatewayProvider[]
   aliases: Record<string, string[]>
   defaultModel?: string
+  masking?: boolean
   source: 'file' | 'env' | 'none'
 }
 
@@ -52,6 +55,7 @@ export function gatewayFromSources(home: string, env: NodeJS.ProcessEnv = proces
       providers: gatewayProvidersFromInput(file.providers, env),
       aliases,
       ...(typeof file.defaultModel === 'string' && file.defaultModel.trim() ? { defaultModel: file.defaultModel.trim() } : {}),
+      ...(file.masking === true ? { masking: true } : {}),
       source: 'file',
     }
   }

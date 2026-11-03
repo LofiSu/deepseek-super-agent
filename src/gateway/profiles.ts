@@ -31,7 +31,10 @@ function readAll(home: string): Record<string, GatewayProfile> {
 
 function writeAll(home: string, all: Record<string, GatewayProfile>): void {
   fs.mkdirSync(home, { recursive: true })
-  fs.writeFileSync(profilesPath(home), `${JSON.stringify(all, null, 2)}\n`)
+  const file = profilesPath(home)
+  // Profiles can carry provider keys; keep them owner-only like gateway.token.
+  fs.writeFileSync(file, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 })
+  fs.chmodSync(file, 0o600)
 }
 
 export function saveProfile(home: string, name: string, profile: Omit<GatewayProfile, 'name'>): GatewayProfile {

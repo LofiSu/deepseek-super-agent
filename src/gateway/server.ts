@@ -354,7 +354,13 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     })
     try {
       const order = strategy(seats, {})
-      if (!Array.isArray(order) || order.length !== candidates.length) return candidates
+      // A strategy may only reorder: reject duplicates/out-of-range indices so a
+      // plugin cannot make the gateway retry one provider twice per request.
+      const valid = Array.isArray(order)
+        && order.length === candidates.length
+        && new Set(order).size === order.length
+        && order.every(index => Number.isInteger(index) && index >= 0 && index < candidates.length)
+      if (!valid) return candidates
       return order.map(index => candidates[index]).filter((item): item is (typeof candidates)[number] => item != null)
     } catch {
       return candidates
@@ -447,7 +453,14 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
   }
 
   const readJson = async (req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> => {
-    const raw = await readBody(req)
+    let raw: string
+    try {
+      raw = await readBody(req)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      sendJson(res, message === 'request body too large' ? 413 : 400, { error: { message } })
+      return undefined
+    }
     try {
       return JSON.parse(raw || '{}') as Record<string, unknown>
     } catch {

@@ -84,4 +84,27 @@ describe('gateway limits', () => {
     limits.release('a')
     expect(limits.acquire('a')).toBe(true)
   })
+
+  it('lets a rested provider recover after the cooldown instead of disabling it forever', () => {
+    let now = Date.UTC(2026, 10, 3, 10, 0, 0)
+    const limits = new GatewayLimits(() => ({}), () => now)
+    limits.rest('a', 60_000)
+    expect(limits.available('a')).toBe(false)
+    expect(limits.snapshot('a').exhausted).toBe(true)
+    expect(limits.retryAfterMs('a')).toBe(60_000)
+    now += 60_001
+    expect(limits.available('a')).toBe(true)
+    expect(limits.snapshot('a').exhausted).toBe(false)
+  })
+
+  it('resets tokensToday when the UTC day rolls over', () => {
+    let now = Date.UTC(2026, 10, 3, 23, 59, 0)
+    const limits = new GatewayLimits(() => ({ dailyTokens: 5 }), () => now)
+    limits.recordTokens('a', 7)
+    expect(limits.snapshot('a').tokensToday).toBe(7)
+    expect(limits.available('a')).toBe(false)
+    now = Date.UTC(2026, 10, 4, 0, 0, 1)
+    expect(limits.snapshot('a').tokensToday).toBe(0)
+    expect(limits.available('a')).toBe(true)
+  })
 })

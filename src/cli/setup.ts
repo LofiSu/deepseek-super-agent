@@ -51,7 +51,9 @@ export async function runSetupCommand(home: string): Promise<void> {
   const text = `${JSON.stringify(config, null, 2)}\n`
   if (write) {
     fs.mkdirSync(home, { recursive: true })
-    fs.writeFileSync(gatewayConfigPath(home), text)
+    // The file will hold provider keys once the operator fills them in.
+    fs.writeFileSync(gatewayConfigPath(home), text, { mode: 0o600 })
+    fs.chmodSync(gatewayConfigPath(home), 0o600)
     console.log(`\nWrote ${gatewayConfigPath(home)}`)
     console.log('Add an "apiKey" to any provider that needs auth, then run: pnpm ds-agent gateway')
   } else {

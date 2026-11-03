@@ -148,15 +148,31 @@ export class ImessageSource {
     for (const message of messages) {
       if (message.rowId > lastRowId) lastRowId = message.rowId
     }
-    return { messages, triggers: messages.map(imessageTrigger), lastRowId }
+    // Advance past rows that decoded to no text (reactions, attachment-only
+    // payloads) without turning them into empty, "direct" Triggers.
+    const usable = messages.filter(message => message.text.trim().length > 0)
+    return { messages: usable, triggers: usable.map(imessageTrigger), lastRowId }
   }
 }
 
 export type OsascriptRunner = (script: string, env: NodeJS.ProcessEnv) => Promise<string>
 
+/** Env names osascript needs; everything else (provider keys, tokens) stays out. */
+const OSASCRIPT_ENV = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR'])
+
+/** Keep API keys and other process secrets out of the osascript child process. */
+export function osascriptEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const childEnv: NodeJS.ProcessEnv = {}
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) continue
+    if (OSASCRIPT_ENV.has(name) || name.startsWith('DS_AGENT_IMSG_')) childEnv[name] = value
+  }
+  return childEnv
+}
+
 /** Production runner: spawn `osascript` with the script on argv and text/target through env. */
 export const runOsascript: OsascriptRunner = (script, env) => new Promise((resolve, reject) => {
-  const child = spawn('osascript', ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'], env })
+  const child = spawn('osascript', ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'], env: osascriptEnv(env) })
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', (chunk: Buffer | string) => { stdout += String(chunk) })
@@ -232,7 +248,9 @@ export class ChatDbImessageApi implements ImessageApi {
 
   async pull(afterRowId: number, opts: ImessagePullOptions = {}): Promise<ImessageInbound[]> {
     const limit = Math.min(Math.max(Math.floor(opts.limit ?? 50), 1), 200)
-    const where = ['m.ROWID > ?', 'm.is_from_me = 0']
+    // Skip rows with no text payload at all (tapbacks, pure attachments) in
+    // SQL so they cannot occupy the page and stall the ROWID cursor.
+    const where = ['m.ROWID > ?', 'm.is_from_me = 0', '(m.text IS NOT NULL AND m.text <> \'\' OR m.attributedBody IS NOT NULL)']
     const params: Array<number | string> = [afterRowId]
     if (opts.handle) {
       where.push('h.id = ?')
@@ -265,7 +283,8 @@ export class ChatDbImessageApi implements ImessageApi {
       const body = row.text != null && String(row.text).length > 0
         ? String(row.text)
         : decodeAttributedBody(row.attributedBody)
-      if (!body.trim()) continue
+      // Keep empty decodes so the caller's cursor advances past them; the
+      // source filters them out of the Trigger list.
       out.push({
         rowId: Number(row.rowId),
         guid,

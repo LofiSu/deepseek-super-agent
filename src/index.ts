@@ -13,4 +13,19 @@ export {
   type LongTermMemoryQuery,
 } from './memory/long-term.ts'
 export { compareBakeoff, type BakeoffComparison, type BakeoffSample } from './metrics/bakeoff.ts'
+export {
+  GatewayRouter,
+  Masker,
+  UsageLedger,
+  gatewayAliasesFromEnv,
+  gatewayFromSources,
+  gatewayProvidersFromEnv,
+  startGatewayServer,
+  type GatewayConfig,
+  type GatewayHandle,
+  type GatewayPlugin,
+  type GatewayProvider,
+  type RouteCandidate,
+} from './gateway/index.ts'
+export { ChatDbImessageApi, ImessageSource, imessageTrigger } from './channels/imessage.ts'
 export { threadKey, type Trigger, type TriggerTrust } from './shared/types.ts'

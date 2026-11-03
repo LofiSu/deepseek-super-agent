@@ -21,7 +21,7 @@ export async function startEmbeddedGateway(
   if (env.DS_AGENT_GATEWAY_URL?.trim()) return undefined
   const file = readGatewayConfigFile(home)
   if (!file || !Array.isArray(file.providers) || file.providers.length === 0) return undefined
-  const { providers, aliases, defaultModel } = gatewayFromSources(home, env)
+  const { providers, aliases, defaultModel, masking } = gatewayFromSources(home, env)
   if (providers.length === 0) return undefined
   const token = loadOrCreateGatewayToken(home)
   const handle: GatewayHandle = await startGatewayServer({
@@ -30,7 +30,7 @@ export async function startEmbeddedGateway(
     token,
     providers,
     home,
-    masking: env.DS_AGENT_GATEWAY_MASKING === '1',
+    masking: masking === true || env.DS_AGENT_GATEWAY_MASKING === '1',
     ...(defaultModel ? { defaultModel } : {}),
     ...(Object.keys(aliases).length ? { aliases } : {}),
   })

@@ -55,12 +55,14 @@ export function runProfileCommand(home: string): void {
     const profile = loadProfile(home, name)
     if (!profile) throw new Error(`unknown profile ${name}`)
     fs.mkdirSync(home, { recursive: true })
-    fs.writeFileSync(gatewayConfigPath(home), `${JSON.stringify({
+    const file = gatewayConfigPath(home)
+    fs.writeFileSync(file, `${JSON.stringify({
       ...(profile.providers !== undefined ? { providers: profile.providers } : {}),
       ...(profile.aliases ? { aliases: profile.aliases } : {}),
       ...(profile.defaultModel ? { defaultModel: profile.defaultModel } : {}),
       ...(profile.masking !== undefined ? { masking: profile.masking } : {}),
-    }, null, 2)}\n`)
+    }, null, 2)}\n`, { mode: 0o600 })
+    fs.chmodSync(file, 0o600)
     console.log(`applied profile ${name} to ${gatewayConfigPath(home)}`)
     return
   }

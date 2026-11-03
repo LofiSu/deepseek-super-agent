@@ -21,7 +21,7 @@ export async function runGatewayCommand(home: string): Promise<void> {
   if (!Number.isFinite(port) || port < 0 || port > 65535) throw new Error(`invalid gateway port: ${port}`)
   const host = flag('host') ?? process.env.DS_AGENT_GATEWAY_HOST ?? '127.0.0.1'
   const token = loadOrCreateGatewayToken(home, flag('token') ?? process.env.DS_AGENT_GATEWAY_TOKEN)
-  const { providers, aliases, defaultModel: fileDefault, source } = gatewayFromSources(home)
+  const { providers, aliases, defaultModel: fileDefault, masking: fileMasking, source } = gatewayFromSources(home)
   if (providers.length === 0) {
     throw new Error(
       'no providers configured: run `pnpm ds-agent setup` to write gateway.config.json, '
@@ -33,7 +33,7 @@ export async function runGatewayCommand(home: string): Promise<void> {
     || fileDefault
     || providers[0]?.models?.[0]
 
-  const masking = process.env.DS_AGENT_GATEWAY_MASKING === '1'
+  const masking = fileMasking === true || process.env.DS_AGENT_GATEWAY_MASKING === '1'
   const handle = await startGatewayServer({
     host,
     port,

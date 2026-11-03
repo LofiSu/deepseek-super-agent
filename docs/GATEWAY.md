@@ -134,7 +134,7 @@ process is needed.
 
 Mirrors Magpie's gateway middleware + router-strategy plugins.
 
-- **Privacy masking** (built-in `redact` plugin): set `DS_AGENT_GATEWAY_MASKING=1`. Secrets/personal data are replaced with stable `{{KIND_hash}}` placeholders before the request leaves this machine, and restored in the reply. Streaming replies are unmasked per SSE event; whole replies are restored as-is.
+- **Privacy masking** (built-in `redact` plugin): set `DS_AGENT_GATEWAY_MASKING=1` or `"masking": true` in `gateway.config.json`. Secrets/personal data are replaced with stable `{{KIND_hash}}` placeholders before the request leaves this machine, and restored in the reply. Streaming replies are unmasked per SSE event; whole replies are restored as-is.
 - **Your own plugins**: drop `.mjs`/`.js` modules in `<stateDir>/gateway-plugins/`; `<stateDir>/gateway.plugins.json` (`{ "plugins": [{ "id": "x", "enabled": true, "options": {} }] }`) selects them.
 - A plugin exports a default object: `{ id, onRequest?, onResponse?, strategies? }`. Hooks fail open (250 ms limit): a throw, a non-object return, or a timeout leaves the body as it was.
 - `strategies` are router orders: `(seats, options) => number[]`. Select one per request with header `X-Gateway-Routing: <name>`. The built-in `rotation` plugin provides `priority` / `smart` / `usage` (least-used first) / `free` (cheapest by provider `cost`) / `fast` (lowest observed latency) / `pace` (most allowance headroom first).
@@ -159,6 +159,6 @@ export default {
 - `/v1/responses` is a pass-through to the upstream's `/responses`; it does not
   translate to chat for providers that only speak chat.
 - Per-provider `maxConcurrency`, `maxRpm` and `dailyTokens` enforce concurrency lanes, a rolling 60s RPM window and a soft daily token budget; a saturated provider is skipped and the request gets `429` with `Retry-After`. `/v1/gateway/quotas` reports in-flight / rpm used / tokens today / exhausted per provider.
-- A provider answering `429` or `402` (quota/balance) is rested for the day in-process.
+- A provider answering `429` or `402` (quota/balance) is rested for 60s in-process, then retried; a spent `dailyTokens` budget rests it until the next UTC midnight.
 - The gateway does not implement provider-specific subscription protocols
   (Cursor/Codex/Kiro). For those, supply your own token as above.

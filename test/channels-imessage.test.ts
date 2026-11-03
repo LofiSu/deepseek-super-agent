@@ -1,3 +1,7 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import {
   APPLE_EPOCH_OFFSET_SECONDS,
@@ -8,6 +12,7 @@ import {
   decodeAttributedBody,
   imessageThreadFor,
   imessageTrigger,
+  osascriptEnv,
   type ImessageApi,
   type ImessageInbound,
   type ImessagePullOptions,
@@ -102,6 +107,62 @@ describe('iMessage source pull', () => {
     const result = await new ImessageSource(api, { handle: 'y' }).pull(0)
     expect(result.triggers.map(trigger => trigger.id)).toEqual(['imessage_G2'])
   })
+
+  it('advances the cursor past empty rows without emitting empty Triggers', async () => {
+    const api = new FakeImessage([
+      sample({ rowId: 1 }),
+      sample({ rowId: 2, guid: 'G2', text: '   ' }),
+      sample({ rowId: 3, guid: 'G3', text: 'second' }),
+    ])
+    const result = await new ImessageSource(api).pull(0)
+    expect(result.triggers.map(trigger => trigger.id)).toEqual(['imessage_GUID-1', 'imessage_G3'])
+    expect(result.messages.map(message => message.rowId)).toEqual([1, 3])
+    expect(result.lastRowId).toBe(3)
+  })
+})
+
+describe('ChatDbImessageApi pull', () => {
+  it('ignores rows with no payload and never stalls the ROWID cursor on an empty decode', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat (ROWID, guid, chat_identifier) VALUES (1, 'iMessage;-;+15550000000', '+15550000000');
+      -- 1: normal text; 2: tapback/attachment with no text columns;
+      -- 3: attributedBody that decodes to nothing (must still advance the cursor).
+      INSERT INTO message VALUES (1, 'G1', 'first message', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (2, 'G2', NULL, NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (3, 'G3', NULL, x'010203', 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (4, 'G4', 'fourth message', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (5, 'G5', 'from the agent', NULL, 0, 'iMessage', 1, 1);
+      INSERT INTO chat_message_join VALUES (1, 1), (2, 1), (3, 1), (4, 1), (5, 1);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows.map(row => row.rowId)).toEqual([1, 3, 4])
+      expect(rows.map(row => row.text)).toEqual(['first message', '', 'fourth message'])
+
+      const pulled = await new ImessageSource(api).pull(0)
+      expect(pulled.triggers.map(trigger => trigger.id)).toEqual(['imessage_G1', 'imessage_G4'])
+      expect(pulled.lastRowId).toBe(4)
+      expect(await api.pull(pulled.lastRowId)).toEqual([])
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 function outboxRow(over: Partial<OutboxRow> = {}): OutboxRow {
@@ -166,5 +227,16 @@ describe('ChatDbImessageApi send', () => {
     })
     await api.send({ chatGuid: 'iMessage;-;+1' }, 'hi')
     expect(mode).toBe('chat')
+  })
+
+  it('does not leak provider credentials into the osascript child env', () => {
+    const env = osascriptEnv({
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/test',
+      DEEPSEEK_API_KEY: 'sk-secret',
+      DS_AGENT_GATEWAY_TOKEN: 'gw_secret',
+      DS_AGENT_IMSG_TEXT: 'hi',
+    })
+    expect(env).toEqual({ PATH: '/usr/bin:/bin', HOME: '/Users/test', DS_AGENT_IMSG_TEXT: 'hi' })
   })
 })

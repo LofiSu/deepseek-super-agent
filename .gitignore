@@ -2,6 +2,7 @@ node_modules
 dist
 coverage
 .ds-agent
+.ds-agent*
 *.log
 uploads
 *.tsbuildinfo
