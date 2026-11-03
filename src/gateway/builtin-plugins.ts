@@ -6,6 +6,7 @@
  * usage    — least-used provider first (from the usage ledger).
  * free     — cheapest provider first (provider `cost`).
  * fast     — lowest observed average latency first.
+ * pace     — most allowance headroom first (tokens today vs daily budget).
  */
 
 import type { GatewayPlugin, RouteSeat } from './plugins.ts'
@@ -28,6 +29,12 @@ function orderBy(seats: RouteSeat[], compare: (left: RouteSeat, right: RouteSeat
     .map(seat => seat.index)
 }
 
+function paceRatio(seat: RouteSeat): number {
+  const tokens = seat.tokensToday ?? 0
+  const budget = seat.dailyTokens
+  return budget && budget > 0 ? tokens / budget : tokens
+}
+
 export function strategyPlugin(): GatewayPlugin {
   return {
     id: 'rotation',
@@ -41,6 +48,7 @@ export function strategyPlugin(): GatewayPlugin {
         const rightLatency = right.avgLatencyMs ?? Number.POSITIVE_INFINITY
         return leftLatency - rightLatency
       }),
+      pace: seats => orderBy(seats, (left, right) => paceRatio(left) - paceRatio(right)),
     },
   }
 }

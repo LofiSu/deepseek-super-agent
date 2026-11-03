@@ -10,6 +10,7 @@ import { strategyPlugin } from './builtin-plugins.ts'
 import { GatewayLimits } from './limits.ts'
 import { UsageLedger, type UsageRow } from './usage.ts'
 import { Affinity } from './affinity.ts'
+import { dashboardHtml } from './web.ts'
 
 interface Usage {
   prompt_tokens?: number
@@ -347,6 +348,8 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
         cost: candidate.provider.cost ?? 0,
         requests: stat?.requests ?? 0,
         ...(stat && stat.requests > 0 ? { avgLatencyMs: stat.latencyMs / stat.requests } : {}),
+        tokensToday: limits.snapshot(candidate.provider.id).tokensToday,
+        ...(candidate.provider.dailyTokens != null ? { dailyTokens: candidate.provider.dailyTokens } : {}),
       }
     })
     try {
@@ -515,6 +518,11 @@ export async function startGatewayServer(config: GatewayConfig): Promise<Gateway
     const url = new URL(req.url ?? '/', 'http://gateway.local')
     if (url.pathname === '/health' && req.method === 'GET') {
       sendJson(res, 200, { ok: true, providers: router.providersState(), plugins: plugins.list(), metrics: metrics.snapshot() })
+      return
+    }
+    if ((url.pathname === '/' || url.pathname === '/ui') && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(dashboardHtml())
       return
     }
     if (!authorized(req, config.token)) {

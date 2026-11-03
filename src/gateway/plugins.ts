@@ -39,6 +39,10 @@ export interface RouteSeat {
   requests?: number
   /** Observed average latency in ms (for the `fast` strategy). */
   avgLatencyMs?: number
+  /** Tokens used today (for the `pace` strategy). */
+  tokensToday?: number
+  /** Daily token budget (for the `pace` strategy). */
+  dailyTokens?: number
 }
 
 export type StrategyFn = (seats: RouteSeat[], options: JsonObject) => number[]

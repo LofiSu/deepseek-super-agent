@@ -45,12 +45,12 @@ scraping or quota bypass.
 - [x] Per-call usage ledger (provider/model, status, latency, tokens) + `onUsage` plugin hook + `/v1/gateway/usage`. (Price/cost still pending.)
 - [x] Session aggregation by conversation id (`/v1/gateway/sessions`; id from `X-Gateway-Session` / `X-Conversation-ID`, else hash of the first user message).
 - [x] Affinity: a conversation stays on the provider that answered it (in-process, bounded).
-- [x] Routing strategies `usage` / `free` / `fast` over real data (requests, cost, latency). `pace` still pending.
+- [x] Routing strategies `usage` / `free` / `fast` / `pace` over real data (requests, cost, latency, tokens).
 
 ### Phase 3 — Wiring & shell
 - [x] Agent config wiring (generic JSON/env merge via `ds-agent wire`) + profiles (`ds-agent profile`). Per-agent presets are a future nicety.
 - [x] `ds-agent gateway` embedded mode (auto-start in-process for chat/imessage when a config file exists).
-- [ ] TUI/web panels (later).
+- [x] Minimal web dashboard at `GET /`; TUI deferred (optional).
 
 ## Definition of done (phase 1)
 `pnpm typecheck` clean; gateway tests green; a request with `X-Gateway-Routing`

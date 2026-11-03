@@ -68,6 +68,11 @@ describe('usage-driven strategies', () => {
     expect(strategies.fast!(seats([{ provider: 'a', avgLatencyMs: 100 }, { provider: 'b' }]), {})).toEqual([0, 1])
   })
 
+  it('pace orders by remaining allowance headroom', () => {
+    expect(strategies.pace!(seats([{ provider: 'a', tokensToday: 80, dailyTokens: 100 }, { provider: 'b', tokensToday: 10, dailyTokens: 100 }]), {})).toEqual([1, 0])
+    expect(strategies.pace!(seats([{ provider: 'a', tokensToday: 50 }, { provider: 'b', tokensToday: 5 }]), {})).toEqual([1, 0])
+  })
+
   it('routes by the free strategy end to end', async () => {
     const upstream = await startFakeUpstream()
     const gw = await startGateway([
