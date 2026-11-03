@@ -9,6 +9,23 @@ function flag(name: string): string | undefined {
   return index < 0 ? undefined : process.argv[index + 1]
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
+
+export function isLoopbackHost(host: string): boolean {
+  return LOOPBACK_HOSTS.has(host.trim().toLowerCase())
+}
+
+/**
+ * Non-loopback binds expose the unauthenticated `/health` and dashboard to the
+ * network, so the CLI must say so instead of silently widening exposure.
+ */
+export function gatewayHostWarning(host: string): string | undefined {
+  if (isLoopbackHost(host)) return undefined
+  return `WARNING: gateway --host ${host} is not a loopback address. `
+    + '/health and the dashboard are unauthenticated in this mode, so anyone who can reach '
+    + 'this port can read provider status and metrics. Bind 127.0.0.1 unless the network is trusted.'
+}
+
 /**
  * `ds-agent gateway` — start a local OpenAI-compatible gateway.
  *
@@ -20,6 +37,8 @@ export async function runGatewayCommand(home: string): Promise<void> {
   const port = Number(flag('port') ?? process.env.DS_AGENT_GATEWAY_PORT ?? 4319)
   if (!Number.isFinite(port) || port < 0 || port > 65535) throw new Error(`invalid gateway port: ${port}`)
   const host = flag('host') ?? process.env.DS_AGENT_GATEWAY_HOST ?? '127.0.0.1'
+  const hostWarning = gatewayHostWarning(host)
+  if (hostWarning) console.warn(hostWarning)
   const token = loadOrCreateGatewayToken(home, flag('token') ?? process.env.DS_AGENT_GATEWAY_TOKEN)
   const { providers, aliases, defaultModel: fileDefault, masking: fileMasking, source } = gatewayFromSources(home)
   if (providers.length === 0) {
@@ -55,8 +74,8 @@ export async function runGatewayCommand(home: string): Promise<void> {
   fs.writeFileSync(path.join(home, 'gateway.json'), `${JSON.stringify(info, null, 2)}\n`)
 
   console.log(`ds-agent gateway listening on ${handle.url}`)
-  console.log(`  token:     ${handle.token}`)
-  console.log(`  saved:     ${gatewayTokenPath(home)} (0600) + ${path.join(home, 'gateway.json')}`)
+  console.log(`  token:     ${gatewayTokenPath(home)} (mode 0600; never printed)`)
+  console.log(`  info:      ${path.join(home, 'gateway.json')}`)
   console.log(`  providers: ${providers.map(provider => provider.id).join(', ')}${defaultModel ? `  defaultModel=${defaultModel}` : ''}  (source=${source})`)
   if (Object.keys(aliases).length) console.log(`  aliases:   ${Object.keys(aliases).join(', ')}`)
   console.log(`  plugins:   ${handle.plugins.join(', ')}${masking ? '  (masking on)' : ''}`)

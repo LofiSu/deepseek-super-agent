@@ -30,6 +30,9 @@ accounts, or bypass provider quotas.
   so subscription-style upstreams that accept a token you supply work too.
 - **Local bearer token**: auto-generated (`gw_<random>`) and persisted
   `<stateDir>/gateway.token` with mode `0600`, so the agent reads it itself.
+  The file is re-checked on every read and forced back to `0600`; if that fails
+  the token is not used (fail closed). The token is never printed or embedded in
+  the dashboard.
 - **Metering**: per-provider requests / errors / latency / tokens.
 
 ## Configure providers
@@ -83,7 +86,7 @@ complying with each provider's terms.
 
 ```bash
 DS_AGENT_GATEWAY_PROVIDERS=... pnpm ds-agent gateway --port 4319
-# prints the URL + token; saves <stateDir>/gateway.json and <stateDir>/gateway.token
+# prints the URL; saves <stateDir>/gateway.json and <stateDir>/gateway.token (mode 0600)
 ```
 
 ## Point ds-agent at it
@@ -129,6 +132,29 @@ process is needed.
 | POST | `/v1/messages` | yes | Anthropic Messages (translated) |
 | POST | `/v1/embeddings` | yes | embeddings (pass-through) |
 | POST | `/v1beta/models/{model}:generateContent` | yes | Gemini, translated to chat |
+
+## Security boundaries
+
+- **Authentication**: every endpoint except `GET /health`, `GET /`, and
+  `GET /ui` requires `Authorization: Bearer <token>`. The comparison is
+  constant-time (`crypto.timingSafeEqual` after a length check), and a missing,
+  malformed, or wrong header always gets the same `401` body — it never reaches
+  an upstream provider.
+- **Empty token**: the server refuses to start with an empty or whitespace-only
+  token. Use the generated `<stateDir>/gateway.token` or pass `--token` /
+  `DS_AGENT_GATEWAY_TOKEN`.
+- **Token file**: `<stateDir>/gateway.token` is re-checked on every read and
+  re-applied as mode `0600` if it was loosened. If the file cannot be secured,
+  the gateway fails closed instead of using it.
+- **Bind exposure**: the gateway listens on `127.0.0.1` by default. Passing a
+  non-loopback `--host` / `DS_AGENT_GATEWAY_HOST` (for example `0.0.0.0`) prints
+  an explicit warning: `/health` and the dashboard are **unauthenticated** in
+  that mode, so only bind beyond loopback on a trusted, firewalled network.
+- **Headers**: every response carries `X-Content-Type-Options: nosniff`;
+  authenticated responses (including streaming replies) carry
+  `Cache-Control: no-store`.
+- **Dashboard**: `GET /` and `GET /ui` are read-only, fetch only `/health`, and
+  never embed the bearer token or any credential.
 
 ## Plugins (gateway extension points)
 
