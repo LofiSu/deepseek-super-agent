@@ -43,15 +43,14 @@ describe('McpToolSource', () => {
   })
 
   it('omits a server that never finishes initialize without stalling the listing', async () => {
-    const source = sourceFor([
-      { name: 'hung', command: process.execPath, args: [hungPath] },
-      { name: 'fake', command: process.execPath, args: [serverPath] },
-    ], 3_000)
+    // A hung handshake must not hold the listing past its cap. The healthy
+    // server is covered by the spawn-failure test; mixing it in here would make
+    // the timing assertion depend on how fast CI can start a second process.
+    const source = sourceFor([{ name: 'hung', command: process.execPath, args: [hungPath] }], 500)
     const started = Date.now()
     const specs = await source.specs()
-    expect(Date.now() - started).toBeLessThan(9_000)
-    expect(specs.some(spec => spec.name.startsWith('mcp__fake__'))).toBe(true)
-    expect(specs.some(spec => spec.name.startsWith('mcp__hung__'))).toBe(false)
+    expect(specs).toEqual([])
+    expect(Date.now() - started).toBeLessThan(8_000)
     await source.close()
   })
 
