@@ -34,9 +34,11 @@ Derived comparison: `extraModelCalls = 1`, `wallRatio = 1.0031`, verdict
 The dual run used a separate `router` Session plus `worker_ticket_1`; the
 single run used one Session and logged `single-session router turn skipped`.
 Both runs acknowledged the trigger, created one ticket, and accepted one Eval.
-The captured console log also shows the acknowledgement/outbox enqueue and the
-worker turn. The `BakeoffSample` itself records only model calls, tickets, Eval
-accepts, wall time, and counters; delivery status is not part of that artifact.
+The operator's console log also shows the acknowledgement/outbox enqueue and
+the worker turn. The `BakeoffSample` itself records only model calls, tickets,
+Eval accepts, wall time, and counters; delivery status is not part of that
+artifact. Both samples are pre-terminal (`memory.remembered=0`), so "accepted
+one Eval" does not mean the work reached a terminal state before the snapshot.
 
 ## Interpretation
 
