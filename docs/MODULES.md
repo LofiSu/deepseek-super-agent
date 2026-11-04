@@ -41,14 +41,15 @@ keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
 
 Placement is logical: this process still executes the turn. The transport half
 of T47 is implemented in `src/harness/remote-node.ts`: `RemoteMeshRegistry`
-registers peers over the authenticated A2A HTTP primitive, tracks
-heartbeat/capacity with a 60 s stale window, picks a least-loaded eligible node,
-and dispatches assignment envelopes fail-closed; `MeshInbox` /
-`createRemoteMeshHandler` is the authenticated receiver seam. The module starts
-no listener and makes no remote-execution claim; mounting it in Runtime/CLI
-remains owner-gated. Capacity is enforced
-in-process with a bounded FIFO queue owned by the Harness (the registry stays
-pure accounting):
+registers peers with validated https/loopback endpoints, minimum-length secrets,
+and no URL userinfo; tracks heartbeat/capacity with a 60 s stale window and
+bounded node counts; picks a least-loaded eligible node and releases
+stale/offline assignments; and dispatches assignment envelopes fail-closed.
+`MeshInbox` / `createRemoteMeshHandler` is the authenticated receiver seam and
+bounds inbound nodes and addresses. The module starts no listener and makes no
+remote-execution claim; mounting it in Runtime/CLI remains owner-gated.
+Capacity is enforced in-process with a bounded FIFO queue owned by the Harness
+(the registry stays pure accounting):
 
 - When every node is full, `launch` does not start the Worker. It parks the
   ticket and records `mesh.queued`.

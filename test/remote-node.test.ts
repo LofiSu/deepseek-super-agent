@@ -106,7 +106,11 @@ async function startInbox(
 ): Promise<InboxHarness> {
   const received: RemoteMeshAssignmentEvent[] = []
   const registry = overrides.registry
-    ?? new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => Date.now() })
+    ?? new RemoteMeshRegistry({
+      localPeerId: LOCAL,
+      now: () => Date.now(),
+      maxNodes: overrides.maxNodes,
+    })
   const peers = overrides.peers ?? {
     [LOCAL]: SECRET,
     [PEER]: SECRET,
@@ -170,7 +174,7 @@ describe('RemoteMeshRegistry registration', () => {
     expect(mesh.unregister('missing')).toBe(false)
   })
 
-  it('reuses the A2A transport URL guard', () => {
+  it('reuses the A2A transport URL guard and rejects embedded credentials', () => {
     const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => NOW })
     const base = { peerId: PEER, secret: SECRET }
     expect(() => mesh.register({ id: 'plain', url: 'http://example.com/a2a', ...base }))
@@ -183,6 +187,64 @@ describe('RemoteMeshRegistry registration', () => {
       .not.toThrow()
     expect(() => mesh.register({ id: 'localhost', url: 'http://localhost:9/a2a', ...base }))
       .not.toThrow()
+
+    let credentialError: unknown
+    try {
+      mesh.register({
+        id: 'userinfo',
+        url: 'http://user:top-secret@127.0.0.1:9/a2a',
+        ...base,
+      })
+    } catch (error) {
+      credentialError = error
+    }
+    expect(credentialError).toBeInstanceOf(Error)
+    expect((credentialError as Error).message).toMatch(/credentials/)
+    expect((credentialError as Error).message).not.toContain('top-secret')
+    expect(() => mesh.register({
+      id: 'username-only',
+      url: 'https://user@example.com/a2a',
+      ...base,
+    })).toThrow(/credentials/)
+    expect(mesh.list().some(node => node.id === 'userinfo')).toBe(false)
+  })
+
+  it('rejects secrets shorter than the A2A minimum at registration', () => {
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => NOW })
+    const url = 'http://127.0.0.1:9/a2a'
+
+    expect(() => mesh.register({ id: 'short-string', url, peerId: PEER, secret: 'a'.repeat(31) }))
+      .toThrow(/at least 32 bytes/)
+    expect(() => mesh.register({
+      id: 'short-bytes',
+      url,
+      peerId: PEER,
+      secret: new Uint8Array(31),
+    })).toThrow(/at least 32 bytes/)
+
+    expect(() => mesh.register({
+      id: 'min-string',
+      url,
+      peerId: PEER,
+      secret: 'a'.repeat(32),
+    })).not.toThrow()
+    expect(() => mesh.register({
+      id: 'min-bytes',
+      url,
+      peerId: OTHER_PEER,
+      secret: new Uint8Array(32),
+    })).not.toThrow()
+    expect(mesh.list()).toHaveLength(2)
+  })
+
+  it('bounds the number of registered nodes', () => {
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => NOW, maxNodes: 1 })
+    const url = 'http://127.0.0.1:9/a2a'
+    mesh.register({ id: 'node-1', url, peerId: PEER, secret: SECRET })
+    expect(() => mesh.register({ id: 'node-2', url, peerId: OTHER_PEER, secret: SECRET }))
+      .toThrow(/node limit/)
+    expect(mesh.list()).toHaveLength(1)
+    expect(mesh.maxNodes).toBe(1)
   })
 })
 
@@ -233,6 +295,36 @@ describe('RemoteMeshRegistry placement', () => {
     mesh.release('t1')
     expect(mesh.pick('t2', NOW + 60_001)).toBeUndefined()
   })
+
+  it('releases a stale/offline assignment so capacity frees and a node can be repicked', async () => {
+    let now = NOW
+    const mesh = new RemoteMeshRegistry({
+      localPeerId: LOCAL,
+      now: () => now,
+      staleAfterMs: 1_000,
+    })
+    const url = 'http://127.0.0.1:9/a2a'
+    mesh.register({ id: 'a', url, peerId: 'peer-a', secret: SECRET, capacity: 2 })
+    mesh.register({ id: 'b', url, peerId: 'peer-b', secret: SECRET, capacity: 2 })
+
+    // pick() drops an offline assignment instead of leaking its slot.
+    expect(mesh.pick('t1', now)?.id).toBe('a')
+    expect(mesh.inFlight('a')).toBe(1)
+    mesh.markOffline('a')
+    expect(mesh.pick('t1', now)).toBeUndefined()
+    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.pick('t1', now)?.id).toBe('b')
+    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.inFlight('b')).toBe(1)
+
+    // dispatch() drops a stale assignment instead of leaking its slot.
+    now = NOW + 1_001
+    expect(await mesh.dispatch('t1', { instruction: 'x' })).toBeUndefined()
+    expect(mesh.inFlight('b')).toBe(0)
+    mesh.heartbeat('b', now)
+    expect(mesh.pick('t1', now)?.id).toBe('b')
+    expect(mesh.inFlight('b')).toBe(1)
+  })
 })
 
 describe('RemoteMeshRegistry dispatch', () => {
@@ -266,15 +358,19 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(mesh.pick('t1', NOW)?.id).toBe('a')
     mesh.markOffline('a')
     expect(await mesh.dispatch('t1', { instruction: 'work' })).toBeUndefined()
+    expect(mesh.inFlight('a')).toBe(0)
     expect(sends).toBe(0)
 
     mesh.heartbeat('a', NOW)
+    expect(mesh.pick('t1', NOW)?.id).toBe('a')
     now = NOW + 1_001
     expect(await mesh.dispatch('t1', { instruction: 'work' })).toBeUndefined()
+    expect(mesh.inFlight('a')).toBe(0)
     expect(sends).toBe(0)
 
     now = NOW
     mesh.heartbeat('a', NOW)
+    expect(mesh.pick('t1', NOW)?.id).toBe('a')
     const result = await mesh.dispatch('t1', { instruction: 'work' })
     expect(result?.status).toBe('delivered')
     expect(sends).toBe(1)
@@ -447,6 +543,84 @@ describe('remote mesh inbox', () => {
     })
     expect(implicit.status).toBe('delivered')
     expect(harness.received).toHaveLength(0)
+  })
+
+  it('rejects heartbeats too far in the future but keeps past timestamps working', async () => {
+    const harness = await startInbox()
+    const transport = new A2AHttpTransport({ url: harness.url, peerId: PEER, secret: SECRET })
+    await transport.send({
+      from: PEER,
+      to: LOCAL,
+      body: { kind: 'register', id: 'node-1', url: 'http://127.0.0.1:9/a2a' },
+    })
+    const before = harness.registry.get('node-1')?.lastHeartbeatAt
+
+    const future = await transport.send({
+      from: PEER,
+      to: LOCAL,
+      body: { kind: 'heartbeat', id: 'node-1', at: Date.now() + 10 * 60_000 },
+    })
+    expect(future.status).toBe('failed')
+    expect(harness.registry.get('node-1')?.lastHeartbeatAt).toBe(before)
+
+    const past = await transport.send({
+      from: PEER,
+      to: LOCAL,
+      body: { kind: 'heartbeat', id: 'node-1', at: 123 },
+    })
+    expect(past.status).toBe('delivered')
+    expect(harness.registry.get('node-1')?.lastHeartbeatAt).toBe(123)
+  })
+
+  it('bounds the number of nodes its default registry accepts', async () => {
+    const harness = await startInbox({ maxNodes: 1 })
+    expect(harness.inbox.registry.maxNodes).toBe(1)
+    const first = new A2AHttpTransport({ url: harness.url, peerId: PEER, secret: SECRET })
+    const second = new A2AHttpTransport({
+      url: harness.url,
+      peerId: OTHER_PEER,
+      secret: OTHER_SECRET,
+    })
+
+    const registered = await first.send({
+      from: PEER,
+      to: LOCAL,
+      body: { kind: 'register', id: 'node-1', url: 'http://127.0.0.1:9/a2a' },
+    })
+    expect(registered.status).toBe('delivered')
+
+    const rejected = await second.send({
+      from: OTHER_PEER,
+      to: LOCAL,
+      body: { kind: 'register', id: 'node-2', url: 'http://127.0.0.1:9/a2a' },
+    })
+    expect(rejected.status).toBe('failed')
+    expect(harness.registry.list()).toHaveLength(1)
+  })
+
+  it('bounds the number of inbound addresses it binds', async () => {
+    const harness = await startInbox({ maxAddresses: 1 })
+    const first = new A2AHttpTransport({ url: harness.url, peerId: PEER, secret: SECRET })
+    const second = new A2AHttpTransport({
+      url: harness.url,
+      peerId: OTHER_PEER,
+      secret: OTHER_SECRET,
+    })
+
+    const registered = await first.send({
+      from: PEER,
+      to: 'address-1',
+      body: { kind: 'register', id: 'node-1', url: 'http://127.0.0.1:9/a2a' },
+    })
+    expect(registered.status).toBe('delivered')
+
+    const rejected = await second.send({
+      from: OTHER_PEER,
+      to: 'address-2',
+      body: { kind: 'register', id: 'node-2', url: 'http://127.0.0.1:9/a2a' },
+    })
+    expect(rejected.status).toBe('failed')
+    expect(harness.registry.list()).toHaveLength(1)
   })
 
   it('rejects unknown peers and bad secrets with 401 and never dispatches', async () => {

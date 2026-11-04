@@ -9,6 +9,10 @@ import {
   type A2ASecretResolver,
 } from '../channels/a2a-http.ts'
 import type { A2AReplayCache, A2ASecret } from '../channels/a2a-auth.ts'
+import {
+  A2A_AUTH_MAX_SKEW_MS,
+  A2A_MIN_SECRET_BYTES,
+} from '../channels/a2a-auth.ts'
 
 /**
  * Client/registry half of the cross-host mesh (T47 transport half).
@@ -28,6 +32,12 @@ import type { A2AReplayCache, A2ASecret } from '../channels/a2a-auth.ts'
 /** A heartbeat older than this (default) makes a node ineligible. */
 export const DEFAULT_REMOTE_STALE_MS = 60_000
 
+/** Default cap on remote nodes a registry (and the handler's default registry) accepts. */
+export const DEFAULT_REMOTE_MAX_NODES = 256
+
+/** Default cap on distinct inbound addresses a mesh inbox accepts. */
+export const DEFAULT_REMOTE_MAX_ADDRESSES = 64
+
 /** Body kinds accepted by the remote mesh inbox. Everything else fails closed. */
 export const REMOTE_MESH_BODY_KINDS = ['register', 'heartbeat', 'assignment'] as const
 export type RemoteMeshBodyKind = (typeof REMOTE_MESH_BODY_KINDS)[number]
@@ -36,7 +46,7 @@ export interface RemoteNodeRegistration {
   /** Stable node id, unique within this registry. */
   id: string
   /** Endpoint URL. Both the A2A transport guard and this module reject non-https,
-   * non-loopback endpoints. */
+   * non-loopback endpoints, and this module also rejects embedded credentials. */
   url: string
   /** The remote peer's authenticated identity used as the envelope `to`. */
   peerId: string
@@ -115,10 +125,27 @@ function nonEmptyString(value: unknown): value is string {
 }
 
 function assertSecret(secret: A2ASecret): void {
-  const ok = typeof secret === 'string'
-    ? secret.length > 0
-    : secret instanceof Uint8Array && secret.byteLength > 0
-  if (!ok) throw new Error('Remote mesh node requires a non-empty secret')
+  const length = typeof secret === 'string'
+    ? Buffer.byteLength(secret, 'utf8')
+    : secret instanceof Uint8Array
+      ? secret.byteLength
+      : 0
+  if (length < A2A_MIN_SECRET_BYTES) {
+    // Static message: never echo the supplied secret.
+    throw new Error(`Remote mesh node secret must be at least ${A2A_MIN_SECRET_BYTES} bytes`)
+  }
+}
+
+/**
+ * Reject endpoints that embed userinfo. The A2A transport guard validates the
+ * scheme/host but not credentials, and this registry would otherwise persist
+ * and list them (or echo them from the URL parser).
+ */
+function assertNoUrlCredentials(url: string): void {
+  const parsed = new URL(url)
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new Error('Remote mesh node URL must not embed credentials')
+  }
 }
 
 function capacityOf(value: number | undefined): number {
@@ -131,6 +158,10 @@ function capacityOf(value: number | undefined): number {
 
 function finiteNow(value: number, fallback: number): number {
   return Number.isFinite(value) ? value : fallback
+}
+
+function boundedInteger(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 1 ? value : fallback
 }
 
 /** Injectable transport constructor used by tests. */
@@ -149,6 +180,8 @@ export interface RemoteMeshRegistryOptions {
   transportFactory?: RemoteTransportFactory
   /** Alias for `transportFactory`. */
   createTransport?: RemoteTransportFactory
+  /** Maximum registered nodes. Defaults to 256. */
+  maxNodes?: number
 }
 
 interface RemoteNodeRecord {
@@ -177,6 +210,7 @@ function defaultTransportFactory(options: A2AHttpTransportOptions): A2ATransport
 export class RemoteMeshRegistry {
   readonly localPeerId: string
   readonly staleAfterMs: number
+  readonly maxNodes: number
   private readonly clock: () => number
   private readonly createTransport: RemoteTransportFactory
   private readonly nodes = new Map<string, RemoteNodeRecord>()
@@ -192,6 +226,10 @@ export class RemoteMeshRegistry {
     this.staleAfterMs = Number.isFinite(stale) && stale >= 0
       ? Math.floor(stale)
       : DEFAULT_REMOTE_STALE_MS
+    const maxNodes = resolved.maxNodes
+    this.maxNodes = maxNodes !== undefined && Number.isSafeInteger(maxNodes) && maxNodes >= 1
+      ? maxNodes
+      : DEFAULT_REMOTE_MAX_NODES
     this.clock = resolved.now ?? (() => Date.now())
     this.createTransport = resolved.transportFactory
       ?? resolved.createTransport
@@ -207,11 +245,13 @@ export class RemoteMeshRegistry {
     assertSecret(secret)
     const capacity = capacityOf(input.capacity)
     if (this.nodes.has(id)) throw new Error(`Remote mesh node already registered: ${id}`)
+    if (this.nodes.size >= this.maxNodes) throw new Error('Remote mesh node limit reached')
 
     // Reuse the transport's constructor (rather than duplicating its parse) so
     // an https-or-loopback-http guard can never drift. The throwaway instance
     // performs no I/O; the per-node transport is still created lazily.
     new A2AHttpTransport({ url, peerId, secret })
+    assertNoUrlCredentials(url)
 
     const record: RemoteNodeRecord = {
       id,
@@ -259,8 +299,8 @@ export class RemoteMeshRegistry {
 
   /**
    * Least-loaded eligible node for a ticket. A ticket keeps its node on repeat
-   * picks. Stale, offline, full, and unknown targets return `undefined` and do
-   * not create an assignment.
+   * picks while that node remains eligible. A stale/offline/unknown assignment
+   * is released so its capacity is not leaked; callers may then pick again.
    */
   pick(ticketId: string, now: number = this.clock()): RemoteMeshNode | undefined {
     if (!nonEmptyString(ticketId)) return undefined
@@ -269,7 +309,10 @@ export class RemoteMeshRegistry {
     const assignedId = this.assignments.get(ticketId)
     if (assignedId !== undefined) {
       const assigned = this.nodes.get(assignedId)
-      if (!assigned || !this.eligible(assigned, at)) return undefined
+      if (!assigned || !this.eligible(assigned, at)) {
+        this.assignments.delete(ticketId)
+        return undefined
+      }
       return this.view(assigned, at)
     }
 
@@ -327,7 +370,11 @@ export class RemoteMeshRegistry {
     const nodeId = this.assignments.get(ticketId)
     if (nodeId === undefined) return undefined
     const node = this.nodes.get(nodeId)
-    if (!node || !this.eligible(node, this.clock())) return undefined
+    if (!node || !this.eligible(node, this.clock())) {
+      // A stale/offline/unknown target must not keep capacity reserved.
+      this.assignments.delete(ticketId)
+      return undefined
+    }
 
     const envelope: A2AEnvelope = {
       from: this.localPeerId,
@@ -429,6 +476,10 @@ export interface RemoteMeshHandlerOptions {
    * boundary and is never trusted for identity.
    */
   address?: string | readonly string[]
+  /** Maximum remote nodes this inbox accepts. Defaults to 256. */
+  maxNodes?: number
+  /** Maximum distinct inbound addresses this inbox binds. Defaults to 64. */
+  maxAddresses?: number
   now?: () => number
   maxSkewMs?: number
   replayCache?: A2AReplayCache
@@ -473,18 +524,29 @@ export class MeshInbox {
   readonly handler: RemoteMeshHandler
   private readonly options: RemoteMeshHandlerOptions
   private readonly restrictedAddresses: string[]
+  private readonly maxNodes: number
+  private readonly maxAddresses: number
+  private readonly maxSkewMs: number
   private readonly capturedSecrets = new Map<string, A2ASecret>()
   private readonly boundAddresses = new Set<string>()
 
   constructor(options: RemoteMeshHandlerOptions) {
     this.options = options
+    this.maxNodes = boundedInteger(options.maxNodes, DEFAULT_REMOTE_MAX_NODES)
+    this.maxAddresses = boundedInteger(options.maxAddresses, DEFAULT_REMOTE_MAX_ADDRESSES)
+    const skew = options.maxSkewMs ?? A2A_AUTH_MAX_SKEW_MS
+    this.maxSkewMs = Number.isFinite(skew) && skew >= 0 ? Math.floor(skew) : A2A_AUTH_MAX_SKEW_MS
     this.registry = options.registry
       ?? new RemoteMeshRegistry({
         localPeerId: options.localPeerId ?? 'mesh-inbox',
         now: options.now,
+        maxNodes: this.maxNodes,
       })
     this.router = new A2ARouter()
     this.restrictedAddresses = normalizedAddresses(options.address)
+    if (this.restrictedAddresses.length > this.maxAddresses) {
+      throw new Error('Remote mesh address limit reached')
+    }
 
     const handle = (envelope: A2AEnvelope): void => { this.handleEnvelope(envelope) }
     for (const address of this.restrictedAddresses) {
@@ -523,6 +585,9 @@ export class MeshInbox {
   private ensureAddress(to: unknown): void {
     if (this.restrictedAddresses.length > 0) return
     if (!nonEmptyString(to) || this.boundAddresses.has(to)) return
+    if (this.boundAddresses.size >= this.maxAddresses) {
+      throw new Error('Remote mesh address limit reached')
+    }
     this.boundAddresses.add(to)
     this.router.register(to, (envelope: A2AEnvelope): void => { this.handleEnvelope(envelope) })
   }
@@ -566,6 +631,11 @@ export class MeshInbox {
     }
     const secret = this.capturedSecrets.get(peerId)
     if (!secret) throw new Error('mesh register has no resolvable peer secret')
+    // Bound remote-driven registry growth even when the caller supplied an
+    // unbounded registry. A duplicate id is left for the registry to reject.
+    if (!this.registry.get(id) && this.registry.list().length >= this.maxNodes) {
+      throw new Error('Remote mesh node limit reached')
+    }
     this.registry.register({
       id,
       url: body.url,
@@ -585,6 +655,14 @@ export class MeshInbox {
     if (at !== undefined
       && (typeof at !== 'number' || !Number.isSafeInteger(at) || at < 0)) {
       throw new Error('mesh heartbeat has an invalid timestamp')
+    }
+    if (typeof at === 'number') {
+      const now = this.options.now ? this.options.now() : Date.now()
+      const current = Number.isFinite(now) ? now : Date.now()
+      if (at > current + this.maxSkewMs) {
+        // A peer must not be able to pin itself online indefinitely.
+        throw new Error('mesh heartbeat timestamp is too far in the future')
+      }
     }
     if (!this.registry.heartbeat(id, at as number | undefined)) {
       throw new Error('mesh heartbeat targets an unknown node')

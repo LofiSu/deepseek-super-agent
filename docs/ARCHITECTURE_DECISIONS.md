@@ -486,7 +486,10 @@ rewrite `PLAN.md`; link to the contract instead.
 
 - **Date:** 2026-11-04
 - **Status:** accepted; implements the T47 transport half. The Runtime/CLI
-  listener remains owner-gated and is not part of this decision.
+  listener remains owner-gated and is not part of this decision. ADR-011
+  (model slow path) is not on `main` at the time of writing; when both land,
+  ADR-012 must follow ADR-011 in numeric order (the coordinator owns merge
+  order).
 - **Context:** T47 placement was logical: `WorkerMeshRegistry` accounted for
   capacity, but no peer could be registered over the network and no assignment
   could leave the process. The authenticated A2A HTTP primitive (`a2a-auth.ts`,
@@ -494,16 +497,19 @@ rewrite `PLAN.md`; link to the contract instead.
   inventing a second wire protocol or weakening the auth boundary.
 - **Decision:** add `src/harness/remote-node.ts` with two halves.
   - `RemoteMeshRegistry` registers `{ id, url, peerId, secret, capacity? }`,
-    validates id/peer/url non-emptiness and positive integer capacity, rejects
-    duplicate ids, and reuses `A2AHttpTransport`'s constructor for the
-    https-or-loopback-http URL guard. It tracks heartbeat, online/offline,
-    in-flight assignments, and a configurable stale window (default 60 s).
-    `pick` is least-loaded, capacity-bounded, sticky for an existing ticket,
-    and returns `undefined` for stale/offline/full/unknown targets without
-    creating an assignment. `dispatch` requires a prior `pick`/assignment,
-    signs `{ kind: 'assignment', ticketId, assignment }` as the local peer
-    with a lazily constructed per-node `A2AHttpTransport`, keeps the slot on
-    `delivered`, and releases it on `unroutable`/`failed`/transport error.
+    validates id/peer/url non-emptiness, the A2A minimum secret length
+    (`A2A_MIN_SECRET_BYTES`), absence of URL userinfo, positive integer
+    capacity, duplicate ids, and a node-count bound (default 256), and reuses
+    `A2AHttpTransport`'s constructor for the https-or-loopback-http URL guard.
+    It tracks heartbeat, online/offline, in-flight assignments, and a
+    configurable stale window (default 60 s). `pick` is least-loaded,
+    capacity-bounded, and sticky for an eligible existing assignment; a
+    stale/offline/unknown assignment is released before `undefined` is
+    returned so its capacity is not leaked. `dispatch` requires a prior
+    `pick`/assignment, signs `{ kind: 'assignment', ticketId, assignment }` as
+    the local peer with a lazily constructed per-node `A2AHttpTransport`, keeps
+    the slot on `delivered`, and releases it on
+    `unroutable`/`failed`/transport error or a stale/offline/unknown refusal.
     `list()` returns secret-free copies; returned deliveries never contain the
     secret or peer-supplied error text.
   - `MeshInbox`/`createRemoteMeshHandler` wraps `createA2AHttpHandler` with an
@@ -511,10 +517,14 @@ rewrite `PLAN.md`; link to the contract instead.
     bodies. The A2A-verified `envelope.from` is the authoritative peer id; a
     body `from` is ignored and an outer `from` that conflicts with auth is
     rejected by the HTTP layer. `register`/`heartbeat` update the registry;
-    `assignment` invokes `onAssignment` exactly once and maps callback failures
-    to a non-leaking 502. Unknown or malformed kinds fail closed before the
-    callback. The module never constructs a Trigger and never starts a
-    listener; the caller creates the `node:http` server.
+    remote-driven growth is bounded by `maxNodes` (default 256) and
+    `maxAddresses` (default 64), with the same node bound applied to the
+    handler's default registry. Heartbeats more than `maxSkewMs` in the future
+    are rejected so a peer cannot pin itself online, while past timestamps
+    remain accepted. `assignment` invokes `onAssignment` exactly once and maps
+    callback failures to a non-leaking 502. Unknown or malformed kinds fail
+    closed before the callback. The module never constructs a Trigger and never
+    starts a listener; the caller creates the `node:http` server.
 - **Trust boundary:** the A2A v1 canonical string binds the peer and body, not
   the target host/path/method, and the default replay cache is process-local.
   Every verifier sharing a secret MUST either use a unique per-verifier secret
@@ -532,7 +542,9 @@ rewrite `PLAN.md`; link to the contract instead.
   delivery result; it never proves the peer executed anything. Losing the
   process loses the registry and ticket stickiness. Capacity is local to each
   registry, so two routers can over-book the same peer unless an operator
-  partitions tickets or capacity.
+  partitions tickets or capacity. Remote-driven node/address growth is bounded,
+  and short secrets, credential-bearing URLs, and future heartbeats fail at the
+  boundary instead of degrading into generic dispatch failures.
 - **Alternatives rejected:**
   - **Add an unauthenticated JSON POST endpoint.** Bypasses the merged A2A
     signature, timestamp, and replay checks.
