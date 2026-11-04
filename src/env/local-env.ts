@@ -5,7 +5,7 @@ import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import { UserError } from '../shared/errors.ts'
 import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
 import type { Vault } from './vault.ts'
-import { sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
+import { readIsolationFromEnv, sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
 
 export interface LocalEnvOptions {
   timeoutMs?: number
@@ -19,6 +19,13 @@ export interface LocalEnvOptions {
   /** Secret names from the vault to inject into child processes. */
   vaultNames?: readonly string[]
   sandbox?: SandboxPolicy
+  /**
+   * Opt-in strict read confinement. Overrides `DS_AGENT_SANDBOX_READ_ISOLATION`
+   * and the sandbox policy's own flag; default is off.
+   */
+  readIsolation?: boolean
+  /** Extra absolute host paths allowed read-only in strict mode. */
+  readRoots?: readonly string[]
 }
 
 /**
@@ -50,7 +57,15 @@ export class LocalEnv implements EnvPort {
     this.childEnv = allowlistedEnv(env, options.allowlist ?? ENV_ALLOWLIST)
     this.vault = options.vault
     this.vaultNames = options.vaultNames ?? []
-    this.sandbox = options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }
+    // Parse the env value even when an explicit flag is present so a garbage
+    // value fails closed instead of being silently shadowed.
+    const envReadIsolation = readIsolationFromEnv(env)
+    const sandbox: SandboxPolicy = options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }
+    this.sandbox = {
+      ...sandbox,
+      readIsolation: options.readIsolation ?? sandbox.readIsolation ?? envReadIsolation,
+      readRoots: [...(sandbox.readRoots ?? []), ...(options.readRoots ?? [])],
+    }
     const vaultSecrets = this.vault
       ? Object.values(this.vault.resolveForChild(this.vaultNames)).filter(
         (v): v is string => typeof v === 'string' && v.length > 0,
@@ -59,6 +74,11 @@ export class LocalEnv implements EnvPort {
     this.secrets = [...secretValues(env), ...vaultSecrets]
   }
 
+
+  /** Read-only config for `ds-agent health` and tests. */
+  get readIsolation(): boolean {
+    return this.sandbox.readIsolation === true
+  }
 
   workspace(workerId: string): string {
     const dir = path.join(this.root, workerId)
