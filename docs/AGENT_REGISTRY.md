@@ -44,8 +44,9 @@
 | OUTBOX-PERMANENT-FAILURE | Core Runtime | `agent/outbox-permanent-failure` | 2026-11-04 | merged `55f0d09` | #100 | integrated |
 | SUBSCRIPTION-FANOUT-TEST | QA/Testing | `debug/subscription-timeout` | 2026-11-04 | merged `5e5a28b` | #103 | integrated |
 | CYCLE-5-CHECKPOINT | Chief Engineer | `docs/cycle-5-checkpoint` | 2026-11-04 | merged `ab8e4bf` (docs; follow-up adds ADR-008/audit) | #98 | integrated |
-| CYCLE-6-CHECKPOINT | Chief Engineer | `docs/cycle-6-checkpoint` | 2026-11-04 | PR #104 open; not reviewed or merged | #104 | in progress |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected | — | continuing |
+| CYCLE-5-CHECKPOINT-FOLLOWUP | Chief Engineer (peer) | `docs/cycle-5-checkpoint-followup` | 2026-11-04 | merged `55f3e7b`, docs APPROVE | #102 | integrated |
+| CYCLE-6-CHECKPOINT | Chief Engineer | `docs/cycle-6-checkpoint` | 2026-11-04 | PR #104 open; in review | #104 | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 

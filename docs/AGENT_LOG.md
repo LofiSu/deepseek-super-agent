@@ -4,6 +4,56 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Cycle 6 (serve loop, outbox permanent failure, pump follow-up; checkpoint)
+
+### Observed
+
+- Cycle 6 dispatched two disjoint tasks after the cycle-5 reconciliation:
+  SERVE-CHANNEL-LOOP (P1) and OUTBOX-PERMANENT-FAILURE (P2). MESH-FAILURE-PUMP
+  was merged by a peer session as #99 (`6184a27`) while those ran.
+- #100 (`55f0d09`) merged the permanent/transient outbox split; #101
+  (`2ae9740`) merged the inbound iMessage loop for `serve` after a docs
+  correction (pull/ingest error wording and the chat retry-cadence
+  compatibility note). Peer session sulin-5f merged #103 (`5e5a28b`, test-only
+  subscription fan-out determinism).
+- A peer session's cycle-5 docs follow-up (#102) was refreshed onto `5e5a28b`
+  and merged at `55f3e7b`, adding ADR-008, the cycle-5 audit figures, and the
+  #96/#97 review corrections.
+- The earlier `docs/cycle-6-checkpoint` head could not be merged directly
+  because #102 rewrote the same five docs files; the resolution was to take
+  #102's merged docs as the base and re-apply the cycle-6 record on top.
+
+### Decided
+
+- Keep one cycle-6 checkpoint after #102 rather than merging two overlapping
+  docs PRs. Do not reopen or rewrite merged entries; record corrections as
+  review-log entries.
+- Next-session queue: SEMANTIC-LTM evaluation, the stale-gateway-token ADR,
+  FEISHU-SERVE-LOOP on the shared channel-loop seam, and the ambiguous-group
+  identity boundary.
+
+### Verified
+
+- Local gate on `5e5a28b`: `tsc --noEmit` clean, `pnpm lint` ok (229 tracked
+  files), `pnpm format:check` clean, offline suite 452 passed / 54 files.
+- `main` `5e5a28b` CI (run `41792700396`, job `126449544790`) succeeded: 464
+  passed / 15 skipped (479 tests), 59 files (56 passed, 3 fully skipped);
+  coverage 463 passed, 55 files, 82.82% statements/lines (7993/9651), 81.09%
+  branches (2878/3549), 90.96% functions (705/775).
+- #102 docs CI green on `e736af4` (run `41793547258`); zero unresolved threads.
+- Peer session sulin-5f ran the full live suite on `5e5a28b`
+  (`DS_AGENT_API_MODEL=auto/deepseek-v4.1-flash`): 476 passed / 3 skipped (479
+  tests), 58 files passed, 567.76s, exit 0; log
+  `/tmp/ds-agent-live-e2e-logs/full-2026-11-04.log`. This session made no live
+  run.
+- No real-channel run. Branch protection was not bypassed.
+
+### Pending
+
+- Land this cycle-6 checkpoint (#104) after CI.
+- Owner has not chosen between SEMANTIC-LTM and the stale-gateway-token ADR for
+  the next cycle.
+
 ## 2026-11-04 — Cycle 5 checkpoint follow-up (ADR-008 and audit evidence)
 
 ### Observed

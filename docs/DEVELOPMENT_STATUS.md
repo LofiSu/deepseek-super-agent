@@ -1,6 +1,6 @@
 # Development status
 
-> Checkpoint: 2026-11-04 · baseline `main` = `5e5a28b`
+> Checkpoint: 2026-11-04 · baseline `main` = `55f3e7b` (cycle-6 checkpoint)
 > Source of truth: `git`, GitHub PRs/checks, and the evidence in
 > `docs/PROJECT_AUDIT.md`. Do not trust this file without re-verifying; later
 > merges after this baseline are not reflected.
@@ -9,87 +9,94 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `5e5a28b` |
-| Last merged PR | #103 SUBSCRIPTION-FANOUT-TEST |
-| Merged in cycle 5 | #94 live reference run (owner, outside this session), #95/#96/#97 test hardening (reviewed APPROVE), #98 checkpoint (docs) |
-| Merged after the cycle-5 checkpoint | #99 MESH-FAILURE-PUMP (`6184a27`), #100 OUTBOX-PERMANENT-FAILURE (`55f0d09`), #101 SERVE-CHANNEL-LOOP (`2ae9740`), #103 SUBSCRIPTION-FANOUT-TEST (`5e5a28b`) |
-| Merged in cycle 4 | #90 thread keys, #91 live-suite test salvage, #92 mesh queue tests; all APPROVE |
-| Merged in cycle 3 | #87 gateway token race, #88 iMessage group edges, #89 cycle-3 reconciliation; all APPROVE |
-| Open PRs at checkpoint | #102 this cycle-5 docs follow-up; #104 cycle-6 checkpoint (open, not reviewed or merged) |
+| Commit | `55f3e7b` |
+| Last merged PR | #102 `CYCLE-5-CHECKPOINT` follow-up (docs: ADR-008, audit evidence, corrections) |
+| Merged in cycle 6 | #99 MESH-FAILURE-PUMP (`6184a27`), #100 OUTBOX-PERMANENT-FAILURE (`55f0d09`), #101 SERVE-CHANNEL-LOOP (`2ae9740`), #103 SUBSCRIPTION-FANOUT-TEST (`5e5a28b`, test-only), #102 cycle-5 docs follow-up (`55f3e7b`) |
+| Merged in cycle 5 | #94 live reference run (owner), #95 metrics assertions, #96 gateway token branch tests, #97 mesh async release, #98 cycle-5 checkpoint |
+| Merged in cycle 4 | #90 thread keys, #91 live-suite test salvage, #92 mesh queue tests, #93 cycle-4 checkpoint |
+| Open PRs at checkpoint | this cycle-6 checkpoint PR only |
 | Required check | `typecheck and test` |
-| Offline suite | 455 passed / 15 skipped (470 tests, 58 files) at `9a0def3` |
-| Coverage | 82.42% statements/lines (7844/9517), 81.01% branches (2817/3477), 90.11% functions (693/769) at `9a0def3` |
+| CI at `5e5a28b` | 464 passed / 15 skipped (479 tests), 59 files: 56 passed, 3 fully skipped |
+| Full live suite at `5e5a28b` (peer run) | 476 passed / 3 skipped (479 tests), 58 files passed, exit 0, 567.76s |
+| Coverage at `5e5a28b` | 82.82% statements/lines (7993/9651), 81.09% branches (2878/3549), 90.96% functions (705/775); coverage run 463 passed, 55 files |
+| Local cycle-6 gate | `tsc --noEmit` clean, `pnpm lint` ok (229 tracked files), `pnpm format:check` clean, offline 452 passed / 54 files |
 
-The suite and coverage figures above are the `main` CI run at `9a0def3`
-(run `41615496540`), the last full product baseline before the docs-only
-checkpoint; the coverage job reported 454 passed across 54 files. A post-merge
-`main` CI at `6184a27` (run `41791336153`) reported 456 passed / 15 skipped
-(471 tests), statements/lines 82.42% (7846/9519), branches 81.03% (2820/3480),
-and functions 90.11%. #100, #101, and #103 added tests afterward, so the current
-`main` count is higher and is left to their CI runs rather than restated here.
-CI runs the full suite with the 15 live tests skipped when no provider
-credential is present. A local cycle-5 gate on `9a0def3` with the live test
-files excluded reported 443 passed / 53 files;
-it is not the CI baseline.
+The CI figures are the post-merge `main` run at `5e5a28b` (run `41792700396`,
+`typecheck and test` job `126449544790`). The full live suite was run by peer
+session sulin-5f on `5e5a28b` (`DS_AGENT_API_MODEL=auto/deepseek-v4.1-flash`):
+476 passed / 3 skipped, 58 files passed, exit 0, 567.76s; its log is
+`/tmp/ds-agent-live-e2e-logs/full-2026-11-04.log`. It is a live-model run, not
+real-channel acceptance. The local offline command is
+`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run` with
+`test/{live-demo,live-e2e,live-modules,team-live,demos-real-channels}.test.ts`
+excluded. CI runs the full suite with the 15 live tests skipped when no provider
+credential is present. #102 (`55f3e7b`) is docs-only and did not change the
+suite.
 
 ## Active workstreams
 
 | Task | Priority | Branch | Owner | State |
 |------|----------|--------|-------|-------|
-| GATEWAY-TOKEN-TESTS — EEXIST/ELOOP branches | P2 | `agent/gateway-token-tests` | implementer | merged (#96, `ac1fd79`), APPROVE |
-| METRICS-ASSERTIONS — offline counter assertions | P2 | `agent/metrics-assertions` | implementer | merged (#95, `f8554cc`), APPROVE |
-| MESH-ASYNC-RELEASE — async rejection node release | P2 | `agent/mesh-async-release` | implementer | merged (#97, `9a0def3`), APPROVE |
-| MESH-FAILURE-PUMP — pump queued Workers after a failed release | P2 | `agent/mesh-failure-pump` | implementer | merged (#99, `6184a27`), APPROVE |
-| SERVE-CHANNEL-LOOP — inbound iMessage loop for `serve` | P1 | `agent/serve-imessage-loop` | implementer | merged (#101, `2ae9740`) |
-| OUTBOX-PERMANENT-FAILURE — stop retrying unroutable sends | P2 | `agent/outbox-permanent-failure` | implementer | merged (#100, `55f0d09`) |
-| SUBSCRIPTION-FANOUT-TEST — deterministic many-to-many workers | P2 | `debug/subscription-timeout` | implementer | merged (#103, `5e5a28b`) |
-| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected |
-| CYCLE-5-CHECKPOINT — this checkpoint | P1 | `docs/cycle-5-checkpoint` | chief engineer | merged (#98, `ab8e4bf`) |
-| CYCLE-6-CHECKPOINT — cycle-6 record | P1 | `docs/cycle-6-checkpoint` | chief engineer | PR #104 open; not reviewed or merged |
+| SERVE-CHANNEL-LOOP — inbound iMessage loop for `serve` | P1 | `agent/serve-imessage-loop` | implementer | merged (#101, `2ae9740`), APPROVE after docs correction |
+| OUTBOX-PERMANENT-FAILURE — fail unroutable sends immediately | P2 | `agent/outbox-permanent-failure` | implementer | merged (#100, `55f0d09`), APPROVE |
+| MESH-FAILURE-PUMP — pump after a failed non-queued Worker | P2 | `agent/mesh-failure-pump` | peer session | merged (#99, `6184a27`), reviewed APPROVE |
+| SUBSCRIPTION-FANOUT-TEST — deterministic many-to-many workers | P2 | `debug/subscription-timeout` | peer session | merged (#103, `5e5a28b`), reviewed APPROVE (test-only) |
+| CYCLE-5-CHECKPOINT follow-up — ADR-008 and audit evidence | P2 | `docs/cycle-5-checkpoint-followup` | peer session | merged (#102, `55f3e7b`), docs APPROVE |
+| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103 APPROVE; #77 corrected |
+| CYCLE-6-CHECKPOINT — this checkpoint | P1 | `docs/cycle-6-checkpoint` | chief engineer | in review (#104) |
 
-## Completed this cycle (Cycle 5)
+## Completed this cycle (Cycle 6)
 
-- Resumed after the cycle-4 checkpoint with the owner's explicit continuation
-  past the four-cycle cap (recorded in `.super-agent/state.json`).
-- Merged #95: the three live-relaxed counter assertions are now deterministic
-  under the offline MockModel and keep the live fallback.
-- Merged #96: direct tests for the gateway-token EEXIST winner-reuse path and
-  the create-path ELOOP failure. The EEXIST test does not fail on pre-#87
-  `10e9f3c` because `if (raced) return raced` pre-dates #87 and behaves
-  identically; it is mutation-verified instead (`return token` mutation fails).
-  The create-path ELOOP test does fail on `10e9f3c` with the raw `ELOOP` error.
-- Merged #97: a non-queued Worker turn that rejects asynchronously now returns
-  the reserved mesh node and logs `[harness] worker failed ...`, matching the
-  synchronous-throw and queued paths.
-- Final `main` `9a0def3` CI (run `41615496540`) succeeded: offline suite
-  455 passed / 15 skipped (470 tests, 58 files); coverage run 454 passed,
-  54 files; statements/lines 82.42% (7844/9517), branches 81.01% (2817/3477),
-  functions 90.11% (693/769).
-- Merged the cycle-5 checkpoint as #98 at `ab8e4bf` (docs-only).
-- After the checkpoint, #99 (pump queued Workers after a failed non-queued
-  release) merged at `6184a27`, #100 (outbox permanent failure) merged at
-  `55f0d09`, #101 (`serve` inbound iMessage loop) merged at `2ae9740`, and #103
-  (deterministic subscription fan-out test) merged at `5e5a28b`.
-- Confirmed PR #97 merged with `typecheck and test` green and zero unresolved
-  review threads; branch protection was not bypassed.
+- Merged #99: a failed non-queued Worker now releases its node and then pumps
+  the queue, so an already-parked Worker cannot wait on a free node.
+- Merged #100: `PermanentDeliveryError` lets the outbox mark an unroutable
+  group row `failed` on the first flush instead of retrying to the attempt
+  limit; transient failures keep the existing backoff.
+- Merged #101: the iMessage polling loop is now shared code
+  (`src/cli/channel-loop.ts`); `ds-agent serve --imessage` runs it beside the
+  daemon with the same default-deny admission, cursor, and outbox. Admission is
+  validated before `Runtime.create` (SQLite) and `chat.db`; SIGINT/SIGTERM
+  aborts polling, drains the loop, closes the API, then finishes the runtime.
+  Default `serve` is unchanged.
+- Merged #103 (peer session, test-only): the many-to-many subscription test now
+  scripts its incidental Worker turns, removing live-model latency without
+  weakening the fan-out assertion.
+- Merged #102 (peer session, docs): ADR-008 for #97, the cycle-5 CI figures in
+  `docs/PROJECT_AUDIT.md`, and corrections to the #96 non-vacuity statement and
+  #97 file counts.
+- Verified `main` `55f3e7b` locally: `tsc --noEmit`, `pnpm lint` (229 files),
+  `pnpm format:check` clean; offline suite 452 passed / 54 files on `5e5a28b`.
+- Every merge was based on a reviewed head with green `typecheck and test`;
+  branch protection was not bypassed.
 
 ## Blockers
 
-- Live model and real-channel acceptance remain operator-only; no credentials
-  were used.
-- Residual non-blocking items: a stale empty gateway token file blocks startup
-  until removed manually; ambiguous groups from one sender across distinct
-  chats share `group-unknown:<handle>` (never with 1:1). The pump liveness gap
-  (#99), the fail-closed group outbox retry (#100), and the missing `serve`
-  inbound channel loop (#101) are fixed and no longer residuals.
+- This session used no model credentials and performed no real-channel run; the
+  full live-model suite was run by peer session sulin-5f on `5e5a28b` (see
+  above). Real-channel acceptance remains operator-only. `serve --imessage`
+  needs macOS Full Disk Access and Automation permission before its first live
+  pull.
+- Residual non-blocking items:
+  - An in-flight `chat.db` pull cannot be cancelled (`ImessageApi` has no signal);
+    shutdown waits for it, and a hung read needs the second-signal force exit.
+  - Ingest failures are logged and skipped and the cursor still advances, so that
+    trigger is not replayed (same as `ds-agent imessage`).
+  - `serve --imessage` retries schema errors forever with capped backoff by
+    design; it does not start the embedded gateway.
+  - `PermanentDeliveryError` detection is `instanceof`-based (safe for in-process
+    adapters); a terminal permanent failure leaves the reply `pending`, matching
+    the existing attempt-limit path.
+  - Stale empty gateway token file still blocks startup until removed manually
+    (needs an ADR).
+  - Ambiguous groups from one sender across distinct chats still share
+    `group-unknown:<handle>` (never with 1:1).
 - The session has exceeded the automatic four-cycle budget under the owner's
   explicit continuation; the override is recorded in state.
 
 ## Next actions
 
-1. Land this cycle-5 follow-up (#102) after CI; the checkpoint itself is #98
-   (`ab8e4bf`).
-2. PR #104 is the open cycle-6 checkpoint; it is not reviewed or merged here.
-   Reconcile #102 and #104 before the next cycle.
-3. Then evaluate semantic long-term memory (roadmap open item) and the
-   remaining iMessage ambiguity boundary.
+1. Land this cycle-6 checkpoint (#104) after CI.
+2. Evaluate semantic long-term memory (roadmap open item) or draft the
+   stale-gateway-token ADR, whichever the owner prioritises.
+3. Consider a Feishu inbound loop for `serve` using the shared channel-loop seam.
+4. Keep `.super-agent/state.json` truthful at every checkpoint.

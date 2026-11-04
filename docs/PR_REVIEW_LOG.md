@@ -441,6 +441,22 @@ head so a later reader can separate the reviewed tree from the merged tree.
   log, with the no-start assertions backstopped by the `startQueued` re-read.
 - **Merged:** `60bb9ae`. CI green on the exact head (run `41604489526`).
 
+## PR #103 — `[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST] Script the many-to-many workers so fan-out no longer waits on a live model`
+
+- **Author:** LofiSu (peer session sulin-5f); test-only.
+- **State at review:** MERGED at `5e5a28b`; reviewed from the merged diff. Head
+  `47342dd`; file `test/subscription.test.ts` (+4/−1).
+- **Independent review:** **APPROVE**. The assertion is unchanged — which
+  Tickets receive `trg_recent` and which one stops after it ends. The diff only
+  gives that runtime a `silentModel()`, so the incidental Worker turns no
+  longer call the default live model; fan-out behavior is model-independent and
+  the file already mixes scripted and live runtimes. No source or fixture
+  changes.
+- **Evidence:** PR CI `typecheck and test` green on head `47342dd` (run
+  `41792560150`). Post-merge `main` CI run `41792700396`: 464 passed / 15
+  skipped (479), 82.82% lines. Peer session's full live suite on `5e5a28b`:
+  476 passed / 3 skipped, exit 0. Zero unresolved threads.
+
 ## PR #99 — `[SUPER-AGENT][MESH-FAILURE-PUMP] Pump queued Workers after a failed non-queued Worker releases its node`
 
 - **Author:** LofiSu (implementer agent)
@@ -517,10 +533,9 @@ head so a later reader can separate the reviewed tree from the merged tree.
 
 ## Pending reviews
 
-- PR #102 (this cycle-5 docs follow-up) and PR #104 (cycle-6 checkpoint) are
-  open; #104 is not reviewed here. #100 OUTBOX-PERMANENT-FAILURE was merged by
-  the parallel orchestrator at `55f0d09`, #101 SERVE-CHANNEL-LOOP at `2ae9740`,
-  and #103 SUBSCRIPTION-FANOUT-TEST at `5e5a28b`; none of the three is
-  reviewed in this log. PR #98 (cycle-5 checkpoint) was merged docs-only at
-  `ab8e4bf`; this follow-up records the missing ADR-008 and audit evidence and
-  corrects the #96 non-vacuity statement.
+- None at this checkpoint. #102 (cycle-5 docs follow-up) merged at `55f3e7b`
+  after review; #100 OUTBOX-PERMANENT-FAILURE, #101 SERVE-CHANNEL-LOOP, and
+  #103 SUBSCRIPTION-FANOUT-TEST are recorded above. This cycle-6 checkpoint
+  (#104) is reviewed before merge. PR #98 (cycle-5 checkpoint) was merged
+  docs-only at `ab8e4bf`; #102 records the missing ADR-008 and audit evidence
+  and corrects the #96 non-vacuity statement.
