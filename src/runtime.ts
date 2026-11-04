@@ -724,7 +724,11 @@ export class Runtime {
     for (const thread of this.store.listDocs<Thread>('thread')) {
       if (!thread.deferred || !thread.pending.length || this.assessingThreads.has(thread.key)) continue
       this.assessingThreads.add(thread.key)
-      const work = this.harness.routerExclusive('default', async () => {
+      // A deferred assessment belongs to the shard that routed its triggers.
+      // Running it on `default` would read the wrong resident history and
+      // journal the outcome where that Router never sees it.
+      const shard = this.assessmentShard(thread.pending)
+      const work = this.harness.routerExclusive(shard, async () => {
         // The snapshot is taken when the queued Router turn starts, coalescing same-tick ingress.
         const current = this.store.getDoc<Thread>('thread', thread.key)
         const pending = [...(current?.pending ?? [])]
@@ -758,11 +762,11 @@ export class Runtime {
           text: entry.text,
           refs: entry.refs ?? [],
         }))
-        const history = this.harness.routerHistory('default', 12)
+        const history = this.harness.routerHistory(shard, 12)
         const outcome = await assessWithMainAgent(this.model, triggers, live, 'policy-v1', memory, history)
         if (!this.store.isOpen) return
         const decision = withSessionRole('router', () => this.engine.commitAssessed(thread.key, ids, outcome))
-        this.harness.routerObserve('default', {
+        this.harness.routerObserve(shard, {
           kind: 'assessment',
           thread: thread.key,
           action: outcome.kind,
@@ -782,6 +786,15 @@ export class Runtime {
       })
       this.assessments.add(work)
     }
+  }
+
+  /** The first shard that routed any queued trigger; `default` when none did. */
+  private assessmentShard(triggerIds: readonly string[]): string {
+    for (const id of triggerIds) {
+      const shard = this.store.getDoc<Disposition>('disposition', id)?.shards?.[0]
+      if (shard) return shard
+    }
+    return 'default'
   }
 
   /**
@@ -929,13 +942,18 @@ export class Runtime {
     let incoming: Trigger = { ...safe, meta: {} }
     let trust: TriggerTrust = { admission }
     if (verdict.action === 'pass') {
-      const triggerRefs = refsForTrigger(safe, undefined, this.neighborTriggerRefs(safe))
+      const neighbors = this.neighborTriggerRefs(safe)
+      let triggerRefs = refsForTrigger(safe, undefined, neighbors)
       const recall = inlineOrSpill(
         safe.text,
         (body, refs) => this.store.putSpill(body, refs),
         triggerRefs,
       )
       if (recall.spillId) {
+        // The handle must carry its own spill id, otherwise read_object can only
+        // return the inline summary and the full trigger body is unreachable.
+        triggerRefs = refsForTrigger(safe, recall.spillId, neighbors)
+        this.store.replaceSpill(recall.spillId, safe.text, triggerRefs)
         this.log.info(`[memory] Inline/Spill chain-of-recall spillId=${recall.spillId} bytes=${recall.bytes}`)
       }
       // A channel hint may only ask for silence (speculate). It cannot buy admission.
