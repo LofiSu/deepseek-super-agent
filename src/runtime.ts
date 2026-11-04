@@ -1,4 +1,5 @@
 import path from 'node:path'
+import type { DatabaseSync } from 'node:sqlite'
 import type {
   CollaborationView,
   InterveneInput,
@@ -28,7 +29,7 @@ import { inlineOrSpill } from './memory/recall.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
 import { Metrics } from './metrics/metrics.ts'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
-import { LifecycleBus } from './core/lifecycle.ts'
+import { LifecycleBus, type LifecyclePersistence } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
 import { Logger } from './shared/log.ts'
 import type { Disposition, ReceiveResult, Thread, Ticket, Trigger, TriggerTrust } from './shared/types.ts'
@@ -76,6 +77,11 @@ export interface RuntimeOptions {
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
    */
   memoryRetention?: MemoryRetention
+  /**
+   * Bounded in-memory lifecycle history and the restart-replay cap.
+   * Defaults to 1000 and keeps the newest events.
+   */
+  lifecycleMaxEvents?: number
 }
 
 export interface MemoryRetention {
@@ -273,7 +279,14 @@ export class Runtime {
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
     const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
-    const lifecycle = new LifecycleBus()
+    const lifecycle = new LifecycleBus(opts.lifecycleMaxEvents)
+    // Restart replay: the ring is filled from the newest persisted events
+    // before this Runtime publishes anything new. A broken sink leaves the
+    // in-memory bus fully usable and is reported once.
+    lifecycle.attachSink(sqliteLifecyclePersistence(store), (error, operation) => {
+      log.info(`[lifecycle] persistence ${operation} failed; continuing in memory: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    lifecycle.hydrateFromSink()
     const a2aRouter = new A2ARouter(store)
     // T16 admission is deterministic and runs before mention/keyword. Ids only.
     const admission = admissionRulesFromEnv(baseEnv, opts.admission)
@@ -844,5 +857,36 @@ function a2aTrigger(envelope: A2AEnvelope, store: Store, at: string): Trigger | 
     at,
     text,
     meta: {},
+  }
+}
+
+/**
+ * Lifecycle persistence shares the Store's SQLite connection: publishes run
+ * inside `Store.atomic`, so a second connection would wait on that write
+ * transaction. The Store keeps its handle private (and `src/store/sqlite.ts`
+ * is outside this task's owned files), so reach it through a narrow cast
+ * rather than opening an independent connection.
+ */
+function sqliteLifecyclePersistence(store: Store): LifecyclePersistence {
+  const db = (store as unknown as { db: DatabaseSync }).db
+  const insert = db.prepare(
+    'INSERT INTO lifecycle_events(at, kind, payload) VALUES(?, ?, ?)',
+  )
+  return {
+    append(event) {
+      // Lifecycle payloads are existing metadata only; do not add message
+      // bodies, tool output, file contents, or credentials here.
+      insert.run(new Date().toISOString(), event.kind, JSON.stringify(event.payload) ?? 'null')
+    },
+    recent(limit) {
+      if (!Number.isSafeInteger(limit) || limit < 1) return []
+      const rows = db.prepare(
+        'SELECT kind, payload FROM lifecycle_events ORDER BY id DESC LIMIT ?',
+      ).all(limit) as { kind: string; payload: string }[]
+      return rows.reverse().map(row => ({
+        kind: row.kind,
+        payload: JSON.parse(row.payload) as unknown,
+      }))
+    },
   }
 }

@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS events (
 `
 
 /** The schema version this build writes and understands. */
-export const LATEST_SCHEMA_VERSION = 2
+export const LATEST_SCHEMA_VERSION = 3
 
 const SCHEMA_MIGRATIONS_DDL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -116,7 +116,8 @@ function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: stri
 
 /**
  * Ordered schema migrations. Version 1 is the original `SCHEMA`; version 2
- * adds the outbox columns that earlier builds created with `ensureColumn`.
+ * adds the outbox columns that earlier builds created with `ensureColumn`;
+ * version 3 adds the durable lifecycle-event log that backs restart replay.
  * Add new steps here and bump `LATEST_SCHEMA_VERSION`; never edit an applied
  * step in place.
  */
@@ -132,6 +133,19 @@ export const MIGRATIONS: readonly StoreMigration[] = [
       ensureColumn(db, 'outbox', 'attempts', 'INTEGER NOT NULL DEFAULT 0')
       ensureColumn(db, 'outbox', 'next_attempt_at', 'TEXT')
     },
+  },
+  {
+    version: 3,
+    // The lifecycle event shape stays `{ kind, payload }` in memory. `at` is
+    // write-time metadata stored alongside it, not an event field.
+    up: db => db.exec(`
+CREATE TABLE IF NOT EXISTS lifecycle_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL
+);
+`),
   },
 ]
 
