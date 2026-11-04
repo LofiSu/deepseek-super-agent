@@ -1,0 +1,638 @@
+import type { A2ADelivery, A2AEnvelope } from '../channels/a2a.ts'
+import { A2ARouter } from '../channels/a2a.ts'
+import type { A2ATransport } from '../channels/a2a-transport.ts'
+import {
+  A2AHttpTransport,
+  createA2AHttpHandler,
+  type A2AHttpHandler,
+  type A2AHttpTransportOptions,
+  type A2ASecretResolver,
+} from '../channels/a2a-http.ts'
+import type { A2AReplayCache, A2ASecret } from '../channels/a2a-auth.ts'
+
+/**
+ * Client/registry half of the cross-host mesh (T47 transport half).
+ *
+ * This module registers remote Worker nodes over the authenticated A2A HTTP
+ * primitive, tracks heartbeat and capacity, and dispatches assignment
+ * envelopes fail-closed. It starts no listener: `createRemoteMeshHandler`
+ * only returns a request handler and the process owner decides whether and
+ * where to mount it. No Trigger is constructed here, and no remote Worker is
+ * executed by this module — an assignment is delivered to the peer's inbox and
+ * the peer's owner decides what to do with it.
+ *
+ * Secrets are held only for outbound signing. `list()` and every dispatch
+ * result omit them, and no error path returns or throws peer-supplied text.
+ */
+
+/** A heartbeat older than this (default) makes a node ineligible. */
+export const DEFAULT_REMOTE_STALE_MS = 60_000
+
+/** Body kinds accepted by the remote mesh inbox. Everything else fails closed. */
+export const REMOTE_MESH_BODY_KINDS = ['register', 'heartbeat', 'assignment'] as const
+export type RemoteMeshBodyKind = (typeof REMOTE_MESH_BODY_KINDS)[number]
+
+export interface RemoteNodeRegistration {
+  /** Stable node id, unique within this registry. */
+  id: string
+  /** Endpoint URL. Both the A2A transport guard and this module reject non-https,
+   * non-loopback endpoints. */
+  url: string
+  /** The remote peer's authenticated identity used as the envelope `to`. */
+  peerId: string
+  /** Shared secret used to sign outbound requests. Never exposed by `list()`. */
+  secret: A2ASecret
+  /** Maximum concurrent assignments. Defaults to 1. */
+  capacity?: number
+}
+
+/** Public, secret-free view of a registered remote node. */
+export interface RemoteMeshNode {
+  id: string
+  url: string
+  peerId: string
+  capacity: number
+  online: boolean
+  lastHeartbeatAt: number
+  inFlight: number
+  stale: boolean
+}
+
+/** Component-wise copy of the raw A2A delivery without peer-supplied error text. */
+function safeDelivery(delivery: A2ADelivery): A2ADelivery {
+  if (delivery.status === 'failed') {
+    return {
+      envelope: delivery.envelope,
+      status: 'failed',
+      delivered: delivery.delivered,
+      persisted: delivery.persisted,
+      // The peer's error text is never propagated. The HTTP transport already
+      // maps failures to static messages, but an injected transport may not.
+      error: 'remote delivery failed',
+    }
+  }
+  return {
+    envelope: delivery.envelope,
+    status: delivery.status,
+    delivered: delivery.delivered,
+    persisted: delivery.persisted,
+  }
+}
+
+function failedDelivery(envelope: A2AEnvelope): A2ADelivery {
+  return {
+    envelope,
+    status: 'failed',
+    delivered: 0,
+    persisted: false,
+    error: 'remote delivery failed',
+  }
+}
+
+function isDelivery(value: unknown): value is A2ADelivery {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Partial<A2ADelivery>
+  if (candidate.status !== 'delivered'
+    && candidate.status !== 'unroutable'
+    && candidate.status !== 'failed') {
+    return false
+  }
+  if (typeof candidate.delivered !== 'number'
+    || !Number.isInteger(candidate.delivered)
+    || candidate.delivered < 0) {
+    return false
+  }
+  if (typeof candidate.persisted !== 'boolean') return false
+  const envelope = candidate.envelope
+  if (typeof envelope !== 'object' || envelope === null) return false
+  if (typeof envelope.from !== 'string' || envelope.from.length === 0) return false
+  if (typeof envelope.to !== 'string' || envelope.to.length === 0) return false
+  return Object.prototype.hasOwnProperty.call(envelope, 'body')
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function assertSecret(secret: A2ASecret): void {
+  const ok = typeof secret === 'string'
+    ? secret.length > 0
+    : secret instanceof Uint8Array && secret.byteLength > 0
+  if (!ok) throw new Error('Remote mesh node requires a non-empty secret')
+}
+
+function capacityOf(value: number | undefined): number {
+  const capacity = value ?? 1
+  if (!Number.isSafeInteger(capacity) || capacity < 1) {
+    throw new Error('Remote mesh node requires a positive integer capacity')
+  }
+  return capacity
+}
+
+function finiteNow(value: number, fallback: number): number {
+  return Number.isFinite(value) ? value : fallback
+}
+
+/** Injectable transport constructor used by tests. */
+export type RemoteTransportFactory = (options: A2AHttpTransportOptions) => A2ATransport
+
+export interface RemoteMeshRegistryOptions {
+  /** This process's authenticated A2A identity; signs every outbound envelope. */
+  localPeerId?: string
+  /** Heartbeats older than this are ineligible. Defaults to 60 s. */
+  staleAfterMs?: number
+  /** Alias for `staleAfterMs`. */
+  staleWindowMs?: number
+  /** Injectable clock for deterministic tests. */
+  now?: () => number
+  /** Lazy transport factory. Defaults to `new A2AHttpTransport(...)`. */
+  transportFactory?: RemoteTransportFactory
+  /** Alias for `transportFactory`. */
+  createTransport?: RemoteTransportFactory
+}
+
+interface RemoteNodeRecord {
+  id: string
+  url: string
+  peerId: string
+  secret: A2ASecret
+  capacity: number
+  online: boolean
+  lastHeartbeatAt: number
+}
+
+function defaultTransportFactory(options: A2AHttpTransportOptions): A2ATransport {
+  return new A2AHttpTransport(options)
+}
+
+/**
+ * Registry and dispatcher for remote Worker nodes.
+ *
+ * Placement rules match the local `WorkerMeshRegistry`: least-loaded online
+ * node with free capacity, sticky for an already-picked ticket, and no
+ * assignment when nothing is eligible. The only network operation is
+ * `dispatch`, which requires an existing `pick`/assignment and never picks on
+ * the caller's behalf.
+ */
+export class RemoteMeshRegistry {
+  readonly localPeerId: string
+  readonly staleAfterMs: number
+  private readonly clock: () => number
+  private readonly createTransport: RemoteTransportFactory
+  private readonly nodes = new Map<string, RemoteNodeRecord>()
+  private readonly assignments = new Map<string, string>()
+  private readonly transports = new Map<string, A2ATransport>()
+
+  constructor(options: RemoteMeshRegistryOptions | string = {}) {
+    const resolved: RemoteMeshRegistryOptions = typeof options === 'string'
+      ? { localPeerId: options }
+      : options
+    this.localPeerId = nonEmptyString(resolved.localPeerId) ? resolved.localPeerId : 'local'
+    const stale = resolved.staleAfterMs ?? resolved.staleWindowMs ?? DEFAULT_REMOTE_STALE_MS
+    this.staleAfterMs = Number.isFinite(stale) && stale >= 0
+      ? Math.floor(stale)
+      : DEFAULT_REMOTE_STALE_MS
+    this.clock = resolved.now ?? (() => Date.now())
+    this.createTransport = resolved.transportFactory
+      ?? resolved.createTransport
+      ?? defaultTransportFactory
+  }
+
+  /** Register a node. A duplicate id throws. The URL guard is the A2A transport's. */
+  register(input: RemoteNodeRegistration): RemoteMeshNode {
+    const { id, url, peerId, secret } = input
+    if (!nonEmptyString(id)) throw new Error('Remote mesh node requires a non-empty id')
+    if (!nonEmptyString(peerId)) throw new Error('Remote mesh node requires a non-empty peerId')
+    if (!nonEmptyString(url)) throw new Error('Remote mesh node requires a non-empty url')
+    assertSecret(secret)
+    const capacity = capacityOf(input.capacity)
+    if (this.nodes.has(id)) throw new Error(`Remote mesh node already registered: ${id}`)
+
+    // Reuse the transport's constructor (rather than duplicating its parse) so
+    // an https-or-loopback-http guard can never drift. The throwaway instance
+    // performs no I/O; the per-node transport is still created lazily.
+    new A2AHttpTransport({ url, peerId, secret })
+
+    const record: RemoteNodeRecord = {
+      id,
+      url,
+      peerId,
+      secret,
+      capacity,
+      online: true,
+      lastHeartbeatAt: this.clock(),
+    }
+    this.nodes.set(id, record)
+    return this.view(record, record.lastHeartbeatAt)
+  }
+
+  /**
+   * Record a heartbeat. A heartbeat also brings an offline node back online.
+   * Unknown ids return `false` instead of throwing.
+   */
+  heartbeat(id: string, at: number = this.clock()): boolean {
+    const node = this.nodes.get(id)
+    if (!node) return false
+    if (!Number.isFinite(at)) return false
+    node.lastHeartbeatAt = at
+    node.online = true
+    return true
+  }
+
+  /** Mark a node offline. Unknown ids return `false`. Assignments are kept. */
+  markOffline(id: string): boolean {
+    const node = this.nodes.get(id)
+    if (!node) return false
+    node.online = false
+    return true
+  }
+
+  /** Remove a node, drop its cached transport, and release its assignments. */
+  unregister(id: string): boolean {
+    if (!this.nodes.delete(id)) return false
+    this.transports.delete(id)
+    for (const [ticketId, assigned] of this.assignments) {
+      if (assigned === id) this.assignments.delete(ticketId)
+    }
+    return true
+  }
+
+  /**
+   * Least-loaded eligible node for a ticket. A ticket keeps its node on repeat
+   * picks. Stale, offline, full, and unknown targets return `undefined` and do
+   * not create an assignment.
+   */
+  pick(ticketId: string, now: number = this.clock()): RemoteMeshNode | undefined {
+    if (!nonEmptyString(ticketId)) return undefined
+    const at = finiteNow(now, this.clock())
+
+    const assignedId = this.assignments.get(ticketId)
+    if (assignedId !== undefined) {
+      const assigned = this.nodes.get(assignedId)
+      if (!assigned || !this.eligible(assigned, at)) return undefined
+      return this.view(assigned, at)
+    }
+
+    let best: RemoteNodeRecord | undefined
+    let bestLoad = Number.POSITIVE_INFINITY
+    for (const node of this.nodes.values()) {
+      if (!this.eligible(node, at)) continue
+      const load = this.inFlight(node.id)
+      if (load >= node.capacity || load >= bestLoad) continue
+      best = node
+      bestLoad = load
+    }
+    if (!best) return undefined
+    this.assignments.set(ticketId, best.id)
+    return this.view(best, at)
+  }
+
+  /** Release a ticket's node slot. Unknown tickets are a no-op `false`. */
+  release(ticketId: string): boolean {
+    return this.assignments.delete(ticketId)
+  }
+
+  /** Current assignment count for a node. */
+  inFlight(nodeId: string): number {
+    let count = 0
+    for (const assigned of this.assignments.values()) {
+      if (assigned === nodeId) count += 1
+    }
+    return count
+  }
+
+  /** Secret-free node copy, or `undefined` for an unknown id. */
+  get(id: string, now: number = this.clock()): RemoteMeshNode | undefined {
+    const node = this.nodes.get(id)
+    return node ? this.view(node, finiteNow(now, this.clock())) : undefined
+  }
+
+  /** Secret-free copies of every registered node. */
+  list(now: number = this.clock()): RemoteMeshNode[] {
+    const at = finiteNow(now, this.clock())
+    return [...this.nodes.values()].map(node => this.view(node, at))
+  }
+
+  /**
+   * Send one `{ kind: 'assignment', ticketId, assignment }` envelope to the
+   * node holding the ticket, after a successful `pick`. Returns `undefined`
+   * when the ticket has no assignment or the node is stale/offline/unknown.
+   *
+   * `delivered` keeps the in-flight assignment. `unroutable` and `failed`
+   * release it. No transport error is ever thrown; the returned delivery never
+   * carries peer-supplied error text or a secret.
+   */
+  async dispatch(ticketId: string, assignment: unknown): Promise<A2ADelivery | undefined> {
+    if (!nonEmptyString(ticketId)) return undefined
+    const nodeId = this.assignments.get(ticketId)
+    if (nodeId === undefined) return undefined
+    const node = this.nodes.get(nodeId)
+    if (!node || !this.eligible(node, this.clock())) return undefined
+
+    const envelope: A2AEnvelope = {
+      from: this.localPeerId,
+      to: node.peerId,
+      body: { kind: 'assignment', ticketId, assignment },
+    }
+
+    let transport: A2ATransport
+    try {
+      transport = this.transportFor(node)
+    } catch {
+      this.assignments.delete(ticketId)
+      return failedDelivery(envelope)
+    }
+
+    let delivery: unknown
+    try {
+      delivery = await transport.send(envelope)
+    } catch {
+      // A remote transport may throw arbitrary text; never surface it.
+      this.assignments.delete(ticketId)
+      return failedDelivery(envelope)
+    }
+    if (!isDelivery(delivery)) {
+      this.assignments.delete(ticketId)
+      return failedDelivery(envelope)
+    }
+
+    if (delivery.status === 'delivered') return safeDelivery(delivery)
+    this.assignments.delete(ticketId)
+    return safeDelivery(delivery)
+  }
+
+  private transportFor(node: RemoteNodeRecord): A2ATransport {
+    const cached = this.transports.get(node.id)
+    if (cached) return cached
+    const transport = this.createTransport({
+      url: node.url,
+      peerId: this.localPeerId,
+      secret: node.secret,
+    })
+    if (!transport || typeof transport.send !== 'function') {
+      throw new Error('Remote mesh transport factory returned no send function')
+    }
+    this.transports.set(node.id, transport)
+    return transport
+  }
+
+  private eligible(node: RemoteNodeRecord, now: number): boolean {
+    return node.online && !this.isStale(node, now)
+  }
+
+  private isStale(node: RemoteNodeRecord, now: number): boolean {
+    return now - node.lastHeartbeatAt > this.staleAfterMs
+  }
+
+  private view(node: RemoteNodeRecord, now: number): RemoteMeshNode {
+    return {
+      id: node.id,
+      url: node.url,
+      peerId: node.peerId,
+      capacity: node.capacity,
+      online: node.online,
+      lastHeartbeatAt: node.lastHeartbeatAt,
+      inFlight: this.inFlight(node.id),
+      stale: this.isStale(node, now),
+    }
+  }
+}
+
+export interface RemoteMeshAssignmentEvent {
+  /** Authenticated peer id. Never read from the body/`from` claim. */
+  peerId: string
+  ticketId: string
+  assignment: unknown
+  /** The authenticated A2A envelope (its `from` is the verified peer). */
+  envelope: A2AEnvelope
+}
+
+export interface RemoteMeshHandlerOptions {
+  /**
+   * Registry to update for `register`/`heartbeat`. When omitted the inbox
+   * creates its own registry using `localPeerId` (or `mesh-inbox`).
+   */
+  registry?: RemoteMeshRegistry
+  /**
+   * Synchronous callback seam for delivered assignments. It is invoked at most
+   * once per accepted request. A thrown error becomes a non-leaking 502.
+   */
+  onAssignment: (event: RemoteMeshAssignmentEvent) => void
+  /** Inbound peer secret lookup, also used for the outbound registry entry. */
+  resolveSecret: A2ASecretResolver
+  /** Local identity; also the default inbox address. */
+  localPeerId?: string
+  /**
+   * Optional address allowlist for inbound envelopes. When omitted the inbox
+   * is address-agnostic: any authenticated non-empty `to` reaches the mesh
+   * handler. This is a dedicated mesh endpoint, so `to` is not a privilege
+   * boundary and is never trusted for identity.
+   */
+  address?: string | readonly string[]
+  now?: () => number
+  maxSkewMs?: number
+  replayCache?: A2AReplayCache
+  requestTimeoutMs?: number
+}
+
+/** A2A HTTP handler plus the registry/router it wraps. */
+export type RemoteMeshHandler = A2AHttpHandler & {
+  readonly registry: RemoteMeshRegistry
+  readonly router: A2ARouter
+}
+
+function normalizedAddresses(address: string | readonly string[] | undefined): string[] {
+  if (address === undefined) return []
+  const values = typeof address === 'string' ? [address] : [...address]
+  const unique = new Set<string>()
+  for (const value of values) {
+    if (nonEmptyString(value)) unique.add(value)
+  }
+  return [...unique]
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+/**
+ * Receiver-side mesh inbox. It wraps `createA2AHttpHandler` with an
+ * `A2ARouter`, accepts only `register`, `heartbeat`, and `assignment` bodies,
+ * and treats the A2A-verified `envelope.from` as the authoritative peer id.
+ *
+ * It does not create a listener, construct a Trigger, or execute anything. The
+ * caller mounts `handler` on its own `node:http` server.
+ */
+export class MeshInbox {
+  readonly registry: RemoteMeshRegistry
+  readonly router: A2ARouter
+  readonly handler: RemoteMeshHandler
+  private readonly options: RemoteMeshHandlerOptions
+  private readonly restrictedAddresses: string[]
+  private readonly capturedSecrets = new Map<string, A2ASecret>()
+  private readonly boundAddresses = new Set<string>()
+
+  constructor(options: RemoteMeshHandlerOptions) {
+    this.options = options
+    this.registry = options.registry
+      ?? new RemoteMeshRegistry({
+        localPeerId: options.localPeerId ?? 'mesh-inbox',
+        now: options.now,
+      })
+    this.router = new A2ARouter()
+    this.restrictedAddresses = normalizedAddresses(options.address)
+
+    const handle = (envelope: A2AEnvelope): void => { this.handleEnvelope(envelope) }
+    for (const address of this.restrictedAddresses) {
+      this.router.register(address, handle)
+      this.boundAddresses.add(address)
+    }
+
+    // The dedicated mesh endpoint is address-agnostic unless the caller pins an
+    // allowlist. Identity comes from A2A auth, not from `to` or the body.
+    const router: Pick<A2ARouter, 'send'> = {
+      send: (envelope: A2AEnvelope): A2ADelivery => {
+        this.ensureAddress(envelope.to)
+        return this.router.send(envelope)
+      },
+    }
+
+    const base = createA2AHttpHandler({
+      router,
+      resolveSecret: async (peerId: string) => {
+        const secret = await options.resolveSecret(peerId)
+        if (secret === undefined) this.capturedSecrets.delete(peerId)
+        else this.capturedSecrets.set(peerId, secret)
+        return secret
+      },
+      now: options.now,
+      maxSkewMs: options.maxSkewMs,
+      replayCache: options.replayCache,
+      requestTimeoutMs: options.requestTimeoutMs,
+    })
+    this.handler = Object.assign(base, {
+      registry: this.registry,
+      router: this.router,
+    }) as RemoteMeshHandler
+  }
+
+  private ensureAddress(to: unknown): void {
+    if (this.restrictedAddresses.length > 0) return
+    if (!nonEmptyString(to) || this.boundAddresses.has(to)) return
+    this.boundAddresses.add(to)
+    this.router.register(to, (envelope: A2AEnvelope): void => { this.handleEnvelope(envelope) })
+  }
+
+  private handleEnvelope(envelope: A2AEnvelope): void {
+    // `createA2AHttpHandler` sets `from` to the authenticated peer id; any body
+    // `from` claim was already rejected or dropped. Treat it as authoritative.
+    const peerId = envelope.from
+    if (!nonEmptyString(peerId)) throw new Error('mesh envelope has no authenticated peer')
+    const body = envelope.body
+    if (!isRecord(body)) throw new Error('mesh body must be an object')
+
+    switch (body.kind) {
+      case 'register':
+        this.handleRegister(peerId, body)
+        return
+      case 'heartbeat':
+        this.handleHeartbeat(peerId, body)
+        return
+      case 'assignment':
+        this.handleAssignment(peerId, body, envelope)
+        return
+      default:
+        // Unknown kinds are a failed delivery (HTTP 502) and never reach the
+        // assignment callback.
+        throw new Error('unsupported mesh body kind')
+    }
+  }
+
+  private handleRegister(peerId: string, body: Record<string, unknown>): void {
+    if (!nonEmptyString(body.url)) throw new Error('mesh register requires a url')
+    const requestedId = body.id ?? body.nodeId
+    if (requestedId !== undefined && !nonEmptyString(requestedId)) {
+      throw new Error('mesh register has an invalid node id')
+    }
+    const id = nonEmptyString(requestedId) ? requestedId : peerId
+    const capacity = body.capacity
+    if (capacity !== undefined
+      && (typeof capacity !== 'number' || !Number.isSafeInteger(capacity) || capacity < 1)) {
+      throw new Error('mesh register has an invalid capacity')
+    }
+    const secret = this.capturedSecrets.get(peerId)
+    if (!secret) throw new Error('mesh register has no resolvable peer secret')
+    this.registry.register({
+      id,
+      url: body.url,
+      peerId,
+      secret,
+      capacity: capacity as number | undefined,
+    })
+  }
+
+  private handleHeartbeat(peerId: string, body: Record<string, unknown>): void {
+    const requestedId = body.id ?? body.nodeId
+    if (requestedId !== undefined && !nonEmptyString(requestedId)) {
+      throw new Error('mesh heartbeat has an invalid node id')
+    }
+    const id = this.nodeIdForPeer(peerId, nonEmptyString(requestedId) ? requestedId : undefined)
+    const at = body.at
+    if (at !== undefined
+      && (typeof at !== 'number' || !Number.isSafeInteger(at) || at < 0)) {
+      throw new Error('mesh heartbeat has an invalid timestamp')
+    }
+    if (!this.registry.heartbeat(id, at as number | undefined)) {
+      throw new Error('mesh heartbeat targets an unknown node')
+    }
+  }
+
+  private handleAssignment(
+    peerId: string,
+    body: Record<string, unknown>,
+    envelope: A2AEnvelope,
+  ): void {
+    if (!nonEmptyString(body.ticketId)) throw new Error('mesh assignment requires a ticketId')
+    if (!hasOwn(body, 'assignment')) throw new Error('mesh assignment requires an assignment body')
+    const event: RemoteMeshAssignmentEvent = {
+      peerId,
+      ticketId: body.ticketId,
+      assignment: body.assignment,
+      envelope,
+    }
+    // Exactly once per accepted request. The A2A router calls this handler once.
+    const result = this.options.onAssignment(event) as unknown
+    if (result !== undefined && result !== null
+      && typeof (result as PromiseLike<unknown>).then === 'function') {
+      // The HTTP handler's router seam is synchronous, so an asynchronous
+      // callback cannot be awaited before the response. Fail closed instead of
+      // reporting a delivery we cannot confirm, and swallow its rejection.
+      void Promise.resolve(result).catch(() => {})
+      throw new Error('mesh assignment callback must be synchronous')
+    }
+  }
+
+  private nodeIdForPeer(peerId: string, requestedId: string | undefined): string {
+    if (requestedId !== undefined) {
+      const node = this.registry.get(requestedId)
+      if (!node || node.peerId !== peerId) throw new Error('mesh node does not belong to this peer')
+      return requestedId
+    }
+    if (this.registry.get(peerId)) return peerId
+    const matches = this.registry.list().filter(node => node.peerId === peerId)
+    if (matches.length === 1 && matches[0]) return matches[0].id
+    throw new Error('mesh heartbeat targets an unknown node')
+  }
+}
+
+/**
+ * Build a receiver handler for the remote mesh without starting a listener.
+ * The caller creates the `node:http` server.
+ */
+export function createRemoteMeshHandler(options: RemoteMeshHandlerOptions): RemoteMeshHandler {
+  return new MeshInbox(options).handler
+}

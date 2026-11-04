@@ -39,8 +39,14 @@ keeps `router`). `mesh.ts` tracks online nodes, capacity, and in-flight tickets:
   `node=` in the Worker task prompt.
 - `release` frees the slot on every terminal ticket path.
 
-Placement is logical: this process still executes the turn. A remote hands
-transport is an integration concern outside this repo. Capacity is enforced
+Placement is logical: this process still executes the turn. The transport half
+of T47 is implemented in `src/harness/remote-node.ts`: `RemoteMeshRegistry`
+registers peers over the authenticated A2A HTTP primitive, tracks
+heartbeat/capacity with a 60 s stale window, picks a least-loaded eligible node,
+and dispatches assignment envelopes fail-closed; `MeshInbox` /
+`createRemoteMeshHandler` is the authenticated receiver seam. The module starts
+no listener and makes no remote-execution claim; mounting it in Runtime/CLI
+remains owner-gated. Capacity is enforced
 in-process with a bounded FIFO queue owned by the Harness (the registry stays
 pure accounting):
 
