@@ -312,6 +312,14 @@ the stored value, or FeishuSource's now-5min default.
 `ds-agent a2a [--limit N]` prints persisted A2A envelopes. Both are offline
 reads over SQLite.
 
+The read-only local UI is a self-contained module: `src/ui/server.ts`
+(`buildSnapshot`, `startUiServer`, loopback bind, Host/method guards, SSE),
+`src/ui/render.ts` (server-rendered HTML and escaping), and `src/cli/ui.ts`
+(`runUi`, `registerUi`). It reads tickets, threads, outbox, health, metrics, and
+lifecycle events without a Session, model, or daemon. `ds-agent ui` command
+registration in `main.ts` is a follow-up wiring PR after the MODEL-SLOW-PATH
+branch merges; see `docs/UI.md` for the endpoints and security model.
+
 ## T45 — metrics and bake-off
 
 - `model.call` counts every completion alongside the existing counters and
