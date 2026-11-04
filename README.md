@@ -282,7 +282,7 @@ pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 pnpm ds-agent ui [--host 127.0.0.1] [--port <n>] [--token <token>]
                                               # read-only loopback dashboard; needs DS_AGENT_UI_TOKEN
                                               # or --token (at least 16 characters)
-pnpm ds-agent backup [--out <file.db>]        # WAL-safe snapshot of the SQLite store
+pnpm ds-agent backup --out <file.db>          # WAL-safe snapshot of the SQLite store
 pnpm ds-agent restore <file.db> [--force]     # replace the store; --force is required when one exists
 ```
 
