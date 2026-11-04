@@ -209,6 +209,19 @@ functions. #91 merged the re-landed live-suite determinism tests at `1dd426a`,
 #92 merged the mesh queue branch tests and non-queued start cleanup at
 `60bb9ae`, and #90 merged the group/1:1 thread-key separation at `8fa3a79`.
 CI at `8fa3a79` reports 452 passed / 15 skipped (467), 58 files, 82.39% lines
-(7837/9512), 80.97% branches (2814/3475), and 90.11% functions (693/769). The
-non-blocking review follow-ups remain tracked in the review log and the current
-status lives in `docs/DEVELOPMENT_STATUS.md`.
+(7837/9512), 80.97% branches (2814/3475), and 90.11% functions (693/769).
+#93 recorded the cycle-4 checkpoint at `d539e25`, and #94 moved `main` to
+`4cef6df` as an owner-merged, docs-only live-reference update. Cycle 5 then
+merged #95 (exact offline counter assertions; `test/metrics.test.ts`) at
+`f8554cc`, #96 (EEXIST winner-reuse and create-path ELOOP branch tests;
+`test/gateway-token.test.ts`) at `ac1fd79`, and #97 (mesh node release on an
+asynchronous non-queued rejection) at `9a0def3`. CI at `9a0def3` (run
+`41615496540`) reports 455 passed / 15 skipped (470 tests, 58 files); the
+coverage run reports 454 passed across 54 files, 82.42% statements/lines
+(7844/9517), 81.01% branches (2817/3477), and 90.11% functions (693/769).
+The cycle-5 checkpoint itself merged as #98 at `ab8e4bf` (docs-only). After
+the checkpoint, #99 (mesh failure pump) merged at `6184a27`, #100 (outbox
+permanent failure) at `55f0d09`, and #101 (serve inbound iMessage loop) at
+`2ae9740`, closing three residuals; the baseline for this record is `2ae9740`
+and later merges are not reflected. The remaining non-blocking work is tracked
+in the review log and the current status lives in `docs/DEVELOPMENT_STATUS.md`.

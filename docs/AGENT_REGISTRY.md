@@ -39,9 +39,10 @@
 | METRICS-ASSERTIONS | QA/Testing | `agent/metrics-assertions` | 2026-11-03 | merged `f8554cc`, APPROVE | #95 | integrated |
 | GATEWAY-TOKEN-TESTS | Infrastructure/Security | `agent/gateway-token-tests` | 2026-11-03 | merged `ac1fd79`, APPROVE | #96 | integrated |
 | MESH-ASYNC-RELEASE | Orchestration | `agent/mesh-async-release` | 2026-11-03 | merged `9a0def3`, APPROVE | #97 | integrated |
-| SERVE-CHANNEL-LOOP | Core Runtime | `agent/serve-imessage-loop` | 2026-11-04 | dispatched cycle 6 | — | in progress |
-| OUTBOX-PERMANENT-FAILURE | Core Runtime | `agent/outbox-permanent-failure` | 2026-11-04 | dispatched cycle 6 | — | in progress |
-| CYCLE-5-CHECKPOINT | Chief Engineer | `docs/cycle-5-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
+| MESH-FAILURE-PUMP | Orchestration | `agent/mesh-failure-pump` | 2026-11-03 | merged `6184a27`, APPROVE | #99 | integrated |
+| SERVE-CHANNEL-LOOP | Core Runtime | `agent/serve-imessage-loop` | 2026-11-04 | merged `2ae9740` | #101 | integrated |
+| OUTBOX-PERMANENT-FAILURE | Core Runtime | `agent/outbox-permanent-failure` | 2026-11-04 | merged `55f0d09` | #100 | integrated |
+| CYCLE-5-CHECKPOINT | Chief Engineer | `docs/cycle-5-checkpoint` | 2026-11-04 | merged `ab8e4bf` (docs; follow-up adds ADR-008/audit) | #98 | integrated |
 | GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
@@ -64,6 +65,8 @@
 - IMESSAGE-THREAD-KEY: the same three iMessage files (after #88; merged #90).
 - MESH-QUEUE-TESTS: `src/harness/loop.ts`, `test/worker-mesh.test.ts` (after
   #84; merged #92).
+- MESH-FAILURE-PUMP: `src/harness/loop.ts`, `test/worker-mesh.test.ts` (after
+  #97; merged #99).
 - LIVE-SUITE-SALVAGE: `test/credential-sentinel.test.ts`, `test/fixtures.ts`,
   `test/metrics.test.ts`, `test/team-live.test.ts` (merged #91).
 - SERVE-CHANNEL-LOOP: `src/cli/imessage.ts`, `src/cli/main.ts`, a new

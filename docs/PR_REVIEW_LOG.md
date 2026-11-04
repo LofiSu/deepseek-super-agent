@@ -441,10 +441,27 @@ head so a later reader can separate the reviewed tree from the merged tree.
   log, with the no-start assertions backstopped by the `startQueued` re-read.
 - **Merged:** `60bb9ae`. CI green on the exact head (run `41604489526`).
 
+## PR #99 — `[SUPER-AGENT][MESH-FAILURE-PUMP] Pump queued Workers after a failed non-queued Worker releases its node`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; reviewed heads `b2b0e4f` and refreshed `48aa718`.
+  Files: `src/harness/loop.ts` (+9/−0), `test/worker-mesh.test.ts` (+53/−0).
+- **Independent review:** **APPROVE**. Both `startNow` failure paths — the
+  synchronous throw and the asynchronous rejection — now release the picked
+  node and then `pump()`, gated on a node having been picked. An ordering
+  comment documents why the release-then-pump sequence cannot double-start.
+  The regression test is deterministic: a gated A model call, B queued, and a
+  targeted `upsertSession` idle rejection for `worker_A`; the base fails with
+  `settlesWithin` false, and the test passed 10/10 repeats.
+- **Merged:** `6184a27`; CI green on refreshed head `48aa718` (run
+  `41791142621`). Post-merge `main` CI run `41791336153`: 456 passed / 15
+  skipped (471 tests), statements/lines 82.42% (7846/9519), branches 81.03%
+  (2820/3480), functions 90.11%. Zero unresolved threads.
+
 ## PR #97 — `[SUPER-AGENT][MESH-ASYNC-RELEASE] Release the mesh node when a non-queued Worker turn rejects`
 
 - **State at review:** OPEN; head `f18e16f` after the cycle-5 follow-up.
-  Files: `src/harness/loop.ts` (+17/−6), `test/worker-mesh.test.ts` (+24/−1).
+  Files: `src/harness/loop.ts` (+9/−2), `test/worker-mesh.test.ts` (+32).
 - **Independent review:** **APPROVE**. `startNow()` now attaches a `.catch`
   to the turn promise returned by `startWorkerTurn`, so an asynchronous
   rejection returns the node reserved by `pickNode` and logs
@@ -458,6 +475,10 @@ head so a later reader can separate the reviewed tree from the merged tree.
   `Harness.launch` from rejecting to resolving for asynchronous Worker
   failures; the failure is logged, and the queued path already resolved on
   error. Callers that awaited rejection must read the log or ticket state.
+- **Follow-up finding:** after a failed non-queued Worker releases its node,
+  the Harness does not `pump()`, so an already-queued Worker can stay parked
+  with a free node until a later event. Dispatched as MESH-FAILURE-PUMP and
+  later merged as #99 (`6184a27`); it is not part of this review.
 - **Merged:** `9a0def3`. CI `typecheck and test` green on the reviewed head;
   zero unresolved threads.
 
@@ -472,7 +493,13 @@ head so a later reader can separate the reviewed tree from the merged tree.
   asserts `GatewayTokenFileError` plus no file and no token. Both mock
   `fs.openSync` only for `O_EXCL` and restore it.
 - **Residual non-blocking:** none beyond the existing POSIX-mode caveat.
-- **Merged:** `ac1fd79`; CI green on the reviewed head.
+- **Non-vacuity correction:** the contract expected this EEXIST test to fail on
+  pre-#87 `10e9f3c`, but the `if (raced) return raced` branch pre-dates #87 and
+  behaves identically, so the test passes on the old base by design. It is
+  mutation-verified instead (`return token` mutation fails). The create-path
+  ELOOP test does fail on `10e9f3c` with the raw `ELOOP` error.
+- **Merged:** `ac1fd79`; CI green on the reviewed head. Zero unresolved
+  threads.
 
 ## PR #95 — `[SUPER-AGENT][METRICS-ASSERTIONS] Make the live-relaxed counter assertions meaningful offline`
 
@@ -485,9 +512,14 @@ head so a later reader can separate the reviewed tree from the merged tree.
   tautology recorded in the #91 review under the offline fixture.
 - **Residual non-blocking:** the live branch remains inherently
   nondeterministic; it is not exercised by CI without credentials.
-- **Merged:** `f8554cc`; CI green on the reviewed head.
+- **Merged:** `f8554cc`; CI green on the reviewed head. Zero unresolved
+  threads.
 
 ## Pending reviews
 
-- None at this checkpoint. The cycle-5 checkpoint PR is the only open PR and is
-  reviewed before merge.
+- PR #102, this cycle-5 docs follow-up, is open. #100 OUTBOX-PERMANENT-FAILURE
+  was merged by the parallel orchestrator at `55f0d09` and #101
+  SERVE-CHANNEL-LOOP at `2ae9740`; neither is reviewed in this log. PR #98
+  (cycle-5 checkpoint) was merged docs-only at `ab8e4bf`; this follow-up
+  records the missing ADR-008 and audit evidence and corrects the #96
+  non-vacuity statement.
