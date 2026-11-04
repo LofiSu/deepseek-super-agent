@@ -353,6 +353,11 @@ decision (see `docs/LOCAL_AGENTS.md`).
 
 ## M10 — watchdog
 
+`routines.ts` reads owner-defined `routines.json` and due-checks it on the
+Daemon tick: first sight arms, a long gap fires once, and `lastRunAt` is
+persisted in `routine` documents. The trigger enters `Runtime.ingest`, so it
+passes the same admission, filter, and rules as a message.
+
 `watchdog.ts` runs the timer, detects stalled assignments, repeated job
 failures, and marker-based goal drift (a running report that says it left the
 ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
@@ -362,7 +367,7 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
 `serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
-`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
+`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `routines`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
 acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the

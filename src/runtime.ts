@@ -17,6 +17,7 @@ import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
+import { loadRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
@@ -76,6 +77,11 @@ export interface RuntimeOptions {
   localAgents?: LocalAgentSpec[]
   /** Owner-authored playbooks. Defaults to `skills/<id>/SKILL.md` in `home`. */
   skills?: SkillRegistry
+  /**
+   * Owner-defined recurring routines. Defaults to `routines.json` in `home`,
+   * then `DS_AGENT_ROUTINES`.
+   */
+  routines?: RoutineSpec[]
   /** Local A2A address and mesh node id. Defaults to `DS_AGENT_INSTANCE_ID` or `local`. */
   instanceId?: string
   /** Worker slots this process advertises. Defaults to `DS_AGENT_MESH_CAPACITY` or 4. */
@@ -304,6 +310,8 @@ export class Runtime {
   readonly localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks; also used by the read_skill tool. */
   readonly skills?: SkillRegistry
+  /** Owner-defined routines, due-checked by the daemon tick. */
+  readonly routines?: RoutineScheduler
   /** Local A2A address and Worker mesh node id. */
   readonly instanceId: string
   readonly routerShards: RouterShardRegistry
@@ -337,6 +345,7 @@ export class Runtime {
     teams: TeamRegistry
     localAgents?: LocalAgentRegistry
     skills?: SkillRegistry
+    routines?: RoutineScheduler
     instanceId: string
     routerShards: RouterShardRegistry
     workerMesh: WorkerMeshRegistry
@@ -361,6 +370,7 @@ export class Runtime {
     this.teams = parts.teams
     this.localAgents = parts.localAgents
     this.skills = parts.skills
+    this.routines = parts.routines
     this.instanceId = parts.instanceId
     this.routerShards = parts.routerShards
     this.workerMesh = parts.workerMesh
@@ -399,6 +409,28 @@ export class Runtime {
     const skills = opts.skills ?? SkillRegistry.fromHome(opts.home, line => log.info(line))
     if (skills.size) {
       log.info(`[skill] configured skills=${skills.list().map(skill => skill.id).join(',')}`)
+    }
+
+    // The scheduler is built before the Runtime exists; the closure forwards
+    // into Runtime.ingest once construction finishes, so routines take the
+    // normal filter, spill, dedupe, and Engine path.
+    let fireRoutine: (trigger: Trigger) => void = () => {}
+    const routineSpecs = opts.routines ?? loadRoutines(opts.home, baseEnv)
+    const routines = routineSpecs.length
+      ? new RoutineScheduler(routineSpecs, {
+        now: () => Date.parse(now()),
+        lastRun: id => store.getDoc<{ lastRunAt?: number }>('routine', id)?.lastRunAt,
+        saveLastRun: (id, at) => store.putDoc('routine', id, {
+          id,
+          lastRunAt: at,
+          updatedAt: new Date(at).toISOString(),
+        }),
+        fire: trigger => fireRoutine(trigger),
+        log: line => log.info(line),
+      })
+      : undefined
+    if (routines) {
+      log.info(`[routine] configured routines=${routines.list().map(routine => routine.id).join(',')}`)
     }
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
@@ -703,7 +735,7 @@ export class Runtime {
       // A watchdog fail is a terminal path too: settle the speculative workdir.
       settle: (sessionId, verdict) => settleSpeculation(env, sessionId, verdict),
     })
-    const daemon = new Daemon(watchdog, line => log.info(line), machines)
+    const daemon = new Daemon(watchdog, line => log.info(line), machines, undefined, routines)
     const runtime = new Runtime({
       home: opts.home,
       log,
@@ -717,6 +749,7 @@ export class Runtime {
       teams,
       ...(localAgents ? { localAgents } : {}),
       skills,
+      ...(routines ? { routines } : {}),
       instanceId,
       routerShards,
       workerMesh,
@@ -730,6 +763,8 @@ export class Runtime {
       admission,
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
+    fireRoutine = trigger => runtime.ingest(trigger)
+    fireRoutine = trigger => runtime.ingest(trigger)
     host.onAssessmentNeeded = () => runtime.assessPending()
     // Local A2A endpoint: an envelope addressed to this instance becomes a normal,
     // untrusted Trigger and goes through the same ingress filter.

@@ -12,5 +12,6 @@ uploads
 .claude/worktrees/
 .claude/settings.local.json
 local-agents.json
+routines.json
 
 __pycache__/
