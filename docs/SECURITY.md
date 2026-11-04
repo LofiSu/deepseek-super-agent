@@ -1,15 +1,17 @@
 # Security threat model — A2A, mesh, and local UI
 
-- **Date:** 2026-11-04; **base:** `origin/main` at `888f810`.
+- **Date:** 2026-11-04; **base:** `origin/main` at `7a1d732`.
 - **Scope:** W4 networked A2A/mesh surfaces and the W3 local UI, plus the
   worker/host boundary they depend on.
-- **Status:** *implemented* = on `main`; *proposed* = only in an open,
-  owner-gated PR; *planned* = design requirement, no code on `main`.
+- **Status:** *implemented* = on `main`; *planned* = design requirement, no
+  code on `main`. A2A HTTP is implemented on `main` (PR #123, merge `7a1d732`);
+  the local UI and the cross-host mesh transport remain planned.
 
-Citations to `src/channels/a2a-auth.ts` and `src/channels/a2a-http.ts` refer to
-PR #123 head `98020c9` (open, not merged at the time of writing), not shipped
-code. The local UI has no `src/ui/*` and no `ds-agent ui` command on `main`; its
-requirements come from `docs/PRODUCTION_PROGRAM.md:61`.
+Citations to `src/channels/a2a-auth.ts` and `src/channels/a2a-http.ts` follow
+the merged files at `7a1d732` (PR #123 final head `9130d4c`). The adapter is
+merged, but it opens no listener and wires no CLI surface, so exposing it remains
+an operator decision. The local UI still has no `src/ui/*` and no `ds-agent ui`
+command on `main`; its requirements come from `docs/PRODUCTION_PROGRAM.md:61`.
 
 ## 1. Assets and trust boundaries
 
@@ -17,12 +19,12 @@ requirements come from `docs/PRODUCTION_PROGRAM.md:61`.
 |---|---|---|---|
 | Gateway bearer token | `<stateDir>/gateway.token`, mode `0600` (POSIX), plain single-link file | local filesystem | Symlinks, hard links, and non-regular files are refused; `O_NOFOLLOW` is used (`src/gateway/token.ts:7,49-53,99-120`). Never printed (`src/cli/gateway.ts:79-80`). |
 | Provider API keys | env, `gateway.config.json`, or `FileVault` | process env / local file | The gateway forwards keys and does not scrape them (`src/gateway/config.ts:5-8,107-108`). `gateway.config.json` is read without a mode check (`src/gateway/config-file.ts:36-44`); `FileVault` writes `0600` (`src/env/vault.ts:63-72`). |
-| A2A per-peer secrets | caller-supplied `resolveSecret` callback; no adapter storage | proposed peer boundary | Secrets/signatures are excluded from errors and results, and secrets shorter than 32 bytes are refused (`a2a-auth.ts:4-13,38-42,66-75,268-278`). |
+| A2A per-peer secrets | caller-supplied `resolveSecret` callback; no adapter storage | network peer (no default listener) | Secrets/signatures are excluded from errors and results, and secrets shorter than 32 bytes are refused (`a2a-auth.ts:4-13,38-42,66-75,268-278`). |
 | A2A envelopes | in-memory history plus SQLite `documents` kind `a2a` | untrusted wire ingress | 64 KiB UTF-8 body cap (`src/channels/a2a.ts:24,119-126`); identity/timestamps are re-assigned by `send` (`a2a.ts:64-79`). |
 | Memory spills and grants | SQLite `spills` + `spill_grants` | process / SQLite file | Grants are ticket/session scoped; a spill id alone is not a capability (`src/memory/acl.ts:22-41`). Reads are paged to 200 bytes (`acl.ts:4-5`). |
 | Lifecycle/UI read model | in-memory `LifecycleBus` plus durable SQLite `lifecycle_events` (schema v3) | process / SQLite file | Bounded keep-newest ring; restart replay hydrates from the durable log (`src/core/lifecycle.ts:8-27,78-84,119-121`; `src/store/schema.ts:97,138-148`; `src/store/sqlite.ts:128-163`). No UI consumes it yet on `main`. |
 | Worker filesystem | per-worker directory under `<stateDir>/workspaces` | process → child shell | Path escapes are rejected (`src/env/local-env.ts:224-231`); writes are bounded by the sandbox policy (`src/env/seccomp.ts:86-110,112-131`). |
-| Outbound channel credentials | Feishu env (`FEISHU_APP_ID`, `FEISHU_APP_SECRET`); GitHub uses the host `gh` login | process → external channel | Feishu refuses a half-configured app (`src/channels/feishu.ts:12-20,38-52`); GitHub writes use the machine login (`docs/safety.md:38`). Replies are queued durably in SQLite `outbox` (`src/store/sqlite.ts:153-172`; `src/channels/outbox-adapter.ts:30-72`). |
+| Outbound channel credentials | Feishu env (`FEISHU_APP_ID`, `FEISHU_APP_SECRET`); GitHub uses the host `gh` login | process → external channel | Feishu refuses a half-configured app (`src/channels/feishu.ts:12-20,38-52`); GitHub writes use the machine login (`docs/safety.md:38`). Replies are queued durably in SQLite `outbox` (`src/store/sqlite.ts:192-212`; `src/channels/outbox-adapter.ts:30-72`). |
 
 Data planes: **model context** is rebuilt from the session journal after ingress
 and tool-result redaction (`src/harness/session.ts:52-65,72-79`;
@@ -36,9 +38,10 @@ SQLite `messages` copy and is not itself a redaction boundary
 replies, outbox text, and lifecycle payloads in plaintext; this repo provides no
 database encryption (`src/store/sqlite.ts:15-32,86-218,281-315,400-413`).
 
-Trust boundaries: process → worker shell; listener → network (gateway today,
-A2A HTTP proposed); peer → authenticated peer id (proposed); process → model
-provider; local OS user → state directory; browser → planned UI loopback.
+Trust boundaries: process → worker shell; listener → network (gateway and A2A
+HTTP, but no A2A listener is wired by default); peer → authenticated peer id;
+process → model provider; local OS user → state directory; browser → planned UI
+loopback.
 
 ## 2. Adversaries and non-goals
 
@@ -54,21 +57,21 @@ provider; local OS user → state directory; browser → planned UI loopback.
 
 **Non-goals:** protection from root, a hostile same-uid process, or a compromised
 host; container/VM hardening; key distribution or TLS termination; multi-tenant
-authorization; guaranteed prompt-injection detection; model alignment; DDoS
-mitigation; supply-chain integrity; and availability of third-party providers.
-A2A transport authentication does not authorize *what* an authenticated peer may
-ask for.
+authorization; guaranteed prompt-injection detection; model alignment; DDoS;
+supply-chain integrity; provider availability. A2A authentication does not
+authorize *what* an authenticated peer may ask for.
 
-## 3. A2A HTTP transport (proposed in #123; owner-gated)
+## 3. A2A HTTP transport (implemented in #123)
 
-The contract on `main` deliberately leaves network I/O and peer authentication
-outside the repository: `A2ATransport` only moves envelopes, must pass them to
-`A2ARouter.send`, and `LocalA2ATransport` is explicitly not an authentication
-boundary (`src/channels/a2a-transport.ts:1-45`). PR #123 proposes the missing
-HTTP half. It is owner-gated and must not be exposed until reviewed
-(`docs/PRODUCTION_PROGRAM.md:68,99`).
+The envelope contract leaves network I/O and peer authentication outside the
+adapter: `A2ATransport` only moves envelopes and `LocalA2ATransport` is not an
+authentication boundary (`src/channels/a2a-transport.ts:1-45`). PR #123
+implemented the HTTP half and merged as `7a1d732`; it adds the handler and
+client below, but opens no listener and wires no CLI command. Exposure is still
+operator-gated: bind loopback by default, require TLS for a remote endpoint, and
+fail closed (`docs/PRODUCTION_PROGRAM.md:100`).
 
-Proposed controls:
+Implemented controls:
 
 - **Canonical HMAC-SHA256 v1.** The canonical string
   `v1\n<peer>\n<timestamp>\n<nonce>\n<sha256(body)>` binds the peer and request
@@ -111,7 +114,7 @@ Proposed controls:
   (`a2a-http.ts:48-49,248-272,310-335`); the outbound request uses the same 30 s
   default (`a2a-http.ts:525-585`).
 
-### Residual risks (proposed surface)
+### Residual risks (implemented surface)
 
 - **Replay state is process-local and may be shared unsafely.** The module and
   per-handler caches live in one process (`a2a-auth.ts:194`;
@@ -141,8 +144,8 @@ Recommendations before exposure: use a unique secret per verifier node and/or a
 shared, durable replay store with atomic nonce claims (the documented
 requirement); add a key id/version for overlap rotation; terminate TLS at the
 listener or a reverse proxy for every non-loopback endpoint; sign responses or
-bind them to the request nonce if the caller acts on delivery status; keep the
-owner gate and replay tests.
+bind them to the request nonce if the caller acts on delivery status; keep
+replay tests and the deployment checks.
 
 ## 4. Local UI (planned; not shipped)
 
@@ -186,11 +189,10 @@ by default is a residual risk, not a current implementation detail.
   host-wide reads (`seccomp.ts:102-105,133-144,176-184`; `local-env.ts:22-27,62-68`).
   The project documents read confinement as an external/container boundary
   (`docs/safety.md:30-32`).
-- **Time and output bounds.** A timeout kills the whole process group; stdout
-  and stderr are capped and truncated (`local-env.ts:124-180`).
-- **Environment allowlist.** The child gets a fixed allowlist; names matching
-  key/token/secret/password/credential are dropped even if listed
-  (`src/env/sanitize.ts:1,6-21,78-89`).
+- **Time and environment bounds.** A timeout kills the whole process group, and
+  stdout/stderr are capped and truncated (`local-env.ts:124-180`). The child gets
+  a fixed allowlist; names matching key/token/secret/password/credential are
+  dropped even if listed (`src/env/sanitize.ts:1,6-21,78-89`).
 - **Redaction.** Exact parent-env secret values of at least 8 characters and
   known credential shapes are replaced before tool results, journal entries, or
   model requests (`sanitize.ts:4,27-35,43-76`; `local-env.ts:181-185,195-198`;
@@ -229,30 +231,31 @@ decision to make read isolation the default (`docs/safety.md:32`;
   same ingress filter (`src/runtime.ts:506-515,857-876`).
 - **Cross-host transport is not implemented.** The mesh comment states remote
   transport is outside this repo (`mesh.ts:8-12`), and the A2A transport contract
-  leaves authentication external (`src/channels/a2a-transport.ts:1-45`). Cross-host
-  mesh therefore depends on the proposed A2A primitive and inherits its residual
-  risks; do not advertise or expose it yet.
+  leaves authentication to the HTTP adapter (`src/channels/a2a-transport.ts:1-45`).
+  Cross-host mesh therefore depends on the now-merged A2A primitive but has no
+  transport or listener of its own; do not advertise or expose it yet.
 
 ## 7. Residual risk register
 
-Critical: none currently exposed, because A2A HTTP (#123) and the UI are not on
-`main`. Severity reflects the risk once the described surface is enabled.
+Critical: none exposed by default. A2A HTTP is merged but no default listener is
+wired, so exposure is operator-gated; the UI is not on `main`. Severity reflects
+the risk once a listener or UI is enabled.
 
 | Severity | Surface | Risk | Current mitigation | Owner/deployment action | Type |
 |---|---|---|---|---|---|
-| High | A2A HTTP (proposed) | Cross-node replay when a peer secret is shared by verifier nodes | HMAC + ±60 s + per-process nonce cache; documented requirement to use unique per-node secrets or a shared cache (`a2a-auth.ts:15-25`) | Unique secret per verifier node and/or a shared durable replay store; never share one peer secret across nodes | Code + deployment |
-| Medium | A2A HTTP (proposed) | Unsigned response status/body; the peer is authenticated but the response is not bound to the request | Client requires TLS off-loopback, checks status, strict delivery shape, and envelope `from`/`to` (`a2a-http.ts:123-142,411-433,588-605`) | Keep TLS; sign responses or bind them to the request nonce if delivery status drives side effects | Code + deployment |
+| High | A2A HTTP | Cross-node replay when a peer secret is shared by verifier nodes | HMAC + ±60 s + per-process nonce cache; documented requirement to use unique per-node secrets or a shared cache (`a2a-auth.ts:15-25`) | Unique secret per verifier node and/or a shared durable replay store; never share one peer secret across nodes | Code + deployment |
+| Medium | A2A HTTP | Unsigned response status/body; the peer is authenticated but the response is not bound to the request | Client requires TLS off-loopback, checks status, strict delivery shape, and envelope `from`/`to` (`a2a-http.ts:123-142,411-433,588-605`) | Keep TLS; sign responses or bind them to the request nonce if delivery status drives side effects | Code + deployment |
 | High | Ingress/model | Prompt injection; deterministic fast/slow filters do not model malice, and model-backed slow-path admission is not shipped | Deterministic admission (`src/ingress/filter.ts:27-89`), non-human A2A identity (`src/runtime.ts:874`), redaction, sandbox, executor tool scope | Treat all trigger text as untrusted; design injection handling in the slow-path ADR before model admission; owner review | Code + operator |
 | High | Model provider | Prompts and tool results leave the host; the provider may inspect or retain them | Best-effort redaction; optional gateway masking plugin (`src/gateway/server.ts:8,256-257`) | Choose a trusted provider and terms, minimize context, keep secrets out of prompts | Operator |
 | Medium | Local state at rest | Same-uid/disk reader can read SQLite, journals, spills, outbox text, and durable lifecycle payloads; no DB encryption | `gateway.token`/vault `0600`; ACLs are in-process only (`src/gateway/token.ts:44-46`; `src/env/vault.ts:63-72`; `src/memory/acl.ts:22-41`) | `0700` state directory, full-disk encryption, separate OS user | Operator |
-| Medium | A2A HTTP (proposed) | Cache eviction or restart forgets a nonce inside the window | Bounded 10,000-entry cache with pruning | Shared/durable replay store; rate-limit unauthenticated traffic | Code |
-| Medium | A2A HTTP (proposed) | Plain-HTTP loopback trusts local processes; the handler opens no listener and cannot enforce inbound TLS | Client requires https off-loopback and refuses redirects (`a2a-http.ts:123-142,548-551`); loopback http is allowed (`a2a-http.ts:139-140`) | Bind loopback; terminate TLS at the listener or reverse proxy for any remote endpoint | Operator |
+| Medium | A2A HTTP | Cache eviction or restart forgets a nonce inside the window | Bounded 10,000-entry cache with pruning | Shared/durable replay store; rate-limit unauthenticated traffic | Code |
+| Medium | A2A HTTP | Plain-HTTP loopback trusts local processes; the handler opens no listener and cannot enforce inbound TLS | Client requires https off-loopback and refuses redirects (`a2a-http.ts:123-142,548-551`); loopback http is allowed (`a2a-http.ts:139-140`) | Bind loopback; terminate TLS at the listener or reverse proxy for any remote endpoint | Operator |
 | Medium | Gateway | `/health` and dashboard are unauthenticated; non-loopback binding only warns | Loopback default and explicit warning (`src/cli/gateway.ts:13-27,39-40`; `src/gateway/server.ts:550-560`) | Bind loopback, firewall the port, never expose it directly | Operator |
 | Medium | Gateway (plain HTTP loopback) | Bearer token and payloads cross plain HTTP if bound beyond loopback | Loopback default; no TLS in the server (`src/gateway/server.ts:616-627`) | TLS reverse proxy for any non-loopback bind | Operator |
 | Medium | Worker | Read isolation is off by default, so a worker can read host files and the state DB | Write/network sandbox; opt-in strict reads (`src/env/seccomp.ts:133-144`; `docs/safety.md:30`) | Enable strict reads or a container profile; make the default flip a separate reviewed change | Operator + code |
 | Medium | Planned UI | Token absent by default; read-only state is visible to local users/processes | Planned loopback-only, read-only, token-optional design (`docs/PRODUCTION_PROGRAM.md:61`) | Require a token when state is sensitive; loopback + OS permissions; review before merge | Code (UI PR) |
 | Low | Redaction | Unknown secret shapes or values under 8 characters reach tool text/model context | Exact env values ≥8 chars plus known credential patterns (`src/env/sanitize.ts:4,43-76`) | Prefer vault injection, avoid pasting secrets, rotate on suspected exposure | Operator |
-| Low | A2A HTTP (proposed) | Secret lookup runs before signature verification, so arbitrary peer ids can trigger resolver calls | Shape/skew checked first; absolute deadline bounds a hanging lookup (`a2a-http.ts:256-263,293-321`) | Rate-limit at the reverse proxy | Operator |
+| Low | A2A HTTP | Secret lookup runs before signature verification, so arbitrary peer ids can trigger resolver calls | Shape/skew checked first; absolute deadline bounds a hanging lookup (`a2a-http.ts:256-263,293-321`) | Rate-limit at the reverse proxy | Operator |
 | Low | A2A rotation | No key id means no dual-secret grace period | Small v1 protocol | Add `kid`/key version before fleet use | Code |
 
 ## 8. Incident and rotation runbook (sketch)
