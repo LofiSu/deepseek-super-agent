@@ -796,7 +796,19 @@ head so a later reader can separate the reviewed tree from the merged tree.
   `41848077717`. Adds a reply-layer guard plus an outbox regression test; no
   live send was performed.
 
+## PR #141 — `[SUPER-AGENT][FINAL-STATUS] Reconcile final status docs`
+
+- **Reviewed head:** `8801fe6`. **Base:** `661e56d`. Docs-only.
+- **Verdict:** APPROVE after independent factual verification of every cited
+  merge SHA, CI run, branch-protection setting, and source claim. The review
+  found and this PR fixes stale duplicate PLAN §9 rows (T48/T49/T50), stale
+  host-read-isolation wording in ROADMAP/README/safety (#117 opt-in strict),
+  non-reproducible historical test counts, a contradicting "#132 remains
+  owner-gated" line, and an imprecise ancestry sentence.
+- **Scope:** no code changes; no live tests claimed.
+
 ## Pending reviews
 
-- No open implementation PRs. #141 is documentation-only and awaits CI/review.
+- No open implementation PRs. #142 (MCP client) and #143 (Router direct-chat)
+  are open with blocking review comments and are not part of this PR.
 - Live bake-off and real Feishu acceptance are evidence tasks, not PRs.
