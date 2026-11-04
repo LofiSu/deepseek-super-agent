@@ -640,7 +640,76 @@ rewrite `PLAN.md`; link to the contract instead.
     an async callback could keep working after the sender was told the delivery
     failed. The contract is synchronous and the type rejects `Promise` returns.
 
-## ADR-013 — Memory follows the article's object graph, Router decision memory, and two-tier retention
+## ADR-013 — The local UI is a read-only, token-gated projection of persisted state
+
+- **Date:** 2026-11-04
+- **Status:** accepted; #129 merged the server and #136 wired the command
+- **Context:** Operators need to see tickets, threads, outbox metadata, health,
+  and lifecycle events without holding a Session or starting a model. Persisted
+  lifecycle payloads can contain titles, thread keys, guidance text, and
+  speculative work; the bus itself is not an authorization boundary. A network
+  UI would add accounts, TLS, and a much larger exposure surface.
+- **Decision:** `src/ui/server.ts` serves one `buildSnapshot()` read model to
+  HTML, `/api/snapshot`, and SSE. It binds `127.0.0.1` only and refuses any
+  non-loopback host. A token of at least 16 characters is mandatory; comparison
+  uses SHA-256 digests and `timingSafeEqual`. The `GET /?token=` bootstrap
+  exchanges the token for an HttpOnly SameSite=Strict cookie and a clean 303.
+  Auth precedes routing; only `GET /health` is unauthenticated and state-free.
+  All routes are GET. The read model hides speculative tickets from tickets,
+  outbox, events, and thread subscriptions; outbox text is omitted; lifecycle
+  events are rebuilt from a per-kind whitelist and events for invisible tickets
+  or unknown kinds are dropped. Metrics are re-read from disk on each frame.
+  The UI never writes domain state and never calls `Metrics.flush()`. SSE uses a
+  bounded drain wait rather than unbounded buffering. `ds-agent ui` wires the
+  command in `main.ts`; token and loopback enforcement stay in `runUi`.
+- **Consequences:** the UI is single-user and local-trust. The token appears
+  once in browser history during bootstrap; any same-uid process that can read
+  the environment or state directory can still reach loopback. There is no
+  TLS, account system, remote bind, or mutation path. Those remain external
+  decisions, not hidden capabilities.
+- **Alternatives rejected:**
+  - **Token-optional or no auth.** State includes ticket titles and thread keys;
+    loopback is not an authorization boundary.
+  - **Render raw lifecycle payloads.** Persisted payloads are caller-supplied
+    and can carry secrets or speculative titles.
+  - **Separate read models for HTML/JSON/SSE.** They drift and one surface
+    eventually leaks what another filters.
+  - **Remote bind in this change.** Requires TLS, accounts, and a threat model
+    of its own.
+
+## ADR-014 — Backup is a verified snapshot; restore is force-gated and reversible
+
+- **Date:** 2026-11-04
+- **Status:** accepted; #131 merged backup/restore and release checks
+- **Context:** The SQLite store is the durable domain state. A naive file copy
+  of a live WAL database is not a consistent snapshot, and a restore that
+  overwrites `ds-agent.db` can destroy the only copy on a failed copy. Operators
+  also need a non-destructive release gate.
+- **Decision:** `backupStore` runs `PRAGMA integrity_check` on the source,
+  refuses newer schemas, uses `VACUUM INTO` a unique temp file in the output
+  directory, verifies the temp snapshot's integrity and ledger, computes
+  SHA-256, and installs it with `fs.linkSync(temp, out)`. `EEXIST` is treated
+  as a race loss: the existing output is preserved, never deleted. The live
+  source is never modified. `restoreStore` requires `--force` when a store
+  exists, integrity-checks the backup, verifies the candidate before install,
+  moves the old DB plus WAL/SHM sidecars to
+  `<state-dir>/backups/pre-restore-<timestamp>.db*`, and rolls back on failure.
+  The release check validates semver, bin/dist entries, rules assets, and
+  `npm pack --dry-run`; the GitHub release workflow is manual (merged in #132
+  `a1985c0` without recorded owner approval; audited as `workflow_dispatch`,
+  `contents: read`, no secrets, no publish).
+- **Consequences:** the daemon must be stopped before restore; backup and
+  install require a filesystem that supports hard links in the same directory.
+  Backups are plaintext SQLite and inherit the state directory's permissions.
+  Publishing is not automated and remains an owner decision.
+- **Alternatives rejected:**
+  - **Copy the live DB/WAL files.** Not a consistent snapshot.
+  - **Overwrite the target unconditionally.** Can delete a race-created or
+    pre-existing backup and leaves no rollback.
+  - **Auto-publish from the release workflow.** Needs secrets and production
+    authority the program does not have.
+
+## ADR-015 — Memory follows the article's object graph, Router decision memory, and two-tier retention
 
 - **Date:** 2026-11-04
 - **Status:** accepted and implemented (2026-11-04).

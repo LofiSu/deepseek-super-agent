@@ -82,7 +82,7 @@
                                     ▼
 ┌─ Ingress 层 ─────────────────────────────────────────────────────────────┐
 │  Fast Path：来源/群组/白名单等确定性过滤                                  │
-│  Slow Path：确定性规则 ruleClassify（模型策略未接线）                    │
+│  Slow Path：Fast Path 先过；可选模型策略，失败回退 ruleClassify           │
 │  Thread key 映射（IM topic / PR）                                         │
 └───────────────────────────────────┬───────────────────────────────────────┘
                                     ▼
@@ -120,7 +120,7 @@
 Source event
   → Channel adapter（半结构化 → Trigger 形状）
   → Ingress Fast Path（source/group/whitelist 确定性过滤）
-  → Ingress Slow Path（确定性 ruleClassify；模型策略未接线）
+  → Ingress Slow Path（Fast Path 先过；可选模型策略，超时/异常回退 ruleClassify）
   → Thread key（IM topic / PR）
   → Engine.receive(trigger)
        → Intake：去重入库 Trigger + disposition；记入 Thread
@@ -192,7 +192,7 @@ flowchart TB
 | 组件 | 做什么 | 不做什么 | 关键 ports / 文件 | 模块 |
 |------|--------|----------|-------------------|------|
 | **Channels** | 入站适配（CLI / 真实 Feishu / 真实 GitHub）→ Trigger；出站 ChannelNorms（IM≤100 words；GH 结构化）；Outbox 发到真实信道 | 写领域聚合；跑 LLM 循环 | `Outbox`, `ChannelNorms` · `src/channels/` | M8 |
-| **Ingress** | Fast Path 确定性过滤；Slow Path 确定性规则（模型策略未接线）；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
+| **Ingress** | Fast Path 确定性过滤；Slow Path 可选模型策略（超时/异常/非法输出回退确定性规则）；Thread key 映射；调用 `Engine.receive` | 写 Ticket；出站；持 Session | `Ingress.admit` · `src/ingress/` | M4 |
 | **Engine** | **领域唯一写者**：Intake / Evals(Gate+Assessment) / Tickets / Assignments / Replies / Subscribe；同步命令+事务 | Node I/O；模型 HTTP；文件系统；Channel 协议细节 | `Engine`, `Repositories`, `Assessor`, `Executor`, `Outbox` · `src/core/` | M3+M5 |
 | **Harness** | Session 事件日志；async ReAct `start/stop/runTurn`；角色工具；Mock/BYOM；daemon 调度；Router=Sequence Point；Worker 隔离；Watchdog Session 宿主 | 领域状态机；直接写 Channel；解释 Policy | `Harness`, `Tool`, `Model` · `src/harness/` | M1 |
 | **Store** | SQLite Repositories + Spill 对象；atomic；session_event/job 持久化 | 业务 Decision；出站格式；跑工具 | `Repositories`, `SpillStore` · `src/store/` | M2 |
@@ -219,7 +219,7 @@ flowchart TB
 
 ### 2.7 职责一句话（速查）
 
-- **Ingress**：两级过滤 + Thread key；Fast Path 白名单；Slow Path 确定性规则（模型策略未接线）。
+- **Ingress**：两级过滤 + Thread key；Fast Path 白名单；Slow Path 可选模型策略，失败回退确定性规则。
 - **Engine**：唯一写 Trigger/Thread/Decision/Ticket/Assignment/Subscription；同步命令 + 事务。
 - **Harness Router**：Sequence Point；批处理 Trigger；轻模型；理想无 bash；出站归 Router。
 - **Harness Worker**：隔离执行；强模型；只向 Router 报告；可订阅 Thread；Subagent 对 Router 不透明。
@@ -242,7 +242,7 @@ flowchart TB
 | T06 | Router = Sequence Point | §2 | M1 | Router tools 默认无 bash（`tools.ts` 的 `roles` 白名单）；批 Triggers 进一轮 |
 | T07 | Router 轻模型 | §2 | M1 | `models.router`（`roleModelsFromEnv`）默认小模型 / Mock |
 | T08 | Trigger batching during LLM round | §2 | M3+M1 | `Evals.evaluateDue` 合并同 Thread 积压；Router turn 开始时 drain inbox |
-| T09 | Future Router sharding / multi-filter | §2/§8 | 扩展 | `[~]` `RouterShardRegistry`（Runtime 常驻；`DS_AGENT_SHARDS` / `routerShards` 配置） |
+| T09 | Future Router sharding / multi-filter | §2/§8 | 扩展 | `[x]` `RouterShardRegistry`（Runtime 常驻；`DS_AGENT_SHARDS` / `routerShards` 配置；每 shard 一轮 Router） |
 | T10 | Worker 隔离 / 最强模型 | §2 | M1+M9 | Worker Session + LocalEnv；`models.worker` |
 | T11 | Worker 无直接用户 I/O | §2 | M8+M3 | Outbound 仅经 `RouterPorts.reply`；WorkerPorts 无 `reply`/`decide`/`receive`（类型 + 运行时） |
 | T12 | Worker 向 Router 报告 | §2 | M3 | `Assignments.report` → DomainEventName 事件 → Router inbox |
@@ -250,7 +250,7 @@ flowchart TB
 | T14 | Worker 内 Subagent/Team 对 Router 不透明 | §2 | M1 | Worker 可 spawn 子 job（Store `jobs` 表）；Router 只见 Assignment 报告 |
 | T15 | 个人助手多话题 → 多 Worker / 一 UI | §2 | M3+M11 | 同 chat Thread 多 Ticket；CLI 列 Tickets |
 | T16 | Fast Path 过滤（source/group/whitelist） | §3.1 | M4 | `ingress/filter.ts` `fastPath` 确定性规则 |
-| T17 | Slow Path policy classifier | §3.1 | M4 | `ingress/filter.ts` `ruleClassify`/`filterTrigger`；确定性规则，模型策略未接线 |
+| T17 | Slow Path policy classifier | §3.1 | M4 | `[x]` `ingress/filter.ts` 确定性 Fast Path；`ingress/policy.ts` 可选 `SemanticPolicy`（`DS_AGENT_SLOW_PATH=model`），`PolicyClassifier` 超时/异常/非法输出回退规则；`Runtime.ingestAsync` 供真实频道循环使用，同步 `ingest` 与 A2A 入站保持纯规则 |
 | T18 | Thread = 事件流 | §3.2 | M0+M2 | `Thread` + `trigger_thread` 表 |
 | T19 | Subscribe Fast Path bypass Router | §3.2 | M5 | 人消息达 Ticket → `bypass=subscription`；日志含 ticketId |
 | T20 | 多对多 Worker↔Thread | §3.2 | M5 | Subscriptions on Thread；`followForContext` |
@@ -280,10 +280,10 @@ flowchart TB
 | T44 | NL maintainability prompts/rules | §6 | M10 | `prompts/watchdog.md`；规则 YAML/JSON |
 | T45 | §7 实验指标 | §7 | M12 | counters + optional `curveSamples` / `summarizeCurve`（T45） |
 | T46 | §8 Router sharding | §8 | 扩展 | 同 T09；registry 常驻 Runtime |
-| T47 | §8 Worker mesh | §8 | 扩展 | `[~]` `WorkerMeshRegistry`（Runtime 常驻；`DS_AGENT_MESH_CAPACITY`） |
-| T48 | §8 Long-term memory | §8 | 长期记忆 | `[~]` `SpillBackedLongTermMemory`（Runtime 常驻；终止 Ticket 写一条） |
-| T49 | §8 Product UX without Session | §8 | 产品层 | `[~]` `LifecycleBus`（Runtime 常驻读取模型；默认 UI 仍未做） |
-| T50 | §8 A2A | §8 | 互操作 | `[~]` `A2ARouter`（Runtime 常驻；`runtime.sendA2A`） |
+| T47 | §8 Worker mesh | §8 | 扩展 | `[~]` 本地 `WorkerMeshRegistry`（容量/队列）+ `RemoteMeshRegistry`/`MeshInbox`（A2A HMAC 传输、心跳、上限、loopback 默认拒绝；`src/harness/remote-node.ts`）。无默认 Runtime 监听器，远程 dispatch 接线仍属 operator-gated |
+| T48 | §8 Long-term memory | §8 | 长期记忆 | `[~]` `SpillBackedLongTermMemory`（Runtime 常驻；终止 Ticket 写一条；保留期/同票去重/ADR-010 词法+标签一跳召回已实现）。语义/embedding 召回与跨月实测仍未实现 |
+| T49 | §8 Product UX without Session | §8 | 产品层 | `[x]` `LifecycleBus` 常驻读取模型 + 只读 loopback UI（`src/ui/server.ts`、`src/cli/ui.ts`、`ds-agent ui`；必需 token、GET-only、生命周期事件白名单、speculative 隐藏、SSE 背压）。远程多进程面板/多用户账号仍为外部边界 |
+| T50 | §8 A2A | §8 | 互操作 | `[x]` `A2ARouter` + 本地 transport + HMAC-SHA256 HTTP transport（±60s、nonce 重放缓存、32B 密钥、64KiB/128KiB 上限、deadline），`runtime.sendA2A`；远程 mesh handler 已实现但默认不监听，暴露需 operator 决策 |
 | T51 | §8 Security/privacy；credential never in context | §8 | M0+M9 | Env 变量描述可进 prompt；**值永不**；vault 外置 |
 
 ---
@@ -761,10 +761,11 @@ export interface RawEvent {
 | Locality | `read_object`（`tools.ts`）+ `acl.ts`：`read_object` 接受 spill id 或 `kind:id` 句柄，分页 200 字符，返回 `refs` 供下一跳 |
 | Chain of Recall | `graph.ts` 为 Trigger/Thread/Ticket/Decision/Session/Channel/Actor 生成稳定句柄；`refsForTrigger`/`refsForTicket`/`refsForDecision` 写进对象和 spill；`readObjectFor` 逐跳解析并重新校验 reader ticket 的 Thread 关系 |
 | Router global memory | `long-term.ts` 的 `rememberDecision`：每个 accept/ignore/stop/unavailable Decision 一条 `kind=decision` 记忆；Router 注入 `recentDecisions` + `forThreads`，Worker 注入 `forThreads` + 词法召回 |
+| Resident Router Session | `Runtime.start()` 为每个 shard 建立常驻 Session；`armRouter` 持久化 `sessions` 行与 `session.started`/`session.resumed`；`routerObserve` 记录 Trigger/Decision/Ticket/assessment 事件；`routerExclusive` 串行化 assessment 与 Router turn；assessment 读取 `routerHistory` |
 | Long-range memory | Ticket/Decision 为 hot（默认 1000 条 / 90 天）；被 prune 的条目折叠为 Thread digest（cold，默认 200 条 / 3650 天），`query({tier:'cold'})` 可召回 |
 | Tools | 注册 `read_object` 给 router+worker；返回 `{text, truncated, nextOffset, refs}` |
-| Tests | `test/spill.test.ts`、`test/memory-graph.test.ts`、`test/long-term-memory.test.ts`、`test/memory-recall-eval.test.ts` |
-| Accept | demo Spill + read_object；trigger→thread→ticket 多跳可走通 |
+| Tests | `test/spill.test.ts`、`test/memory-graph.test.ts`、`test/long-term-memory.test.ts`、`test/memory-recall-eval.test.ts`、`test/router-resident.test.ts` |
+| Accept | demo Spill + read_object；trigger→thread→ticket 多跳可走通；常驻 Router 跨 Ticket 可见 |
 | Deps | M1, M2 |
 | Wave | C |
 
@@ -932,8 +933,8 @@ pnpm install && pnpm test && pnpm demo
 | T46 | 扩展 | Router sharding / multi-filter | registry 常驻 Runtime；`DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在 | `RouterShardRegistry` |
 | T47 | 扩展 | Worker mesh | capacity registry 常驻 Runtime；`DS_AGENT_MESH_CAPACITY` / `RuntimeOptions.meshCapacity` | `WorkerMeshRegistry` |
 | T48 | 长期记忆 | Long-term memory | Spill-backed LTM 常驻 Runtime；终态 Ticket + 每个 Decision 写一条；hot/cold 两层：hot 按标题/标签召回，cold 为 Thread digest 跨月保留 | `SpillBackedLongTermMemory` |
-| T49 | 产品层 | Product UX without Session | 无会话读取模型 `LifecycleBus` 常驻 Runtime；默认 UI 仍在另仓 | `core/lifecycle.ts` |
-| T50 | 互操作 | A2A | envelope router 常驻 Runtime；`runtime.sendA2A`；跨进程传输外置 | `A2ARouter` |
+| T49 | 产品层 | Product UX without Session | 无会话读取模型 `LifecycleBus` 常驻 Runtime；只读 loopback UI 在本仓（`src/ui/server.ts`、`ds-agent ui`）；远程面板/多用户外置 | `core/lifecycle.ts` |
+| T50 | 互操作 | A2A | envelope router 常驻 Runtime；`runtime.sendA2A`；HMAC-SHA256 HTTP transport 已实现（`a2a-auth.ts`/`a2a-http.ts`），默认不监听 | `A2ARouter` |
 | T51 | 安全与隐私 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | allowlist + redact 已落地；vault / seccomp 仍外置 |
 
 ---
@@ -1096,8 +1097,8 @@ deepseek-super-agent/
 | 文章块 | 覆盖任务 | README 勾选 | 代码落点 | 缺口 |
 |--------|----------|-------------|----------|------|
 | §1 四特质 | T01–T04 | 有 | Harness/Engine/Store/Speculate | — |
-| §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding；T14/T15 部分 |
-| §3.1 Fast/Slow | T16–T17 | 有 | ingress | Slow Path 是确定性规则；LLM 策略未接线，可再加强 |
+| §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding 已接线；T14/T15 部分（多话题 UX 由只读 UI 覆盖） |
+| §3.1 Fast/Slow | T16–T17 | 有 | ingress | Fast Path 确定性；Slow Path 可选模型策略（`DS_AGENT_SLOW_PATH=model`），超时/异常回退确定性规则 |
 | §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | T21 handback 弱 |
 | §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object + graph refs | 多跳对象图已落地（Trigger/Thread/Ticket/Decision） |
 | §3.4 投机 | T26–T28 | 有 | speculate + deliver | — |

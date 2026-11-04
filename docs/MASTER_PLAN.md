@@ -1,13 +1,57 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `f6e5972` (`[SUPER-AGENT][SEMANTIC-LTM] Evaluate
-> semantic and multi-hop long-term memory recall (#112)`)
+> Baseline: `main` after PR #140 (`661e56d`); the cycle-9 baseline below is
+> historical.
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
-## 0. Verified baseline (2026-11-04)
+## Final integration status (2026-11-04)
+
+The owner-directed program is integrated. The remaining work is owner-gated or
+requires live evidence, not missing code.
+
+| Area | State | Evidence |
+|------|-------|----------|
+| Semantic LTM / store migration / restart replay | lexical + one tag hop done; embedding recall partial | #112/#118, #124; ADR-010 lexical/tag-hop recall, schema v3 `lifecycle_events`, replay tests |
+| Host read isolation | done (opt-in strict) | read-isolation tests; docs/safety boundary unchanged |
+| A2A + peer auth | done | #123 `7a1d732`; HMAC v1, replay cache, caps, deadline |
+| Model slow path | done and wired | #128 `788be60`; #135 `268809d`; `Runtime.ingestAsync` in iMessage/Feishu loops |
+| Cross-host mesh | partial (no default listener) | #130 `d9ded0b`; registry/inbox/handler, operator-gated exposure |
+| Local UI | done (loopback, token) | #129 `123ee40`; #136 `1e01862`; sanitized read model, auth, SSE |
+| Backup/restore/release checks | done; release workflow on `main` via gate bypass | #131 `d67731a`; #132 merged `a1985c0` without recorded owner approval (manual, `contents: read`, no publish/secrets) |
+| Combined Feishu/iMessage | done | #133 `0cdea17`; one Runtime, independent loops/cursors/outboxes |
+| Live bake-off / real Feishu acceptance | not run | requires operator credentials and authorization |
+
+### Verification at the checkpoint
+
+- `main` `661e56d`; required check `typecheck and test` green on each merged PR
+  head (#129 `ab73604`, #131 `61128d7`, #133 `ffef7d1`, #135 `096e83c`,
+  #136 `740c61c`, #138 `33b0941`, #132 `21cc421`, #134 `56cb001`,
+  #139 `50cf9d1`, #140 `69a243c`).
+- CI-equivalent offline suite on #135 merged head: 75 files, 724 tests,
+  709 passed, 15 skipped, 0 failed.
+- Focused gates: UI 12/12, CLI wiring 4/4, channel slow path 4/4 plus the
+  updated imessage/feishu serve suites 21/21, backup/release 30/30.
+- No live model, channel send, production deploy, or secret-storage change was
+  performed in this program.
+
+### Remaining decisions
+
+1. #132 release workflow: merged at `a1985c0` outside this session despite the
+   owner gate, without recorded owner approval. The content was audited as
+   manual (`workflow_dispatch`), read-only (`contents: read`), no secrets, no
+   publish step. Treat the merge as a documented deviation; publishing remains
+   an owner decision.
+2. Real Feishu acceptance needs `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/chat id and
+   an authorized operator; `channels check` is the no-send preflight.
+3. Remote mesh exposure needs an operator-mounted listener, TLS off loopback,
+   and unique per-peer secrets; the module starts nothing by default.
+4. Live bake-off remains the only way to make a model-quality claim; offline
+   comparisons are not a substitute.
+
+## 0. Verified baseline (2026-11-04, historical cycle-9)
 
 The gate evidence below is from post-merge `main` CI at `f6e5972` (run
 `41800320615`). The cycle-9 local gate on `f6e5972` produced: `tsc --noEmit`
