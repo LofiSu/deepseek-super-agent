@@ -39,6 +39,10 @@ export interface HarnessOptions {
   queueLimit?: number
   /** Return a reserved mesh slot when a queued Worker fails before it starts. */
   releaseNode?: (ticketId: string) => void
+  /** True when the Router already queued a reply for this ticket. */
+  repliedTo?: (ticketId: string) => boolean
+  /** End a direct-chat ticket the Router already answered, before a Worker starts. */
+  stopAnsweredDirectChat?: (ticket: Ticket, reason: string) => void
   /** Cross-ticket recall lines injected into the Worker task. */
   memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string }[]
   /** T45 bake-off baseline: one turn chain, no Router session. */
@@ -129,7 +133,21 @@ export class Harness {
     // Sequence point (T06/T08): Router turn(s) complete first. A Router veto
     // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
     // Capacity is picked after the Routers so a veto never consumes a slot.
-    const startWorker = (): Promise<void> | undefined => this.startOrQueue(ticket.id)
+    const startWorker = (): Promise<void> | undefined => {
+      // A direct chat the Router already answered is finished. Give the
+      // conversation no Worker even when the Router forgot assess_trigger
+      // stop: a conversational reply is the whole deliverable.
+      const directChat = ticket.channels.some(channel => channel.source === 'imessage')
+      if (directChat && this.opts.repliedTo?.(ticket.id)) {
+        const latest = this.opts.store.getDoc<Ticket>('ticket', ticket.id)
+        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=answered-direct-chat`)
+        if (!latest?.ended) {
+          this.opts.stopAnsweredDirectChat?.(ticket, 'direct-chat answered by Router')
+        }
+        return undefined
+      }
+      return this.startOrQueue(ticket.id)
+    }
     let chain: Promise<void> = Promise.resolve()
     if (this.opts.singleSession) {
       this.opts.log(`[harness] single-session ticketId=${ticket.id}`)

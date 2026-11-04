@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { routerPromptFor } from '../src/harness/loop.ts'
-import { directChatRouterShard, routerSessionId } from '../src/harness/session.ts'
+import { directChatRouterShard, routerSessionId, sharesDirectChatThread } from '../src/harness/session.ts'
 import { systemPrompt } from '../src/harness/model.ts'
 import type { Ticket } from '../src/shared/types.ts'
 
@@ -56,5 +56,19 @@ describe('router prompt', () => {
     expect(shard).toBe('thread:chat:any;-;+1')
     expect(routerSessionId(shard!)).toBe('router:thread:chat:any;-;+1')
     expect(directChatRouterShard(ticket())).toBeUndefined()
+  })
+
+  it('does not recall memory across different direct iMessage threads', () => {
+    const instinct = ticket({
+      threadKeys: ['imessage:chat:any;-;+1'],
+      channels: [{ source: 'imessage', thread: 'chat:any;-;+1', address: { handle: '+1' } }],
+    })
+    const chen = ticket({
+      threadKeys: ['imessage:chat:any;-;+2'],
+      channels: [{ source: 'imessage', thread: 'chat:any;-;+2', address: { handle: '+2' } }],
+    })
+    expect(sharesDirectChatThread(instinct, 'chat:any;-;+1')).toBe(true)
+    expect(sharesDirectChatThread(chen, 'chat:any;-;+1')).toBe(false)
+    expect(sharesDirectChatThread(chen, 'chat:any;-;+2')).toBe(true)
   })
 })

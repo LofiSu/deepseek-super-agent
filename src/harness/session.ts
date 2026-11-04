@@ -28,8 +28,18 @@ export function routerSessionId(shard: string): string {
  * chatting at once can bleed into each other's replies.
  */
 export function directChatRouterShard(ticket: Ticket): string | undefined {
-  const direct = ticket.channels.find(channel => channel.source === 'imessage' && channel.thread)
-  return direct?.thread ? `thread:${direct.thread}` : undefined
+  const thread = directChatThread(ticket)
+  return thread ? `thread:${thread}` : undefined
+}
+
+/** The iMessage thread a ticket belongs to, when it is a direct chat. */
+export function directChatThread(ticket: Ticket): string | undefined {
+  return ticket.channels.find(channel => channel.source === 'imessage' && channel.thread)?.thread
+}
+
+/** True when both tickets belong to the same direct iMessage thread. */
+export function sharesDirectChatThread(ticket: Ticket, thread: string): boolean {
+  return ticket.channels.some(channel => channel.source === 'imessage' && channel.thread === thread)
 }
 
 /** Append-only JSONL plus a SQLite copy so a restart can still read the session. */

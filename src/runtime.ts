@@ -20,7 +20,7 @@ import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
-import { directChatRouterShard, SessionJournal, workerSessionId } from './harness/session.ts'
+import { directChatRouterShard, directChatThread, SessionJournal, sharesDirectChatThread, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
 import {
@@ -563,14 +563,29 @@ export class Runtime {
       releaseNode: ticketId => {
         workerMesh.release(ticketId)
       },
+      repliedTo: ticketId => store.listReplies().some(
+        reply => reply.ticketId === ticketId && reply.channel === 'imessage',
+      ),
+      stopAnsweredDirectChat: (ticket, reason) => {
+        engine.decide(ticket.originTriggerId, { kind: 'stop', ticketId: ticket.id, reason })
+      },
       memory: ticket => {
+        // Direct chats are private threads: recall only memories that belong to
+        // the same conversation. Cross-ticket recall stays for repository work.
+        const thread = directChatThread(ticket)
         const entries = longTermMemory.query({
           ticketId: ticket.id,
           text: ticket.title,
-          limit: 3,
+          limit: thread ? 50 : 3,
         })
-        if (entries.length) metrics.increment('memory.recalled', entries.length)
-        return entries.map(entry => ({ id: entry.id, spillId: entry.spillId, text: entry.text }))
+        const scoped = thread
+          ? entries.filter(entry => {
+            const source = store.getDoc<Ticket>('ticket', entry.ticketId)
+            return source ? sharesDirectChatThread(source, thread) : false
+          }).slice(0, 3)
+          : entries
+        if (scoped.length) metrics.increment('memory.recalled', scoped.length)
+        return scoped.map(entry => ({ id: entry.id, spillId: entry.spillId, text: entry.text }))
       },
     })
     late.harness = harness
