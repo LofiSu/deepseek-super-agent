@@ -179,7 +179,9 @@ export function migrate(
     }
   }
 
-  // Fail closed before taking a write lock, so a newer database is untouched.
+  // Wait for a concurrent opener before any read or write, then fail closed
+  // before taking a write lock so a newer database is untouched.
+  db.exec('PRAGMA busy_timeout = 5000')
   if (tableExists(db, 'schema_migrations')) {
     const row = db.prepare(
       'SELECT MAX(version) AS version FROM schema_migrations',
@@ -189,7 +191,6 @@ export function migrate(
     if (known >= latest) return known
   }
 
-  db.exec('PRAGMA busy_timeout = 5000')
   db.exec('BEGIN IMMEDIATE')
   try {
     // Re-read inside the write transaction: another opener may have applied
