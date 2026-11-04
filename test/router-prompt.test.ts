@@ -37,6 +37,8 @@ describe('router prompt', () => {
     expect(systemPrompt('router')).toContain('reply_user')
     expect(systemPrompt('router')).toContain('do not tell the other party to stop replying')
     expect(systemPrompt('router')).toContain('Keep the conversation going')
+    expect(systemPrompt('router')).toContain('Be proactive')
+    expect(systemPrompt('router')).toContain('😺')
   })
 
   it('does not mark a GitHub issue as a direct chat', () => {
