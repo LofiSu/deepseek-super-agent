@@ -393,7 +393,18 @@ export class ImessageSource {
   }
 }
 
-export type OsascriptRunner = (script: string, env: NodeJS.ProcessEnv) => Promise<string>
+/**
+ * Runs one AppleScript. `args` are passed to the script's `on run argv`
+ * handler, never through the environment: AppleScript's `system attribute`
+ * decodes env values with the process/system encoding, so UTF-8 text (any
+ * Chinese, emoji, or accented reply) arrives as mojibake. osascript decodes
+ * argv items as UTF-8, so non-ASCII payloads must travel there.
+ */
+export type OsascriptRunner = (
+  script: string,
+  env: NodeJS.ProcessEnv,
+  args?: readonly string[],
+) => Promise<string>
 
 /** Env names osascript needs; everything else (provider keys, tokens) stays out. */
 const OSASCRIPT_ENV = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR'])
@@ -408,9 +419,11 @@ export function osascriptEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return childEnv
 }
 
-/** Production runner: spawn `osascript` with the script on argv and text/target through env. */
-export const runOsascript: OsascriptRunner = (script, env) => new Promise((resolve, reject) => {
-  const child = spawn('osascript', ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'], env: osascriptEnv(env) })
+/** Production runner: spawn `osascript` with the script and UTF-8 args on argv. */
+export const runOsascript: OsascriptRunner = (script, env, args = []) => new Promise((resolve, reject) => {
+  // `--` stops option parsing so a message beginning with "-" stays an argv item.
+  const argv = ['-e', script, ...(args.length > 0 ? ['--', ...args] : [])]
+  const child = spawn('osascript', argv, { stdio: ['ignore', 'pipe', 'pipe'], env: osascriptEnv(env) })
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', (chunk: Buffer | string) => { stdout += String(chunk) })
@@ -429,8 +442,8 @@ export const runOsascript: OsascriptRunner = (script, env) => new Promise((resol
   })
 })
 
-const APPLE_SEND_SCRIPT = `on run
-  set theText to system attribute "DS_AGENT_IMSG_TEXT"
+const APPLE_SEND_SCRIPT = `on run argv
+  set theText to item 1 of argv
   set theTarget to system attribute "DS_AGENT_IMSG_TARGET"
   set theMode to system attribute "DS_AGENT_IMSG_MODE"
   tell application "Messages"
@@ -673,11 +686,10 @@ export class ChatDbImessageApi implements ImessageApi {
     const externalId = nextExternalId()
     await this.run(APPLE_SEND_SCRIPT, {
       ...process.env,
-      DS_AGENT_IMSG_TEXT: text,
       DS_AGENT_IMSG_TARGET: value,
       DS_AGENT_IMSG_MODE: mode,
       DS_AGENT_IMSG_EXTERNAL_ID: externalId,
-    })
+    }, [text])
     return { externalId }
   }
 }
