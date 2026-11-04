@@ -81,6 +81,37 @@ describe('durable outbox', () => {
     store.close()
   })
 
+  it('does not send the canned acknowledgement into an iMessage conversation', () => {
+    const store = tempStore()
+    const lines: string[] = []
+    const host: Host = {
+      repo: store,
+      now: () => new Date().toISOString(),
+      log: line => { lines.push(line) },
+      metrics: { increment: () => undefined } as unknown as Host['metrics'],
+      scope: { admit: () => ({ listened: true, reason: 'test' }) },
+    }
+    const imessageTicket = ticket({
+      threadKeys: ['imessage:chat:any;-;+1'],
+      channels: [{
+        source: 'imessage',
+        thread: 'chat:any;-;+1',
+        address: { handle: '+1', chatGuid: 'any;-;+1' },
+      }],
+    })
+    const replies = new Replies(host)
+    replies.acknowledge(imessageTicket, 'imessage:chat:any;-;+1')
+    expect(store.listReplies()).toHaveLength(0)
+    expect(store.listOutbox('pending')).toHaveLength(0)
+    expect(lines.some(line => line.includes('ack-suppressed') && line.includes('channel=imessage'))).toBe(true)
+
+    // Only the acknowledgement is suppressed; the real answer still goes out.
+    replies.answer(imessageTicket, '你好，我在。')
+    expect(store.listReplies()).toHaveLength(1)
+    expect(store.listOutbox('pending')).toHaveLength(1)
+    store.close()
+  })
+
   it('flushes through the matching adapter and records the provider id', async () => {
     const store = tempStore()
     store.addReply({

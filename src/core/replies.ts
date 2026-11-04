@@ -7,6 +7,14 @@ export class Replies {
   constructor(private readonly host: Host) {}
 
   acknowledge(ticket: Ticket, threadKey?: string): void {
+    // iMessage is a live conversation: a canned English acknowledgement before
+    // the Router has even decided whether there is work is noise, and it cannot
+    // be retracted when the Router vetoes (the sender sees "Working on it."
+    // followed by silence). Only the real result goes back to a chat.
+    if (channelFor(ticket, threadKey)?.source === 'imessage') {
+      this.host.log(`[reply] ack-suppressed ticketId=${ticket.id} channel=imessage reason=conversational`)
+      return
+    }
     this.send(ticket, `Acknowledged “${ticket.title}”. Working on it.`, 'acknowledgement', threadKey)
   }
 
