@@ -6,11 +6,14 @@ workflow. A release is a reviewed version bump, a green offline check, a
 tarball built from the tagged commit, and a GitHub release attached to that
 tarball.
 
-The release workflow lives in a separate owner-gated PR until that PR is
-approved and merged; this branch does not include it, so run the gate below
-manually in the meantime. Once merged, `.github/workflows/release.yml` is
-`workflow_dispatch` only: it has no tag trigger and does not publish anything.
-It checks a selected ref and uploads the tarball as a workflow artifact.
+`.github/workflows/release.yml` is on `main` (PR #132, merge `a1985c0`). That
+PR was owner-gated and merged outside this session without recorded owner
+approval; the merge is recorded as a process deviation in
+`docs/DEVELOPMENT_STATUS.md` and `docs/AGENT_LOG.md`. The workflow itself is
+`workflow_dispatch` only: it has no tag trigger, does not publish anything, has
+`permissions: contents: read`, and contains no secrets. It checks a selected
+ref and uploads the tarball as a workflow artifact. Publishing remains a
+deliberate human step.
 
 ## 1. Prepare the version
 
@@ -159,7 +162,7 @@ Releases are immutable. To roll back:
 
 ## Workflow permissions and secrets
 
-`.github/workflows/release.yml` (in the separate owner-gated PR) declares
+`.github/workflows/release.yml` (merged in #132 `a1985c0`) declares
 `permissions: contents: read`, runs on `workflow_dispatch`, and contains no
 `secrets.*` references. It installs dependencies, runs the offline gate,
 builds, runs the release check, and uploads the tarball. Publishing is a

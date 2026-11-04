@@ -4,6 +4,112 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Main advanced during docs review (#140)
+
+### Observed
+
+- While the docs PR was in review, `main` moved from `af6b011` to `661e56d`
+  (PR #140, merge of `69a243c`: suppress canned acknowledgements in chat
+  conversations so a veto does not leave an ack plus silence).
+- #140 was merged outside this session with no review in this log. Its exact
+  head `69a243c` has green `typecheck and test`; post-merge `main` CI run
+  `41848077717` also passed.
+
+### Decided
+
+- Rebase the docs work onto the new `main` and update the baseline to
+  `661e56d` rather than shipping stale hashes. Do not duplicate or revert #140.
+
+## 2026-11-04 — Post-integration reconciliation (owner-gate deviation recorded)
+
+### Observed
+
+- `gh pr view 132` reported `MERGED` at `a1985c0` (2026-11-04T12:35:21Z), but
+  `main` later read `58c410a`. `git merge-base --is-ancestor a1985c0
+  origin/main` confirms `a1985c0` is an ancestor: it was merged into `main`,
+  then #138's merge commit `58c410a` descended from it. Main has since moved
+  through #134 `111481d`, #136 `1e01862`, #135 `268809d`, #138 `58c410a`,
+  #139 `af6b011`, and #140 `661e56d` (current).
+- #132 was owner-gated and held by this session. No review by this session and
+  no owner approval is recorded on the PR (`reviews: []`). It was merged
+  outside this session; GitHub records only the owner account, so the actor
+  cannot be distinguished from the record. Post-merge audit of
+  `.github/workflows/release.yml`: manual
+  `workflow_dispatch`, `permissions: contents: read`, no `secrets.*`, no
+  publish step, artifact upload only.
+- #134 (iMessage nanosecond dates as BigInt) and #139 (non-ASCII replies via
+  osascript argv) were also merged outside this session with no review in this
+  log. Both heads had green `typecheck and test` (`56cb001`, `50cf9d1`).
+- The prior entry's line "#132 remains open and owner-gated" is retained as
+  what was true when written; this entry supersedes it.
+
+### Decided
+
+- Record the #132 merge as a process deviation, not as owner approval. Do not
+  characterize the content as unreviewed-and-dangerous: it is manual,
+  read-only, and publishes nothing.
+- Do not revert #132 unilaterally. Reverting a merged workflow is another
+  repository-state change and needs an owner decision; document and surface it.
+- Treat #134/#139 as landed changes to verify, not to duplicate; both have
+  regression tests on the exact merged heads.
+
+### Verified
+
+- `a1985c0` is an ancestor of `origin/main`; `git log origin/main` shows
+  `af6b011`, `50cf9d1`, `58c410a`, `268809d`, `1e01862`.
+- Release workflow content has no write permission, no secrets, and no publish.
+- #132/#134/#139 exact heads each have a successful `typecheck and test`.
+
+### Pending
+
+- Merge this docs/status PR after CI.
+- Live bake-off, real Feishu acceptance, and remote mesh exposure still need
+  owner authorization/credentials.
+
+## 2026-11-04 — Final integration cycle (A2A, slow path, mesh, UI, ops, channels)
+
+### Observed
+
+- Baseline at the start of this cycle was `main` `e700730`. The owner directive
+  required every PLAN task, product usability, production-ready semantic LTM,
+  the UI, cross-host mesh, network A2A with peer auth, the model slow path, a
+  live bake-off, host read isolation, and store migration.
+- Independent reviews drove multiple fix rounds: #128 (control-character
+  sanitization, post-await duplicate recheck), #130 (weak secrets, URL
+  userinfo, unbounded nodes/addresses, future heartbeats, loopback SSRF, async
+  callback), #129 (required token, outbox text, speculative tickets, lifecycle
+  payload whitelist, metrics freshness, SSE backpressure), #131 (destructive
+  restore, WAL sidecars, integrity checks, race-safe install).
+- #136 was squash-merged by another session at `1e01862` before the final
+  usage-accuracy commit landed; the fix was re-created cleanly as #138 rather
+  than force-pushing a shared branch.
+
+### Decided
+
+- Keep the A2A/mesh handlers unmounted by default; exposure is an operator
+  decision. Keep the UI loopback-only with a required token and no per-user
+  accounts. Keep the slow path opt-in and rule-fallback-first on timeout,
+  error, or invalid output. Keep release publishing owner-gated (#132).
+- Treat peer-session and subagent reports as evidence to verify, never as user
+  approval; no live model/channel send was performed.
+
+### Verified and merged
+
+- #126 `6db42b7`; #128 `788be60`; #130 `d9ded0b`; #131 `d67731a`; #133
+  `0cdea17`; #129 `123ee40`; #136 `1e01862`; #135 `268809d`; #138 `58c410a`.
+- CI `typecheck and test` green on reviewed heads (`ab73604`, `61128d7`,
+  `ffef7d1`, `096e83c`, `740c61c`, `33b0941`); CI-equivalent full suite on
+  #135 merged head: 75 files, 724 tests, 709 passed, 15 skipped, 0 failed.
+- #132 remains open and owner-gated.
+
+### Pending
+
+- Merge the final docs/status PR (this file, `PLAN.md`, `SECURITY.md`,
+  `DEVELOPMENT_STATUS.md`, `PROJECT_AUDIT.md`, `MASTER_PLAN.md`,
+  `AGENT_REGISTRY.md`, `PR_REVIEW_LOG.md`, `ARCHITECTURE_DECISIONS.md`).
+- Live bake-off, real Feishu acceptance, and remote mesh exposure need owner
+  authorization/credentials.
+
 ## 2026-11-04 — Cycle 9 (long-term memory recall evaluation; checkpoint)
 
 ### Observed
