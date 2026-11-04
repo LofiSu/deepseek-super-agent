@@ -110,7 +110,7 @@ LofiSu × Grokbot（CoderBot）。
 
 ### §8 未决问题（明确不做进 M11）
 
-- [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime（放置是逻辑的，远端传输外置）
+- [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime（放置是逻辑的，远端传输外置）；等待启动的 Worker 进入有界 FIFO 队列（`DS_AGENT_MESH_QUEUE`，默认 100），非队列启动失败会释放已预留节点并泵送队列
 - [~] 跨 Ticket 长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime（尚未到跨月）
 - [~] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；暂无默认 UI
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
@@ -269,6 +269,9 @@ pnpm ds-agent panel            # Panel · Execution
 pnpm ds-agent retry <ticketId> # 同一 Ticket 上新建 Assignment
 pnpm ds-agent status
 pnpm ds-agent metrics
+pnpm ds-agent serve [--imessage|--feishu]  # 基于持久化状态的 daemon/watchdog 定时器；可选单个入站轮询
+pnpm ds-agent health
+pnpm ds-agent memory --limit 10
 pnpm ds-agent emit im --thread bug-login --text "login still 500"
 pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 ```
@@ -327,6 +330,14 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 保留真实 issue
 
 Router / Watchdog 用轻量模型，Worker 用强一点的。上表是进程级的一个模型。
 
+`ds-agent gateway` 是本地 OpenAI 兼容代理，通过 `<stateDir>/gateway.token`（0600）签发并复用本地 bearer token；设置 `DS_AGENT_GATEWAY_URL` 时 CLI 会复用它。`gateway.token` 为零字节或只有空白字符时，网关会 fail closed 并给出明确错误；恢复是显式的运维操作，按 ADR-009 执行（确认文件确实陈旧后，才删除或替换），不会自动恢复。见 [docs/GATEWAY.md](./docs/GATEWAY.md)。
+
+`ds-agent imessage` 是面向专用 Apple ID 的双向 iMessage 信道：入站只读 `~/Library/Messages/chat.db`（`is_from_me = 0`），出站经 Messages.app 的 `osascript`，文本从环境变量传入。`serve --imessage` 会在 daemon 旁跑同一个入站轮询（默认 `serve` 没有入站轮询）；它沿用同样的默认拒绝发送者准入、cursor 和 outbox，并在 `chat.db` 打开前拒绝启动。见 [docs/IMESSAGE.md](./docs/IMESSAGE.md)。
+
+iMessage 的群聊与 1:1 使用不同线程键，群聊优先级严格为 `chat:<guid>` > `group:<identifier>` > `group-rowid:<rowid>` > `group-unknown:<handle>`；1:1 会话始终是 `handle:<handle>`。`group-rowid` 是每个数据库内的 SQLite 标识，只用于线程身份，从不用于出站。
+
+`serve --feishu` 用 `FEISHU_APP_ID`/`FEISHU_APP_SECRET` 和 `FEISHU_CHAT_ID` 或 `--chat <id>` 轮询一个 Feishu 会话，cursor 存在 SQLite；同一进程不能与 `--imessage` 同时使用。
+
 ## 致谢
 
 LofiSu × Grokbot（CoderBot）。
@@ -345,6 +356,8 @@ gh auth login
 pnpm test
 pnpm demo          # 真实 GitHub issue/comment + 真实模型
 ```
+
+最后一次记录的真实运行（2026-11-03，本机 Magpie）：`pnpm test:live` 22 passed、3 files（195.34 s）；`pnpm test` 384 passed、3 skipped、55 files（622.33 s）。该记录早于当前测试套件的增长，本次 README 更新没有重新运行真实测试。
 
 `pnpm test` 会在 Vitest 启动前，把缺的 `DS_AGENT_API_*` 填成上面这套 Magpie 默认值。`test/setup-live.ts` 只在变量仍然空着时做同样的事，CI 上不做。只放一把厂商 Key 换不掉这三项。E2E 日志目录：`/tmp/ds-agent-live-e2e-logs/`；真实信道 demo 日志与证据：`/tmp/ds-agent-live-e2e-logs/demos/`。
 

@@ -273,6 +273,9 @@ pnpm ds-agent panel
 pnpm ds-agent retry <ticketId>
 pnpm ds-agent status
 pnpm ds-agent metrics
+pnpm ds-agent serve [--imessage|--feishu]  # daemon/watchdog timer over persisted state; optional single inbound poll loop
+pnpm ds-agent health
+pnpm ds-agent memory --limit 10
 pnpm ds-agent emit im --thread bug-login --text "login still 500"
 pnpm ds-agent emit github --pr 42 --text "CI failed on auth test"
 ```
@@ -307,7 +310,7 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # keep the real issues open
 The functional domains keep the T45–T51 ids: evaluation and metrics, extensions, long-term memory, product layer, interop, and security and privacy. The extension services are no longer behind a feature flag; `Runtime.create` always constructs them:
 
 - `runtime.routerShards` — `src/ingress/shards.ts`; configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`. The default shard always exists.
-- `runtime.workerMesh` — `src/harness/mesh.ts`; `DS_AGENT_MESH_CAPACITY` or `RuntimeOptions.meshCapacity`.
+- `runtime.workerMesh` — `src/harness/mesh.ts`; `DS_AGENT_MESH_CAPACITY` or `RuntimeOptions.meshCapacity`; waiting launches use a bounded FIFO queue (`DS_AGENT_MESH_QUEUE`, default 100), and a failed non-queued start releases the reserved node and pumps the queue.
 - `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket.
 - `runtime.lifecycle` — `src/core/lifecycle.ts`; read-model events for panels and CLI views.
 - `runtime.a2aRouter` / `runtime.sendA2A` — `src/channels/a2a.ts`; the Runtime registers its instance as the local recipient.
@@ -350,11 +353,15 @@ Use a small model for the Router and Watchdog. Use a stronger one for the Worker
 
 ## Local gateway and iMessage
 
-`ds-agent gateway` is a local OpenAI-compatible proxy in front of the providers you already configure. It speaks `POST /v1/chat/completions` (JSON and SSE), `/v1/messages` (Anthropic), `/v1/responses`, `/v1/embeddings`, and Gemini `generateContent`, and routes by model, priority, or a `provider/model` prefix with failover and per-provider metering. It mints a local bearer token at `<stateDir>/gateway.token` (0600), and the CLI reuses it when `DS_AGENT_GATEWAY_URL` is set. With a `gateway.config.json` present, `chat` and `imessage` start it in-process. See [docs/GATEWAY.md](./docs/GATEWAY.md).
+`ds-agent gateway` is a local OpenAI-compatible proxy in front of the providers you already configure. It speaks `POST /v1/chat/completions` (JSON and SSE), `/v1/messages` (Anthropic), `/v1/responses`, `/v1/embeddings`, and Gemini `generateContent`, and routes by model, priority, or a `provider/model` prefix with failover and per-provider metering. It mints a local bearer token at `<stateDir>/gateway.token` (0600), and the CLI reuses it when `DS_AGENT_GATEWAY_URL` is set. With a `gateway.config.json` present, `chat` and `imessage` start it in-process. A zero-length or whitespace-only `gateway.token` fails closed with an explicit error, and recovery is an explicit operator action per ADR-009 (remove or replace only after verifying the file is stale), never automatic. See [docs/GATEWAY.md](./docs/GATEWAY.md).
 
 `ds-agent setup --write` discovers local OpenAI-compatible products (Magpie, Ollama, LM Studio, llama.cpp, vLLM) and scaffolds `gateway.config.json`. Fill `apiKey` for any provider that needs auth; the gateway never reads a product's stored credentials.
 
-`ds-agent imessage` is a two-way iMessage channel for a dedicated Apple ID: inbound from `~/Library/Messages/chat.db` (read-only, `is_from_me = 0` only), outbound through Messages.app via `osascript` with the text passed in the environment. It needs macOS Full Disk Access plus Automation permission. See [docs/IMESSAGE.md](./docs/IMESSAGE.md).
+`ds-agent imessage` is a two-way iMessage channel for a dedicated Apple ID: inbound from `~/Library/Messages/chat.db` (read-only, `is_from_me = 0` only), outbound through Messages.app via `osascript` with the text passed in the environment. It needs macOS Full Disk Access plus Automation permission. `serve --imessage` runs the same inbound poll loop alongside the daemon (default `serve` has no inbound loop); it uses the same default-deny sender admission, cursor, and outbox, and refuses to start before `chat.db` opens. See [docs/IMESSAGE.md](./docs/IMESSAGE.md).
+
+Thread keys are separate for groups and 1:1: group precedence is `chat:<guid>` > `group:<identifier>` > `group-rowid:<rowid>` > `group-unknown:<handle>`, while a 1:1 thread is always `handle:<handle>`. `group-rowid` is a per-database SQLite identity used only for thread identity and never for outbound.
+
+`serve --feishu` polls one Feishu chat with `FEISHU_APP_ID`/`FEISHU_APP_SECRET` and `FEISHU_CHAT_ID` or `--chat <id>`, stores its cursor in SQLite, and cannot be combined with `--imessage` in one process.
 
 ## Credits
 
@@ -374,6 +381,8 @@ gh auth login
 pnpm test
 pnpm demo          # real GitHub issues/comments + live model
 ```
+
+Last recorded live run (2026-11-03, local Magpie): `pnpm test:live` 22 passed, 3 files (195.34 s); `pnpm test` 384 passed, 3 skipped, 55 files (622.33 s). It predates the current suite growth and was not re-run for this README update.
 
 `pnpm test` fills any missing `DS_AGENT_API_*` with those Magpie defaults before Vitest starts. `test/setup-live.ts` does the same only when the variables are still unset, and it skips that fill on CI. A provider key alone does not replace the three. Transcripts from the E2E cases land under `/tmp/ds-agent-live-e2e-logs/`; real-channel demo logs and proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`. Update the pass/fail counts in this section after each live run.
 
