@@ -54,6 +54,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Trigger batching.** A positive `batchWindowMs` folds same-Thread Triggers into one Eval. Covered by `test/batching-bench.test.ts`; the real-channel demo uses the default window (0), so it does not exercise folding.
 - [~] **Router sharding / multi-layer filter.** `RouterShardRegistry` is always wired into the Runtime (PLAN T09/T46). Configure with `DS_AGENT_SHARDS` or `RuntimeOptions.routerShards`; the default shard always exists.
 - [x] **Isolated Worker context.** Each Worker has its own Session and the full tool set.
+- [x] **Layered prompt stack.** Identity, owner voice, standing instructions, owner context, rules, memory guidance, style, and the role contract are assembled in dependency order. `PERSONA.md`, `AGENTS.md`, and `USER.md` in the agent home refine the owner-editable layers; `ds-agent prompt --layers` shows every layer and its source. See [docs/PROMPTS.md](docs/PROMPTS.md).
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
 - [x] **Subagent / Team inside a Worker.** Async jobs + `spawn_team`/`team_status`/`complete_team` → member jobs → `TEAM_MEMBER_DONE` → aggregate report. Team rows persist in SQLite and `ds-agent team`/`teams` inspect them offline. Router only sees the parent Assignment report (T14; unit + harness + live e2e).
@@ -72,7 +73,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Inline.** Short summaries stay in context (`memory/recall`).
 - [x] **Spill.** Long content is stored out of band, with an id (`store/spill`).
 - [x] **Locality.** IDs and summaries first. Expand on demand (`read_object`).
-- [x] **Chain of Recall.** Pull a spill id or object ref when needed (minimal T25).
+- [x] **Chain of Recall.** Typed `kind:id` handles; `read_object` returns the next hop (`memory/graph`).
 - [x] **Speculative work.** A background Assignment can run first.
 - [x] **Deliver gate.** `deliver=true`, or the result is dropped. The demo checks this.
 
@@ -114,7 +115,7 @@ Article evals. They do not block the release.
 Kept out of M11.
 
 - [~] Router scale-out / Worker-direct topology (§8.1) — always-wired `RouterShardRegistry` + `WorkerMeshRegistry`; `RemoteMeshRegistry`/`MeshInbox` add authenticated A2A registration/heartbeat/dispatch, but no listener starts by default and remote dispatch is not connected to the local queue yet.
-- [~] Memory that spans tickets (§8.1) — always-wired `SpillBackedLongTermMemory` with retention, dedupe, and lexical/tag-hop recall; no embedding recall and not month-scale yet.
+- [~] Memory that spans tickets and months (§8.1) — always-wired `SpillBackedLongTermMemory`: hot tickets/decisions (1000 / 90 days) plus cold Thread digests (200 / 3650 days); calendar-month behavior is bounded, not measured across real months
 - [x] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model plus `ds-agent ui`, a read-only, required-token loopback dashboard with sanitized lifecycle events and no message bodies.
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
 - [x] Panel · Execution — `ds-agent panel` derives Open/Pending/Working/Waiting/Blocked/Awaiting from Ticket facts, with Mandate, Executor Session, directory, report, and Outbox delivery counts (`src/core/panel.ts`)
@@ -317,7 +318,7 @@ The functional domains keep the T45–T51 ids: evaluation and metrics, extension
 
 - `runtime.routerShards` — `src/ingress/shards.ts`; configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`. The default shard always exists.
 - `runtime.workerMesh` — `src/harness/mesh.ts`; `DS_AGENT_MESH_CAPACITY` or `RuntimeOptions.meshCapacity`; waiting launches use a bounded FIFO queue (`DS_AGENT_MESH_QUEUE`, default 100), and a failed non-queued start releases the reserved node and pumps the queue.
-- `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket.
+- `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket and per Router Decision, with a cold Thread-digest tier for month-scale recall.
 - `runtime.lifecycle` — `src/core/lifecycle.ts`; read-model events for panels and CLI views.
 - `runtime.a2aRouter` / `runtime.sendA2A` — `src/channels/a2a.ts`; the Runtime registers its instance as the local recipient.
 

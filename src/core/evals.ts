@@ -1,4 +1,5 @@
 import { nextBatch } from '../ingress/batch.ts'
+import { refsForDecision } from '../memory/graph.ts'
 import { UserError } from '../shared/errors.ts'
 import type { AssessmentOutcome } from '../shared/ports.ts'
 import { threadKey, type Decision, type DecisionKind, type Disposition, type Strength, type Thread, type Ticket, type Trigger } from '../shared/types.ts'
@@ -169,8 +170,10 @@ export class Evals {
       reason: input.reason,
       strength: input.strength,
     }
+    decision.refs = refsForDecision(decision)
     this.host.repo.putDoc('decision', decision.id, decision)
     this.host.repo.addEvent('decision.recorded', { decisionId: decision.id, kind: input.kind })
+    this.notifyDecision(decision)
     const ticket = input.ticketId ? ` ticketId=${input.ticketId}` : ''
     this.host.log(`[engine] Evals.${input.kind} thread=${input.thread.key}${ticket} reason=${input.reason}`)
     return decision
@@ -244,9 +247,22 @@ export class Evals {
       reason: outcome.reason,
       strength,
     }
+    decision.refs = refsForDecision(decision)
     this.host.repo.putDoc('decision', decision.id, decision)
     this.host.repo.addEvent('decision.recorded', { decisionId: decision.id, kind: outcome.kind })
+    this.notifyDecision(decision)
     return decision
+  }
+
+  /** A Decision is Router global memory; observers never abort the transaction. */
+  private notifyDecision(decision: Decision): void {
+    const hook = this.host.onDecision
+    if (!hook) return
+    try {
+      hook(decision)
+    } catch (error) {
+      this.host.log(`[hook] hook=decision decisionId=${decision.id} error=${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** Delegate to the shared stop path so scratch cleanup runs for every entrypoint. */

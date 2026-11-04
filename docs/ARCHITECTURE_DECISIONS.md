@@ -708,3 +708,82 @@ rewrite `PLAN.md`; link to the contract instead.
     pre-existing backup and leaves no rollback.
   - **Auto-publish from the release workflow.** Needs secrets and production
     authority the program does not have.
+
+## ADR-015 — Memory follows the article's object graph, Router decision memory, and two-tier retention
+
+- **Date:** 2026-11-04
+- **Status:** accepted and implemented (2026-11-04).
+- **Context:** ADR-010 made long-term recall lexical and deterministic, but the
+  article's §3.3 Chain of Recall is an **object graph**: every Trigger, Thread,
+  and Worker Session gets an id; each injected object inlines the ids of its
+  tightly related neighbours; a recalled object inlines the next hop. The
+  shipped `read_object` only paged a spill body and returned no neighbours, and
+  §2.1's Router was described as the global sequence point and memory while the
+  implementation only remembered finished Tickets. §8.1 names month-scale
+  memory as the remaining scalability bottleneck.
+- **Decision:**
+  1. **Typed handles and refs.** `src/memory/graph.ts` defines one handle per
+     object (`trigger:<id>`, `thread:<key>`, `ticket:<id>`, `decision:<id>`,
+     `session:<id>`, `channel:<source>:<thread>`, `actor:<source>:<id>`).
+     `refsForTrigger`, `refsForTicket`, and `refsForDecision` build one-hop
+     ref lists; `inlineOrSpill` returns them alongside the inline result, the
+     Router/Worker task lines carry `refs=`, and the same list is persisted on
+     the spill. The trigger text stays clean for user-facing acknowledgements.
+  2. **Schema v4.** `spills.refs` stores that JSON list. Existing rows default
+     to `[]`; body and grants are untouched.
+  3. **Chain of Recall is resolved, not trusted.** `read_object` accepts a
+     spill id or a `kind:id` handle. `readObjectFor` re-checks the reader
+     ticket on every hop: trigger/thread/ticket/decision require a shared
+     Thread; a session requires the caller's own session. A handle never
+     becomes a capability.
+  4. **Router global memory.** Every persisted Decision (accept, ignore, stop,
+     unavailable) becomes a `kind=decision` LTM entry with thread/ticket/
+     trigger refs. The Router prompt and main-agent assessment receive
+     `recentDecisions()` (the global sequence point) plus
+     `forThreads(ticket.threadKeys)`, so a same-Thread decision is visible
+     without a lexical title match and a cross-channel decision can steer a
+     new Ticket. The Worker receives lexical query hits plus the same-Thread
+     entries.
+  5. **Long-range memory.** Hot ticket/decision entries keep the existing
+     1000-entry / 90-day bound. Before a hot entry is pruned, its summary is
+     folded into one bounded cold Thread digest (200 entries / 3650 days).
+     `query({ tier: 'cold' })` searches the digests. This is the concrete
+     answer to §8.1: month-scale recall does not require unbounded history.
+  6. **The Router is a resident Session.** `Runtime.start()` arms every
+     configured shard before recovery or assessment. `Harness.armRouter`
+     persists one `sessions` row per shard and appends `session.started`;
+     a later process keeps the original `createdAt` and appends
+     `session.resumed`. Every admitted or filtered Trigger, Decision, Ticket
+     created/ended event, and assessment outcome is appended as a redacted,
+     bounded `observe.*`/`assessment` entry. Router turns and main-agent
+     assessment share the shard's Session chain (`routerExclusive`), and
+     assessment receives `routerHistory()` as `routerSession`. The observed
+     entries have no model role, so they are durable Session memory rather
+     than fabricated user turns in the replay.
+- **Security:** redaction runs before every spill and summary. `query()` still
+  requires a reader `ticketId` and grants each hit. `readObjectFor` resolves
+  only ids and re-checks the reader's Thread relation; it does not grant the
+  target. `ltm` ids remain references, not capabilities.
+- **Determinism:** refs are plain JSON, ordering is stable, and handle
+  resolution is synchronous over SQLite. No network, model, provider, or
+  wall-clock-dependent ranking is added. Hot/cold pruning uses the injectable
+  clock and runs inside the write transaction.
+- **Retention defaults:** hot 1000 / 90 days; cold 200 / 3650 days. Both are
+  configurable (`DS_AGENT_MEMORY_MAX_ENTRIES`, `DS_AGENT_MEMORY_MAX_AGE_DAYS`,
+  `DS_AGENT_MEMORY_COLD_MAX_ENTRIES`, `DS_AGENT_MEMORY_COLD_MAX_AGE_DAYS`) and
+  `0` disables a dimension.
+- **Evidence:** `test/memory-graph.test.ts` covers spill refs, trigger→thread→
+  ticket hops, cross-ticket denial, decision memory, and cold-digest creation.
+  `test/long-term-memory.test.ts`, `test/memory-recall-eval.test.ts`,
+  `test/spill.test.ts`, and `test/store-migration.test.ts` remain green;
+  schema v4 upgrades a legacy database without rewriting body rows.
+- **Alternatives rejected:**
+  - **A separate graph database or unbounded edge table.** The existing JSON
+    documents and spill refs already carry the same ids; a new store would add
+    migration and query cost without a measured need.
+  - **Making a ref a capability.** It would let any recalled id read an
+    unrelated Ticket's body and bypass the per-hit grant.
+  - **Remembering only Tickets.** It loses mid-task Router decisions (the
+    "plan A then plan B" case) and makes the Router's global memory a fiction.
+  - **Keeping pruned history forever.** It contradicts §8.1's cost concern;
+    bounded cold digests preserve the summary without unbounded growth.

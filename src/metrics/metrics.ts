@@ -28,6 +28,7 @@ export const METRIC_NAMES = [
   'mesh.queue_drained',
   'memory.remembered',
   'memory.recalled',
+  'memory.decision',
   'a2a.delivery',
 ] as const
 
@@ -70,6 +71,7 @@ function blankCounters(): Record<MetricName, number> {
     'mesh.queue_drained': 0,
     'memory.remembered': 0,
     'memory.recalled': 0,
+    'memory.decision': 0,
     'a2a.delivery': 0,
   }
 }

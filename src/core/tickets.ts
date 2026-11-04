@@ -1,4 +1,5 @@
 import { grantTicketSpill } from '../memory/acl.ts'
+import { refsForDecision, refsForTicket } from '../memory/graph.ts'
 import { isSpeculative } from '../speculate/gate.ts'
 import { UserError } from '../shared/errors.ts'
 import { threadKey, type Decision, type Strength, type Thread, type Ticket, type Trigger } from '../shared/types.ts'
@@ -68,6 +69,7 @@ export class Tickets {
       originTriggerId: input.primary.id,
       createdAt: now,
     }
+    ticket.refs = refsForTicket(ticket)
     this.host.repo.putDoc('ticket', id, ticket)
     grantTicketSpill(this.host.repo, spillId, id)
     for (const row of ticket.inputs) grantTicketSpill(this.host.repo, row.spillId, id)
@@ -92,12 +94,14 @@ export class Tickets {
       reason: input.reason ?? (speculative ? 'speculative' : 'accepted'),
       strength: input.strength,
     }
+    decision.refs = refsForDecision(decision)
     this.host.repo.putDoc('decision', decision.id, decision)
     this.host.log(`[engine] Tickets.create ticketId=${id} title=${ticket.title} speculative=${ticket.speculative}`)
     this.host.log(`[engine] Evals.accept thread=${input.thread.key} ticketId=${id} strength=${input.strength}`)
     this.host.metrics.increment('eval.accept')
     this.host.repo.addEvent('ticket.created', { ticketId: id, decisionId: decision.id, speculative })
     this.host.repo.addEvent('decision.recorded', { decisionId: decision.id, kind: 'accept' })
+    this.notifyDecision(decision)
     if (speculative) this.host.log(`[speculate] speculative silent ticketId=${id} until deliver`)
     else this.replies.acknowledge(ticket, threadKey(input.primary.threads[0]!))
     this.notifyTicket('created', ticket)
@@ -112,6 +116,17 @@ export class Tickets {
       hook(ticket)
     } catch (error) {
       this.host.log(`[hook] hook=${kind} ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** A Decision is Router global memory; observers never abort the transaction. */
+  private notifyDecision(decision: Decision): void {
+    const hook = this.host.onDecision
+    if (!hook) return
+    try {
+      hook(decision)
+    } catch (error) {
+      this.host.log(`[hook] hook=decision decisionId=${decision.id} error=${error instanceof Error ? error.message : String(error)}`)
     }
   }
 

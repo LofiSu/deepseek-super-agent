@@ -91,6 +91,16 @@ Restart replay remains a boundary: an in-flight turn is not reconstructed after 
 restart, and unfinished jobs/sessions are not replayed. This is deliberate and
 documented, not hidden behavior.
 
+`prompts.ts` assembles the stable system-prompt stack in dependency order:
+identity, owner persona, standing instructions, owner context, reach, rules,
+memory guidance, style, long tasks, then the role contract. `PERSONA.md`,
+`AGENTS.md`, and `USER.md` in the agent home refine the owner-editable layers;
+`DS_AGENT_PERSONA` / `DS_AGENT_INSTRUCTIONS` / `DS_AGENT_OWNER` seed them when a
+file is absent. Files are capped and never override the rules or the role.
+Turn facts (principal, channel, recalled memory, clock, task) stay in the turn
+prompt so the system prefix remains cacheable. `ds-agent prompt --layers` shows
+the stack and each layer's source; see `docs/PROMPTS.md`.
+
 ## M2 — store
 
 `sqlite.ts` provides atomic document/spill operations, `replaceSpill` upsert,
@@ -158,6 +168,9 @@ Active rules are logged once at `Runtime.create` as
   in priority order, or `['default']`.
 - The shard list is stored in `TriggerTrust.shards` and `Disposition.shards`.
 - The Harness runs one Router session per matching shard, then starts the Worker.
+- `Runtime.start()` arms every shard as a resident Session before recovery or
+  assessment. The `sessions` row persists across Tickets; a later process keeps
+  its `createdAt` and journals `session.resumed`.
 - Configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`.
   Malformed JSON is logged and ignored, leaving the default shard.
 
@@ -172,16 +185,45 @@ bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
 
 ## M6 — memory
 
-`recall.ts` stores large bodies as spill and returns an inline summary.
-`long-term.ts` persists one entry per finished ticket:
+`recall.ts` stores large bodies as spill and returns an inline summary plus a
+separate `refs` list. `graph.ts` gives every context object a stable `kind:id`
+handle and builds one-hop ref lists for Trigger, Thread, Ticket, Decision,
+Session, Channel, and Actor. Spill rows persist those refs (`spills.refs`,
+schema v4). Router/Worker task lines carry `refs=`; the trigger text itself
+stays clean for user-facing acknowledgements.
 
-- On every terminal path, `remember(ticket)` upserts `ltm_<ticketId>` with the
-  title, brief, and last report, then grants the ticket access to its spill.
-- Text is redacted before it reaches the spill, including `put()` callers.
-- The next ticket queries by title (three most recent hits), receives a spill
-  grant for each hit, and gets `memory=<id> spillId=<id> text=<summary>` lines
-  in the Worker task.
-- Recall requires the reader ticket id; an `ltm` id alone is not a capability.
+`long-term.ts` persists:
+
+- one entry per finished ticket (`ltm_<ticketId>`): title, brief, and last
+  report, plus ticket/thread/trigger/channel refs;
+- one entry per Router Decision (`ltm_decision_<decisionId>`): kind, thread,
+  reason, trigger ids, and refs. Accept/ignore/stop/unavailable all count, so
+  "plan A here, plan B there" survives across Tickets and channels.
+
+Both are `tier=hot`. On every terminal path, `remember(ticket)` upserts the
+ticket entry and grants that ticket access to its spill. Text is redacted
+before it reaches the spill, including `put()` callers. The next ticket
+queries by title (three most recent hits), receives a spill grant for each
+hit, and gets `memory=<id> spillId=<id> refs=<handles> text=<summary>` lines
+in the Worker task. The Router prompt and the main-agent assessment receive
+`recentDecisions()` (the global sequence point) plus
+`forThreads(ticket.threadKeys)`, so a same-Thread decision is visible without a
+lexical title match and a cross-channel decision can steer a new Ticket.
+
+The Router is a resident Session, not a per-Ticket artifact. `Runtime.start()`
+arms every Router shard; each shard keeps one `sessions` row and one journal.
+Admitted/filtered Triggers, Decisions, Ticket created/ended events, and
+assessment outcomes are appended as redacted, bounded `observe.*`/`assessment`
+entries. Router turns and assessment are serialized on that shard's session
+chain, and assessment receives the last 12 entries as `routerSession`. The
+entries carry no model role, so replay does not treat a journal event as a user
+turn.
+
+Recall requires the reader ticket id; an `ltm` id alone is not a capability.
+`read_object` accepts a spill id or a `kind:id` handle. Every hop re-checks
+the reader ticket: a trigger/thread/ticket/decision is readable only when the
+reader owns or shares its Thread; a session only when it is the caller's own
+session. A handle is a pointer, never a grant.
 
 Recall is lexical-first and deterministic (ADR-010, implemented in
 `src/memory/long-term.ts`). `query()`:
@@ -200,14 +242,24 @@ Recall is lexical-first and deterministic (ADR-010, implemented in
   hop without a new link table. Entries without a readable spill are never
   eligible.
 - Orders by `tagHits` desc, then `textHits` desc (each query token capped at
-  5), then `hopScore` desc, then `createdAt` desc, then `id` desc. There is no
-  randomness, provider call, or wall-clock-dependent ranking.
+  5), then `hopScore` desc, then hot before cold, then `createdAt` desc, then
+  `id` desc. There is no randomness, provider call, or wall-clock-dependent
+  ranking.
 
-Security and storage are unchanged: `query()` throws without a reader ticket
-id; every ranked hit, including an expanded one, grants that ticket access to
-the exact spill; an `ltm` id alone is never a capability; redaction still runs
-before storage; and there is no lookup-by-id API. `remember()`, dedupe,
-retention/prune, `forget`, and the store schema are untouched.
+Retention is two-tier. Hot ticket/decision entries default to 1000 entries /
+90 days (`DS_AGENT_MEMORY_MAX_ENTRIES`, `DS_AGENT_MEMORY_MAX_AGE_DAYS`).
+Before a hot entry is pruned, its summary is folded into a cold Thread digest
+(`ltm_digest_<thread>`), which defaults to 200 entries / 3650 days
+(`DS_AGENT_MEMORY_COLD_MAX_ENTRIES`, `DS_AGENT_MEMORY_COLD_MAX_AGE_DAYS`).
+`query({ tier: 'cold' })` searches only digests. Both prune passes run inside
+the same transaction as the write; `forget()` deletes the entry, its spill,
+and its grants.
+
+Security and storage: `query()` throws without a reader ticket id; every
+ranked hit, including an expanded one, grants that ticket access to the exact
+spill; an `ltm` id alone is never a capability; redaction still runs before
+storage; and there is no lookup-by-id API. Object handles follow the same
+rule: `readObjectFor` re-checks the reader ticket's Thread on every hop.
 
 Evidence: `test/memory-recall-eval.test.ts` measures the shipped `query()` on
 the original 11 ADR-010 queries (macro recall@3 11/11 = 1.000; exact 2/2, word
@@ -358,6 +410,7 @@ npx vitest run test/runtime-integration.test.ts   8 tests: shards, mesh, memory,
 npx vitest run test/router-shards.test.ts          route/priority/filter contracts
 npx vitest run test/worker-mesh.test.ts            capacity/least-loaded/release
 npx vitest run test/long-term-memory.test.ts       persistence, normalization, tag/hop recall, ACL, redaction
+npx vitest run test/memory-graph.test.ts           refs persistence, trigger→thread→ticket hops, decision memory, cold digest
 npx vitest run test/memory-recall-eval.test.ts     offline recall@3, held-out, determinism, 1000-entry bound
 npx vitest run test/lifecycle-a2a.test.ts          lifecycle bus + envelope delivery
 npx vitest run test/runtime-wiring.test.ts         default-path service construction

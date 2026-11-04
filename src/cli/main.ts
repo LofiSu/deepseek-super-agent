@@ -6,13 +6,14 @@ import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
+import { buildSystemPrompt, describePromptLayers, loadPromptFiles } from '../harness/prompts.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import type { A2AEnvelope } from '../channels/a2a.ts'
 import type { LongTermMemoryEntry } from '../memory/long-term.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
-import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
+import type { JobRow, Role, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
 import { startEmbeddedGateway } from '../gateway/embedded.ts'
@@ -142,6 +143,8 @@ function help(): void {
   pnpm ds-agent metrics
   pnpm ds-agent memory [--limit 10]   # persisted cross-ticket memories
   pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
+  pnpm ds-agent prompt [--role router|worker|watchdog] [--layers] [--json]
+                            # the layered system prompt and where each layer comes from
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -496,6 +499,9 @@ async function main(): Promise<void> {
           recent: memories.slice(-limit).map(entry => ({
             id: entry.id,
             ticketId: entry.ticketId,
+            kind: entry.kind ?? 'note',
+            tier: entry.tier ?? 'hot',
+            refs: entry.refs?.map(ref => ref.id) ?? [],
             text: entry.text,
           })),
         }, null, 2))
@@ -750,6 +756,26 @@ async function main(): Promise<void> {
     await withRuntime(runtime => {
       runtime.ingest(githubTrigger({ pr, text, speculate: option('speculate') === 'true' }))
     })
+    return
+  }
+  if (cmd === 'prompt') {
+    const role = option('role') ?? 'router'
+    if (role !== 'router' && role !== 'worker' && role !== 'watchdog') {
+      throw new Error('role must be router, worker, or watchdog')
+    }
+    const input = { role: role as Role, ...loadPromptFiles(home, process.env) }
+    const layers = describePromptLayers(input)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(layers, null, 2))
+      return
+    }
+    if (process.argv.includes('--layers')) {
+      for (const layer of layers) {
+        console.log(`${layer.id.padEnd(14)}${layer.text.length} chars  ${layer.source}`)
+      }
+      return
+    }
+    console.log(buildSystemPrompt(input))
     return
   }
   throw new Error(`unknown command ${cmd}`)
