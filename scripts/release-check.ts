@@ -224,7 +224,8 @@ export function checkRelease(options: ReleaseCheckOptions = {}): ReleaseCheckRes
   )
 
   const runPack = options.pack ?? (repoRoot => {
-    const result = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    // The check already requires a built tree, so skip prepack's second build.
+    const result = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
       cwd: repoRoot,
       encoding: 'utf8',
       timeout: 180_000,

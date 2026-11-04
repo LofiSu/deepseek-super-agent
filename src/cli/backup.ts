@@ -28,6 +28,8 @@ export interface BackupCommandOptions {
 export interface RestoreCommandOptions {
   readonly home: string
   readonly input: string
+  /** Required to replace an existing `ds-agent.db`; the old set is kept. */
+  readonly force?: boolean
 }
 
 function errorMessage(error: unknown): string {
@@ -60,13 +62,13 @@ export function runBackupCommand(options: BackupCommandOptions): StoreBackupResu
 /** Restore the store and print a human-readable result. Throws on refusal. */
 export function runRestoreCommand(options: RestoreCommandOptions): StoreRestoreResult {
   const { home, input } = options
-  const result = restoreStore(home, input)
+  const result = restoreStore(home, input, { force: options.force === true })
   const legacy = result.schemaVersion === 0
     ? ' The backup has no schema_migrations ledger (legacy schema 0); the next ds-agent start migrates it.'
     : ''
   console.log(
     `Restored ${path.join(path.resolve(home), 'ds-agent.db')} from ${path.resolve(input)} `
-    + `(${result.bytes} bytes, schema v${result.schemaVersion}).${legacy}`,
+    + `(${result.bytes} bytes, schema v${result.schemaVersion}, sha256=${result.sha256}).${legacy}`,
   )
   return result
 }
@@ -75,8 +77,10 @@ export function backupUsage(): string {
   return [
     'Usage:',
     '  ds-agent backup --out <file.db> [--home <state-dir>] [--allow-any-extension]',
-    '  ds-agent restore --input <file.db> [--home <state-dir>]',
+    '  ds-agent restore --input <file.db> [--home <state-dir>] [--force]',
     '',
+    'Restore replaces an existing store only with --force. It first moves the',
+    'old database and WAL sidecars to <state-dir>/backups/pre-restore-<timestamp>.db*.',
     'The target process must be stopped before restore.',
   ].join('\n')
 }
@@ -111,7 +115,11 @@ export function runBackupCli(
         allowUnknownExtension: argv.includes('--allow-any-extension'),
       })
     } else {
-      runRestoreCommand({ home, input: input! })
+      runRestoreCommand({
+        home,
+        input: input!,
+        force: argv.includes('--force'),
+      })
     }
     return 0
   } catch (error) {

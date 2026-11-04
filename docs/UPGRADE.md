@@ -117,31 +117,54 @@ The restore path probes for an active write lock and fails with a clear message
 when one is held, but an idle process can hold no lock at the instant checked;
 the probe is not a substitute for stopping it.
 
+Replacing an existing `ds-agent.db` requires `--force`. Without it, restore
+refuses rather than silently overwriting state.
+
 ```bash
 # Once wired:
-ds-agent restore --input "$HOME/ds-agent-backup-YYYYMMDDTHHMMSSZ.db"
+ds-agent restore --input "$HOME/ds-agent-backup-YYYYMMDDTHHMMSSZ.db" --force
 
 # In this branch:
 npx tsx src/cli/backup.ts \
   --home "${DS_AGENT_HOME:-./.ds-agent}" \
-  --input "$HOME/ds-agent-backup-YYYYMMDDTHHMMSSZ.db"
+  --input "$HOME/ds-agent-backup-YYYYMMDDTHHMMSSZ.db" \
+  --force
 ```
 
-`restoreStore` / `runRestoreCommand` behavior:
+`restoreStore` / `runRestoreCommand` behavior, in order:
 
-- Opens the backup read-only and reads its schema version. A file with no
-  `schema_migrations` table is treated as legacy schema 0.
-- Refuses a backup newer than this build's `LATEST_SCHEMA_VERSION`.
-- Copies to a temporary file in the state home, fsyncs it, removes the
-  replaced database's stale `-wal`/`-shm` files, and renames the temporary
-  file over `ds-agent.db`.
-- Does not migrate the restored file. The next `Store` open does that.
-  Restoring a legacy (schema 0) backup therefore prints a note, and the next
-  start migrates it to 3.
+1. Opens the backup read-only and runs `PRAGMA integrity_check`. The result
+   must be exactly `ok`; a file with a readable schema ledger but damaged
+   pages is refused before the live store is touched.
+2. Reads the ledger. A file with no `schema_migrations` table is treated as
+   legacy schema 0. A backup newer than this build's `LATEST_SCHEMA_VERSION`
+   is refused.
+3. Refuses an existing store unless `force` is set, and probes for an active
+   write lock.
+4. Copies the backup to a temporary file in the state home, fsyncs it, and
+   opens it read-only to verify `integrity_check` and the expected schema
+   version. The candidate must pass before the old set moves.
+5. With `force`, moves the old `ds-agent.db` and any `-wal`/`-shm` sidecars
+   together into a private `<home>/backups/` directory (mode `0700`) as
+   `pre-restore-<timestamp>.db`, `.db-wal`, and `.db-shm` (mode `0600`). The
+   old set is never deleted before the new file is ready.
+6. Renames the verified temporary file over `ds-agent.db` and fsyncs the
+   directory. If the install fails, the old database and sidecars are moved
+   back from the pre-restore set and the store remains recoverable.
+7. Prints the backup's SHA-256 in the result for audit logs.
+
+Restore does not delete the pre-restore set on success. Keep it until the
+restored store has been verified; it is the fastest rollback path if the
+restored data is wrong.
+
+The restored file is not migrated during restore. The next `Store` open does
+that. Restoring a legacy (schema 0) backup therefore prints a note, and the
+next start migrates it to 3.
 
 Restoring a backup from the same or an older schema is the supported rollback
 across a failed upgrade. Restoring a backup from a newer schema is refused; it
-must be opened by a build that supports that version.
+must be opened by a build that supports that version. `backupStore` likewise
+refuses to snapshot a live store recorded above this build's supported schema.
 
 ## Verification queries
 
@@ -178,8 +201,9 @@ open.
 3. If the previous binary supports the current schema version (table above),
    start it; no restore is needed.
 4. If the schema advanced past the previous binary's maximum, restore the
-   pre-upgrade backup with the previous binary's `restore` path (or by
-   replacing `ds-agent.db` while stopped), then remove any stale `-wal`/`-shm`
-   files.
+   pre-upgrade backup with the previous binary's `restore --input ... --force`
+   path (or by replacing `ds-agent.db` while stopped), then remove any stale
+   `-wal`/`-shm` files. Alternatively, use the `backups/pre-restore-*.db*`
+   set retained by the last restore.
 5. Verify with the queries above and `ds-agent health`.
 6. Never delete or rewrite `schema_migrations` to force a downgrade.

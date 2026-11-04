@@ -19,7 +19,7 @@
  * writer but is best-effort, not a guarantee.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -47,11 +47,28 @@ export interface StoreBackupResult {
 export interface StoreRestoreResult {
   readonly schemaVersion: number
   readonly bytes: number
+  /** SHA-256 of the backup file that was installed, for audit logs. */
+  readonly sha256: string
 }
 
 export interface BackupStoreOptions {
   /** Allow an output name that does not end in `.db` or `.sqlite`. */
   readonly allowUnknownExtension?: boolean
+}
+
+export interface RestoreStoreOptions {
+  /**
+   * Replace an existing `ds-agent.db`. Without it, restore refuses when a
+   * store is present. The old database and its WAL sidecars are moved to
+   * `<home>/backups/pre-restore-<timestamp>.db*` before installation.
+   */
+  readonly force?: boolean
+  /**
+   * Test seam for the final atomic replace. Production uses `fs.renameSync`.
+   * The hook runs after the old store has been moved aside, so a thrown error
+   * exercises the rollback path.
+   */
+  readonly replace?: (from: string, to: string) => void
 }
 
 interface SchemaVersionRow {
@@ -60,6 +77,45 @@ interface SchemaVersionRow {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** SHA-256 of a file, streamed in fixed-size chunks so large stores are fine. */
+function sha256File(file: string): string {
+  const hash = createHash('sha256')
+  const fd = fs.openSync(file, 'r')
+  try {
+    const buffer = Buffer.allocUnsafe(1024 * 1024)
+    let read: number
+    while ((read = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, read))
+    }
+  } finally {
+    fs.closeSync(fd)
+  }
+  return hash.digest('hex')
+}
+
+/**
+ * Refuse a file whose pages are structurally damaged even if its header and
+ * schema ledger still parse. `integrity_check` returns exactly one `ok` row
+ * for a healthy database; any error or other row means the file must not
+ * replace the live store.
+ */
+function assertIntegrity(db: DatabaseSync, file: string, label: string): void {
+  let results: string[]
+  try {
+    const rows = db.prepare('PRAGMA integrity_check').all() as { integrity_check: string }[]
+    results = rows.map(row => String(row.integrity_check))
+  } catch (error) {
+    throw new UserError(
+      `${label} integrity check failed: ${file} (${errorMessage(error)})`,
+    )
+  }
+  if (results.length !== 1 || results[0] !== 'ok') {
+    throw new UserError(
+      `${label} integrity check failed: ${file} (${results.join('; ') || 'no result'})`,
+    )
+  }
 }
 
 /** Resolve symlinks where possible without requiring the final path to exist. */
@@ -211,6 +267,12 @@ export function backupStore(
     // committed state, including uncheckpointed WAL frames.
     db.exec('PRAGMA busy_timeout = 5000')
     const schemaVersion = readSchemaVersion(db)
+    if (schemaVersion > LATEST_SCHEMA_VERSION) {
+      throw new UserError(
+        `store schema version ${schemaVersion} is newer than this build supports `
+        + `(${LATEST_SCHEMA_VERSION}); upgrade ds-agent before backing up this store`,
+      )
+    }
     db.prepare('VACUUM INTO ?').run(out)
     // The snapshot contains prompts, messages, and spills; keep it private.
     fs.chmodSync(out, 0o600)
@@ -265,17 +327,140 @@ function assertNoActiveWriter(target: string): void {
   }
 }
 
+interface PreRestoreSet {
+  readonly db?: string
+  readonly wal?: string
+  readonly shm?: string
+}
+
+/**
+ * Move the current database set into `<home>/backups` before installation.
+ * The main file moves first so the sidecars cannot be applied to a missing
+ * database; a failure rolls the moves back in reverse order.
+ */
+function moveCurrentStoreAside(home: string, target: string, token: string): PreRestoreSet {
+  const dir = path.join(home, 'backups')
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  fs.chmodSync(dir, 0o700)
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  let base = path.join(dir, `pre-restore-${stamp}.db`)
+  if (fs.existsSync(base)) {
+    base = path.join(dir, `pre-restore-${stamp}-${token.slice(-8)}.db`)
+  }
+
+  const sourceWal = `${target}-wal`
+  const sourceShm = `${target}-shm`
+  const hasDb = fs.existsSync(target)
+  const hasWal = fs.existsSync(sourceWal)
+  const hasShm = fs.existsSync(sourceShm)
+  const wal = hasWal ? `${base}-wal` : undefined
+  const shm = hasShm ? `${base}-shm` : undefined
+
+  const moved: { from: string; to: string }[] = []
+  const move = (from: string, to: string): void => {
+    fs.renameSync(from, to)
+    moved.push({ from, to })
+  }
+
+  try {
+    if (hasDb) move(target, base)
+    if (wal !== undefined) move(sourceWal, wal)
+    if (shm !== undefined) move(sourceShm, shm)
+  } catch (error) {
+    for (const item of moved.reverse()) {
+      try {
+        fs.renameSync(item.to, item.from)
+      } catch {
+        // Keep the original failure; restoreStore reports the partial state.
+      }
+    }
+    throw error
+  }
+
+  const privateMode = (file: string | undefined): void => {
+    if (file === undefined) return
+    try {
+      fs.chmodSync(file, 0o600)
+    } catch {
+      // The move already succeeded; report the original outcome.
+    }
+  }
+  privateMode(hasDb ? base : undefined)
+  privateMode(wal)
+  privateMode(shm)
+
+  return {
+    ...(hasDb ? { db: base } : {}),
+    ...(wal === undefined ? {} : { wal }),
+    ...(shm === undefined ? {} : { shm }),
+  }
+}
+
+/** Put the pre-restore set back after a failed install, sidecars first. */
+function restorePreRestoreSet(set: PreRestoreSet, target: string): void {
+  const moved: { from: string; to: string }[] = []
+  const move = (from: string, to: string): void => {
+    fs.renameSync(from, to)
+    moved.push({ from, to })
+  }
+  try {
+    if (set.wal !== undefined) move(set.wal, `${target}-wal`)
+    if (set.shm !== undefined) move(set.shm, `${target}-shm`)
+    if (set.db !== undefined) move(set.db, target)
+  } catch (error) {
+    for (const item of moved.reverse()) {
+      try {
+        fs.renameSync(item.to, item.from)
+      } catch {
+        // Keep the original failure.
+      }
+    }
+    throw error
+  }
+}
+
+/** Verify the copied candidate before it can be installed over the live store. */
+function verifyCandidate(file: string, expectedVersion: number): void {
+  try {
+    const db = new DatabaseSync(file, { readOnly: true })
+    try {
+      assertIntegrity(db, file, 'restore candidate')
+      const actual = readSchemaVersion(db)
+      if (actual !== expectedVersion) {
+        throw new UserError(
+          `restore candidate schema version ${actual} does not match the backup version ${expectedVersion}`,
+        )
+      }
+    } finally {
+      db.close()
+    }
+  } catch (error) {
+    if (error instanceof UserError) throw error
+    throw new UserError(`restore candidate verification failed: ${file} (${errorMessage(error)})`)
+  }
+}
+
 /**
  * Replace `home`'s store with `backupPath`.
  *
- * The backup must be a readable SQLite database whose recorded schema version
- * is no newer than this build. Stop the target process first: the store is
- * replaced in place and stale WAL sidecars are discarded.
+ * The backup must pass `PRAGMA integrity_check`, be a readable SQLite
+ * database, and have a recorded schema version no newer than this build.
+ * Replacing an existing store requires `force`; the old database and its WAL
+ * sidecars are moved to `home/backups/pre-restore-<timestamp>.db*` before the
+ * new file is installed. If installation fails, the old set is moved back.
+ * Stop the target process first.
  */
-export function restoreStore(home: string, backupPath: string): StoreRestoreResult {
+export function restoreStore(
+  home: string,
+  backupPath: string,
+  options: RestoreStoreOptions = {},
+): StoreRestoreResult {
   const homePath = path.resolve(home)
   const target = path.join(homePath, STORE_DB_FILE)
   const backup = path.resolve(backupPath)
+  const force = options.force === true
+  const replace = options.replace ?? fs.renameSync
 
   if (!fs.existsSync(backup) || !fs.statSync(backup).isFile()) {
     throw new UserError(`backup file not found: ${backup}`)
@@ -288,6 +473,8 @@ export function restoreStore(home: string, backupPath: string): StoreRestoreResu
   try {
     const source = new DatabaseSync(backup, { readOnly: true })
     try {
+      // Validate pages and the ledger before any live-store path is touched.
+      assertIntegrity(source, backup, 'backup')
       schemaVersion = readSchemaVersion(source)
     } finally {
       source.close()
@@ -306,31 +493,62 @@ export function restoreStore(home: string, backupPath: string): StoreRestoreResu
     )
   }
 
+  const targetExists = fs.existsSync(target)
+  if (targetExists && !force) {
+    throw new UserError(
+      `store already exists at ${target}; restoring replaces it. `
+      + 'Stop the ds-agent process and re-run with --force; the old database and '
+      + `WAL sidecars are moved to ${path.join(homePath, 'backups')} first`,
+    )
+  }
+  if (targetExists && !fs.statSync(target).isFile()) {
+    throw new UserError(`store path is not a regular file: ${target}`)
+  }
+
+  const sha256 = sha256File(backup)
   fs.mkdirSync(homePath, { recursive: true })
   assertNoActiveWriter(target)
 
-  const temp = path.join(homePath, `.${STORE_DB_FILE}.restore-${process.pid}-${randomUUID()}.tmp`)
-  let renamed = false
+  const token = `${process.pid}-${randomUUID()}`
+  const temp = path.join(homePath, `.${STORE_DB_FILE}.restore-${token}.tmp`)
+  let installed = false
+  let preRestore: PreRestoreSet | undefined
   try {
+    // Keep the candidate on the same filesystem as the target; fsync it and
+    // verify the copy before moving the old set.
     fs.copyFileSync(backup, temp)
     fs.chmodSync(temp, 0o600)
     fsyncFile(temp)
-
-    // These sidecars describe the database being replaced. Removing them
-    // before the rename prevents SQLite from applying old WAL frames to the
-    // restored file on the next open.
-    removeIfExists(`${target}-wal`)
-    removeIfExists(`${target}-shm`)
-
-    fs.renameSync(temp, target)
-    renamed = true
+    verifyCandidate(temp, schemaVersion)
     fsyncDirectory(homePath)
-    return { schemaVersion, bytes: fs.statSync(target).size }
+
+    if (targetExists || fs.existsSync(`${target}-wal`) || fs.existsSync(`${target}-shm`)) {
+      preRestore = moveCurrentStoreAside(homePath, target, token)
+    }
+
+    replace(temp, target)
+    installed = true
+    fsyncDirectory(homePath)
   } catch (error) {
+    let rollbackError: unknown
+    if (preRestore !== undefined && !installed) {
+      try {
+        restorePreRestoreSet(preRestore, target)
+      } catch (failure) {
+        rollbackError = failure
+      }
+    }
+    if (rollbackError !== undefined) {
+      throw new UserError(
+        `restore failed: ${errorMessage(error)}; could not restore the original store `
+        + `(pre-restore set: ${preRestore?.db ?? path.join(homePath, 'backups')}): `
+        + errorMessage(rollbackError),
+      )
+    }
     if (error instanceof UserError) throw error
     throw new UserError(`restore failed: ${errorMessage(error)}`)
   } finally {
-    if (!renamed) {
+    if (!installed) {
       try {
         removeIfExists(temp)
       } catch {
@@ -338,4 +556,6 @@ export function restoreStore(home: string, backupPath: string): StoreRestoreResu
       }
     }
   }
+
+  return { schemaVersion, bytes: fs.statSync(target).size, sha256 }
 }

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -57,6 +58,39 @@ function expectUserError(work: () => unknown, pattern: RegExp): void {
     return
   }
   throw new Error('expected the operation to throw UserError')
+}
+
+/**
+ * A database whose header, schema, and migration ledger parse, but whose
+ * `corrupt_me` b-tree root page has an invalid page-type byte. `integrity_check`
+ * must reject it; `MAX(version)` still reads successfully.
+ */
+function writeCorruptButParseableBackup(file: string): void {
+  const db = new DatabaseSync(file)
+  db.exec('PRAGMA page_size = 4096;')
+  db.exec(`
+CREATE TABLE schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+INSERT INTO schema_migrations(version, applied_at) VALUES(3, 'test');
+CREATE TABLE corrupt_me (id INTEGER PRIMARY KEY, body TEXT);
+`)
+  const insert = db.prepare('INSERT INTO corrupt_me(body) VALUES(?)')
+  for (let index = 0; index < 200; index += 1) insert.run(`${'x'.repeat(200)}-${index}`)
+  const row = db.prepare(
+    `SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = 'corrupt_me'`,
+  ).get() as { rootpage: number }
+  expect(row.rootpage).toBeGreaterThan(1)
+  db.close()
+
+  const fd = fs.openSync(file, 'r+')
+  try {
+    // Page type 0x00 is not a valid b-tree page header.
+    fs.writeSync(fd, Buffer.from([0x00]), 0, 1, (row.rootpage - 1) * 4096)
+  } finally {
+    fs.closeSync(fd)
+  }
 }
 
 afterEach(() => {
@@ -145,6 +179,28 @@ describe('backupStore', () => {
     const out = path.join(tempDir('ds-agent-backup-empty-out-'), 'snapshot.db')
     expectUserError(() => backupStore(home, out), /no store at .*ds-agent\.db/)
   })
+
+  it('refuses to back up a store recorded by a newer schema version', () => {
+    const home = tempDir('ds-agent-backup-future-')
+    const out = path.join(tempDir('ds-agent-backup-future-out-'), 'snapshot.db')
+
+    const db = new DatabaseSync(dbPath(home))
+    db.exec(`
+CREATE TABLE schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+`)
+    db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)')
+      .run(LATEST_SCHEMA_VERSION + 1, new Date().toISOString())
+    db.close()
+
+    expectUserError(
+      () => backupStore(home, out),
+      new RegExp(`schema version ${LATEST_SCHEMA_VERSION + 1} is newer`),
+    )
+    expect(fs.existsSync(out)).toBe(false)
+  })
 })
 
 describe('restoreStore', () => {
@@ -164,14 +220,105 @@ describe('restoreStore', () => {
     changed.putDoc('ticket', 'T9', { id: 'T9', title: 'after backup' })
     changed.close()
 
-    const restored = restoreStore(home, out)
+    const restored = restoreStore(home, out, { force: true })
     expect(restored.schemaVersion).toBe(backup.schemaVersion)
     expect(restored.bytes).toBe(fs.statSync(out).size)
+    expect(restored.sha256).toBe(
+      createHash('sha256').update(fs.readFileSync(out)).digest('hex'),
+    )
+
+    // The replaced set is retained, not deleted, in a private backups dir.
+    const backupsDir = path.join(home, 'backups')
+    expect(fs.statSync(backupsDir).mode & 0o777).toBe(0o700)
+    const preRestore = fs.readdirSync(backupsDir)
+      .find(name => name.startsWith('pre-restore-') && name.endsWith('.db'))
+    expect(preRestore).toBeDefined()
+    expect(fs.statSync(path.join(backupsDir, preRestore!)).mode & 0o777).toBe(0o600)
+    expect(documentPayload(path.join(backupsDir, preRestore!), 'ticket', 'T9'))
+      .toContain('after backup')
 
     const reopened = openStore(home)
     expect(reopened.getDoc<{ title: string }>('ticket', 'T1')?.title).toBe('original')
     expect(reopened.getDoc('ticket', 'T9')).toBeUndefined()
     reopened.close()
+  })
+
+  it('refuses to replace an existing store without force', () => {
+    const home = tempDir('ds-agent-restore-noforce-')
+    const out = path.join(tempDir('ds-agent-restore-noforce-out-'), 'snapshot.db')
+
+    const store = openStore(home)
+    store.putDoc('ticket', 'T1', { id: 'T1', title: 'live row' })
+    store.close()
+    backupStore(home, out)
+
+    expectUserError(() => restoreStore(home, out), /--force/)
+    expect(fs.existsSync(path.join(home, 'backups'))).toBe(false)
+
+    const reopened = openStore(home)
+    expect(reopened.getDoc<{ title: string }>('ticket', 'T1')?.title).toBe('live row')
+    reopened.close()
+  })
+
+  it('refuses a corrupt but parseable backup without touching the live store', () => {
+    const home = tempDir('ds-agent-restore-corrupt-')
+    const outDir = tempDir('ds-agent-restore-corrupt-out-')
+    const corrupt = path.join(outDir, 'corrupt.db')
+
+    const store = openStore(home)
+    store.putDoc('ticket', 'T1', { id: 'T1', title: 'must survive' })
+    store.close()
+    const before = fs.readFileSync(dbPath(home))
+
+    writeCorruptButParseableBackup(corrupt)
+    // The header and ledger still read; only page integrity fails.
+    expect(inspect(corrupt, db =>
+      (db.prepare('SELECT MAX(version) AS version FROM schema_migrations')
+        .get() as { version: number }).version,
+    )).toBe(LATEST_SCHEMA_VERSION)
+
+    expectUserError(
+      () => restoreStore(home, corrupt, { force: true }),
+      /backup integrity check failed/,
+    )
+
+    expect(fs.readFileSync(dbPath(home)).equals(before)).toBe(true)
+    expect(fs.existsSync(path.join(home, 'backups'))).toBe(false)
+    const reopened = openStore(home)
+    expect(reopened.getDoc<{ title: string }>('ticket', 'T1')?.title).toBe('must survive')
+    reopened.close()
+  })
+
+  it('rolls the old database and WAL back when install fails after the move', () => {
+    const home = tempDir('ds-agent-restore-install-failure-')
+    const out = path.join(tempDir('ds-agent-restore-install-failure-out-'), 'snapshot.db')
+
+    const store = openStore(home)
+    store.putDoc('ticket', 'T1', { id: 'T1', title: 'keep me' })
+    backupStore(home, out)
+
+    const wal = `${dbPath(home)}-wal`
+    expect(fs.existsSync(wal)).toBe(true)
+    expect(fs.statSync(wal).size).toBeGreaterThan(0)
+
+    expectUserError(
+      () => restoreStore(home, out, {
+        force: true,
+        replace: () => {
+          throw new Error('injected install failure')
+        },
+      }),
+      /restore failed: injected install failure/,
+    )
+
+    // The old set is back in place and still readable, including its WAL.
+    expect(fs.existsSync(dbPath(home))).toBe(true)
+    expect(fs.existsSync(wal)).toBe(true)
+    expect(fs.statSync(wal).size).toBeGreaterThan(0)
+    expect(store.getDoc<{ title: string }>('ticket', 'T1')?.title).toBe('keep me')
+    expect(fs.readdirSync(home).filter(name => name.includes('.restore-'))).toEqual([])
+    expect(fs.readdirSync(path.join(home, 'backups'))).toEqual([])
+    store.close()
   })
 
   it('refuses a backup recorded by a newer schema version', () => {
@@ -213,7 +360,7 @@ CREATE TABLE schema_migrations (
     expect(fs.existsSync(wal)).toBe(true)
     expect(fs.existsSync(shm)).toBe(true)
 
-    restoreStore(home, out)
+    restoreStore(home, out, { force: true })
     expect(fs.existsSync(wal)).toBe(false)
     expect(fs.existsSync(shm)).toBe(false)
 
@@ -257,6 +404,9 @@ CREATE TABLE documents (
     fs.writeFileSync(invalid, 'not a database')
 
     expectUserError(() => restoreStore(home, missing), /backup file not found/)
-    expectUserError(() => restoreStore(home, invalid), /not a valid SQLite backup/)
+    expectUserError(
+      () => restoreStore(home, invalid),
+      /not a valid SQLite backup|integrity check failed/,
+    )
   })
 })
