@@ -1,7 +1,7 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` after PR #139 (`af6b011`); the cycle-9 baseline below is
+> Baseline: `main` after PR #140 (`661e56d`); the cycle-9 baseline below is
 > historical.
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
@@ -26,10 +26,10 @@ requires live evidence, not missing code.
 
 ### Verification at the checkpoint
 
-- `main` `af6b011`; required check `typecheck and test` green on each merged PR
+- `main` `661e56d`; required check `typecheck and test` green on each merged PR
   head (#129 `ab73604`, #131 `61128d7`, #133 `ffef7d1`, #135 `096e83c`,
   #136 `740c61c`, #138 `33b0941`, #132 `21cc421`, #134 `56cb001`,
-  #139 `50cf9d1`).
+  #139 `50cf9d1`, #140 `69a243c`).
 - CI-equivalent offline suite on #135 merged head: 75 files, 724 tests,
   709 passed, 15 skipped, 0 failed.
 - Focused gates: UI 12/12, CLI wiring 4/4, channel slow path 4/4 plus the

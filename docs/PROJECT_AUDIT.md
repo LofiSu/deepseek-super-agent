@@ -1,6 +1,6 @@
 # Project audit — 2026-11-04 (final integration)
 
-> Audit base: `main` after PR #139 (`af6b011`). This section supersedes the
+> Audit base: `main` after PR #140 (`661e56d`). This section supersedes the
 > 2026-11-03 audit below for current status; the older sections remain as
 > history. Checks were run in dedicated worktrees; the primary clone's unrelated
 > WIP was not used.
@@ -11,10 +11,10 @@
 
 | Item | Observation |
 |------|-------------|
-| `main` | `af6b011` merge of #139 |
-| Merged surfaces | A2A HMAC HTTP (`7a1d732`), lifecycle/schema v3 (`888f810`), slow path (`788be60`), remote mesh (`d9ded0b`), backup/release (`d67731a`), combined channels (`0cdea17`), local UI (`123ee40`), CLI wiring (`1e01862`), channel slow path (`268809d`), usage accuracy (`58c410a`), release workflow (`a1985c0`), iMessage nanosecond dates (`111481d`), iMessage non-ASCII argv (`af6b011`) |
+| `main` | `661e56d` merge of #140 |
+| Merged surfaces | A2A HMAC HTTP (`7a1d732`), lifecycle/schema v3 (`888f810`), slow path (`788be60`), remote mesh (`d9ded0b`), backup/release (`d67731a`), combined channels (`0cdea17`), local UI (`123ee40`), CLI wiring (`1e01862`), channel slow path (`268809d`), usage accuracy (`58c410a`), release workflow (`a1985c0`), iMessage nanosecond dates (`111481d`), iMessage non-ASCII argv (`af6b011`), iMessage canned-ack suppression (`661e56d`) |
 | Required check | `typecheck and test`; strict, admins enforced, conversation resolution required |
-| CI evidence | #129 `41829844125` pass; #131 `41826730675` pass; #135 `41845266705` pass; #136 `41844155920` pass; #132 head `21cc421`, #134 head `56cb001`, #139 head `50cf9d1` green; post-merge main runs recorded in `docs/DEVELOPMENT_STATUS.md` |
+| CI evidence | #129 `41829844125` pass; #131 `41826730675` pass; #135 `41845266705` pass; #136 `41844155920` pass; #132 head `21cc421`, #134 head `56cb001`, #139 head `50cf9d1`, #140 head `69a243c` green; post-merge main runs `41848077717` (`661e56d`) and `41847695711` (`af6b011`) pass |
 | Offline suite | #135 merged head: 75 files, 724 tests, 709 passed, 15 skipped, 0 failed (CI-equivalent env) |
 | Live evidence | none added by this program; bake-off remains unmeasured |
 
@@ -37,9 +37,9 @@
    without recorded owner approval. A post-merge audit found the workflow is
    `workflow_dispatch` only, with `permissions: contents: read`, no
    `secrets.*`, no publish step, and an artifact upload. That limits the blast
-   radius but does not constitute approval. #134 and #139 were also merged by
-   other sessions without independent review in this log; both heads had green
-   `typecheck and test`. No production infrastructure, secret storage, auth
+   radius but does not constitute approval. #134, #139, and #140 were also
+   merged by other sessions without independent review in this log; all three
+   heads had green `typecheck and test`. No production infrastructure, secret storage, auth
    redesign, destructive migration, or live external send was performed.
 5. **Verification limits are explicit.** CI and offline fixtures pass; no live
    model bake-off or real Feishu acceptance was run. iMessage daemon tests use

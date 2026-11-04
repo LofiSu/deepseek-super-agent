@@ -4,6 +4,22 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Main advanced during docs review (#140)
+
+### Observed
+
+- While the docs PR was in review, `main` moved from `af6b011` to `661e56d`
+  (PR #140, merge of `69a243c`: suppress canned acknowledgements in chat
+  conversations so a veto does not leave an ack plus silence).
+- #140 was merged by another session with no review in this log. Its exact head
+  `69a243c` has green `typecheck and test`; post-merge `main` CI run
+  `41848077717` also passed.
+
+### Decided
+
+- Rebase the docs work onto the new `main` and update the baseline to
+  `661e56d` rather than shipping stale hashes. Do not duplicate or revert #140.
+
 ## 2026-11-04 — Post-integration reconciliation (owner-gate deviation recorded)
 
 ### Observed

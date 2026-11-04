@@ -784,6 +784,14 @@ head so a later reader can separate the reviewed tree from the merged tree.
   `typecheck and test` green on the exact head. The change passes reply text as
   an osascript argv item instead of an env/system-attribute path.
 
+## PR #140 — `[SUPER-AGENT][IMESSAGE] Suppress canned acknowledgement in chats`
+
+- **Head:** `69a243c`. **Merged by another session:** `661e56d`.
+- **Review:** none in this log; merged before this session reviewed it.
+  `typecheck and test` green on the exact head and in post-merge main CI run
+  `41848077717`. Adds a reply-layer guard plus an outbox regression test; no
+  live send was performed.
+
 ## Pending reviews
 
 - No open implementation PRs. #141 is documentation-only and awaits CI/review.

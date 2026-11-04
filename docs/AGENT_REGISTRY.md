@@ -66,6 +66,7 @@
 | CHANNELS-COMBINED | Core Runtime | `agent/channels-feishu-imessage` | 2026-11-04 | merged `0cdea17`, APPROVE | #133 | integrated |
 | CHANNEL-SLOW-PATH | Core Runtime | `agent/channel-slow-path` | 2026-11-04 | merged `268809d`, APPROVE after spy update | #135 | integrated |
 | CLI-WIRING | Chief Engineer/CLI | `agent/cli-command-wiring` | 2026-11-04 | squash-merged `1e01862`; usage accuracy split to #138, merged `58c410a` | #136/#138 | integrated |
+| IMESSAGE-FIXES | Channels (other sessions) | `fix/imessage-*` | 2026-11-04 | merged without review in this log: #134 `111481d`, #139 `af6b011`, #140 `661e56d`; exact heads green | #134/#139/#140 | landed; recorded, not re-reviewed |
 
 ## Ownership boundaries
 

@@ -1,6 +1,6 @@
 # Development status
 
-> Checkpoint: 2026-11-04 · baseline `main` = `af6b011` (final integration cycle)
+> Checkpoint: 2026-11-04 · baseline `main` = `661e56d` (final integration cycle)
 > Source of truth: `git`, GitHub PRs/checks, and the evidence in
 > `docs/PROJECT_AUDIT.md`. Do not trust this file without re-verifying; later
 > merges after this baseline are not reflected. The cycle-9 tables below are
@@ -16,12 +16,12 @@ not missing implementation.
 
 | Field | Value |
 |-------|-------|
-| `main` at this checkpoint | `af6b011` (PR #139 merge; includes #132 `a1985c0`, #134 `111481d`, #139 `af6b011`) |
+| `main` at this checkpoint | `661e56d` (PR #140 merge; includes #132 `a1985c0`, #134 `111481d`, #139 `af6b011`, #140 `661e56d`) |
 | Merged in this program | #123 A2A HTTP auth (`7a1d732`), #124 lifecycle schema v3 (`888f810`), #126 threat model (`6db42b7`), #127 health/observability (`e700730`), #128 model slow path (`788be60`), #130 remote mesh (`d9ded0b`), #131 backup/release checks (`d67731a`), #133 combined channels (`0cdea17`), #129 local UI (`123ee40`), #136 CLI wiring (`1e01862`), #135 channel slow path (`268809d`), #138 usage accuracy (`58c410a`) |
-| Merged outside this program | #132 release workflow (`a1985c0`) merged by another session without recorded owner approval; #134 iMessage nanosecond dates (`111481d`) and #139 iMessage non-ASCII argv (`af6b011`) merged by other sessions without review in this log. All three had green `typecheck and test` on their exact heads. |
+| Merged outside this program | #132 release workflow (`a1985c0`) merged by another session without recorded owner approval; #134 iMessage nanosecond dates (`111481d`), #139 iMessage non-ASCII argv (`af6b011`), and #140 iMessage canned-ack suppression (`661e56d`) merged by other sessions without review in this log. All four had green `typecheck and test` on their exact heads. |
 | Owner-gated deviation | #132 was held as owner-gated by this session; it is on `main` anyway. Post-merge audit of its content: `workflow_dispatch` only, `permissions: contents: read`, no `secrets.*`, no publish step, artifact upload only. This is recorded as a process deviation, not as owner approval. |
 | Required check | `typecheck and test` (strict, admins enforced, conversation resolution required) |
-| Main CI | green after each merge; #139 head `50cf9d1` green, #134 head `56cb001` green, #132 head `21cc421` green, #138 head `33b0941` run `41845978818`, #135 head `096e83c` run `41845266705`, #136 head `740c61c` run `41844155920`, #129 head `ab73604` run `41829844125` |
+| Main CI | green after each merge (post-merge `main` runs `41848077717` at `661e56d`, `41847695711` at `af6b011`); #140 head `69a243c` green, #139 head `50cf9d1` green, #134 head `56cb001` green, #132 head `21cc421` green, #138 head `33b0941` run `41845978818`, #135 head `096e83c` run `41845266705`, #136 head `740c61c` run `41844155920`, #129 head `ab73604` run `41829844125` |
 | Local offline gate on #135 merged head | `tsc --noEmit` clean; `pnpm lint` ok (268 files); CI-equivalent full suite 75 files / 724 tests: 709 passed, 15 skipped, 0 failed |
 | UI gate | `test/cli-ui.test.ts` 12/12; `test/cli-command-wiring.test.ts` 4/4; CI `typecheck and test` green on `ab73604` (run `41829844125`). A separate bare local full-suite run on `ab73604` had 3 long `test/subscription.test.ts` failures under concurrent load; that file passes 19/19 when run alone, and CI's CI-env full run passed. |
 | Open high-risk PRs | none; #141 is documentation-only. The #132 owner gate was bypassed by another session (see above). |
