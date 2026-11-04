@@ -653,7 +653,15 @@ export class Harness {
       : 'default'
     const session = routerSessionId(shard)
     this.armRouter(shard)
-    return this.enqueue(session, () => this.run(session, 'router', undefined, prompt))
+    // Report turns decide delivery, so they need the same resident timeline as
+    // launch and assessment turns. Without it the busiest Router path sees no
+    // observed Trigger, decision, or ticket lifecycle.
+    return this.enqueue(session, () => this.run(
+      session,
+      'router',
+      undefined,
+      this.withRouterHistory(shard, prompt),
+    ))
   }
 
   async watchdogTurn(): Promise<void> {
@@ -931,16 +939,22 @@ function describeObservation(event: RouterObservation): string {
 
 function messagesFromJournal(entries: JournalEntry[]): ModelMessage[] {
   const messages: ModelMessage[] = []
-  let recent = entries.length > MAX_HISTORY_ENTRIES ? entries.slice(-MAX_HISTORY_ENTRIES) : entries
-  if (entries.length > MAX_HISTORY_ENTRIES) {
+  // Observations are durable session memory with no model role. Filter them
+  // first: applying the cap to the raw journal would let a busy Router's
+  // observe.* entries push every real turn out of the replayed transcript.
+  const replayable = entries.filter(entry =>
+    entry.role === 'user' || entry.role === 'assistant' || entry.role === 'tool')
+  let recent = replayable.length > MAX_HISTORY_ENTRIES
+    ? replayable.slice(-MAX_HISTORY_ENTRIES)
+    : replayable
+  if (replayable.length > MAX_HISTORY_ENTRIES) {
     // Never start mid tool-call: begin at the first user message in the slice.
     const firstUser = recent.findIndex(entry => entry.role === 'user')
     if (firstUser > 0) recent = recent.slice(firstUser)
   }
   for (const entry of recent) {
-    if (entry.role !== 'user' && entry.role !== 'assistant' && entry.role !== 'tool') continue
     const message: ModelMessage = {
-      role: entry.role,
+      role: entry.role as 'user' | 'assistant' | 'tool',
       content: String(entry.content ?? ''),
     }
     if (entry.name) message.name = entry.name

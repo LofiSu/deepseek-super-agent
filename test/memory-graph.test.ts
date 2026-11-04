@@ -145,4 +145,29 @@ describe('Chain of Recall object graph', () => {
       .toHaveLength(1)
     store.close()
   })
+
+  it('keeps thread digests separate when keys differ only in escaped characters', () => {
+    const store = new Store(tempHome())
+    let tick = 0
+    const memory = new SpillBackedLongTermMemory(store, {
+      maxEntries: 1,
+      maxAgeDays: 0,
+      coldMaxEntries: 10,
+      coldMaxAgeDays: 3650,
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick++ * 1_000),
+    })
+    memory.remember(ticket('ticket_slash', ['github:pr/7'], 'slash route incident'))
+    memory.remember(ticket('ticket_under', ['github:pr_7'], 'underscore route incident'))
+    memory.remember(ticket('ticket_third', ['github:pr/8'], 'other route incident'))
+
+    const digests = store.listDocs<{ tier?: string; kind?: string }>('ltm')
+      .filter(entry => entry.tier === 'cold' && entry.kind === 'digest')
+    expect(digests).toHaveLength(2)
+    const slash = memory.forThreads(['github:pr/7'], 5, 'ticket_reader')
+    const under = memory.forThreads(['github:pr_7'], 5, 'ticket_reader')
+    expect(slash.map(entry => entry.spillId)).not.toEqual(under.map(entry => entry.spillId))
+    expect(slash.every(entry => store.getSpill(entry.spillId)?.includes('slash route incident'))).toBe(true)
+    expect(under.every(entry => store.getSpill(entry.spillId)?.includes('underscore route incident'))).toBe(true)
+    store.close()
+  })
 })

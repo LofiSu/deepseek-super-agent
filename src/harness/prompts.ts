@@ -143,9 +143,23 @@ function roleText(role: Role): string {
   return ROLE_WATCHDOG
 }
 
-/** Owner files keep their headings, moved down one level so they do not look like stack sections. */
+/**
+ * Owner files keep their headings, moved down one level so they do not look
+ * like stack sections. Lines inside a fenced code block are literal text: a
+ * shell comment must not become a Markdown heading.
+ */
 function demoteHeadings(text: string): string {
-  return text.replace(/^(#{1,5}) /gm, '#$1 ')
+  let fence: string | undefined
+  return text.split('\n').map(line => {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0]
+    if (marker) {
+      if (!fence) fence = marker
+      else if (fence === marker) fence = undefined
+      return line
+    }
+    if (fence) return line
+    return line.replace(/^(#{1,5}) /, '#$1 ')
+  }).join('\n')
 }
 
 /** A persona cannot close its own wrapper and start a new top-level section. */

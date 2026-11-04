@@ -96,6 +96,13 @@ describe('prompt layers', () => {
     expect(withOwner).toContain('Name: Sam. Timezone: Europe/Oslo.')
     expect(withOwner.indexOf('Name: Sam.')).toBeLessThan(withOwner.indexOf('# Rules'))
   })
+
+  it('does not rewrite headings inside a fenced code block', () => {
+    const persona = ['# Voice', '```sh', '# install deps', '```', '# Habits'].join('\n')
+    const prompt = buildSystemPrompt({ role: 'router', persona })
+    expect(prompt).toContain('# install deps')
+    expect(prompt).toContain('## Habits')
+  })
 })
 
 describe('role contracts', () => {
