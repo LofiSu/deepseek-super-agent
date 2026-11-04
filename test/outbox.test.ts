@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { Outbox, type OutboundAdapter } from '../src/channels/outbox-adapter.ts'
+import { Outbox, PermanentDeliveryError, type OutboundAdapter } from '../src/channels/outbox-adapter.ts'
 import { Replies } from '../src/core/replies.ts'
 import type { Host } from '../src/core/host.ts'
 import type { OutboxRow, Ticket } from '../src/shared/types.ts'
@@ -126,6 +126,78 @@ describe('durable outbox', () => {
     expect(rows.find(item => item.id === 'outbox_gh')!.status).toBe('failed')
     expect(rows.find(item => item.id === 'outbox_gh')!.error).toMatch(/no outbound adapter/)
     expect(rows.find(item => item.id === 'outbox_cli')!.status).toBe('sent')
+    store.close()
+  })
+
+  it('fails an unroutable row on the first flush without scheduling a retry', async () => {
+    const store = tempStore()
+    store.addReply({
+      id: 'reply_1',
+      ticketId: 'ticket_1',
+      channel: 'github',
+      purpose: 'acknowledgement',
+      text: 'ds-agent note',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    })
+    store.enqueueOutbox(row())
+
+    let calls = 0
+    const adapter: OutboundAdapter = {
+      channel: 'github',
+      send: async () => {
+        calls += 1
+        throw new PermanentDeliveryError('targets group without a chatGuid')
+      },
+    }
+    const outbox = new Outbox(store, [adapter])
+    const result = await outbox.flush()
+    expect(result).toEqual({ sent: 0, failed: 1, pending: 0 })
+    expect(calls).toBe(1)
+
+    const after = store.listOutbox()[0]!
+    expect(after.status).toBe('failed')
+    expect(after.error).toBe('targets group without a chatGuid')
+    // A permanent failure is terminal on the first attempt: no retry counter,
+    // no backoff deadline, and the reply is not marked sent.
+    expect(after.attempts ?? 0).toBe(0)
+    expect(after.nextAttemptAt).toBeUndefined()
+    expect(store.listReplies()[0]!.status).toBe('pending')
+
+    await outbox.flush()
+    expect(calls).toBe(1)
+    expect(store.listOutbox()[0]!.status).toBe('failed')
+    store.close()
+  })
+
+  it('retries a transient send failure with backoff instead of failing early', async () => {
+    const store = tempStore()
+    store.enqueueOutbox(row())
+
+    let calls = 0
+    const adapter: OutboundAdapter = {
+      channel: 'github',
+      send: async () => {
+        calls += 1
+        throw new Error('network down')
+      },
+    }
+    const outbox = new Outbox(store, [adapter])
+    const result = await outbox.flush()
+    expect(result).toEqual({ sent: 0, failed: 0, pending: 1 })
+    expect(calls).toBe(1)
+
+    const after = store.listOutbox()[0]!
+    expect(after.status).toBe('pending')
+    expect(after.error).toBe('network down')
+    expect(after.attempts).toBe(1)
+    expect(after.nextAttemptAt).toBeTruthy()
+    expect(new Date(after.nextAttemptAt!).getTime()).toBeGreaterThan(Date.now())
+
+    // The row is not due until the backoff elapses, and it is not failed.
+    await outbox.flush()
+    expect(calls).toBe(1)
+    expect(store.listOutbox()[0]!.status).toBe('pending')
     store.close()
   })
 

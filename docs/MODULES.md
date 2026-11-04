@@ -192,6 +192,11 @@ a delivered one clears `speculative` and emits `speculate.delivered`.
   populate `address.group` themselves to opt into group admission; `meta` is
   never read.
 
+- `outbox-adapter.ts` drains the durable outbox. Transient send errors retry
+  with exponential backoff up to 5 attempts; a `PermanentDeliveryError` (for
+  example, an iMessage group row with no `chatGuid`) marks the row `failed` on
+  the first attempt with no retry scheduled. Both terminal paths leave the
+  reply `pending`; only a successful send marks it `sent`.
 - `A2ARouter` validates non-empty `from`/`to`, serializable bodies, and a 64 KiB
   UTF-8 byte cap. `send` copies only `{ from, to, body }`, assigns a fresh
   `id`/`at`, drops caller-supplied `id`/`at` and unknown fields, and persists
