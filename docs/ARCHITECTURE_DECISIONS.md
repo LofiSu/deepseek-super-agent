@@ -302,3 +302,166 @@ rewrite `PLAN.md`; link to the contract instead.
     would silently convert tampering into a new credential and could destroy a
     mid-write file. The current exclusive create already prevents this; it must
     stay.
+
+## ADR-010 — Long-term memory recall stays lexical-first with an offline evaluation harness; embeddings stay behind a port
+
+- **Date:** 2026-11-04
+- **Status:** accepted; evaluation only. This ADR adds no recall behavior and
+  does not implement semantic search or embeddings.
+- **Context:** `SpillBackedLongTermMemory.query`
+  (`src/memory/long-term.ts`) is word-AND substring matching over the
+  lower-cased redacted spill body. Requested tags are an exact AND filter, and
+  ranking is `tagHits` desc, `textHits` desc, `createdAt` desc, `id` desc. The
+  M6 module row and the roadmap's 长期记忆 row still described semantic search,
+  multi-hop recall, and the month-scale story as open-ended. Guessing at an
+  implementation would have added either a ranking heuristic or a provider
+  dependency without a measured recall problem. `test/memory-recall-eval.test.ts`
+  now fixes a 14-entry redacted corpus, 11 labelled positive queries (exact,
+  paraphrase/synonym, word order, tag-only, and multi-hop), and 2 negative
+  controls. It runs through the real `query()` path on a temp SQLite store:
+  no network, no model, no sleeps, and no product-source changes.
+- **Measured baseline:** macro recall@3 is **4/11 = 0.364**. The metric is the
+  fraction of each query's labelled relevant entries that appear in the top
+  three results, averaged over the 11 positive queries. Breakdown:
+
+  | Strategy | Exact (2) | Word order (2) | Paraphrase (3) | Tag-only (2) | Multi-hop (2) | Macro (11) |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | Current `query()` | 1.000 | 1.000 | 0.000 | 0.000 | 0.000 | 0.364 |
+  | (a) normalization + synonym/morphology map | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 | 0.636 |
+  | (a)+(b) plus tag-aware one-hop expansion | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+  | (c) embedding port with deterministic mock | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+  | (d) hybrid lexical + tag-hop + embedding | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+
+  The two negative controls (`kubernetes helm chart`, `payment refund
+  chargeback`) return zero results under every strategy. The exact baseline
+  failures are pinned explicitly: tag-only queries return `[]`, paraphrase
+  queries score 0, and both multi-hop queries score 0 because no single entry
+  contains every query word.
+- **Evaluation of options:**
+  - **(a) Lexical normalization and a small in-repo synonym map.** NFKC,
+    lower-casing, punctuation/whitespace normalization, a tiny canonical map
+    (`credential`/`token`, `rotate`/`rotation`, `prune`/`pruning`,
+    `old`/`older`, `entry`/`entries`, and similar), plus stop-word removal.
+    Recovers all three paraphrase queries: macro rises from 0.364 to 0.636
+    (+0.273 absolute). It is deterministic, has no dependency, and changes no
+    authorization or redaction path. It does not recover tag-only or multi-hop
+    recall (0/2 each). Risk: over-expansion can reduce precision, so the
+    negative controls and exact/word-order categories must stay at their
+    current values.
+  - **(b) Tag/ticket hop expansion.** Tag-aware scoring makes a tag-only query
+    retrievable, and one hop across a shared tag links the deploy-owner entry
+    to the deploy-token/deploy-incident entries. Combined with (a), macro
+    recall@3 reaches 1.000 (+0.364 over (a), +0.636 over baseline), including
+    2/2 multi-hop. It is deterministic and dependency-free. The measured
+    implementation relaxes the strict word-AND gate to partial-overlap scoring
+    before ranking; without that, tag-only and multi-hop candidates never enter
+    the result set. That relaxation is the precision risk the negative controls
+    and held-out set must guard. The hop is capped at one and the index is
+    capped by retention, so it does not introduce an unbounded graph walk.
+    Risk: tags can be coarse; a one-hop link is a retrieval hint, not proof of
+    relevance, so precision controls and a held-out query set are required.
+  - **(c) Embeddings behind a pluggable port.** The harness evaluates a
+    deterministic, offline mock that embeds the same canonical tokens and tags
+    as a sparse vector. It reaches 1.000 on this corpus, but **adds zero recall
+    over (a)+(b)**. The mock is deliberately not a neural model: it proves the
+    port can be deterministic and CI-safe, not that a provider model would
+    generalize. A real provider would add network latency and cost, an SDK or
+    persistent vector store, nondeterminism, and a new egress path for redacted
+    summaries. Because the measured corpus has no residual semantic gap after
+    (a)+(b), that cost is not justified now. The port boundary is recorded
+    below; it is not implemented.
+  - **(d) Hybrid ranking.** A normalized lexical+hop score blended with the
+    mock cosine also reaches 1.000, exactly equal to (a)+(b). It adds score
+    weighting, two ranking explanations, and a provider-shaped dependency for
+    no measured recall gain. Rejected until a held-out corpus shows a gap that
+    lexical+hop cannot close.
+- **Dimension check:**
+
+  | Option | Recall@3 macro | Determinism | Dependency cost | Security | Month-scale |
+  | --- | --- | --- | --- | --- | --- |
+  | (a) normalization + synonyms | 7/11 = 0.636 | pure, stable | none | ACL/redaction unchanged | bounded scan |
+  | (b) (a) + tag-aware one-hop | 11/11 = 1.000 cumulative | pure, stable | none | grants per hit; one hop only | one hop within the 1000-entry cap |
+  | (c) embedding port + mock | 11/11; **zero gain over (b)** | mock deterministic; real provider is not | interface none; real SDK/vector store | new redacted-summary egress; ACL unchanged | per-entry vector storage/refresh |
+  | (d) hybrid | 11/11; **zero gain over (b)** | deterministic with mock | ranking complexity; provider-shaped | same as (c) if embeddings are used | same as (c) if embeddings are used |
+
+  This is why the decision is (a)+(b): it is the smallest measured step that
+  recovers every labelled failure, and it adds no dependency, provider egress,
+  or new authorization path.
+- **Decision:** keep M6 recall lexical-first. The next implementation step is
+  (a)+(b), not embeddings:
+  1. Normalize query and body tokens (NFKC, case, punctuation, whitespace) and
+     apply a small in-repo synonym/morphology map.
+  2. Let query words match tags, while requested `tags` remain an AND filter,
+     and add a one-hop expansion across shared tags (and ticket/thread links
+     where the entry already carries them).
+  3. Preserve deterministic ordering: score, then `createdAt` desc, then `id`
+     desc; do not introduce randomness or a provider.
+  4. Keep embeddings unimplemented. If semantic recall is revisited, it must
+     sit behind an `EmbeddingPort` that accepts **already-redacted text and
+     tags only**, never ticket ids or raw bodies, and must have a deterministic
+     offline mock used by CI. A real provider adapter must be explicitly
+     configured, never called by the default/offline suite, and must not become
+     a new capability path.
+- **Security:** ACL grants and redaction are unchanged. `query()` still requires
+  a reader `ticketId`; every returned hit still grants that ticket access to
+  the exact spill, so a memory id remains a reference, never a capability. The
+  hop expansion is retrieval over the same authorized result set and must grant
+  per hit; it must not expose a body without a grant. Redaction continues to
+  run before the spill and summary are written. An embedding provider would be
+  a new egress path for summaries even after redaction, which is another reason
+  not to wire one before evidence requires it. Fixtures are synthetic and
+  contain no secrets.
+- **Determinism:** (a), (b), and the mock embedding are pure and deterministic;
+  the test asserts identical top-three ids across repeated runs and a reopened
+  SQLite store. A real embedding provider would not be deterministic by default,
+  so it cannot be used in CI or as the sole ranking source without pinning a
+  model/version and recording fixtures.
+- **Month-scale behavior under retention defaults:** Runtime defaults are 1000
+  entries / 90 days (`DEFAULT_MEMORY_MAX_ENTRIES`,
+  `DEFAULT_MEMORY_MAX_AGE_DAYS` in `src/runtime.ts`); retention prunes inside
+  the same transaction as writes, so the index does not grow without bound
+  across months. A query scans at most that bounded set, and one-hop expansion
+  is also bounded by it; there is no unbounded history or graph. The current
+  scan still reads stored bodies, so the follow-up should add a 1000-entry
+  fixture/benchmark to confirm the bound; wall-clock assertions should stay out
+  of CI if they are machine-sensitive. Embeddings would add per-entry vector
+  storage and refresh cost on top of that bound; that cost is not accepted yet.
+- **Limitations of this evidence:** the corpus is synthetic and small (14
+  entries, 11 positive queries), and the mock embedding is lexical. The values
+  are a regression floor and a decision aid, not a generalization claim. Before
+  shipping the follow-up, add at least 10 held-out queries and keep the two
+  negative controls empty. Do not tune only to the original 11 queries.
+- **Acceptance criteria for the follow-up task (M6
+  `src/memory/long-term.ts` + tests; not this PR):**
+  - On `test/memory-recall-eval.test.ts`, macro recall@3 is at least 10/11
+    (0.909), exact and word-order remain 1.000, both tag-only and both
+    multi-hop queries reach at least 0.5 (the targeted outcome is 1.000), and
+    both negative controls still return zero results.
+  - At least 10 additional held-out queries are added before merge; the
+    implementation does not regress exact/word-order or make a negative control
+    return a hit.
+  - `query()` still throws without `ticketId`; a memory id alone cannot read a
+    spill; every returned hit grants the reader ticket the spill; redaction is
+    applied before storage; no new lookup-by-id API is added.
+  - Deterministic id order across repeated runs and a reopened store; no
+    network, model, sleep, or real channel in the test.
+  - No new runtime dependency. If an `EmbeddingPort` is introduced, only its
+    interface and deterministic mock are wired; no provider is called in CI and
+    no embeddings are claimed as implemented.
+  - Retention defaults and transactional prune remain 1000 entries / 90 days;
+    add a 1000-entry fixture to prove the query remains bounded and
+    deterministic.
+  - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, the two memory test
+    files, and the full offline suite stay green.
+- **Alternatives rejected:**
+  - **Implement embeddings now.** Zero measured recall gain over (a)+(b) on the
+    fixed corpus, plus provider, dependency, egress, and nondeterminism costs.
+  - **Call a live model in the recall test.** Non-deterministic, network-bound,
+    and violates the offline CI contract; a mock behind a port is the only
+    acceptable CI form.
+  - **Unbounded tag/ticket graph traversal.** Speculative and cost-unbounded;
+    one hop is enough for both measured multi-hop queries, and the retention
+    cap already bounds the candidate set.
+  - **Treat a memory id or a hop link as authorization.** It would turn a
+    reference into a capability and bypass the reader-ticket grant; rejected
+    on security grounds regardless of recall.
