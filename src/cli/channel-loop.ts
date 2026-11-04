@@ -10,10 +10,13 @@
 import {
   DEFAULT_IMESSAGE_INTERVAL_MS,
   ImessageOutboxAdapter,
+  ImessagePermissionError,
   ImessageSchemaError,
+  IMESSAGE_FULL_DISK_ACCESS_HINT,
+  isImessagePermissionError,
   type ImessageApi,
 } from '../channels/imessage.ts'
-import { Outbox } from '../channels/outbox-adapter.ts'
+import { Outbox, type OutboundAdapter } from '../channels/outbox-adapter.ts'
 import type { Runtime } from '../runtime.ts'
 import type { Trigger } from '../shared/types.ts'
 
@@ -32,6 +35,13 @@ export interface ImessageLoopOptions {
   source: ImessageLoopSource
   /** API used by the outbox adapter to send replies. */
   api: ImessageApi
+  /**
+   * Outbound adapters for this loop's Outbox. A combined serve passes both
+   * channel adapters to both loops: `Outbox.flush()` scans every due row, so a
+   * loop with only its own adapter would mark the other channel's rows failed.
+   * Defaults to this loop's iMessage adapter.
+   */
+  outboxAdapters?: readonly OutboundAdapter[]
   /** chat.db path, for the startup log line only. */
   dbPath: string
   handle?: string
@@ -98,7 +108,7 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
 
   const outbox = new Outbox(
     runtime.store,
-    [new ImessageOutboxAdapter(api, log)],
+    options.outboxAdapters ?? [new ImessageOutboxAdapter(api, log)],
     { log },
   )
   outbox.start(400)
@@ -147,6 +157,16 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
         // A successful poll clears the retry backoff.
         failures = 0
       } catch (error) {
+        // Permission denials are not transient. Retrying forever in the
+        // standalone command hides the one action that fixes it: grant Full
+        // Disk Access and restart the terminal. `serve` logs this terminal
+        // loop failure and keeps its other channel and daemon alive.
+        if (isImessagePermissionError(error)) {
+          const detail = messageOf(error)
+          throw detail.includes('Full Disk Access')
+            ? error
+            : new ImessagePermissionError(`${detail}. ${IMESSAGE_FULL_DISK_ACCESS_HINT}`, { cause: error })
+        }
         // The standalone chat command surfaces a schema/configuration
         // incompatibility once; serve keeps the daemon alive and retries.
         if (error instanceof ImessageSchemaError && options.retrySchemaErrors !== true) throw error

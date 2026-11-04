@@ -78,18 +78,41 @@ Set these for a live Feishu/Lark channel:
 
 Bot permissions: `im:message`, `im:message:send_as_bot`, `im:message:readonly`,
 and for group chats the sensitive scope `im:message.group_msg` (list/poll
-messages in groups the bot belongs to). Also useful for demo setup:
-`im:chat:create` / `im:chat:readonly`. The bot must be a member of
-`FEISHU_CHAT_ID`. Publish a new app version after adding scopes.
+messages in groups the bot belongs to). Also useful for setup:
+`im:chat:readonly` to list chats, and `im:chat:create` only for demo creation.
+The bot must be a member of `FEISHU_CHAT_ID`. Publish a new app version after
+adding scopes.
+
+One-time setup:
+
+1. Create a custom app in the Feishu Open Platform (or Lark Developer) console.
+2. Enable the **Bot** capability.
+3. Add the scopes above under Permissions & Scopes, then publish a version and
+   wait for approval.
+4. Add the bot to the target chat. For a group, add it as a group bot; for a
+   one-to-one chat, open the bot conversation.
+5. Copy the chat id (`oc_...`) from the chat's settings/API response and set
+   `FEISHU_CHAT_ID` or pass `--chat oc_...`.
+6. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` from the app's Credentials page.
+   `FEISHU_BASE_URL` is optional; use `https://open.larksuite.com` for Lark.
+
+`ds-agent channels check --feishu` reports only presence and pairing, never the
+secret. Add `--network` for one real `tenant_access_token` call (still no
+message); exit 0 means the app credentials authenticate and the chat id is
+configured. Chat membership and scope errors surface on the first poll.
 
 Inbound paths:
 
-- **Webhook** — `parseFeishuWebhook` handles `url_verification` (return the
-  challenge), plaintext v2 callbacks, and AES-256-CBC encrypted envelopes
-  (`im.message.receive_v1`).
-- **Polling Source** — `FeishuSource` lists `/open-apis/im/v1/messages` since a
-  cursor, maps text/post/image messages to `Trigger`s, and dedupes by
-  `feishu_<message_id>`. Thread key: `im:feishu:<chat_id>[:<thread_id>]`.
+- **Library parser, not a running listener** — `parseFeishuWebhook` can parse
+  `url_verification` (return the challenge), plaintext v2 callbacks, and
+  AES-256-CBC encrypted envelopes (`im.message.receive_v1`). Inbound webhooks
+  are **not implemented** for the CLI: `serve` does not expose a webhook server,
+  and it does not open Feishu's long-connection/WebSocket transport either.
+- **Polling Source (the implemented CLI path)** — `FeishuSource` lists
+  `/open-apis/im/v1/messages` since a cursor, maps text/post/image messages to
+  `Trigger`s, and dedupes by `feishu_<message_id>`. Thread key:
+  `im:feishu:<chat_id>[:<thread_id>]`. `serve --feishu` covers **exactly one
+  chat per process**.
 
 Outbound: `FeishuOutboxAdapter` replies in-thread with
 `/open-apis/im/v1/messages/:message_id/reply` when the source message is known,
@@ -113,9 +136,35 @@ Requirements, validated before `Runtime.create` and before any network call:
 | `--once` | One poll then return (smoke/testing) |
 
 A missing credential or chat id throws before SQLite is opened, so the daemon
-state directory is not created. `--imessage` and `--feishu` cannot be combined;
-`serve` rejects the pair before `Runtime.create` rather than running two inbound
-loops in one process. Default `serve` (no flag) is unchanged.
+state directory is not created. `--imessage` and `--feishu` may be combined:
+`serve` resolves and validates **both** configurations before `Runtime.create`,
+uses one Runtime/SQLite store, and gives each loop its own AbortController,
+cursor, and Outbox. If either configuration is absent or invalid, the process
+exits before opening SQLite, `chat.db`, or the Feishu network and lists every
+missing item. Default `serve` (no flag) is unchanged. A loop failure is logged
+and does not kill the other loop or the daemon.
+
+### No-send preflight
+
+Run the preflight before a live serve. It needs no model and opens no SQLite:
+
+```bash
+ds-agent channels check                  # iMessage + Feishu, offline
+ds-agent channels check --imessage       # one channel
+ds-agent channels check --feishu
+ds-agent channels check --feishu --network  # real tenant_access_token, no message
+```
+
+- iMessage: opens `chat.db` read-only, checks the required schema, prints
+  `COUNT(*)` and `MAX(ROWID)` only (never text), reports admission and whether
+  `osascript` exists. It prints the manual Automation command but does not run
+  it, so it cannot prompt or send.
+- Feishu: reports paired credentials, chat presence, base URL, and scopes with
+  values hidden. `--network` performs one real `tenant_access_token` call and
+  reports success/failure without printing the token or secret. The default is
+  fully offline.
+- Exit 0 only when every selected channel is ready; otherwise every actionable
+  reason is printed and the exit code is 1.
 
 **Cursor semantics.** The loop stores one document, `feishu_cursor/cursor`, as
 `{ chatId, lastCreateTimeMs }`, where `lastCreateTimeMs` is the highest message
@@ -140,12 +189,28 @@ otherwise `addressed` is unset and normal keyword/observed admission applies.
 admission. A denied message is persisted as a filtered disposition and cannot
 become a Ticket.
 
-**Shutdown.** The first SIGINT/SIGTERM aborts the poll loop, waits for the
-in-flight poll and its drain (jobs, outbox flush), and only then runs
-`Runtime.finish()` to stop the daemon and close SQLite. The loop never closes the
-Runtime or the client; `serve` owns them. A failed pull is logged and retried
-with bounded exponential backoff (cap 30s); stream/ingest errors are logged and
-skipped like the iMessage loop.
+**Shutdown.** The first SIGINT/SIGTERM aborts every inbound poll loop, waits for
+both in-flight polls and their drains (jobs, outbox flush), closes the iMessage
+API, and only then runs `Runtime.finish()` to stop the daemon and close SQLite.
+The loops never close the Runtime or the clients; `serve` owns them. A failed
+pull is logged and retried with bounded exponential backoff (cap 30s);
+stream/ingest errors are logged and skipped like the iMessage loop. A TCC/Full
+Disk Access denial is terminal for the iMessage loop (not retried forever), names
+the exact System Settings path, and leaves a combined Feishu loop and the daemon
+running.
+
+**Safe no-send smoke.** Check permissions and configuration without a model or
+message:
+
+```bash
+ds-agent channels check
+ds-agent channels check --feishu --network   # token only; does not send
+osascript -e 'tell application "Messages" to get name'  # manual Automation check
+```
+
+`serve` is not a send test: the first Router reply is the first real outbound
+message. Use a dedicated Apple ID / bot and keep default-deny admission while
+testing.
 
 **No live run was performed** for this loop: the tests use a fake source and a
 `FeishuClient` whose fetch throws, so CI never calls Feishu. Live verification is

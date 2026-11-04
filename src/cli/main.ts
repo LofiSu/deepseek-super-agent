@@ -1,8 +1,6 @@
 import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
-import { FeishuClient, FeishuSource } from '../channels/feishu.ts'
-import { ChatDbImessageApi, ImessageSource } from '../channels/imessage.ts'
 import { Engine } from '../core/engine.ts'
 import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
@@ -20,9 +18,8 @@ import { healthProbe } from '../watchdog/health.ts'
 import { startEmbeddedGateway } from '../gateway/embedded.ts'
 import { defaultHome, runDemo } from './demo.ts'
 import { runGatewayCommand } from './gateway.ts'
-import { resolveImessageCliConfig, runImessageCommand } from './imessage.ts'
-import { runImessageLoop } from './channel-loop.ts'
-import { resolveFeishuCliConfig, runFeishuLoop } from './feishu.ts'
+import { runImessageCommand } from './imessage.ts'
+import { resolveServeChannelConfigs, runChannelsCheck, startServeChannels } from './channels.ts'
 import { runProfileCommand, runWireCommand } from './wiring.ts'
 import { runSetupCommand } from './setup.ts'
 
@@ -115,11 +112,15 @@ function help(): void {
   pnpm ds-agent retry <ticketId> # new Assignment on the same Ticket
   pnpm ds-agent status
   pnpm ds-agent health
-  pnpm ds-agent serve [--imessage|--feishu] [--handle <id>] [--chat <id>]
+  pnpm ds-agent serve [--imessage] [--feishu] [--handle <id>] [--chat <id>]
                             [--allow-any] [--allow-groups] [--interval <ms>]
                             [--since <epoch-ms>] [--once]
-                            # daemon timer over persisted state; optional inbound iMessage or Feishu poll loop
-                            # SIGINT/SIGTERM drain; the two inbound loops cannot be combined
+                            # daemon timer over persisted state; optional inbound iMessage
+                            # and/or Feishu poll loop; the two loops share one Runtime but
+                            # keep independent cursors, outboxes, and abort controllers
+  pnpm ds-agent channels check [--imessage] [--feishu] [--network]
+                            # offline preflight: no model, no SQLite, no message send;
+                            # --network only calls Feishu tenant_access_token
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
   pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLMs, write gateway.config.json
@@ -162,7 +163,7 @@ process are not picked up. Pass --imessage to run the same inbound iMessage poll
 loop as "ds-agent imessage" alongside the daemon; it uses that command's
 default-deny sender admission, cursor, and outbox, and refuses to start before
 chat.db is opened. --allow-groups opens group ingestion; group messages are never
-marked direct. Pass --feishu instead to poll a Feishu chat: it requires
+marked direct. Pass --feishu to poll one Feishu chat: it requires
 FEISHU_APP_ID/FEISHU_APP_SECRET and FEISHU_CHAT_ID or --chat <id>, validates them
 before SQLite is opened, and stores its cursor in SQLite as
 { chatId, lastCreateTimeMs }. --since <epoch-ms> overrides the stored cursor for
@@ -170,14 +171,44 @@ one start; otherwise the stored cursor for that chat seeds the poll, otherwise
 the source starts at now-5min. Feishu triggers keep the chat id in
 channel.address.group, so DS_AGENT_GROUP_ALLOWLIST admits by chat; only a real
 bot mention sets addressed=mention, and group messages are never marked direct.
---imessage and --feishu cannot be combined. Poll errors are logged and retried
-with bounded backoff, so they do not kill the loop or the daemon. The model is
-fixed at Runtime.create, so mount credentials before starting and restart to
-change them. With no provider key the idle daemon uses MockModel, and
-Gate-deferred assessments stay queued for a live-model start.
-The first SIGINT/SIGTERM aborts the inbound loop, drains through
-Runtime.finish() (assessments, jobs, daemon timer, SQLite), and exits 0; a second
-signal force-exits 1 if it hangs.
+--imessage and --feishu may be combined: both configurations are resolved before
+Runtime.create, one Runtime/SQLite store is shared, and each loop keeps its own
+AbortController, cursor, and outbox. If either configuration is absent or
+invalid, serve fails before opening SQLite, chat.db, or the Feishu network and
+names every missing item; it never starts with only one half configured. A loop
+failure is logged and does not kill the other loop or the daemon. Feishu
+inbound is polling only: one chat per process, with no webhook server or
+long-connection listener. Poll errors are logged and retried with bounded
+backoff, so they do not kill the loop or the daemon. A Full Disk Access denial
+is terminal for the iMessage loop and includes the exact System Settings path;
+serve keeps the daemon and any other channel running. The model is fixed at
+Runtime.create, so mount credentials before starting and restart to change them.
+With no provider key the idle daemon uses MockModel, and Gate-deferred
+assessments stay queued for a live-model start.
+The first SIGINT/SIGTERM aborts every inbound loop, waits for both drains, closes
+the iMessage API, then drains through Runtime.finish() (assessments, jobs,
+daemon timer, SQLite), and exits 0; a second signal force-exits 1 if it hangs.
+
+Run "ds-agent channels check" before serve. It needs no model and opens no
+SQLite. For iMessage it opens chat.db read-only, checks the required columns,
+prints count/latest ROWID (never message text), reports admission and osascript
+presence, and prints the exact manual Automation command without running it. For
+Feishu it reports paired credentials, chat id, base URL, and scopes without
+printing secrets; --network adds one real tenant_access_token call and still
+sends no message. Exit 0 means every selected channel is ready. A safe no-send
+smoke is: run channels check (optionally --network), run the printed iMessage
+Automation command manually, then stop; the first real Router reply is the first
+real send. TCC errors are reported with "Grant Full Disk Access to your
+terminal" and System Settings > Privacy & Security > Full Disk Access; allow the
+terminal to control Messages under System Settings > Privacy & Security >
+Automation.
+
+Feishu setup: create a custom app with the Bot capability, add scopes im:message,
+im:message:send_as_bot, im:message:readonly, and im:message.group_msg (for group
+history), publish an app version, add the bot to exactly one target chat, copy
+its oc_... chat id, then set FEISHU_APP_ID, FEISHU_APP_SECRET, and
+FEISHU_CHAT_ID (or pass --chat). Inbound CLI delivery is one-chat polling only;
+webhook servers and long-connection/WebSocket delivery are not implemented.
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
 Section 7 counters are written to <stateDir>/metrics.json and printed by metrics.
@@ -241,32 +272,28 @@ async function runWithEmbeddedGateway(home: string, run: () => Promise<void>): P
  * same inbound iMessage poll loop as `ds-agent imessage`, sharing that command's
  * default-deny admission, cursor, and outbox. With `--feishu` it runs an
  * inbound Feishu poll loop over `FEISHU_CHAT_ID`/`--chat`, with a durable
- * `feishu_cursor` document. The two inbound loops cannot be combined. The model
- * is resolved once at Runtime.create; changing credentials requires a restart. A
- * keyless process falls back to MockModel and leaves deferred assessments queued
- * for a live-model start. chat and serve may run on MockModel;
+ * `feishu_cursor` document. Both may run together: each config is validated
+ * before Runtime.create, one Runtime/SQLite store is shared, and each loop has
+ * its own abort controller, cursor, and outbox. The model is resolved once at
+ * Runtime.create; changing credentials requires a restart. A keyless process
+ * falls back to MockModel and leaves deferred assessments queued for a
+ * live-model start. chat and serve may run on MockModel;
  * demo/retry/resume require a live model.
  *
- * Shutdown is signal-driven. The first SIGINT/SIGTERM aborts the inbound poll
- * loop, waits for its drain, then runs Runtime.finish(), which waits for Main
- * Agent assessments and Harness jobs, stops the Daemon timer, and closes SQLite
- * before exiting 0. A second signal force-exits 1 in case a live turn or
- * finish() itself hangs. In-flight turns are not reconstructed after a restart;
- * that boundary is documented in docs/MODULES.md.
+ * Shutdown is signal-driven. The first SIGINT/SIGTERM aborts every inbound poll
+ * loop, waits for both drains, closes the iMessage API, then runs
+ * Runtime.finish(), which waits for Main Agent assessments and Harness jobs,
+ * stops the Daemon timer, and closes SQLite before exiting 0. A second signal
+ * force-exits 1 in case a live turn or finish() itself hangs. In-flight turns
+ * are not reconstructed after a restart; that boundary is documented in
+ * docs/MODULES.md.
  */
 async function serve(home: string): Promise<void> {
-  // Resolve and validate the opt-in inbound channel before Runtime.create opens
-  // SQLite (and long before ChatDbImessageApi opens chat.db or a Feishu client
-  // makes a network call). A missing allowlist or app credential must leave
-  // every permissioned resource untouched.
-  const wantsImessage = process.argv.includes('--imessage')
-  const wantsFeishu = process.argv.includes('--feishu')
-  if (wantsImessage && wantsFeishu) {
-    throw new Error('serve --imessage and --feishu cannot be combined; run exactly one inbound loop per process.')
-  }
-  const imessage = wantsImessage ? resolveImessageCliConfig() : undefined
-  if (imessage && !imessage.admission.allowed) throw new Error(imessage.admission.error)
-  const feishu = wantsFeishu ? resolveFeishuCliConfig() : undefined
+  // Resolve and validate every opt-in inbound channel before Runtime.create
+  // opens SQLite (and long before ChatDbImessageApi opens chat.db or a Feishu
+  // client makes a network call). A missing allowlist or app credential must
+  // leave every permissioned resource untouched.
+  const configs = resolveServeChannelConfigs()
 
   const runtime = Runtime.create({
     home,
@@ -274,11 +301,9 @@ async function serve(home: string): Promise<void> {
     watchdogIntervalMs: 60_000,
   })
   const canAssess = runtime.model.name !== 'MockModel'
-  const channelAbort = new AbortController()
-  let imessageApi: ChatDbImessageApi | undefined
-  // Resolved (never rejected) so shutdown can always await it. A loop failure
-  // is logged and leaves the daemon running.
-  let loopDone: Promise<void> = Promise.resolve()
+  // Independent loops: each channel owns its AbortController and Outbox, but
+  // both run over this one Runtime and SQLite store.
+  let channels: ReturnType<typeof startServeChannels> | undefined
   let stopping = false
   const shutdown = (signal: NodeJS.Signals): void => {
     if (stopping) {
@@ -287,13 +312,15 @@ async function serve(home: string): Promise<void> {
     }
     stopping = true
     // Stop polling first so no new Trigger is ingested while finish() drains.
-    channelAbort.abort()
+    channels?.abort()
     runtime.log.info(`[serve] shutdown signal=${signal}; draining (send again to force exit)`)
     void (async () => {
-      // The loop owns its outbox and cursor writes; let it finish before the
-      // API closes and Runtime.finish() closes SQLite.
-      await loopDone
-      imessageApi?.close()
+      // The loops own their outbox and cursor writes; let both finish before
+      // the iMessage API closes and Runtime.finish() closes SQLite.
+      if (channels) {
+        await channels.wait()
+        channels.close()
+      }
       await runtime.finish()
     })()
       .then(() => {
@@ -306,6 +333,7 @@ async function serve(home: string): Promise<void> {
         console.error(`[serve] shutdown failed: ${error instanceof Error ? error.message : String(error)}`)
         // Runtime.finish() releases both on its own, but keep shutdown safe if
         // a future finish() path rejects before it reaches that block.
+        channels?.close()
         runtime.daemon.stop()
         if (runtime.store.isOpen) {
           try {
@@ -323,68 +351,37 @@ async function serve(home: string): Promise<void> {
   try {
     runtime.start({ assessPending: canAssess })
   } catch (error) {
-    channelAbort.abort()
-    imessageApi?.close()
+    channels?.abort()
+    channels?.close()
     await runtime.finish().catch(() => undefined)
     throw error
   }
   if (!canAssess) {
     runtime.log.info('[serve] MockModel: deferred assessments left queued until a live-model start')
   }
-  if (imessage && !stopping) {
-    if (imessage.allowAny) {
+  if (configs.imessage && !stopping) {
+    if (configs.imessage.allowAny) {
       runtime.log.info(
         '[imessage] WARNING: --allow-any is active; any sender in a 1:1 chat can trigger work. '
         + 'Prefer --handle or DS_AGENT_ACTOR_ALLOWLIST unless this is intentional.',
       )
     }
-    if (imessage.allowGroups) {
+    if (configs.imessage.allowGroups) {
       runtime.log.info(
         '[imessage] WARNING: --allow-groups is active; group messages are ingested, '
         + 'but they are never marked direct and still pass normal admission.',
       )
     }
-    const api = new ChatDbImessageApi(imessage.dbPath)
-    imessageApi = api
-    loopDone = runImessageLoop({
-      runtime,
-      source: new ImessageSource(api, {
-        ...(imessage.handle ? { handle: imessage.handle } : {}),
-        allowGroups: imessage.allowGroups,
-      }),
-      api,
-      dbPath: imessage.dbPath,
-      handle: imessage.handle,
-      allowGroups: imessage.allowGroups,
-      allowAny: imessage.allowAny,
-      intervalMs: imessage.intervalMs,
-      since: imessage.since,
-      once: imessage.once,
-      signal: channelAbort.signal,
-      // A bad/unavailable chat.db must not kill the daemon; the loop retries
-      // with bounded backoff and keeps logging.
-      retrySchemaErrors: true,
-    }).then(() => undefined, error => {
-      runtime.log.info(`[imessage] loop stopped error=${error instanceof Error ? error.message : String(error)}`)
-    })
   }
-  if (feishu && !stopping) {
-    const client = new FeishuClient(feishu.config)
-    loopDone = runFeishuLoop({
-      runtime,
-      chatId: feishu.chatId,
-      client,
-      createSource: sinceMs => new FeishuSource(client, feishu.chatId, {
-        ...(sinceMs !== undefined ? { sinceMs } : {}),
-        config: feishu.config,
-      }),
-      intervalMs: feishu.intervalMs,
-      since: feishu.since,
-      once: feishu.once,
-      signal: channelAbort.signal,
-    }).then(() => undefined, error => {
-      runtime.log.info(`[feishu] loop stopped error=${error instanceof Error ? error.message : String(error)}`)
-    })
+  if (!stopping) {
+    try {
+      channels = startServeChannels({ runtime, ...configs })
+    } catch (error) {
+      channels?.abort()
+      channels?.close()
+      await runtime.finish().catch(() => undefined)
+      throw error
+    }
   }
   runtime.log.info(`ds-agent serve ready home=${home} pid=${process.pid} model=${runtime.model.name}`)
   // Keep the CLI promise pending; the daemon timer keeps the process alive and a
@@ -455,6 +452,17 @@ async function main(): Promise<void> {
     } finally {
       store.close()
     }
+    return
+  }
+  if (cmd === 'channels') {
+    if (sub !== 'check') {
+      throw new Error('channels needs "check": ds-agent channels check [--imessage] [--feishu] [--network]')
+    }
+    const report = await runChannelsCheck({
+      network: process.argv.includes('--network'),
+    })
+    for (const line of report.lines) console.log(line)
+    process.exitCode = report.code
     return
   }
   if (cmd === 'serve') {
