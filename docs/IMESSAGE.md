@@ -145,9 +145,10 @@ SQLite document, so `imessage` and `serve --imessage` resume from the same
 point.
 
 The first SIGINT/SIGTERM aborts polling, drains the loop and Runtime, and exits
-0; a second signal force-exits 1 if the drain hangs. Pull/ingest errors are
-logged and retried with bounded backoff, so a transient `chat.db`/io failure
-does not kill the loop or the daemon.
+0; a second signal force-exits 1 if the drain hangs. Pull errors are logged and
+retried with bounded backoff; ingest errors are logged and skipped (the cursor
+still advances), so a transient `chat.db`/io failure does not kill the loop or
+the daemon.
 
 ## Limitations (MVP)
 
