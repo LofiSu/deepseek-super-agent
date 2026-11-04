@@ -18,6 +18,7 @@ import {
   imessageTrigger,
   isGroupMessage,
   osascriptEnv,
+  runOsascript,
   type ImessageApi,
   type ImessageInbound,
   type ImessagePullOptions,
@@ -1248,19 +1249,36 @@ describe('iMessage outbound', () => {
 })
 
 describe('ChatDbImessageApi send', () => {
-  it('passes text and target through the environment, not the script', async () => {
-    const captured: { script: string; env: NodeJS.ProcessEnv }[] = []
-    const api = new ChatDbImessageApi('/tmp/unused.db', async (script, env) => {
-      captured.push({ script, env })
+  it('passes text as an argv item, not through the environment', async () => {
+    const captured: { script: string; env: NodeJS.ProcessEnv; args: readonly string[] }[] = []
+    const api = new ChatDbImessageApi('/tmp/unused.db', async (script, env, args = []) => {
+      captured.push({ script, env, args })
       return 'ok'
     })
     const result = await api.send({ handle: '+1' }, 'hi "quoted" $HOME')
     expect(captured).toHaveLength(1)
     expect(captured[0]!.script).not.toContain('hi "quoted"')
-    expect(captured[0]!.env.DS_AGENT_IMSG_TEXT).toBe('hi "quoted" $HOME')
+    expect(captured[0]!.script).toContain('item 1 of argv')
+    expect(captured[0]!.args).toEqual(['hi "quoted" $HOME'])
+    expect(captured[0]!.env.DS_AGENT_IMSG_TEXT).toBeUndefined()
     expect(captured[0]!.env.DS_AGENT_IMSG_TARGET).toBe('+1')
     expect(captured[0]!.env.DS_AGENT_IMSG_MODE).toBe('buddy')
     expect(result.externalId).toMatch(/^imessage_/)
+  })
+
+  it('delivers non-ASCII text as UTF-8 through osascript argv', async () => {
+    // AppleScript's `system attribute` decodes the env with the system encoding,
+    // which turned every Chinese reply into mojibake on a real Mac. argv is UTF-8.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-osascript-'))
+    const fake = path.join(dir, 'osascript')
+    fs.writeFileSync(fake, '#!/bin/sh\nfor arg in "$@"; do printf "%s\\n" "$arg"; done\n', { mode: 0o755 })
+    try {
+      const text = '你好，测试 normal text'
+      const out = await runOsascript('on run argv\nreturn item 1 of argv\nend run', { PATH: dir }, [text])
+      expect(out.split('\n')).toContain(text)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('uses chat mode for a chat guid target', async () => {
