@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const distEntry = path.join(root, 'dist', 'cli', 'main.js')
+const distRules = path.join(root, 'dist', 'watchdog', 'rules.json')
 const failures: string[] = []
 let passed = 0
 
@@ -58,6 +59,13 @@ check('pnpm build exits 0', build.status === 0, build.output)
 if (build.status !== 0) finish()
 
 check('dist/cli/main.js exists', existsSync(distEntry), `missing ${distEntry}`)
+check('dist/watchdog/rules.json exists', existsSync(distRules), `missing ${distRules}`)
+check(
+  'dist/watchdog/rules.json matches src asset',
+  existsSync(distRules)
+    && readFileSync(distRules, 'utf8') === readFileSync(path.join(root, 'src', 'watchdog', 'rules.json'), 'utf8'),
+  `compare ${distRules}`,
+)
 
 const binTarget = pkg.bin?.['ds-agent']
 check(
@@ -81,6 +89,7 @@ console.log('package smoke: checking tarball contents')
 const pack = run('npm', ['pack', '--dry-run'])
 check('npm pack --dry-run exits 0', pack.status === 0, pack.output)
 check('tarball file list contains dist/cli/main.js', pack.output.includes('dist/cli/main.js'), pack.output)
+check('tarball file list contains dist/watchdog/rules.json', pack.output.includes('dist/watchdog/rules.json'), pack.output)
 check('tarball file list contains package.json (bin entry)', pack.output.includes('package.json'), pack.output)
 check(
   'bin target is in the files whitelist',

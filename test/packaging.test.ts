@@ -38,7 +38,7 @@ describe('package manifest', () => {
   })
 
   it('builds dist through the build tsconfig and on prepack', () => {
-    expect(pkg.scripts?.build).toBe('tsc -p tsconfig.build.json')
+    expect(pkg.scripts?.build).toBe('tsc -p tsconfig.build.json && tsx scripts/copy-assets.ts')
     expect(pkg.scripts?.prepack).toBe('pnpm build')
   })
 
@@ -51,7 +51,11 @@ describe('package manifest', () => {
       'docs/MODULES.md',
       'docs/REAL_CHANNELS.md',
     ])
-    for (const file of pkg.files ?? []) {
+    // dist is build output and must stay untracked; the unit suite runs
+    // without a build, so only the checked-in files are required to exist.
+    const gitignore = readFileSync(path.join(root, '.gitignore'), 'utf8').split('\n')
+    expect(gitignore).toContain('dist')
+    for (const file of (pkg.files ?? []).filter(entry => entry !== 'dist')) {
       expect(existsSync(path.join(root, file)), file).toBe(true)
     }
   })
@@ -77,5 +81,10 @@ describe('tsconfig.build.json', () => {
   it('compiles src only', () => {
     expect(buildConfig.include).toEqual(['src/**/*.ts'])
     expect(buildConfig.exclude).toEqual(expect.arrayContaining(['test', 'scripts', 'vitest.config.ts']))
+  })
+
+  it('declares dist as the emitted output', () => {
+    expect(buildConfig.compilerOptions.outDir).toBe('dist')
+    expect(pkg.files).toContain(buildConfig.compilerOptions.outDir)
   })
 })

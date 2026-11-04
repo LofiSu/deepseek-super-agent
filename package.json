@@ -20,7 +20,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsx scripts/copy-assets.ts",
     "prepack": "pnpm build",
     "demo": "NODE_NO_WARNINGS=1 tsx src/cli/demos/run.ts",
     "demo:local": "NODE_NO_WARNINGS=1 tsx src/cli/demo.ts",
