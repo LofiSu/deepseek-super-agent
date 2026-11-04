@@ -353,9 +353,16 @@ export class Runtime {
 
   static create(opts: RuntimeOptions): Runtime {
     const baseEnv = opts.env ?? process.env
-    const secrets = secretValues(baseEnv)
+    const mcpConfig = mcpServersFromConfig(opts.mcpServers, baseEnv)
+    // A server's own env is where its credentials live, so its secret-named
+    // values join the redaction list before anything logs or persists.
+    const secrets = [...new Set([
+      ...secretValues(baseEnv),
+      ...mcpConfig.configs.flatMap(config => secretValues(config.env)),
+    ])].sort((a, b) => b.length - a.length)
     const redact = (text: string) => redactSecrets(text, secrets)
     const log = new RedactingLogger(redact)
+    if (mcpConfig.error) log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${mcpConfig.error}`)
     const model = opts.model ?? createModelFromEnv(baseEnv)
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
     const store = new Store(opts.home)
@@ -513,7 +520,7 @@ export class Runtime {
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const teams = new TeamRegistry(store)
     const machines = new MachineRegistry()
-    const mcpConfigs = mcpServersFromConfig(opts.mcpServers, baseEnv, log)
+    const mcpConfigs = mcpConfig.configs
     const mcp = mcpConfigs.length === 0
       ? undefined
       : new McpToolSource(mcpConfigs, {
@@ -1030,29 +1037,30 @@ export class Runtime {
 
 /**
  * `DS_AGENT_MCP_SERVERS` (or `RuntimeOptions.mcpServers`) is configuration, not
- * code: malformed config is logged and ignored so a bad file cannot stop the
- * runtime from starting.
+ * code: malformed config is reported and ignored so a bad file cannot stop the
+ * runtime from starting. The caller logs `error` once a logger exists.
  */
-function mcpServersFromConfig(raw: unknown, env: NodeJS.ProcessEnv, log: Logger): McpServerConfig[] {
+function mcpServersFromConfig(
+  raw: unknown,
+  env: NodeJS.ProcessEnv,
+): { configs: McpServerConfig[]; error?: string } {
   let value = raw
   if (value === undefined) {
     const configured = env.DS_AGENT_MCP_SERVERS?.trim()
-    if (!configured) return []
+    if (!configured) return { configs: [] }
     value = configured
   }
   if (typeof value === 'string') {
     try {
       value = JSON.parse(value) as unknown
     } catch (error) {
-      log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${error instanceof Error ? error.message : String(error)}`)
-      return []
+      return { configs: [], error: error instanceof Error ? error.message : String(error) }
     }
   }
   try {
-    return parseMcpServers(value)
+    return { configs: parseMcpServers(value) }
   } catch (error) {
-    log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${error instanceof Error ? error.message : String(error)}`)
-    return []
+    return { configs: [], error: error instanceof Error ? error.message : String(error) }
   }
 }
 

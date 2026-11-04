@@ -38,7 +38,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
 server.setRequestHandler(CallToolRequestSchema, async request => {
   const { name, arguments: args = {} } = request.params
   if (name === 'echo') return { content: [{ type: 'text', text: JSON.stringify(args) }] }
-  if (name === 'big') return { content: [{ type: 'text', text: 'x'.repeat(70 * 1024) }] }
+  if (name === 'big') return { content: [{ type: 'text', text: `${'x'.repeat(70 * 1024)} TOKEN-123` }] }
   if (name === 'fail') throw new Error('boom')
   if (name === 'hang') {
     await new Promise(resolve => setTimeout(resolve, 500))

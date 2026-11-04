@@ -340,16 +340,20 @@ export DS_AGENT_MCP_SERVERS='[
 ```
 
 - `name` matches `[A-Za-z0-9_-]`, starts with a letter or digit, is at most 32
-  characters, and is unique. `command` is a non-empty executable (`/absolute/path`
-  is safest because the child inherits the current working directory).
-  `args` defaults to `[]`, `env` to `{}`, and `timeoutMs` to `120000`.
+  characters, is unique, and contains no `__` (that is the namespace
+  separator). `command` is a non-empty executable (`/absolute/path` is safest
+  because the child inherits the current working directory). `args` defaults
+  to `[]`, `env` to `{}`, and `timeoutMs` to `120000`.
 - Tools appear to Workers as `mcp__<server>__<tool>`. Text stays text;
   image/resource payloads are written to `<DS_AGENT_HOME>/mcp/<server>/` and
   referenced by path; a result over 64 KB goes to spill and returns
   `{ spillId, bytes, preview }`.
 - The child process inherits only `PATH`, `HOME`, `LANG`, `TZ`, `HTTP_PROXY`,
-  `HTTPS_PROXY`, and `NO_PROXY`, plus the server's own `env`. Put credentials in
-  `env`, not in your shell.
+  `HTTPS_PROXY`, and `NO_PROXY`, plus the server's own `env`; the MCP SDK also
+  adds its own safe defaults (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`,
+  `USER`) from the host when it starts the transport. Put credentials in
+  `env`, not in your shell. Secret-named `env` values (for example
+  `KRENE_TOKEN`) join the redaction list like any other credential.
 - Unreadable configuration is logged as
   `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` and ignored. A server that fails or
   hangs while connecting increments `mcp.connect_error` and is omitted; the

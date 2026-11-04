@@ -22,6 +22,7 @@ describe('parseMcpServers', () => {
 
   it.each([
     [{ name: 'bad name', command: 'a' }, /name/i],
+    [{ name: 'a__b', command: 'a' }, /name/i],
     [{ name: 'krene', command: '   ' }, /command/i],
     [{ name: 'krene', command: 'a', args: [1] }, /args/i],
     [{ name: 'krene', command: 'a', env: { A: 1 } }, /env/i],

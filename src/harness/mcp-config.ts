@@ -8,7 +8,9 @@ export interface McpServerConfig {
   timeoutMs: number
 }
 
-const NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/i
+// `__` is the namespace separator, so allowing it would make
+// `mcp__<server>__<tool>` ambiguous across servers.
+const NAME = /^(?!.*__)[a-z0-9][a-z0-9_-]{0,31}$/i
 const DEFAULT_TIMEOUT_MS = 120_000
 
 function fail(reason: string): never {
@@ -25,7 +27,9 @@ export function parseMcpServers(raw: unknown): McpServerConfig[] {
     const record = entry as Record<string, unknown>
 
     const name = record.name
-    if (typeof name !== 'string' || !NAME.test(name)) fail('name must match /^[a-z0-9][a-z0-9_-]{0,31}$/i')
+    if (typeof name !== 'string' || !NAME.test(name)) {
+      fail('name must match /^(?!.*__)[a-z0-9][a-z0-9_-]{0,31}$/i')
+    }
     if (seen.has(name)) fail(`duplicate name: ${name}`)
     seen.add(name)
 

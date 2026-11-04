@@ -5,14 +5,16 @@ import { McpToolSource, childEnv, mcpToolName } from '../src/harness/mcp.ts'
 import { parseMcpServers } from '../src/harness/mcp-config.ts'
 
 const serverPath = fileURLToPath(new URL('./fixtures/fake-mcp-server.mjs', import.meta.url))
+const hungPath = fileURLToPath(new URL('./fixtures/hung-mcp-server.mjs', import.meta.url))
 
-function sourceFor(configs: unknown) {
+function sourceFor(configs: unknown, listTimeoutMs?: number) {
   return new McpToolSource(parseMcpServers(configs), {
     log: () => {},
     metrics: { increment: () => {} },
     redact: text => text,
     spill: { put: () => 'spill_1' },
     workspaceDir: path.join(fileURLToPath(new URL('.', import.meta.url)), 'tmp-mcp'),
+    ...(listTimeoutMs === undefined ? {} : { listTimeoutMs }),
   })
 }
 
@@ -37,6 +39,19 @@ describe('McpToolSource', () => {
     const specs = await source.specs()
     expect(specs.some(spec => spec.name.startsWith('mcp__fake__'))).toBe(true)
     expect(specs.some(spec => spec.name.startsWith('mcp__broken__'))).toBe(false)
+    await source.close()
+  })
+
+  it('omits a server that never finishes initialize without stalling the listing', async () => {
+    const source = sourceFor([
+      { name: 'hung', command: process.execPath, args: [hungPath] },
+      { name: 'fake', command: process.execPath, args: [serverPath] },
+    ], 3_000)
+    const started = Date.now()
+    const specs = await source.specs()
+    expect(Date.now() - started).toBeLessThan(9_000)
+    expect(specs.some(spec => spec.name.startsWith('mcp__fake__'))).toBe(true)
+    expect(specs.some(spec => spec.name.startsWith('mcp__hung__'))).toBe(false)
     await source.close()
   })
 

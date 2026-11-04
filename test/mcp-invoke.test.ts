@@ -1,19 +1,20 @@
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { McpToolSource } from '../src/harness/mcp.ts'
+import { McpToolSource, type McpToolSourceDeps } from '../src/harness/mcp.ts'
 import { parseMcpServers } from '../src/harness/mcp-config.ts'
 
 const serverPath = fileURLToPath(new URL('./fixtures/fake-mcp-server.mjs', import.meta.url))
 const workspaceDir = fileURLToPath(new URL('./tmp-mcp-invoke', import.meta.url))
 
-async function source(timeoutMs = 5_000) {
+async function source(timeoutMs = 5_000, overrides: Partial<McpToolSourceDeps> = {}) {
   return new McpToolSource(parseMcpServers([{ name: 'fake', command: process.execPath, args: [serverPath], timeoutMs }]), {
     log: () => {},
     metrics: { increment: () => {} },
     redact: text => text,
     spill: { put: () => 'spill_1' },
     workspaceDir,
+    ...overrides,
   })
 }
 
@@ -41,6 +42,24 @@ describe('McpToolSource.invoke', () => {
     expect(result.paths).toHaveLength(1)
     expect(fs.existsSync(result.paths[0])).toBe(true)
     expect(JSON.stringify(result)).not.toContain('iVBORw0KGgo')
+    await mcp.close()
+  })
+
+  it('redacts tool output before storing it in spill', async () => {
+    const bodies: string[] = []
+    const mcp = await source(5_000, {
+      redact: text => text.replaceAll('TOKEN-123', '[redacted]'),
+      spill: {
+        put: body => {
+          bodies.push(body)
+          return 'spill_1'
+        },
+      },
+    })
+    await mcp.invoke('mcp__fake__big', {})
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).not.toContain('TOKEN-123')
+    expect(bodies[0]).toContain('[redacted]')
     await mcp.close()
   })
 

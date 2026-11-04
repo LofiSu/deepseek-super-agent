@@ -15,6 +15,8 @@ export interface McpToolSourceDeps {
   spill: { put(body: string): string }
   workspaceDir: string
   baseEnv?: NodeJS.ProcessEnv
+  /** Cap for connecting and listing one server. Defaults to 10s; tests lower it. */
+  listTimeoutMs?: number
 }
 
 export interface McpToolSourceLike {
@@ -27,6 +29,8 @@ const NAME_PREFIX = 'mcp__'
 const LIST_TIMEOUT_MS = 10_000
 const SPILL_LIMIT = 64 * 1024
 const PREVIEW_LIMIT = 500
+/** Keeps the SDK's 60s default request timeout from firing before our own race. */
+const SDK_TIMEOUT_MARGIN_MS = 1_000
 const TIMED_OUT = Symbol('timed-out')
 
 const MIME_EXT: Record<string, string> = {
@@ -149,7 +153,16 @@ export class McpToolSource implements McpToolSourceLike {
     const timeoutMs = connection.config.timeoutMs
     let result: CallToolResult | typeof TIMED_OUT
     try {
-      result = await withTimeout(connection.client.callTool({ name: tool, arguments: args }), timeoutMs)
+      // The SDK's own per-request timeout defaults to 60s. Our race owns the
+      // error path, so the SDK cap sits just above it instead of cutting off a
+      // configured 120s image-generation call.
+      result = await withTimeout(
+        connection.client.callTool({ name: tool, arguments: args }, undefined, {
+          timeout: timeoutMs + SDK_TIMEOUT_MARGIN_MS,
+          maxTotalTimeout: timeoutMs + SDK_TIMEOUT_MARGIN_MS,
+        }),
+        timeoutMs,
+      )
     } catch (error) {
       this.deps.metrics.increment('mcp.call_error')
       throw new UserError(`mcp tool ${name} failed: ${this.deps.redact(errorMessage(error))}`)
@@ -196,8 +209,12 @@ export class McpToolSource implements McpToolSourceLike {
   }
 
   private async loadSpecs(): Promise<ToolSpec[]> {
+    // One budget for the whole listing: a server that connects late must not
+    // get a fresh cap for its tool list.
+    const deadline = Date.now() + (this.deps.listTimeoutMs ?? LIST_TIMEOUT_MS)
+    const remaining = (): number => Math.max(0, deadline - Date.now())
     const connected = await Promise.all(
-      this.connections.map(connection => withTimeout(connection.ready, LIST_TIMEOUT_MS)),
+      this.connections.map(connection => withTimeout(connection.ready, remaining())),
     )
     const specs: ToolSpec[] = []
     await Promise.all(this.connections.map(async (connection, index) => {
@@ -206,7 +223,7 @@ export class McpToolSource implements McpToolSourceLike {
         return
       }
       try {
-        const listed = await withTimeout(connection.client.listTools(), LIST_TIMEOUT_MS)
+        const listed = await withTimeout(connection.client.listTools(), remaining())
         if (listed === TIMED_OUT) {
           this.deps.log(`[mcp] skipping server=${connection.config.name} reason=list-timeout`)
           return
@@ -280,10 +297,13 @@ export class McpToolSource implements McpToolSourceLike {
   private maybeSpill(normalized: unknown): unknown {
     const json = JSON.stringify(normalized) ?? ''
     if (json.length <= SPILL_LIMIT) return normalized
+    // Redact before it is written at rest: spill bodies are not re-scrubbed
+    // later, and the model only ever sees the preview.
+    const body = this.deps.redact(json)
     return {
-      spillId: this.deps.spill.put(json),
-      bytes: Buffer.byteLength(json),
-      preview: json.slice(0, PREVIEW_LIMIT),
+      spillId: this.deps.spill.put(body),
+      bytes: Buffer.byteLength(body),
+      preview: body.slice(0, PREVIEW_LIMIT),
     }
   }
 
