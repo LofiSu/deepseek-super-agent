@@ -487,7 +487,75 @@ head so a later reader can separate the reviewed tree from the merged tree.
   nondeterministic; it is not exercised by CI without credentials.
 - **Merged:** `f8554cc`; CI green on the reviewed head.
 
+## PR #101 — `[SUPER-AGENT][SERVE-CHANNEL-LOOP] Run an inbound iMessage loop from serve`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; reviewed head `2675331` (feature `fac711c`, merges of
+  `ab8e4bf`/`55f0d09`, docs correction `2675331`). Files:
+  `src/cli/channel-loop.ts` (new, 175 lines), `src/cli/imessage.ts`,
+  `src/cli/main.ts`, `docs/IMESSAGE.md`, `test/cli-serve-imessage.test.ts`
+  (+650/−111). `src/channels/imessage.ts` and `docs/MODULES.md` untouched.
+- **Independent review:** **APPROVE** after one documentation correction.
+  - Admission is resolved by the shared `resolveImessageCliConfig` and checked
+    before `Runtime.create`, so a missing allowlist leaves SQLite and `chat.db`
+    unopened; the child-process test asserts neither path is created.
+  - `chat` keeps its flags, cursor seeding/persistence, ingest-skip semantics,
+    and fail-fast `ImessageSchemaError`; `ImessageSource` is stateless, so
+    constructing it once per loop instead of per poll is safe.
+  - Shutdown aborts polling first, awaits `loopDone`, closes the API, then runs
+    `Runtime.finish()`; the loop promise cannot reject.
+  - Requested correction: the docs claimed ingest errors are retried. They are
+    logged and skipped and the cursor still advances; fixed in `2675331`, and
+    the PR body now records that `chat`'s non-schema retry cadence moved to the
+    shared bounded backoff.
+- **Non-vacuity:** the five new tests fail without the loop/serve wiring and are
+  offline only (fake API/source, MockModel, child process for refusal).
+- **Residual non-blocking:** an in-flight pull is not cancellable, so a hung
+  `chat.db` read needs the second-signal force exit; `serve --imessage` retries
+  schema errors forever by design and does not start the embedded gateway;
+  `--once` leaves the daemon running.
+- **Merged:** `2ae9740`; CI `typecheck and test` green on `2675331` (run
+  `41792159144`); zero unresolved threads.
+
+## PR #100 — `[SUPER-AGENT][OUTBOX-PERMANENT-FAILURE] Fail unroutable outbound rows immediately`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; head `b250541` after merging `main`; files:
+  `src/channels/outbox-adapter.ts`, `src/channels/imessage.ts` (adapter error
+  only), `test/outbox.test.ts`, `test/channels-imessage.test.ts`,
+  `docs/MODULES.md`.
+- **Independent review:** **APPROVE**. `PermanentDeliveryError` is a narrow
+  exported contract; `flushOnce` checks it before the retry branch and calls
+  `markOutboxFailed` with no retry scheduling. The iMessage adapter throws it
+  only for the existing group-without-chatGuid refusal, with the same message.
+  Transient errors and the attempt limit are unchanged, and the missing-adapter
+  path is untouched. Tests assert status/attempts/nextAttemptAt and that a
+  second flush does not resend; the implementer also verified the two new tests
+  fail on the pre-change behavior.
+- **Residual non-blocking:** `instanceof` detection would not match a duplicate
+  module copy (no such adapter in-repo); a terminal permanent failure still
+  leaves the reply `pending`, matching the pre-existing failure path.
+- **Merged:** `55f0d09`; CI green on `b250541` (run `41791499699`); zero
+  unresolved threads.
+
+## PR #99 — `[SUPER-AGENT][MESH-FAILURE-PUMP] Pump queued Workers after a failed non-queued Worker releases its node`
+
+- **Author:** LofiSu (peer orchestration session)
+- **State at review:** merged by the peer session as `6184a27`; this session
+  reviewed the diff and the post-merge CI afterwards.
+- **Independent review:** **APPROVE**. `startNow()` calls `pump()` after
+  releasing the reserved node on both the synchronous-throw and asynchronous
+  rejection paths. This is safe: the synchronous path threw before a turn was
+  enqueued, and the asynchronous path runs after the failed turn settled. The
+  test ends a Worker turn as plain text (no report), then makes the session
+  write throw, so neither a Ticket nor Assignment release can free the slot;
+  only the failure handler can, and the parked Worker still runs.
+- **Verification:** post-merge CI run `41791336153` on `6184a27` is green
+  (456 passed / 15 skipped, 471 tests; 82.42% lines, 81.03% branches, 90.11%
+  functions).
+- **Residual non-blocking:** none found.
+
 ## Pending reviews
 
-- None at this checkpoint. The cycle-5 checkpoint PR is the only open PR and is
+- None at this checkpoint. The cycle-6 checkpoint PR is the only open PR and is
   reviewed before merge.

@@ -39,10 +39,12 @@
 | METRICS-ASSERTIONS | QA/Testing | `agent/metrics-assertions` | 2026-11-03 | merged `f8554cc`, APPROVE | #95 | integrated |
 | GATEWAY-TOKEN-TESTS | Infrastructure/Security | `agent/gateway-token-tests` | 2026-11-03 | merged `ac1fd79`, APPROVE | #96 | integrated |
 | MESH-ASYNC-RELEASE | Orchestration | `agent/mesh-async-release` | 2026-11-03 | merged `9a0def3`, APPROVE | #97 | integrated |
-| SERVE-CHANNEL-LOOP | Core Runtime | `agent/serve-imessage-loop` | 2026-11-04 | dispatched cycle 6 | — | in progress |
-| OUTBOX-PERMANENT-FAILURE | Core Runtime | `agent/outbox-permanent-failure` | 2026-11-04 | dispatched cycle 6 | — | in progress |
-| CYCLE-5-CHECKPOINT | Chief Engineer | `docs/cycle-5-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected | — | continuing |
+| SERVE-CHANNEL-LOOP | Core Runtime | `agent/serve-imessage-loop` | 2026-11-04 | merged `2ae9740`, APPROVE after docs correction | #101 | integrated |
+| OUTBOX-PERMANENT-FAILURE | Core Runtime | `agent/outbox-permanent-failure` | 2026-11-04 | merged `55f0d09`, APPROVE | #100 | integrated |
+| MESH-FAILURE-PUMP | Orchestration | `agent/mesh-failure-pump` | 2026-11-04 | merged by peer session `6184a27`, reviewed APPROVE | #99 | integrated |
+| CYCLE-5-CHECKPOINT | Chief Engineer | `docs/cycle-5-checkpoint` | 2026-11-04 | merged `ab8e4bf`, docs APPROVE | #98 | integrated |
+| CYCLE-6-CHECKPOINT | Chief Engineer | `docs/cycle-6-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 

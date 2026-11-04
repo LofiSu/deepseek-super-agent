@@ -4,6 +4,56 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Cycle 6 (serve inbound loop + outbox permanent failure)
+
+### Observed
+
+- The cycle-5 checkpoint PR (#98) merged at `ab8e4bf`. A peer session merged
+  #99 (MESH-FAILURE-PUMP) at `6184a27` while this session was dispatching.
+- Residual gaps from the cycle-5 review: fail-closed group replies retried to
+  `failed`, and `serve` had no inbound channel loop.
+- Two implementers were dispatched from `origin/main` in isolated worktrees:
+  SERVE-CHANNEL-LOOP and OUTBOX-PERMANENT-FAILURE.
+
+### Decided
+
+- Keep `chat` admission, flags, cursor semantics, and fail-fast schema behavior
+  identical while extracting the loop; allow the retry cadence to become the
+  shared bounded backoff and record that compatibility note in the PR.
+- Classify unroutable outbound rows as permanent failures rather than raising
+  `MAX_ATTEMPTS`; keep transient retry/backoff unchanged.
+- Accept #99's review as part of this cycle and record the peer session's
+  post-merge CI evidence.
+
+### Executed
+
+- #100: `PermanentDeliveryError` in the outbox contract; the iMessage adapter
+  throws it for a group row without a chatGuid; `flushOnce` fails the row on
+  the first attempt with no retry. Tests cover permanent, transient, and
+  second-flush behavior; fail-without-change verified by the implementer.
+- #101: extracted `src/cli/channel-loop.ts`; `chat` and `serve --imessage`
+  share it; serve validates admission before `Runtime.create`, aborts polling
+  on the first signal, drains the loop, closes the API, then finishes the
+  runtime. Offline fake-source tests cover ingest/cursor, retry, abort, and
+  refusal before opening `chat.db`/SQLite.
+- Review corrections on #101: accurate pull-vs-ingest retry wording in
+  `docs/IMESSAGE.md`, plus a compatibility note for `chat`'s retry cadence.
+
+### Verified
+
+- Local `2ae9740`: `tsc --noEmit`, `pnpm lint` (229 files),
+  `pnpm format:check` clean; offline suite 452 passed / 54 files.
+- #99 post-merge CI run `41791336153`: 456 passed / 15 skipped (471);
+  82.42% lines, 81.03% branches, 90.11% functions.
+- #100 CI run `41791499699` and #101 CI run `41792159144` green on their
+  reviewed heads; zero unresolved threads on all three PRs.
+- No live model, real-channel, or iMessage permission run was performed.
+
+### Pending
+
+- Next cycle: semantic long-term memory evaluation or the stale-gateway-token
+  ADR; a Feishu inbound loop is now feasible on the shared channel-loop seam.
+
 ## 2026-11-04 — Cycle 5 (post-cap follow-ups merged; checkpoint)
 
 ### Observed
