@@ -18,6 +18,8 @@ import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
+import { McpToolSource } from './harness/mcp.ts'
+import { parseMcpServers, type McpServerConfig } from './harness/mcp-config.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
 import { SessionJournal, workerSessionId } from './harness/session.ts'
@@ -60,6 +62,11 @@ export interface RuntimeOptions {
   now?: () => string
   /** Environment for the LocalEnv allowlist, secret redaction, model ids, and instance settings. */
   env?: NodeJS.ProcessEnv
+  /**
+   * External MCP servers (array or JSON array string). Overrides
+   * `DS_AGENT_MCP_SERVERS`. Their tools are exposed to Workers only.
+   */
+  mcpServers?: unknown
   /** Local A2A address and mesh node id. Defaults to `DS_AGENT_INSTANCE_ID` or `local`. */
   instanceId?: string
   /** Worker slots this process advertises. Defaults to `DS_AGENT_MESH_CAPACITY` or 4. */
@@ -290,6 +297,8 @@ export class Runtime {
   private readonly redact: (text: string) => string
   private readonly batchWindowMs: number
   private readonly admission: AdmissionRules
+  /** Kept so finish() can close external MCP server processes. */
+  private readonly tools: ToolRegistry
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
@@ -316,6 +325,7 @@ export class Runtime {
     redact: (text: string) => string
     batchWindowMs: number
     admission: AdmissionRules
+    tools: ToolRegistry
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -338,6 +348,7 @@ export class Runtime {
     this.redact = parts.redact
     this.batchWindowMs = parts.batchWindowMs
     this.admission = parts.admission
+    this.tools = parts.tools
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -502,6 +513,17 @@ export class Runtime {
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const teams = new TeamRegistry(store)
     const machines = new MachineRegistry()
+    const mcpConfigs = mcpServersFromConfig(opts.mcpServers, baseEnv, log)
+    const mcp = mcpConfigs.length === 0
+      ? undefined
+      : new McpToolSource(mcpConfigs, {
+        log: line => log.info(line),
+        metrics,
+        redact,
+        spill: { put: body => store.putSpill(body) },
+        workspaceDir: path.join(opts.home, 'mcp'),
+        baseEnv,
+      })
     const tools = new ToolRegistry({
       store,
       ports: bindRolePorts(engine),
@@ -526,6 +548,7 @@ export class Runtime {
         store.addEvent('watchdog.nudge', { ticketId, sessionId })
       },
       teams,
+      ...(mcp ? { mcp } : {}),
     })
     const harness = new Harness({
       model,
@@ -604,6 +627,7 @@ export class Runtime {
       redact,
       batchWindowMs: opts.batchWindowMs ?? 0,
       admission,
+      tools,
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     host.onAssessmentNeeded = () => runtime.assessPending()
@@ -977,9 +1001,14 @@ export class Runtime {
     } catch (error) {
       remember(error)
     } finally {
-      // The daemon timer and SQLite handle must be released even when a drain
-      // step rejects; otherwise the process stays alive after a failed shutdown.
+      // The daemon timer, MCP child processes, and SQLite handle must all be
+      // released even when a drain step rejects.
       this.daemon.stop()
+      try {
+        await this.tools.close()
+      } catch (error) {
+        remember(error)
+      }
       try {
         this.metrics.flush()
       } catch (error) {
@@ -996,6 +1025,34 @@ export class Runtime {
       }
     }
     if (failed) throw failure
+  }
+}
+
+/**
+ * `DS_AGENT_MCP_SERVERS` (or `RuntimeOptions.mcpServers`) is configuration, not
+ * code: malformed config is logged and ignored so a bad file cannot stop the
+ * runtime from starting.
+ */
+function mcpServersFromConfig(raw: unknown, env: NodeJS.ProcessEnv, log: Logger): McpServerConfig[] {
+  let value = raw
+  if (value === undefined) {
+    const configured = env.DS_AGENT_MCP_SERVERS?.trim()
+    if (!configured) return []
+    value = configured
+  }
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value) as unknown
+    } catch (error) {
+      log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${error instanceof Error ? error.message : String(error)}`)
+      return []
+    }
+  }
+  try {
+    return parseMcpServers(value)
+  } catch (error) {
+    log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${error instanceof Error ? error.message : String(error)}`)
+    return []
   }
 }
 
