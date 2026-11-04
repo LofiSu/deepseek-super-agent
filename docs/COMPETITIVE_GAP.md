@@ -13,14 +13,14 @@ that make a personal agent worth talking to and worth delegating work to.
 
 | Dimension | Instinct / Open Instinct | Muse | Grok Bot | ds-agent now | Verdict |
 |---|---|---|---|---|---|
-| **Prompt stack** | Rebuilt each run: identity, instructions, owner, principal, channel, reach, setup, rules, memory, skills, approvals, long tasks, now | One long prompt plus injected workspace files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`) | Persistent Bot instructions plus skills, routines, integrations, memory | 11 stable layers + 5 turn layers; owner files `PERSONA.md` / `AGENTS.md` / `USER.md`; `ds-agent prompt --layers` | **Parity on structure**, still behind on per-principal and skills layers |
+| **Prompt stack** | Rebuilt each run: identity, instructions, owner, principal, channel, reach, setup, rules, memory, skills, approvals, long tasks, now | One long prompt plus injected workspace files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`) | Persistent Bot instructions plus skills, routines, integrations, memory | 12 stable layers + 5 turn layers; owner files `PERSONA.md` / `AGENTS.md` / `USER.md`; `ds-agent prompt --layers` | **Parity on structure**, still behind on per-principal layers |
 | **Voice / personality** | `PERSONA.md`, owner-owned, about 30 lines | `SOUL.md` + `IDENTITY.md`, written and refined by the agent and owner | Bot instructions, editable | Warm identity + `PERSONA.md` + concrete voice examples (v2) | **Parity on intent**; needs real conversation evaluation, not just prompt shape |
 | **Owner model** | Principal tiers: owner, staff, partner, family, friend, contact, stranger | Single owner; other people are not principals | One owner | Single owner; ingress trust separates owner from group/other | **Behind** on tiers; ahead on a strict default-deny ingress |
 | **Local specialist agents** | Skills and subagents; MCP tools | Subagents and tools | Skills, routines, integrations | `delegate_agent` to owner-configured local CLIs; Workers only; no shell; bounded | **Newly at parity**, with a narrower trust surface than Muse/Instinct connectors |
 | **Subagents / team** | Subagent prompts get the shared frame plus a role | Subagents | Routines and skills | Router/Worker split, Worker-internal teams, persisted jobs, aggregate report | **Parity** for execution topology |
 | **Memory** | `MEMORY.md` + daily journal; bounded digest every turn | `MEMORY.md` + memory search/explain tools; strict write rules | Bot memory | Typed refs, `read_object` chain of recall, lexical recall, hot/cold retention, cold Thread digests, per-hop ACL | **Ahead on safety and provenance**, **behind on semantic recall and an owner-editable daily journal** |
 | **Skills** | `skills/` with `SKILL.md`; loaded on demand | Tools and workspace files | Skills | `skills/<id>/SKILL.md` index in the prompt; `read_skill` loads the body | **Parity on the core loop**; no bundled starter set yet |
-| **Proactivity / routines** | Scheduled etiquette and routines | `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, scheduling | Routines | Watchdog timer and speculative assignments; no owner-defined recurring routines | **Partial**; the proactive loop exists, the owner-facing scheduler does not |
+| **Proactivity / routines** | Scheduled etiquette and routines | `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, scheduling | Routines | `routines.json`: interval prompt, channel/thread, persisted last-run, daemon tick | **Parity on intervals**; no cron/daily-at scheduling or owner editor yet |
 | **Channels** | Texting, email, A2A, chat | App / channel surfaces | Bot connectors | CLI, iMessage, Feishu, GitHub, A2A, OpenAI-compatible gateway, loopback UI | **Ahead in one runtime**, **behind on email, browser, calendar, payments** |
 | **Approvals** | Dedicated approvals layer | Safety policy | Approval before send, publish, delete, spend | Prompt boundary plus Engine pause/intervene/resume; no interactive approval card or token | **Partial**; the state machine exists, the owner-facing approval flow does not |
 | **Observability** | Layer inspection, logs | Workspace files are visible | Bot editor | Lifecycle bus, read-only token-gated UI, metrics, health, session journals, offline CLI inspection | **Ahead** |
@@ -58,9 +58,9 @@ implementation.
    loads the body. What is still missing is a bundled starter set, an
    owner-facing editor, and any way for a skill to declare which existing tool
    it expects. A skill still cannot grant a tool.
-2. **Owner-defined routines.** The daemon can watch and speculate, but the owner
-   cannot say "every weekday at 8, check the deploy and tell me only if it is
-   red." This is Muse's `HEARTBEAT.md` and Grok Bot's routines.
+2. **Routine scheduling depth.** Owner routines now exist for intervals. The
+   canonical "every weekday at 8" still needs cron or a time-of-day field, and
+   there is no owner-facing editor. Restart drift is documented, not solved.
 3. **Interactive approvals.** The rules layer says what needs approval and the
    Engine can pause a ticket, but there is no first-class "ask the owner, wait,
    approve/deny, resume with an audit trail" flow for a specific action.
@@ -82,7 +82,7 @@ implementation.
 | Priority | Work | Acceptance evidence |
 |---|---|---|
 | ~~P0~~ | ~~Skills loader and `read_skill`~~ — shipped in #149 | ✅ index injection, size caps, symlink/path rejection, role guards, `ds-agent skills`, docs |
-| P0 | Owner-defined routines / heartbeat | Persisted schedule rows, fake-clock daemon tests, owner-only creation, no outward action without approval |
+| ~~P0~~ | ~~Owner-defined routines / heartbeat~~ — shipped in #150 | ✅ fake-clock tests, persisted last-run, first-sight arming, gap fires once, ingress admission, `ds-agent routines`, docs |
 | P1 | Interactive approval flow | Worker requests approval, ticket pauses, Router asks, owner approves/denies, resume is audited |
 | P1 | Semantic memory behind `EmbeddingPort` | Deterministic mock, hybrid ranking, recall eval stays green, no CI provider call |
 | P2 | Email and browser connectors | Adapter contract, approval gate, offline fakes, real-channel acceptance remains operator-gated |

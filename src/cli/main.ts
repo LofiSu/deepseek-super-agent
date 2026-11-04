@@ -9,6 +9,7 @@ import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harn
 import { buildSystemPrompt, describePromptLayers, loadPromptFiles } from '../harness/prompts.ts'
 import { LOCAL_AGENTS_FILE, loadLocalAgents } from '../env/local-agents.ts'
 import { SKILLS_DIR, SKILL_FILE, SkillRegistry } from '../env/skills.ts'
+import { loadRoutines, ROUTINES_ENV, ROUTINES_FILE } from '../harness/routines.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import type { A2AEnvelope } from '../channels/a2a.ts'
@@ -149,6 +150,7 @@ function help(): void {
                             # the layered system prompt and where each layer comes from
   pnpm ds-agent agents [--json]  # local specialist agents configured for delegation
   pnpm ds-agent skills [--json]  # owner-authored playbooks the agent can load
+  pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -790,6 +792,23 @@ async function main(): Promise<void> {
       return
     }
     console.log(buildSystemPrompt(input))
+    return
+  }
+  if (cmd === 'routines') {
+    const routines = loadRoutines(home, process.env)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(routines, null, 2))
+      return
+    }
+    if (!routines.length) {
+      console.log(`no routines configured (${ROUTINES_FILE} or ${ROUTINES_ENV})`)
+      return
+    }
+    for (const routine of routines) {
+      console.log(
+        `${routine.id.padEnd(24)}every ${routine.everyMinutes}m  ${routine.source}:${routine.thread}  ${routine.prompt}`,
+      )
+    }
     return
   }
   if (cmd === 'skills') {
