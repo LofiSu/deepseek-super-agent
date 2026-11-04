@@ -50,9 +50,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** Trim a reason to one short log-safe line. */
+/**
+ * Trim a reason to one short log-safe line. Unicode Cc (C0/C1 controls, e.g.
+ * ESC) and Cf (bidi/format) characters are stripped first: a model reason can
+ * be prompt-injected text and these characters can rewrite terminal or log
+ * output.
+ */
 export function clampPolicyReason(reason: string): string {
-  const line = reason.replace(/\s+/g, ' ').trim()
+  const line = reason
+    .replace(/[\p{Cc}\p{Cf}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
   return line.slice(0, MAX_POLICY_REASON_LENGTH)
 }
 
@@ -94,7 +102,9 @@ export class PolicyClassifier {
       })
       const hit = await Promise.race([this.policy.classifyPolicy(trigger), expired])
       if (!isValidSemanticHit(hit)) return fallback(trigger, 'invalid')
-      return hit
+      // Injected policies are untrusted too: sanitize before the reason can
+      // reach an ingress log line.
+      return { ...hit, reason: clampPolicyReason(hit.reason) }
     } catch (error) {
       return fallback(trigger, fallbackCause(error))
     } finally {

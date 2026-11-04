@@ -777,6 +777,12 @@ export class Runtime {
     const verdict = this.slowPathPolicy
       ? await filterTriggerWithPolicy(safe, this.model, this.admission, this.slowPathPolicy)
       : filterTrigger(safe, this.model, this.admission)
+    // Re-check after the await: a concurrent call for the same id may have
+    // committed while this one was waiting on the policy. Without this, the
+    // loser would still spill a body, emit metrics/log lines, and only then
+    // learn from Engine.receive that it was a duplicate.
+    const raced = this.duplicate(trigger)
+    if (raced) return raced
     return this.commitIngress(safe, verdict)
   }
 

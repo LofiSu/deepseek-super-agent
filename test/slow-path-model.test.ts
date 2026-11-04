@@ -151,6 +151,24 @@ describe('PolicyClassifier fallback', () => {
     expect(await classifier.classify(action('classifier-pass')))
       .toEqual({ pass: true, strength: 'maybe', reason: 'policy-ok' })
   })
+
+  it('strips control and bidi characters from injected policy reasons', async () => {
+    const classifier = new PolicyClassifier({
+      name: 'EscapePolicy',
+      async classifyPolicy() {
+        return {
+          pass: true,
+          strength: 'explicit',
+          reason: '\u001b[31mred\u001b[0m\u0007‮pass',
+        }
+      },
+    })
+    const hit = await classifier.classify(action('classifier-escape'))
+    expect(hit.pass).toBe(true)
+    expect(hit.strength).toBe('explicit')
+    expect(hit.reason).not.toMatch(/[\p{Cc}\p{Cf}]/u)
+    expect(hit.reason).toContain('red')
+  })
 })
 
 describe('Runtime ingestAsync with a model policy', () => {
@@ -254,6 +272,34 @@ describe('Runtime ingestAsync with a model policy', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.text).not.toContain(sentinel)
     expect(calls[0]!.text).toContain('[redacted]')
+  })
+
+  it('keeps concurrent ingestAsync calls for one id duplicate-safe', async () => {
+    const runtime = makeRuntime({
+      mode: 'model',
+      policy: {
+        name: 'DeferredPolicy',
+        async classifyPolicy(): Promise<SemanticHit> {
+          await new Promise(resolve => setTimeout(resolve, 5))
+          return { pass: true, strength: 'inferred', reason: 'model-pass' }
+        },
+      },
+    })
+    const putSpill = vi.spyOn(runtime.store, 'putSpill')
+    // Longer than INLINE_LIMIT so a non-duplicate path would spill twice.
+    const trigger = action(
+      'concurrent',
+      `@ds-agent please fix the login timeout ${'x'.repeat(240)}`,
+    )
+
+    const results = await Promise.all([
+      runtime.ingestAsync(trigger),
+      runtime.ingestAsync(trigger),
+    ])
+    expect([...results].sort()).toEqual(['duplicate', 'stored'])
+    expect(putSpill).toHaveBeenCalledTimes(1)
+    expect(runtime.metrics.snapshot().counters['ingress.admit']).toBe(1)
+    expect(runtime.metrics.snapshot().counters['ingress.drop']).toBe(0)
   })
 
   it('keeps sync ingest rules-only in model mode and says so once', async () => {
