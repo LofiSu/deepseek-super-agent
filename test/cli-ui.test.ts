@@ -249,7 +249,6 @@ function seed(store: Store, metrics: Metrics): void {
 async function startSeeded(): Promise<{
   home: string
   store: Store
-  metrics: Metrics
   server: UiServerHandle
   base: string
 }> {
@@ -257,13 +256,13 @@ async function startSeeded(): Promise<{
   const store = new Store(home)
   const metrics = new Metrics(home)
   seed(store, metrics)
-  const server = await startUiServer({ home, store, metrics, token: TOKEN, port: 0 })
+  const server = await startUiServer({ home, store, token: TOKEN, port: 0 })
   cleanup.push(async () => {
     await server.close()
     if (store.isOpen) store.close()
     fs.rmSync(home, { recursive: true, force: true })
   })
-  return { home, store, metrics, server, base: server.url }
+  return { home, store, server, base: server.url }
 }
 
 describe('local UI server', () => {
@@ -383,6 +382,24 @@ describe('local UI server', () => {
     expect(response.body).not.toContain(TOKEN)
     // The home path is not part of the public snapshot.
     expect(JSON.stringify(snapshot)).not.toContain(home)
+
+    // A speculative ticket must not leak through the thread read model either
+    // (production writes a real subscription before the delivery gate).
+    expect(snapshot.threads.map(item => item.key)).not.toContain(SPEC_THREAD)
+    expect(JSON.stringify(snapshot.threads)).not.toContain('tkt_ui_spec')
+  })
+
+  it('re-reads counters flushed by another Metrics process', async () => {
+    const { home, base } = await startSeeded()
+    const writer = new Metrics(home)
+    writer.increment('ingress.admit', 3)
+    writer.flush()
+
+    const response = await request(`${base}/api/snapshot`)
+    expect(response.status).toBe(200)
+    const snapshot = JSON.parse(response.body) as { metrics: { counters: Record<string, number> } }
+    // seed() flushed 2; the separate writer instance adds 3 after startup.
+    expect(snapshot.metrics.counters['ingress.admit']).toBe(5)
   })
 
   it('requires a token on every route except GET /health', async () => {
@@ -519,8 +536,7 @@ describe('local UI server', () => {
   it('closes the SSE stream when the read model throws', async () => {
     const home = tempHome()
     const store = new Store(home)
-    const metrics = new Metrics(home)
-    const server = await startUiServer({ home, store, metrics, token: TOKEN, port: 0, eventIntervalMs: 20 })
+    const server = await startUiServer({ home, store, token: TOKEN, port: 0, eventIntervalMs: 20 })
     cleanup.push(async () => {
       await server.close()
       if (store.isOpen) store.close()
@@ -546,7 +562,6 @@ describe('local UI server', () => {
   it('fails closed without a long-enough token', async () => {
     const home = tempHome()
     const store = new Store(home)
-    const metrics = new Metrics(home)
     cleanup.push(() => {
       if (store.isOpen) store.close()
       fs.rmSync(home, { recursive: true, force: true })
@@ -556,21 +571,20 @@ describe('local UI server', () => {
     await expect(runUi(home, { token: '' })).rejects.toThrow(/requires a token/)
     await expect(runUi(home, { token: 'short-token' })).rejects.toThrow(/at least 16/)
     await expect(
-      startUiServer({ home, store, metrics, token: 'short-token', port: 0 }),
+      startUiServer({ home, store, token: 'short-token', port: 0 }),
     ).rejects.toThrow(/at least 16/)
   })
 
   it('refuses to bind anything but loopback', async () => {
     const home = tempHome()
     const store = new Store(home)
-    const metrics = new Metrics(home)
     cleanup.push(() => {
       if (store.isOpen) store.close()
       fs.rmSync(home, { recursive: true, force: true })
     })
     await expect(runUi(home, { host: '0.0.0.0', token: TOKEN })).rejects.toThrow(/only binds loopback/)
     await expect(
-      startUiServer({ home, store, metrics, host: '0.0.0.0', token: TOKEN, port: 0 }),
+      startUiServer({ home, store, host: '0.0.0.0', token: TOKEN, port: 0 }),
     ).rejects.toThrow(/non-loopback/)
   })
 

@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { ticketStage } from '../core/stage.ts'
-import type { Metrics, MetricsSnapshot } from '../metrics/metrics.ts'
+import { readMetrics, type MetricsSnapshot } from '../metrics/metrics.ts'
 import type { OutboxRow, Thread, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
@@ -155,7 +155,6 @@ export interface UiSnapshot {
  */
 export function buildSnapshot(
   store: Store,
-  metrics: Metrics,
   home: string,
   opts: { eventLimit?: number } = {},
 ): UiSnapshot {
@@ -241,7 +240,9 @@ export function buildSnapshot(
     threads,
     outbox,
     health: healthProbe(store, home),
-    metrics: metrics.snapshot(),
+    // Re-read the file on every frame: the daemon in another process owns
+    // live counters. flush() is write-only, so the UI never writes metrics.
+    metrics: readMetrics(home),
     events,
   }
 }
@@ -308,7 +309,6 @@ function isAuthorized(req: http.IncomingMessage, token: string): boolean {
 export interface UiServerOptions {
   home: string
   store: Store
-  metrics: Metrics
   /** Required bearer token; at least MIN_TOKEN_LENGTH characters. */
   token: string
   host?: string
@@ -348,7 +348,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
   const sseClients = new Set<http.ServerResponse>()
   let closing = false
 
-  const snapshot = (): UiSnapshot => buildSnapshot(options.store, options.metrics, options.home, { eventLimit })
+  const snapshot = (): UiSnapshot => buildSnapshot(options.store, options.home, { eventLimit })
 
   const server = http.createServer((req, res) => {
     if (!isAllowedHostHeader(req.headers.host)) {
@@ -452,6 +452,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
     })
     sseClients.add(res)
     let timer: NodeJS.Timeout | undefined
+    let draining = false
+    let blockedTicks = 0
     const cleanup = (): void => {
       if (timer) {
         clearInterval(timer)
@@ -462,6 +464,15 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
     const writeFrame = (): void => {
       if (res.writableEnded || res.destroyed) {
         cleanup()
+        return
+      }
+      if (draining) {
+        // Bound the wait: a client that never drains must not hold a slot.
+        blockedTicks += 1
+        if (blockedTicks > 5) {
+          cleanup()
+          res.destroy()
+        }
         return
       }
       let flushed: boolean
@@ -479,9 +490,14 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         return
       }
       if (!flushed) {
-        // Never let a slow client buffer frames without bound.
-        cleanup()
-        res.destroy()
+        // Backpressure, not failure: skip frames until the response drains,
+        // and destroy it only if that never happens within the bounded wait.
+        draining = true
+        blockedTicks = 0
+        res.once('drain', () => {
+          draining = false
+          blockedTicks = 0
+        })
       }
     }
     // One immediate frame so a client sees state without waiting 2 s.

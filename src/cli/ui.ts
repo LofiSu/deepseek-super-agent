@@ -1,4 +1,3 @@
-import { Metrics } from '../metrics/metrics.ts'
 import { Store } from '../store/sqlite.ts'
 import {
   DEFAULT_UI_PORT,
@@ -52,10 +51,12 @@ function resolveToken(explicit: string | undefined): string {
 /**
  * `ds-agent ui` — read-only loopback dashboard over persisted state.
  *
- * Opens exactly one Store and one Metrics, starts the loopback-only HTTP
- * server, and closes the Store on SIGINT/SIGTERM. It constructs no model and
- * starts no daemon. Command registration in `main.ts` is a follow-up wiring PR
- * (see docs/UI.md) so this module can land independently.
+ * Opens exactly one Store, starts the loopback-only HTTP server, and closes the
+ * Store on SIGINT/SIGTERM. Metrics are re-read from the store home on every
+ * request, so another process's counters appear without a restart. It
+ * constructs no model and starts no daemon. Command registration in `main.ts`
+ * is a follow-up wiring PR (see docs/UI.md) so this module can land
+ * independently.
  */
 export async function runUi(home: string, options: UiCommandOptions = {}): Promise<void> {
   const host = options.host ?? '127.0.0.1'
@@ -72,17 +73,9 @@ export async function runUi(home: string, options: UiCommandOptions = {}): Promi
     throw new Error(`ds-agent ui: cannot open store at ${home}: ${errorMessage(error)}`)
   }
 
-  let metrics: Metrics
-  try {
-    metrics = new Metrics(home)
-  } catch (error) {
-    store.close()
-    throw new Error(`ds-agent ui: cannot open metrics at ${home}: ${errorMessage(error)}`)
-  }
-
   let handle: UiServerHandle
   try {
-    handle = await startUiServer({ home, store, metrics, host, port, token })
+    handle = await startUiServer({ home, store, host, port, token })
   } catch (error) {
     if (store.isOpen) store.close()
     throw new Error(`ds-agent ui: cannot start server on 127.0.0.1:${port}: ${errorMessage(error)}`)

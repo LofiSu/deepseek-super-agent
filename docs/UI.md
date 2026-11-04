@@ -129,9 +129,10 @@ documents.
 - **Escaping.** All user-controlled text (ticket titles, thread keys, lifecycle
   payloads) is HTML-escaped before rendering.
 - **Timeouts and backpressure.** `headersTimeout` is 10 s, `requestTimeout`
-  30 s, and `keepAliveTimeout` 5 s. If an SSE `write()` returns false or the
-  response is closed, the stream is cleaned up and destroyed rather than
-  buffering frames for a slow client.
+  30 s, and `keepAliveTimeout` 5 s. If an SSE `write()` returns false, frame
+  writes pause until the response emits `drain`; a client that stays blocked
+  for more than five interval ticks is cleaned up and destroyed, so frames are
+  never buffered without bound. A closed response is cleaned up immediately.
 
 Access is gated by a shared token; there is no user account system and no remote
 access. Do not put this server behind a proxy or expose the port beyond the
