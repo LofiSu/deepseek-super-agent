@@ -4,6 +4,54 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Cycle 8 (ADR-009 implementation; checkpoint)
+
+### Observed
+
+- Cycle 7 closed at `6e19bca` with green post-merge CI (run `41796892880`).
+  Cycle 8 dispatched one task, STALE-GATEWAY-TOKEN-FOLLOWUP (P1): implement
+  ADR-009's distinct stale-empty diagnostic and the fail-closed client read.
+- #109 merged at `064ab06` with green PR CI (run `41797511158` on head
+  `97fa166`) and zero unresolved review threads. It touched only
+  `src/gateway/token.ts`, `test/gateway-token.test.ts`, `docs/GATEWAY.md`, and
+  `docs/ARCHITECTURE_DECISIONS.md`.
+- The independent review confirmed four contract points on the reviewed head:
+  a zero-length or whitespace-only file produces the distinct empty diagnostic;
+  the genuine concurrent-create race keeps its `was created concurrently and is
+  empty` message; an absent file still mints a token; an explicit
+  `DS_AGENT_GATEWAY_TOKEN` or CLI override still wins without touching the
+  file. It made no blocking findings.
+
+### Decided
+
+- Keep ADR-009's fail-closed startup policy. #109 changes only diagnosis and
+  the client read path; it does not auto-regenerate, rename aside, or treat an
+  empty file as absent.
+- The merge used the queue's single remaining ready task. SEMANTIC-LTM and the
+  optional ROTATE-TOKEN flag stay candidates for a later owner-directed cycle.
+- The squash commit subject dropped the `[SUPER-AGENT][STALE-GATEWAY-TOKEN]`
+  prefix that the PR title carried. Recorded as a non-blocking process note;
+  CI does not enforce the prefix, and the branch/PR remain identifiable.
+
+### Verified
+
+- Local offline suite on `064ab06`: 477 passed / 55 files (live files
+  excluded); `tsc --noEmit` clean, `pnpm lint` ok (231 tracked files),
+  `pnpm format:check` clean.
+- Targeted token tests on the merged tree: 45/45 across
+  `test/gateway-token.test.ts`, `test/gateway.test.ts`, and
+  `test/cli-gateway.test.ts`.
+- Post-merge `main` CI green on `064ab06` (run `41797671287`): 489 passed /
+  15 skipped (504), 60 files (57 passed, 3 fully skipped); coverage 82.80%
+  statements/lines, 81.56% branches, 90.98% functions.
+- No live model or real-channel run in this session. Branch protection was
+  not bypassed.
+
+### Pending
+
+- Land the cycle-8 checkpoint after CI.
+- Evaluate SEMANTIC-LTM; draft `--rotate-token` only on owner request.
+
 ## 2026-11-04 — Cycle 7 (Feishu inbound loop, stale-token ADR, group identity; checkpoint)
 
 ### Observed
