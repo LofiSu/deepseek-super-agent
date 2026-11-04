@@ -48,14 +48,37 @@ opened (and, for `serve`, before SQLite is opened).
   as `channel.address.group`; ambiguous/unknown groups leave it unset, so
   `DS_AGENT_GROUP_ALLOWLIST` and outbound fail closed instead of reusing a 1:1
   chat id. When a message joins several positive group rows, the first non-empty
-  chat guid and the first non-empty identifier are aggregated independently, so
-  an identifier-only row cannot hide a usable guid from a later row.
-- **Group and 1:1 conversations use separate thread keys.** A chat guid yields
-  `chat:<chatGuid>`. Without one, a group yields `group:<chatIdentifier>` when
-  a positive identifier exists and `group-unknown:<handle>` otherwise, while a
-  1:1 message yields `handle:<handle>`. An ambiguous group can never share a
-  thread, and therefore ticket context, with a 1:1 message from the same
-  sender.
+  chat guid, the first non-empty identifier, and the first safe positive
+  `chat.ROWID` are aggregated independently, so an identifier-only row cannot
+  hide a usable guid from a later row.
+- **Group and 1:1 conversations use separate thread keys.** Thread-key
+  precedence is strict:
+
+  1. a chat guid yields `chat:<chatGuid>`;
+  2. otherwise a group with a positive chat identifier yields
+     `group:<chatIdentifier>`;
+  3. otherwise a group with a positive `chat.ROWID` yields
+     `group-rowid:<rowid>`;
+  4. any other group (no usable positive group row identity) yields
+     `group-unknown:<handle>`.
+
+  A 1:1 message always yields `handle:<handle>` and never uses `chat.ROWID`.
+  An ambiguous group can never share a thread, and therefore ticket context,
+  with a 1:1 message from the same sender.
+
+  `chatRowId` is selected from a **positive group row only** (`chat.style = 43`
+  or a non-empty `room_name`), never from a joined 1:1 or ambiguous chat, and
+  only when it is a safe positive integer. `chat.ROWID` is a per-database
+  SQLite identity, not a stable global id: it can change across a restore,
+  `VACUUM`, or on a different machine. That is why it is used only when neither
+  a guid nor an identifier exists, and why `group-rowid:<rowid>` is **never**
+  used for outbound routing — outbound stays fail-closed when `chatGuid` is
+  missing, exactly as before.
+
+  Continuity note: after upgrading, existing tickets/threads keyed
+  `group-unknown:<handle>` will not match the new `group-rowid:<rowid>` key, so
+  those conversations start a new thread rather than silently continuing the
+  old one.
 - **Missing schema fails closed.** If `chat.style` or `chat.room_name` is absent,
   the channel reports a compatibility error instead of treating every row as
   1:1; it does not retry the incompatible query on every poll.

@@ -34,6 +34,12 @@ export interface ImessageInbound {
   service?: string
   chatGuid?: string
   chatIdentifier?: string
+  /**
+   * `chat.ROWID` of a positive group chat row. SQLite row identity local to
+   * one chat.db (not a global id); used only as a last-resort thread key and
+   * never as an outbound address.
+   */
+  chatRowId?: number
   /** `chat.style` from chat.db. `43` denotes a group chat. */
   chatStyle?: number
   /** `chat.room_name` from chat.db; non-empty for a named group chat. */
@@ -86,6 +92,19 @@ function nonEmptyText(value: unknown): string | undefined {
   if (value == null) return undefined
   const text = String(value)
   return text.trim() === '' ? undefined : text
+}
+
+/**
+ * Accept only a positive SQLite row identity. Zero, negatives, fractions, NaN,
+ * and non-numeric junk are rejected so a malformed join cannot mint a thread
+ * key that might collide with another conversation.
+ */
+function safeChatRowId(value: unknown): number | undefined {
+  if (typeof value === 'bigint') {
+    return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : undefined
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) return undefined
+  return value
 }
 
 /**
@@ -201,22 +220,30 @@ export function decodeAttributedBody(blob: unknown): string {
 }
 
 /**
- * Conversation key for a message. A chat guid always wins. Without one, a
- * group message is namespaced away from 1:1 traffic: a positive chat
- * identifier yields `group:<identifier>`, and a group with no identifier stays
- * under `group-unknown:<handle>` so it can never share a thread with a 1:1
- * message from the same sender.
+ * Conversation key for a message, in strict precedence order:
+ *
+ * 1. a chat guid → `chat:<guid>`;
+ * 2. a group with a positive chat identifier → `group:<identifier>`;
+ * 3. a group with a positive `chat.ROWID` → `group-rowid:<rowid>`;
+ * 4. any other group → `group-unknown:<handle>`.
+ *
+ * A 1:1 message is always `handle:<handle>` and never consults `chatRowId`.
+ * Every group key is namespaced away from 1:1 traffic, so a group message can
+ * never share a thread with a 1:1 message from the same sender.
  */
 export function imessageThreadFor(message: {
   handle: string
   chatGuid?: string
   chatIdentifier?: string
+  chatRowId?: number
   isGroup?: boolean
 }): string {
   if (message.chatGuid) return `chat:${message.chatGuid}`
   if (message.isGroup === true) {
     const identifier = nonEmptyText(message.chatIdentifier)
-    return identifier ? `group:${identifier}` : `group-unknown:${message.handle}`
+    if (identifier) return `group:${identifier}`
+    const rowId = safeChatRowId(message.chatRowId)
+    return rowId !== undefined ? `group-rowid:${rowId}` : `group-unknown:${message.handle}`
   }
   return `handle:${message.handle}`
 }
@@ -232,17 +259,22 @@ export function imessageThreadFor(message: {
 export function imessageTrigger(message: ImessageInbound): Trigger {
   const group = isGroupMessage(message)
   // A group message without a chat guid must not share the 1:1 `handle:`
-  // namespace, so `imessageThreadFor` receives the resolved group flag and the
-  // positive chat identifier.
+  // namespace, so `imessageThreadFor` receives the resolved group flag, the
+  // positive chat identifier, and (for groups only) the positive group row's
+  // ROWID. The ROWID only refines the thread key; it is never an address.
   const thread = imessageThreadFor({
     handle: message.handle,
     chatGuid: message.chatGuid,
     chatIdentifier: message.chatIdentifier,
+    ...(group ? { chatRowId: message.chatRowId } : {}),
     isGroup: group,
   })
   // A group address must come from a positive group chat row. Falling back to
   // the thread (or a joined 1:1 chat's guid) would let an ambiguous group reply
   // into a direct conversation, so leave it unset and let admission fail closed.
+  // `chatRowId` is deliberately never an address: it is a local SQLite identity
+  // with no Messages.app send target, so a group-rowid thread still has no
+  // outbound target.
   const groupId = group ? message.chatGuid ?? message.chatIdentifier : undefined
   // A group address deliberately omits the sender `handle`. The outbox adapter
   // sends a handle target in buddy (1:1) mode, so copying the sender handle
@@ -462,7 +494,8 @@ export class ChatDbImessageApi implements ImessageApi {
     const sql = `
       SELECT m.ROWID AS rowId, m.guid AS guid, m.text AS text, m.attributedBody AS attributedBody,
              m.date AS date, m.service AS service,
-             h.id AS handle, c.guid AS chatGuid, c.chat_identifier AS chatIdentifier,
+             h.id AS handle, c.ROWID AS chatRowId,
+             c.guid AS chatGuid, c.chat_identifier AS chatIdentifier,
              c.style AS chatStyle, c.room_name AS roomName
       FROM message m
       LEFT JOIN handle h ON m.handle_id = h.ROWID
@@ -488,6 +521,7 @@ export class ChatDbImessageApi implements ImessageApi {
       firstChatIdentifier?: string
       groupChatGuid?: string
       groupChatIdentifier?: string
+      groupChatRowId?: number
     }
     // One message can join multiple chats. Aggregate every joined row first;
     // taking the first row's chat metadata loses groupness when the 1:1 join
@@ -517,14 +551,19 @@ export class ChatDbImessageApi implements ImessageApi {
       // ambiguous and therefore treated as a group too.
       if (style === IMESSAGE_GROUP_CHAT_STYLE || roomName !== undefined) {
         aggregate.groupSignal = true
-        // Aggregate the group guid and identifier independently: the first
-        // non-empty value of each wins, so an identifier-only positive row
-        // cannot hide a usable guid from a later positive row.
+        // Aggregate the group guid, identifier, and ROWID independently: the
+        // first usable value of each wins, so an identifier-only positive row
+        // cannot hide a usable guid from a later positive row. The ROWID is
+        // taken only from a positive group row — never from a joined 1:1 or
+        // ambiguous chat — and only when it is a safe positive integer.
         if (aggregate.groupChatGuid === undefined && chatGuid !== undefined) {
           aggregate.groupChatGuid = chatGuid
         }
         if (aggregate.groupChatIdentifier === undefined && chatIdentifier !== undefined) {
           aggregate.groupChatIdentifier = chatIdentifier
+        }
+        if (aggregate.groupChatRowId === undefined) {
+          aggregate.groupChatRowId = safeChatRowId(row.chatRowId)
         }
       }
       if (hasChatRow && style === IMESSAGE_DIRECT_CHAT_STYLE && roomName === undefined) {
@@ -550,6 +589,9 @@ export class ChatDbImessageApi implements ImessageApi {
       const chatIdentifier = isGroup
         ? aggregate.groupChatIdentifier
         : aggregate.firstChatIdentifier
+      // ROWID is a group-only fallback identity: a 1:1 row never contributes
+      // one, so 1:1 threads stay keyed by `handle:`.
+      const chatRowId = isGroup ? aggregate.groupChatRowId : undefined
       const body = row.text != null && String(row.text).length > 0
         ? String(row.text)
         : decodeAttributedBody(row.attributedBody)
@@ -563,6 +605,7 @@ export class ChatDbImessageApi implements ImessageApi {
         ...(row.service ? { service: String(row.service) } : {}),
         ...(chatGuid ? { chatGuid } : {}),
         ...(chatIdentifier ? { chatIdentifier } : {}),
+        ...(chatRowId !== undefined ? { chatRowId } : {}),
         isGroup,
         at: appleDateToIso(row.date),
       })
