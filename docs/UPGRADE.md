@@ -76,13 +76,22 @@ npx tsx src/cli/backup.ts \
 
 `backupStore` / `runBackupCommand` behavior:
 
-- Takes a consistent `VACUUM INTO` snapshot, including committed WAL frames
-  that have not been checkpointed.
+- Runs `PRAGMA integrity_check` on the live store before creating any output;
+  a damaged source is refused.
+- Takes a consistent `VACUUM INTO` snapshot to a unique temporary file in the
+  output directory, including committed WAL frames that have not been
+  checkpointed.
+- Verifies the snapshot's `integrity_check` and confirms its schema ledger
+  matches the source version, then hashes it.
+- Installs with a hard link (`linkSync`), so an output path that appears in a
+  race is never overwritten or deleted. Only the temporary file is removed on
+  failure.
 - Refuses an output path that already exists.
 - Refuses the live database, its `-wal`/`-shm` sidecars, and reserved spill
   directories (`<home>/spills`, `<home>/spill`).
 - Requires a `.db` or `.sqlite` extension unless explicitly allowed.
-- Makes the output mode `0600` and fsyncs it before reporting success.
+- Makes the output mode `0600`, fsyncs the file and directory, and prints the
+  snapshot SHA-256 before reporting success.
 
 Verify the snapshot before relying on it:
 

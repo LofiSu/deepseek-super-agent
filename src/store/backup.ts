@@ -42,6 +42,8 @@ const BACKUP_EXTENSIONS = new Set(['.db', '.sqlite'])
 export interface StoreBackupResult {
   readonly bytes: number
   readonly schemaVersion: number
+  /** SHA-256 of the delivered snapshot, for audit logs. */
+  readonly sha256: string
 }
 
 export interface StoreRestoreResult {
@@ -54,6 +56,16 @@ export interface StoreRestoreResult {
 export interface BackupStoreOptions {
   /** Allow an output name that does not end in `.db` or `.sqlite`. */
   readonly allowUnknownExtension?: boolean
+  /**
+   * Test seam: runs after the SQLite snapshot is written to its temporary
+   * path, before the temporary file's ledger/integrity is verified.
+   */
+  readonly beforeSnapshotVerify?: (temp: string) => void
+  /**
+   * Test seam: runs after the temporary file is verified and hashed, before
+   * the no-overwrite install. A hook may create `out` to exercise the race.
+   */
+  readonly beforeInstall?: (temp: string, out: string) => void
 }
 
 export interface RestoreStoreOptions {
@@ -227,13 +239,39 @@ function validateOutputPath(home: string, outPath: string, options: BackupStoreO
     throw new UserError(`backup output already exists: ${outPath}; choose a new path`)
   } catch (error) {
     if (error instanceof UserError) throw error
-    // ENOENT means the path is free. Anything else (for example EACCES while
-    // probing the directory) is left to the filesystem operation below.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') {
+      throw new UserError(
+        `cannot inspect backup output ${outPath}: ${errorMessage(error)}`,
+      )
+    }
   }
 
   const parent = path.dirname(outPath)
   if (!fs.existsSync(parent) || !fs.statSync(parent).isDirectory()) {
     throw new UserError(`backup directory does not exist: ${parent}; create it first`)
+  }
+}
+
+/** Verify a snapshot's pages and that its ledger matches the source version. */
+function verifySnapshot(file: string, expectedVersion: number): void {
+  try {
+    const db = new DatabaseSync(file, { readOnly: true })
+    try {
+      assertIntegrity(db, file, 'backup snapshot')
+      const actual = readSchemaVersion(db)
+      if (actual !== expectedVersion) {
+        throw new UserError(
+          `backup snapshot schema version ${actual} does not match the source version `
+          + `${expectedVersion}; retry the backup after the store settles`,
+        )
+      }
+    } finally {
+      db.close()
+    }
+  } catch (error) {
+    if (error instanceof UserError) throw error
+    throw new UserError(`backup snapshot verification failed: ${file} (${errorMessage(error)})`)
   }
 }
 
@@ -243,6 +281,11 @@ function validateOutputPath(home: string, outPath: string, options: BackupStoreO
  * The output path must not already exist, must not be the live database or a
  * WAL sidecar, must not be inside a reserved spill directory, and normally
  * ends in `.db` or `.sqlite`.
+ *
+ * The snapshot is written to a unique temporary file in the output directory,
+ * verified, hashed, and installed with `linkSync` so a file created by another
+ * process in the meantime is never overwritten or deleted. Only the temporary
+ * file is cleaned up on failure.
  */
 export function backupStore(
   home: string,
@@ -261,11 +304,19 @@ export function backupStore(
     )
   }
 
+  const outDir = path.dirname(out)
+  const temp = path.join(
+    outDir,
+    `.${path.basename(out)}.backup-${process.pid}-${randomUUID()}.tmp`,
+  )
+  let tempPresent = false
   const db = new DatabaseSync(dbPath)
   try {
     // A writer can hold the lock briefly. VACUUM INTO then snapshots the last
     // committed state, including uncheckpointed WAL frames.
     db.exec('PRAGMA busy_timeout = 5000')
+    // Refuse a damaged source before creating any output file.
+    assertIntegrity(db, dbPath, 'store')
     const schemaVersion = readSchemaVersion(db)
     if (schemaVersion > LATEST_SCHEMA_VERSION) {
       throw new UserError(
@@ -273,18 +324,51 @@ export function backupStore(
         + `(${LATEST_SCHEMA_VERSION}); upgrade ds-agent before backing up this store`,
       )
     }
-    db.prepare('VACUUM INTO ?').run(out)
+
+    db.prepare('VACUUM INTO ?').run(temp)
+    tempPresent = true
     // The snapshot contains prompts, messages, and spills; keep it private.
-    fs.chmodSync(out, 0o600)
-    fsyncFile(out)
-    return { bytes: fs.statSync(out).size, schemaVersion }
-  } catch (error) {
-    // The output did not exist before this call, so anything here is a partial
-    // snapshot and must not block a retry.
+    fs.chmodSync(temp, 0o600)
+    fsyncFile(temp)
+
+    options.beforeSnapshotVerify?.(temp)
+    verifySnapshot(temp, schemaVersion)
+    const sha256 = sha256File(temp)
+
+    options.beforeInstall?.(temp, out)
     try {
-      fs.rmSync(out, { force: true })
+      // Hard-link install is atomic and fails with EEXIST instead of replacing
+      // a file that appeared after validation.
+      fs.linkSync(temp, out)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new UserError(`backup output already exists: ${out}; choose a new path`)
+      }
+      throw error
+    }
+
+    try {
+      removeIfExists(temp)
+      tempPresent = false
     } catch {
-      // Keep the original failure.
+      // The output is installed; leaving the extra temporary name is harmless.
+    }
+    fsyncDirectory(outDir)
+
+    // The hard link shares the inode, but assert the delivered contract.
+    if (sha256File(out) !== sha256) {
+      throw new UserError(`backup checksum mismatch after install: ${out}`)
+    }
+    return { bytes: fs.statSync(out).size, schemaVersion, sha256 }
+  } catch (error) {
+    // Only the temporary file belongs to this call. Never touch `out`: it may
+    // have been created by another process after validation.
+    if (tempPresent) {
+      try {
+        removeIfExists(temp)
+      } catch {
+        // Keep the original failure.
+      }
     }
     if (error instanceof UserError) throw error
     throw new UserError(`backup failed: ${errorMessage(error)}`)

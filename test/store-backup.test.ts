@@ -33,6 +33,11 @@ function dbPath(home: string): string {
   return path.join(home, STORE_DB_FILE)
 }
 
+/** Temporary snapshot names left in an output directory. */
+function backupTempNames(dir: string): string[] {
+  return fs.readdirSync(dir).filter(name => name.includes('.backup-') && name.endsWith('.tmp'))
+}
+
 function inspect<T>(file: string, work: (db: DatabaseSync) => T): T {
   const db = new DatabaseSync(file, { readOnly: true })
   try {
@@ -119,6 +124,9 @@ describe('backupStore', () => {
     expect(result.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
     expect(result.bytes).toBe(fs.statSync(out).size)
     expect(result.bytes).toBeGreaterThan(0)
+    expect(result.sha256).toBe(
+      createHash('sha256').update(fs.readFileSync(out)).digest('hex'),
+    )
     expect(fs.statSync(out).mode & 0o777).toBe(0o600)
 
     // The snapshot includes the uncheckpointed row.
@@ -139,6 +147,86 @@ describe('backupStore', () => {
 
     expectUserError(() => backupStore(home, out), /already exists/)
     expect(fs.readFileSync(out, 'utf8')).toBe('do not replace me')
+  })
+
+  it('refuses a corrupt live store before creating any output', () => {
+    const home = tempDir('ds-agent-backup-corrupt-source-')
+    const outDir = tempDir('ds-agent-backup-corrupt-source-out-')
+    const out = path.join(outDir, 'snapshot.db')
+
+    writeCorruptButParseableBackup(dbPath(home))
+
+    expectUserError(
+      () => backupStore(home, out),
+      /store integrity check failed/,
+    )
+    expect(fs.existsSync(out)).toBe(false)
+    expect(backupTempNames(outDir)).toEqual([])
+  })
+
+  it('preserves a file that appears before install when the backup later fails', () => {
+    const home = tempDir('ds-agent-backup-failure-preserve-')
+    const outDir = tempDir('ds-agent-backup-failure-preserve-out-')
+    const out = path.join(outDir, 'snapshot.db')
+    const sentinel = 'created by another process, must survive'
+    openStore(home).close()
+
+    expectUserError(
+      () => backupStore(home, out, {
+        beforeInstall: () => {
+          fs.writeFileSync(out, sentinel)
+          throw new Error('injected failure after out appeared')
+        },
+      }),
+      /backup failed: injected failure after out appeared/,
+    )
+
+    expect(fs.readFileSync(out, 'utf8')).toBe(sentinel)
+    expect(backupTempNames(outDir)).toEqual([])
+  })
+
+  it('refuses a race-created output without touching it', () => {
+    const home = tempDir('ds-agent-backup-race-')
+    const outDir = tempDir('ds-agent-backup-race-out-')
+    const out = path.join(outDir, 'snapshot.db')
+    const sentinel = 'race winner'
+    openStore(home).close()
+
+    expectUserError(
+      () => backupStore(home, out, {
+        beforeInstall: () => {
+          fs.writeFileSync(out, sentinel)
+        },
+      }),
+      /already exists/,
+    )
+
+    expect(fs.readFileSync(out, 'utf8')).toBe(sentinel)
+    expect(backupTempNames(outDir)).toEqual([])
+  })
+
+  it('refuses a snapshot whose ledger does not match the source version', () => {
+    const home = tempDir('ds-agent-backup-schema-mismatch-')
+    const outDir = tempDir('ds-agent-backup-schema-mismatch-out-')
+    const out = path.join(outDir, 'snapshot.db')
+    openStore(home).close()
+
+    expectUserError(
+      () => backupStore(home, out, {
+        beforeSnapshotVerify: temp => {
+          const snapshot = new DatabaseSync(temp)
+          try {
+            snapshot.exec('DELETE FROM schema_migrations')
+          } finally {
+            snapshot.close()
+          }
+        },
+      }),
+      /does not match the source version/,
+    )
+
+    expect(fs.existsSync(out)).toBe(false)
+    expect(backupTempNames(outDir)).toEqual([])
   })
 
   it('refuses the live database and spill directories', () => {

@@ -54,7 +54,7 @@ export function runBackupCommand(options: BackupCommandOptions): StoreBackupResu
   })
   console.log(
     `Backed up ${path.join(path.resolve(home), 'ds-agent.db')} to ${path.resolve(out)} `
-    + `(${result.bytes} bytes, schema v${result.schemaVersion}).`,
+    + `(${result.bytes} bytes, schema v${result.schemaVersion}, sha256=${result.sha256}).`,
   )
   return result
 }
