@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import type { LifecycleEvent } from '../core/lifecycle.ts'
 import type { DomainEventName } from '../shared/events.ts'
 import type { JobRow, OutboxRow, ReplyRow, SessionRow } from '../shared/types.ts'
 import { migrate } from './schema.ts'
@@ -122,6 +123,44 @@ export class Store {
       payload: JSON.parse(row.payload) as unknown,
       createdAt: row.created_at,
     }))
+  }
+
+  /**
+   * Persist one lifecycle event. When `keep` is set, the log is bounded in the
+   * same transaction: only the newest `keep` rows survive, so the table cannot
+   * grow without limit. `at` is write-time metadata, not part of the event
+   * read model returned by `recentLifecycleEvents`.
+   */
+  appendLifecycleEvent(event: LifecycleEvent, keep?: number): void {
+    this.atomic(() => {
+      this.db.prepare(
+        'INSERT INTO lifecycle_events(at, kind, payload) VALUES(?, ?, ?)',
+      ).run(new Date().toISOString(), event.kind, JSON.stringify(event.payload) ?? 'null')
+      if (keep !== undefined) this.pruneLifecycleEvents(keep)
+    })
+  }
+
+  /** The newest `limit` lifecycle events in publish order. */
+  recentLifecycleEvents(limit: number): LifecycleEvent[] {
+    if (!Number.isSafeInteger(limit) || limit < 1) return []
+    const rows = this.db.prepare(
+      'SELECT kind, payload FROM lifecycle_events ORDER BY id DESC LIMIT ?',
+    ).all(limit) as { kind: string; payload: string }[]
+    return rows.reverse().map(row => ({
+      kind: row.kind,
+      payload: JSON.parse(row.payload) as unknown,
+    }))
+  }
+
+  /** Keep only the newest `keep` lifecycle rows; older rows are deleted. */
+  pruneLifecycleEvents(keep: number): void {
+    if (!Number.isSafeInteger(keep) || keep < 1) {
+      throw new Error('lifecycle retention must be a positive integer')
+    }
+    this.db.prepare(
+      `DELETE FROM lifecycle_events
+       WHERE id NOT IN (SELECT id FROM lifecycle_events ORDER BY id DESC LIMIT ?)`,
+    ).run(keep)
   }
 
   addReply(row: ReplyRow): void {
