@@ -17,6 +17,24 @@ import {
 const TOKEN = 'ui-test-token-0123456789abcdef'
 const OTHER_TOKEN = 'ui-other-token-0123456789abcd'
 const OUTBOX_SECRET = 'outbox body must stay private'
+const SPEC_TITLE = 'speculative title sentinel must never leak'
+const SPEC_THREAD = 'im:spec-secret-thread'
+const SPEC_OUTBOX_SECRET = 'speculative outbox body must never leak'
+const ENDED_SECRET = 'visible ended title must not leak'
+const PAUSE_SECRET = 'pause reason must not leak'
+const GUIDANCE_SECRET = 'guidance text must not leak'
+const RESUME_SECRET = 'resume reason must not leak'
+const UNKNOWN_SECRET = 'unknown kind secret must not leak'
+const EVENT_SENTINELS = [
+  SPEC_TITLE,
+  SPEC_THREAD,
+  SPEC_OUTBOX_SECRET,
+  ENDED_SECRET,
+  PAUSE_SECRET,
+  GUIDANCE_SECRET,
+  RESUME_SECRET,
+  UNKNOWN_SECRET,
+]
 
 const cleanup: Array<() => Promise<void> | void> = []
 
@@ -123,7 +141,8 @@ function seed(store: Store, metrics: Metrics): void {
   store.putDoc('ticket', 'tkt_ui_spec', {
     ...ticket,
     id: 'tkt_ui_spec',
-    title: 'speculative ticket must stay hidden',
+    title: SPEC_TITLE,
+    threadKeys: [SPEC_THREAD],
     speculative: true,
     originTriggerId: 'trg_ui_spec',
   } satisfies Ticket)
@@ -149,9 +168,66 @@ function seed(store: Store, metrics: Metrics): void {
     status: 'pending',
     createdAt: now,
   })
+  store.enqueueOutbox({
+    id: 'out_spec_1',
+    replyId: 'reply_spec_1',
+    ticketId: 'tkt_ui_spec',
+    channel: 'im',
+    thread: SPEC_THREAD,
+    target: { chat: 'chat_spec' },
+    text: SPEC_OUTBOX_SECRET,
+    status: 'pending',
+    createdAt: now,
+  })
   store.appendLifecycleEvent({
     kind: 'ticket.created',
-    payload: { ticketId: ticket.id, title: TITLE },
+    payload: {
+      ticketId: ticket.id,
+      title: TITLE,
+      speculative: false,
+      threads: ticket.threadKeys,
+      decisionId: 'decision_private',
+    },
+  })
+  store.appendLifecycleEvent({
+    kind: 'ticket.created',
+    payload: {
+      ticketId: 'tkt_ui_spec',
+      title: SPEC_TITLE,
+      speculative: true,
+      threads: [SPEC_THREAD],
+    },
+  })
+  store.appendLifecycleEvent({
+    kind: 'ticket.ended',
+    payload: {
+      ticketId: ticket.id,
+      outcome: 'ready',
+      by: 'executor',
+      memoryId: 'ltm_ui_1',
+      title: ENDED_SECRET,
+    },
+  })
+  store.appendLifecycleEvent({
+    kind: 'ticket.paused',
+    payload: { ticketId: ticket.id, at: now, by: 'sam', reason: PAUSE_SECRET },
+  })
+  store.appendLifecycleEvent({
+    kind: 'ticket.guidance',
+    payload: {
+      ticketId: ticket.id,
+      guidanceId: 'guid_ui_1',
+      paused: false,
+      text: GUIDANCE_SECRET,
+    },
+  })
+  store.appendLifecycleEvent({
+    kind: 'ticket.resumed',
+    payload: { ticketId: ticket.id, pausedAt: now, reason: RESUME_SECRET },
+  })
+  store.appendLifecycleEvent({
+    kind: 'lifecycle.private',
+    payload: { ticketId: ticket.id, secret: UNKNOWN_SECRET },
   })
   metrics.increment('ingress.admit', 2)
   metrics.flush()
@@ -201,6 +277,9 @@ describe('local UI server', () => {
     expect(response.body).toContain('im:thread-1')
     expect(response.body).not.toContain(OUTBOX_SECRET)
     expect(response.body).not.toContain('tkt_ui_spec')
+    expect(response.body).not.toContain('out_spec_1')
+    expect(response.body).not.toContain('decision_private')
+    for (const sentinel of EVENT_SENTINELS) expect(response.body, sentinel).not.toContain(sentinel)
     expect(response.body).not.toContain(TOKEN)
     expect(response.body).not.toContain('http://')
     expect(response.body).not.toContain('https://')
@@ -220,7 +299,7 @@ describe('local UI server', () => {
       outbox: { id: string; status: string; channel: string; thread: string; ticketId: string }[]
       health: { store: string; vaultMode: string; watchdogIdle: boolean }
       metrics: { counters: Record<string, number> }
-      events: { kind: string; payload: unknown }[]
+      events: { kind: string; payload: Record<string, unknown> }[]
     }
 
     expect(snapshot.tickets).toHaveLength(1)
@@ -255,12 +334,39 @@ describe('local UI server', () => {
     expect(snapshot.health.vaultMode).toBe('absent')
     expect(snapshot.health.watchdogIdle).toBe(true)
     expect(snapshot.metrics.counters['ingress.admit']).toBe(2)
-    expect(snapshot.events).toHaveLength(1)
-    expect(snapshot.events[0]?.kind).toBe('ticket.created')
-    expect(snapshot.events[0]?.payload).toMatchObject({ ticketId: 'tkt_ui_1' })
+    expect(snapshot.events).toHaveLength(5)
+    const eventsByKind = Object.fromEntries(snapshot.events.map(event => [event.kind, event.payload]))
+    expect(eventsByKind['ticket.created']).toEqual({ ticketId: 'tkt_ui_1', speculative: false })
+    expect(eventsByKind['ticket.ended']).toEqual({
+      ticketId: 'tkt_ui_1',
+      outcome: 'ready',
+      by: 'executor',
+      memoryId: 'ltm_ui_1',
+    })
+    expect(eventsByKind['ticket.paused']).toEqual({
+      ticketId: 'tkt_ui_1',
+      at: '2026-11-04T10:00:00.000Z',
+      by: 'sam',
+    })
+    expect(eventsByKind['ticket.guidance']).toEqual({
+      ticketId: 'tkt_ui_1',
+      guidanceId: 'guid_ui_1',
+      paused: false,
+    })
+    expect(eventsByKind['ticket.resumed']).toEqual({
+      ticketId: 'tkt_ui_1',
+      pausedAt: '2026-11-04T10:00:00.000Z',
+    })
+    // Unknown kinds are dropped; a speculative ticket contributes no event.
+    expect(eventsByKind['lifecycle.private']).toBeUndefined()
+    expect(snapshot.events.some(event => event.kind === 'ticket.created' && event.payload.speculative === true)).toBe(false)
+    expect(Object.keys(eventsByKind['ticket.created']!)).toEqual(['ticketId', 'speculative'])
 
+    expect(snapshot.outbox).toHaveLength(1)
     expect(response.body).not.toContain(OUTBOX_SECRET)
     expect(response.body).not.toContain('tkt_ui_spec')
+    expect(response.body).not.toContain('out_spec_1')
+    for (const sentinel of EVENT_SENTINELS) expect(response.body, sentinel).not.toContain(sentinel)
     expect(response.body).not.toContain(TOKEN)
     // The home path is not part of the public snapshot.
     expect(JSON.stringify(snapshot)).not.toContain(home)
@@ -301,6 +407,7 @@ describe('local UI server', () => {
     const boot = await request(`${base}/?token=${encodeURIComponent(TOKEN)}`, { token: null })
     expect(boot.status).toBe(303)
     expect(boot.headers.location).toBe('/')
+    expect(boot.headers['referrer-policy']).toBe('no-referrer')
     expect(String(boot.headers['cache-control'])).toBe('no-store')
     const setCookie = boot.headers['set-cookie']
     const cookieHeader = Array.isArray(setCookie) ? setCookie[0] : setCookie
@@ -381,10 +488,15 @@ describe('local UI server', () => {
     const snapshot = JSON.parse(sse.frame.slice('data: '.length)) as {
       tickets: { id: string }[]
       outbox: Record<string, unknown>[]
+      events: { kind: string; payload: Record<string, unknown> }[]
     }
     expect(snapshot.tickets[0]?.id).toBe('tkt_ui_1')
+    expect(snapshot.outbox).toHaveLength(1)
     expect(snapshot.outbox[0]).not.toHaveProperty('text')
-    expect(sse.frame).not.toContain(OUTBOX_SECRET)
+    expect(snapshot.events).toHaveLength(5)
+    for (const sentinel of [OUTBOX_SECRET, ...EVENT_SENTINELS]) {
+      expect(sse.frame, sentinel).not.toContain(sentinel)
+    }
 
     // Client close must not leave the timer or response behind.
     sse.req.destroy()

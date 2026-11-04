@@ -85,9 +85,57 @@ export interface SnapshotHealth {
   watchdogIdle: boolean
 }
 
+export type SnapshotEventPayload = Record<string, string | boolean | null>
+
 export interface SnapshotEvent {
   kind: string
-  payload: unknown
+  payload: SnapshotEventPayload
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+/**
+ * Whitelist lifecycle fields for the read model. Persisted payloads can carry
+ * titles, thread keys, or guidance text, and a speculative ticket's event would
+ * otherwise reveal a ticket that `tickets` filters out. Unknown kinds and any
+ * event for an invisible ticket are dropped entirely.
+ */
+export function sanitizeLifecycleEvent(
+  event: { kind: string; payload: unknown },
+  visibleTicketIds: ReadonlySet<string>,
+): SnapshotEventPayload | undefined {
+  const payload = event.payload && typeof event.payload === 'object'
+    ? event.payload as Record<string, unknown>
+    : {}
+  const ticketId = stringOrNull(payload.ticketId)
+  if (ticketId === null || !visibleTicketIds.has(ticketId)) return undefined
+
+  switch (event.kind) {
+    case 'ticket.created':
+      if (payload.speculative === true) return undefined
+      return { ticketId, speculative: false }
+    case 'ticket.ended':
+      return {
+        ticketId,
+        outcome: stringOrNull(payload.outcome),
+        by: stringOrNull(payload.by),
+        memoryId: stringOrNull(payload.memoryId),
+      }
+    case 'ticket.paused':
+      return { ticketId, at: stringOrNull(payload.at), by: stringOrNull(payload.by) }
+    case 'ticket.guidance':
+      return {
+        ticketId,
+        guidanceId: stringOrNull(payload.guidanceId),
+        paused: payload.paused === true,
+      }
+    case 'ticket.resumed':
+      return { ticketId, pausedAt: stringOrNull(payload.pausedAt) }
+    default:
+      return undefined
+  }
 }
 
 /** One read model shared by the HTML page, `/api/snapshot`, and SSE. */
@@ -111,9 +159,10 @@ export function buildSnapshot(
   home: string,
   opts: { eventLimit?: number } = {},
 ): UiSnapshot {
-  const tickets = store.listDocs<Ticket>('ticket')
+  const visibleTickets = store.listDocs<Ticket>('ticket')
     .filter(ticket => ticket.speculative !== true)
-    .map(ticket => ({
+  const visibleTicketIds = new Set(visibleTickets.map(ticket => ticket.id))
+  const tickets = visibleTickets.map(ticket => ({
     id: ticket.id,
     title: ticket.title,
     stage: ticketStage(ticket),
@@ -151,17 +200,24 @@ export function buildSnapshot(
     return view
   })
 
-  const outbox = store.listOutbox().map(row => ({
-    id: row.id,
-    ticketId: row.ticketId,
-    status: row.status,
-    channel: row.channel,
-    thread: row.thread,
-    attempts: row.attempts ?? 0,
-    createdAt: row.createdAt,
-  }))
+  const outbox = store.listOutbox()
+    .filter(row => visibleTicketIds.has(row.ticketId))
+    .map(row => ({
+      id: row.id,
+      ticketId: row.ticketId,
+      status: row.status,
+      channel: row.channel,
+      thread: row.thread,
+      attempts: row.attempts ?? 0,
+      createdAt: row.createdAt,
+    }))
 
   const eventLimit = opts.eventLimit ?? SNAPSHOT_EVENT_LIMIT
+  const events: SnapshotEvent[] = []
+  for (const event of store.recentLifecycleEvents(eventLimit)) {
+    const payload = sanitizeLifecycleEvent(event, visibleTicketIds)
+    if (payload) events.push({ kind: event.kind, payload })
+  }
   return {
     generatedAt: new Date().toISOString(),
     tickets,
@@ -169,10 +225,7 @@ export function buildSnapshot(
     outbox,
     health: healthProbe(store, home),
     metrics: metrics.snapshot(),
-    events: store.recentLifecycleEvents(eventLimit).map(event => ({
-      kind: event.kind,
-      payload: event.payload,
-    })),
+    events,
   }
 }
 
@@ -307,6 +360,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         res.writeHead(303, {
           ...SECURITY_HEADERS,
           'set-cookie': `${AUTH_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`,
+          'referrer-policy': 'no-referrer',
           location: '/',
         })
         res.end()

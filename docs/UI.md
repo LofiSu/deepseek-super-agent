@@ -70,17 +70,26 @@ curl -H "Authorization: Bearer $DS_AGENT_UI_TOKEN" http://127.0.0.1:4318/api/eve
 ## Read model
 
 One function, `buildSnapshot()`, produces every view. It only includes visible
-tickets (`speculative !== true`). Outbox message bodies are never exposed; only
-routing and delivery metadata is shown.
+tickets (`speculative !== true`), and outbox rows whose `ticketId` is not in that
+visible set are dropped. Outbox message bodies are never exposed; only routing
+and delivery metadata is shown.
 
 | Section | Fields |
 |---------|--------|
 | `tickets` | `id`, `title`, canonical `stage`, `ended`, `paused`, `createdAt` |
 | `threads` | `key`, `subscriptions`, `pending` count, `deferred`, `lastAt` |
-| `outbox` | `id`, `ticketId`, `status`, `channel`, `thread`, `attempts`, `createdAt` |
+| `outbox` | visible tickets only: `id`, `ticketId`, `status`, `channel`, `thread`, `attempts`, `createdAt` |
 | `health` | `healthProbe()` output: store health, vault mode, machines online, watchdog idle |
 | `metrics` | the persisted Section 7 counters and model-latency summary |
-| `events` | the newest lifecycle events in publish order |
+| `events` | sanitized lifecycle events, whitelisted per kind (below) |
+
+Lifecycle payloads are rebuilt instead of passed through: `ticket.created` →
+`{ ticketId, speculative }`; `ticket.ended` → `{ ticketId, outcome, by, memoryId }`;
+`ticket.paused` → `{ ticketId, at, by }`; `ticket.guidance` →
+`{ ticketId, guidanceId, paused }`; `ticket.resumed` → `{ ticketId, pausedAt }`.
+Unknown kinds are dropped, as is any event for a ticket outside the visible set
+(including a speculative `ticket.created`). Raw titles, thread keys, and guidance
+text in persisted payloads are never exposed.
 
 Threads are the union of persisted Thread documents and the subscription table,
 so a subscription is visible even before a Thread document exists. Tickets use
@@ -131,14 +140,17 @@ host, and do not log the token.
 ## Tests
 
 `test/cli-ui.test.ts` seeds a temporary home with one visible ticket, one
-speculative ticket, one thread subscription, one outbox row (with a secret body),
-and one lifecycle event, then starts the server on `127.0.0.1:0`. It checks the
+speculative ticket, one thread subscription, a visible outbox row (with a secret
+body) plus a speculative outbox row, and lifecycle events carrying secret
+titles/reasons/guidance, then starts the server on `127.0.0.1:0`. It checks the
 rendered page (escaped title, ticket/outbox metadata, no message body, no
-speculative ticket, no token, no `http://`/`https://` references), the JSON read
-model, missing/wrong token `401`, `GET /health` without auth and with the Store
-closed, the query-token → HttpOnly cookie → `303` flow, `404`/`405` after auth,
-evil and malformed Host values (`[::1]evil`, `[::1]:80x`, non-numeric ports)
-versus valid `[::1]:port`, the SSE first frame and clean abort, SSE close on a
-throwing read model, short/missing token rejection, loopback-only refusal, and a
+speculative ticket, no speculative outbox row, no event secrets, no token, no
+`http://`/`https://` references), the JSON read model with its whitelisted event
+payloads, missing/wrong token `401`, `GET /health` without auth and with the
+Store closed, the query-token → HttpOnly cookie → `303` flow (including
+`referrer-policy: no-referrer`), `404`/`405` after auth, evil and malformed Host
+values (`[::1]evil`, `[::1]:80x`, non-numeric ports) versus valid `[::1]:port`,
+the SSE first frame and clean abort with no sentinels, SSE close on a throwing
+read model, short/missing token rejection, loopback-only refusal, and a
 child-process run proving the token is never logged and SIGTERM shuts down. No
 model and no network are used.

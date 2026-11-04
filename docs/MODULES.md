@@ -316,8 +316,8 @@ The read-only local UI is a self-contained module: `src/ui/server.ts`
 (`buildSnapshot`, `startUiServer`, required token auth, loopback bind,
 Host/method guards, SSE), `src/ui/render.ts` (server-rendered HTML and escaping),
 and `src/cli/ui.ts` (`runUi`, `registerUi`). It reads visible tickets, threads,
-outbox metadata (never message bodies), health, metrics, and lifecycle events
-without a Session, model, or daemon. `ds-agent ui` command registration in
+outbox metadata for visible tickets (never message bodies), health, metrics, and
+whitelisted lifecycle-event fields without a Session, model, or daemon. `ds-agent ui` command registration in
 `main.ts` is a follow-up wiring PR after the MODEL-SLOW-PATH branch merges; see
 `docs/UI.md` for the endpoints and security model.
 
