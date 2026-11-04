@@ -238,7 +238,7 @@ flowchart TB
 | T02 | Efficient：吞吐 vs 连续折中 | §2 | M1+M3 | Router 批处理窗口；Eval 同 Thread batch |
 | T03 | Proactive：静默试探 | §3.4 | M7 | silent Assignment + `DeliverGate` |
 | T04 | Persistent：状态可恢复 | §5 | M2+M1 | SQLite + `SessionJournal`；`Runtime.resume` 从 Store 续跑 |
-| T05 | Dual-layer Router/Worker | §2 | M1+M3 | `Role = 'router'\|'worker'\|'watchdog'`；分角色 tools/models；分层 prompt stack（identity→persona→instructions→owner→rules→style→role；`PERSONA.md`/`AGENTS.md`/`USER.md`） |
+| T05 | Dual-layer Router/Worker | §2 | M1+M3 | `Role = 'router'\|'worker'\|'watchdog'`；分角色 tools/models；分层 prompt stack（identity→persona→instructions→owner→team→reach→rules→memory→style→long-tasks→role；`PERSONA.md`/`AGENTS.md`/`USER.md`） |
 | T06 | Router = Sequence Point | §2 | M1 | Router tools 默认无 bash（`tools.ts` 的 `roles` 白名单）；批 Triggers 进一轮 |
 | T07 | Router 轻模型 | §2 | M1 | `models.router`（`roleModelsFromEnv`）默认小模型 / Mock |
 | T08 | Trigger batching during LLM round | §2 | M3+M1 | `Evals.evaluateDue` 合并同 Thread 积压；Router turn 开始时 drain inbox |

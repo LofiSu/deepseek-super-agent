@@ -765,7 +765,15 @@ async function main(): Promise<void> {
     if (role !== 'router' && role !== 'worker' && role !== 'watchdog') {
       throw new Error('role must be router, worker, or watchdog')
     }
-    const input = { role: role as Role, ...loadPromptFiles(home, process.env) }
+    const agents = loadLocalAgents(home, process.env).map(agent => ({
+      id: agent.id,
+      ...(agent.description ? { description: agent.description } : {}),
+    }))
+    const input = {
+      role: role as Role,
+      ...loadPromptFiles(home, process.env),
+      ...(agents.length ? { localAgents: agents } : {}),
+    }
     const layers = describePromptLayers(input)
     if (process.argv.includes('--json')) {
       console.log(JSON.stringify(layers, null, 2))
