@@ -1,23 +1,28 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { SpillBackedLongTermMemory, type LongTermMemoryEntry } from '../src/memory/long-term.ts'
 import { Store } from '../src/store/sqlite.ts'
 import { tempHome } from './fixtures.ts'
 
 /**
- * Offline, deterministic evaluation of long-term memory recall.
+ * Offline, deterministic evaluation of the shipped long-term memory recall
+ * path (`SpillBackedLongTermMemory.query`) after ADR-010.
  *
  * The corpus is fixed and every entry is already redacted (fixtures only, no
- * secrets). The real `query()` path is exercised through an in-memory/temp
- * SQLite store exactly like `test/long-term-memory.test.ts`: no network, no
- * model, no sleeps, no live channel.
+ * secrets). `query()` is exercised through an on-disk SQLite store exactly like
+ * `test/long-term-memory.test.ts`: no network, no model, no sleeps, no live
+ * channel, no wall-clock assertion.
  *
  * Metric: recall@3 is the fraction of each query's labelled relevant entries
  * that appear in the top three results. The reported macro value is the mean
- * over positive queries. Category means are reported separately because the
- * baseline's failures are not uniform (see ADR-010).
+ * over positive queries. ADR-010 recorded the pre-implementation baseline at
+ * 4/11 = 0.364; the implementation assertions below measure the shipped path.
  */
 
-type Category = 'exact' | 'paraphrase' | 'word-order' | 'tag-only' | 'multi-hop'
+type Category = 'exact' | 'paraphrase' | 'morphology' | 'word-order' | 'tag-only' | 'multi-hop'
+
+const CATEGORIES: readonly Category[] = [
+  'exact', 'paraphrase', 'morphology', 'word-order', 'tag-only', 'multi-hop',
+]
 
 interface EvalDoc {
   key: string
@@ -117,6 +122,7 @@ const CORPUS: readonly EvalDoc[] = [
   },
 ]
 
+/** The 11 original ADR-010 queries; expectations are unchanged. */
 const POSITIVE_QUERIES: readonly EvalQuery[] = [
   // Exact lexical match: every query word is spelled the same way in one body.
   {
@@ -177,7 +183,7 @@ const POSITIVE_QUERIES: readonly EvalQuery[] = [
     relevant: ['imessage-group'],
   },
   // Multi-hop: one or both answers require following a shared tag between two
-  // entries (deploy-owner and deploy-token/deploy-incident share the `deploy` tag).
+  // entries (deploy-owner and deploy-token/deploy-incident share `deploy`).
   {
     id: 'multi-hop-deploy-token',
     category: 'multi-hop',
@@ -192,9 +198,113 @@ const POSITIVE_QUERIES: readonly EvalQuery[] = [
   },
 ]
 
+/**
+ * Held-out queries, authored in this PR after the implementation was in place.
+ * They are additional coverage, not a blind or independent generalization set;
+ * they exercise paraphrase, morphology, tag-only, and multi-hop recall over the
+ * same fixed corpus.
+ */
+const HELD_OUT_QUERIES: readonly EvalQuery[] = [
+  {
+    id: 'held-exact-latency',
+    category: 'exact',
+    text: 'bounded retry queue restored p95',
+    relevant: ['gateway-latency'],
+  },
+  {
+    id: 'held-exact-outbox',
+    category: 'exact',
+    text: 'outbox delivery exponential backoff permanent failures',
+    relevant: ['outbox-retry'],
+  },
+  {
+    id: 'held-paraphrase-latency',
+    category: 'paraphrase',
+    text: 'gateway delay from upstream retry queue',
+    relevant: ['gateway-latency'],
+  },
+  {
+    id: 'held-paraphrase-sandbox',
+    category: 'paraphrase',
+    text: 'missing sandbox wrapper fails closed',
+    relevant: ['sandbox-missing'],
+  },
+  {
+    id: 'held-paraphrase-retention',
+    category: 'paraphrase',
+    text: 'memory retention removes old entries',
+    relevant: ['ltm-retention'],
+  },
+  {
+    id: 'held-morphology-rotation',
+    category: 'morphology',
+    text: 'credential rotation for gateway',
+    relevant: ['gateway-401'],
+  },
+  {
+    id: 'held-morphology-retries',
+    category: 'morphology',
+    text: 'outbox retried transient errors',
+    relevant: ['outbox-retry'],
+  },
+  {
+    id: 'held-morphology-auth',
+    category: 'morphology',
+    text: 'gateway authentication failures',
+    relevant: ['gateway-401'],
+  },
+  {
+    id: 'held-tag-acl',
+    category: 'tag-only',
+    text: 'acl',
+    relevant: ['memory-acl'],
+  },
+  {
+    id: 'held-tag-env',
+    category: 'tag-only',
+    text: 'env',
+    relevant: ['sandbox-missing'],
+  },
+  {
+    id: 'held-tag-performance',
+    category: 'tag-only',
+    text: 'performance',
+    relevant: ['gateway-latency'],
+  },
+  {
+    id: 'held-hop-deploy',
+    category: 'multi-hop',
+    text: 'deploy token rotation owner approval',
+    relevant: ['deploy-owner', 'deploy-token'],
+  },
+  {
+    id: 'held-hop-incident',
+    category: 'multi-hop',
+    text: 'production release incident team deploy',
+    relevant: ['deploy-owner', 'deploy-incident'],
+  },
+  {
+    id: 'held-hop-gateway',
+    category: 'multi-hop',
+    text: 'gateway token rotation latency',
+    relevant: ['gateway-401', 'gateway-latency'],
+  },
+  {
+    id: 'held-hop-memory',
+    category: 'multi-hop',
+    text: 'memory retention recall synonyms',
+    relevant: ['ltm-retention', 'memory-recall'],
+  },
+]
+
 const NEGATIVE_QUERIES: readonly string[] = [
   'kubernetes helm chart',
   'payment refund chargeback',
+]
+
+const HELD_OUT_NEGATIVE_QUERIES: readonly string[] = [
+  'solar eclipse photography',
+  'quantum telescope calibration',
 ]
 
 interface Seeded {
@@ -202,13 +312,12 @@ interface Seeded {
   store: Store
   memory: SpillBackedLongTermMemory
   keyById: Map<string, string>
-  docs: EvalDoc[]
 }
 
 /**
  * Injected clock keeps createdAt and the id-desc tie-breaker stable. Retention
  * is left at the constructor default (disabled) so the fixed corpus is intact;
- * runtime defaults are evaluated in ADR-010, not changed here.
+ * runtime defaults are covered by the 1000-entry fixture and ADR-010.
  */
 function seedCorpus(): Seeded {
   const home = tempHome()
@@ -222,21 +331,26 @@ function seedCorpus(): Seeded {
     const entry = memory.put(`ticket_${doc.key}`, doc.text, { tags: doc.tags })
     keyById.set(entry.id, doc.key)
   }
-  const docs = memory.recent(CORPUS.length).map(entry => ({
-    key: keyById.get(entry.id) ?? entry.id,
-    text: store.getSpill(entry.spillId) ?? '',
-    tags: entry.tags ?? [],
-  }))
-  return { home, store, memory, keyById, docs }
+  return { home, store, memory, keyById }
 }
 
-function baselineRank(seeded: Seeded, query: EvalQuery): string[] {
+/** The real shipped path: `query()` on the persisted store. */
+function queryRanks(seeded: Seeded, query: EvalQuery): string[] {
   return seeded.memory.query({
     ticketId: 'ticket_reader',
     text: query.text,
     tags: query.tags,
     limit: 3,
   }).map((entry: LongTermMemoryEntry) => seeded.keyById.get(entry.id) ?? entry.id)
+}
+
+function queryIds(memory: SpillBackedLongTermMemory, query: EvalQuery): string[] {
+  return memory.query({
+    ticketId: 'ticket_reader',
+    text: query.text,
+    tags: query.tags,
+    limit: 3,
+  }).map(entry => entry.id)
 }
 
 function coverage(ranked: readonly string[], relevant: readonly string[]): number {
@@ -252,8 +366,7 @@ function evaluate(
     const ranked = rank(query)
     return { query, ranked, recall: coverage(ranked, query.relevant) }
   })
-  const categories: Category[] = ['exact', 'paraphrase', 'word-order', 'tag-only', 'multi-hop']
-  const byCategory = Object.fromEntries(categories.map(category => {
+  const byCategory = Object.fromEntries(CATEGORIES.map(category => {
     const inCategory = results.filter(result => result.query.category === category)
     const mean = inCategory.length
       ? inCategory.reduce((sum, result) => sum + result.recall, 0) / inCategory.length
@@ -264,289 +377,123 @@ function evaluate(
   return { macro, byCategory, results }
 }
 
-// ---------------------------------------------------------------------------
-// Candidate strategies. These are evaluation-only implementations over the
-// same redacted corpus; no product source is imported or changed.
-// ---------------------------------------------------------------------------
-
-const STOPWORDS = new Set([
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'did', 'do', 'does', 'for',
-  'from', 'how', 'in', 'is', 'it', 'of', 'on', 'or', 'the', 'to', 'was', 'were',
-  'what', 'when', 'where', 'which', 'who', 'whose', 'why', 'with',
-])
-
-/**
- * Small in-repo synonym/morphology map. The canonical form is the first word
- * in each group. It is deliberately tiny and deterministic: no model, no
- * learned vocabulary, no external dependency.
- */
-const SYNONYM_GROUPS: readonly (readonly string[])[] = [
-  ['token', 'credential', 'credentials'],
-  ['rotate', 'rotated', 'rotates', 'rotating', 'rotation'],
-  ['prune', 'prunes', 'pruned', 'pruning'],
-  ['old', 'older', 'oldest'],
-  ['entry', 'entries'],
-  ['fail', 'failed', 'failing', 'failure', 'failures'],
-  ['expand', 'expanded', 'expands', 'expansion'],
-  ['synonym', 'synonyms'],
-  ['paraphrase', 'paraphrases'],
-  ['own', 'owns', 'owned', 'owner', 'ownership'],
-  ['restore', 'restored', 'restores'],
-  ['deploy', 'deploys', 'deployed', 'deployment'],
-  ['release', 'releases', 'released'],
-  ['incident', 'incidents'],
-  ['auth', 'authentication', 'authenticate'],
-  ['memory', 'memories'],
-  ['retention', 'retain', 'retains', 'retained'],
-  ['measure', 'measures', 'measured'],
-  ['evaluate', 'evaluation', 'evaluates'],
-  ['embed', 'embedding', 'embeddings'],
-]
-
-const CANONICAL = new Map<string, string>()
-for (const group of SYNONYM_GROUPS) {
-  const canonical = group[0]!
-  for (const word of group) CANONICAL.set(word, canonical)
-}
-
-function tokenize(text: string): string[] {
-  return text
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-}
-
-function queryTokens(text: string): string[] {
-  return [...new Set(tokenize(text)
-    .map(token => CANONICAL.get(token) ?? token)
-    .filter(token => !STOPWORDS.has(token)))]
-}
-
-function byScoreThenKey(a: { key: string; score: number }, b: { key: string; score: number }): number {
-  return b.score - a.score || a.key.localeCompare(b.key)
-}
-
-/** (a) Lexical normalization + synonym/morphology map, keeping AND semantics. */
-function lexicalAndRank(docs: readonly EvalDoc[], text: string): string[] {
-  const words = queryTokens(text)
-  if (!words.length) return []
-  return docs.flatMap(doc => {
-    const body = new Set(tokenize(doc.text).map(token => CANONICAL.get(token) ?? token))
-    const hits = words.filter(word => body.has(word)).length
-    return hits === words.length ? [{ key: doc.key, score: hits }] : []
-  }).sort(byScoreThenKey).map(item => item.key)
-}
-
-/** (b) Tag-aware OR scoring plus one-hop expansion across shared tags. */
-function tagHoppedScores(
-  docs: readonly EvalDoc[],
-  text: string,
-  requestedTags: readonly string[] = [],
-): Map<string, number> {
-  const words = queryTokens(text)
-  const wanted = requestedTags.map(tag => CANONICAL.get(tag.toLowerCase()) ?? tag.toLowerCase())
-  const bodyTokens = new Map(docs.map(doc => [
-    doc.key,
-    new Set(tokenize(doc.text).map(token => CANONICAL.get(token) ?? token)),
-  ]))
-  const tagTokens = new Map(docs.map(doc => [
-    doc.key,
-    new Set(doc.tags.map(tag => CANONICAL.get(tag.toLowerCase()) ?? tag.toLowerCase())),
-  ]))
-  const direct = new Map<string, number>()
-  for (const doc of docs) {
-    const body = bodyTokens.get(doc.key)!
-    const tags = tagTokens.get(doc.key)!
-    let score = words.filter(word => body.has(word)).length
-    score += words.filter(word => tags.has(word)).length
-    score += wanted.filter(tag => tags.has(tag)).length * 2
-    if (score > 0) direct.set(doc.key, score)
-  }
-  const scores = new Map(direct)
-  for (const [seedKey, seedScore] of direct) {
-    const seedTags = tagTokens.get(seedKey)!
-    if (!seedTags.size) continue
-    for (const doc of docs) {
-      if (doc.key === seedKey) continue
-      const tags = tagTokens.get(doc.key)!
-      const sharesTag = [...seedTags].some(tag => tags.has(tag))
-      if (sharesTag) scores.set(doc.key, (scores.get(doc.key) ?? 0) + seedScore * 0.5)
-    }
-  }
-  return scores
-}
-
-function tagHoppedRank(docs: readonly EvalDoc[], text: string, requestedTags: readonly string[] = []): string[] {
-  return [...tagHoppedScores(docs, text, requestedTags).entries()]
-    .map(([key, score]) => ({ key, score }))
-    .sort(byScoreThenKey)
-    .map(item => item.key)
-}
-
-type SparseVector = ReadonlyMap<string, number>
-
-/** (c) Pluggable embedding port. The mock is offline, deterministic, token-only. */
-interface EmbeddingPort {
-  readonly name: string
-  embed(text: string): SparseVector
-}
-
-class DeterministicMockEmbedding implements EmbeddingPort {
-  readonly name = 'deterministic-mock'
-
-  embed(text: string): SparseVector {
-    const counts = new Map<string, number>()
-    for (const token of queryTokens(text)) {
-      counts.set(token, (counts.get(token) ?? 0) + 1)
-    }
-    const norm = Math.sqrt([...counts.values()].reduce((sum, value) => sum + value * value, 0))
-    if (!norm) return new Map()
-    return new Map([...counts].map(([token, count]) => [token, count / norm]))
-  }
-}
-
-function cosine(left: SparseVector, right: SparseVector): number {
-  let dot = 0
-  for (const [token, weight] of left) {
-    dot += weight * (right.get(token) ?? 0)
-  }
-  return dot
-}
-
-function embeddingRank(docs: readonly EvalDoc[], port: EmbeddingPort, text: string): string[] {
-  const query = port.embed(text)
-  return docs.map(doc => ({
-    key: doc.key,
-    score: cosine(query, port.embed(`${doc.text} ${doc.tags.join(' ')}`)),
-  })).filter(item => item.score > 0).sort(byScoreThenKey).map(item => item.key)
-}
-
-/** (d) Hybrid: normalized tag-hop lexical score plus mock-embedding cosine. */
-function hybridRank(docs: readonly EvalDoc[], port: EmbeddingPort, text: string): string[] {
-  const lexical = tagHoppedScores(docs, text)
-  const maxLexical = Math.max(0, ...lexical.values())
-  const query = port.embed(text)
-  return docs.map(doc => {
-    const lexicalScore = (lexical.get(doc.key) ?? 0) / (maxLexical || 1)
-    const embeddingScore = cosine(query, port.embed(`${doc.text} ${doc.tags.join(' ')}`))
-    return { key: doc.key, score: lexicalScore + embeddingScore }
-  }).filter(item => item.score > 0).sort(byScoreThenKey).map(item => item.key)
-}
-
 describe('Long-term memory recall evaluation (offline)', () => {
-  it('pins the current lexical baseline at 4/11 macro recall@3', () => {
+  it('meets the original 11-query acceptance criteria through query()', () => {
     const seeded = seedCorpus()
     try {
-      const baseline = evaluate(POSITIVE_QUERIES, query => baselineRank(seeded, query))
+      const evaluation = evaluate(POSITIVE_QUERIES, query => queryRanks(seeded, query))
 
-      expect(baseline.macro).toBeCloseTo(4 / 11, 10)
-      expect(baseline.byCategory).toEqual({
-        exact: 1,
-        paraphrase: 0,
-        'word-order': 1,
-        'tag-only': 0,
-        'multi-hop': 0,
-      })
+      // ADR-010 floor is 10/11; the targeted outcome is 11/11.
+      expect(evaluation.macro).toBeGreaterThanOrEqual(10 / 11)
+      expect(evaluation.macro).toBe(1)
+      expect(evaluation.byCategory.exact).toBe(1)
+      expect(evaluation.byCategory['word-order']).toBe(1)
+      expect(evaluation.byCategory['tag-only']).toBeGreaterThanOrEqual(0.5)
+      expect(evaluation.byCategory['multi-hop']).toBeGreaterThanOrEqual(0.5)
+      // Targeted outcomes, not just the floor.
+      expect(evaluation.byCategory.paraphrase).toBe(1)
+      expect(evaluation.byCategory['tag-only']).toBe(1)
+      expect(evaluation.byCategory['multi-hop']).toBe(1)
+    } finally {
+      seeded.store.close()
+    }
+  })
 
-      // Explicit per-query evidence for the categories the baseline loses.
-      for (const result of baseline.results) {
-        if (result.query.category === 'multi-hop') expect(result.recall).toBe(0)
-        if (result.query.category === 'tag-only') expect(result.ranked).toEqual([])
-        if (result.query.category === 'paraphrase') expect(result.recall).toBe(0)
+  it('meets the held-out query targets through query()', () => {
+    const seeded = seedCorpus()
+    try {
+      const evaluation = evaluate(HELD_OUT_QUERIES, query => queryRanks(seeded, query))
+
+      expect(HELD_OUT_QUERIES.length).toBeGreaterThanOrEqual(10)
+      expect(evaluation.macro).toBe(1)
+      expect(evaluation.byCategory.exact).toBe(1)
+      expect(evaluation.byCategory.paraphrase).toBe(1)
+      expect(evaluation.byCategory.morphology).toBe(1)
+      expect(evaluation.byCategory['tag-only']).toBe(1)
+      expect(evaluation.byCategory['multi-hop']).toBe(1)
+    } finally {
+      seeded.store.close()
+    }
+  })
+
+  it('returns zero for both negative controls and held-out precision controls', () => {
+    const seeded = seedCorpus()
+    try {
+      for (const text of [...NEGATIVE_QUERIES, ...HELD_OUT_NEGATIVE_QUERIES]) {
+        expect(seeded.memory.query({
+          ticketId: 'ticket_reader',
+          text,
+          limit: 3,
+        })).toEqual([])
       }
     } finally {
       seeded.store.close()
     }
   })
 
-  it('measures the candidate strategies on the same fixed corpus', () => {
-    const seeded = seedCorpus()
-    try {
-      const mock = new DeterministicMockEmbedding()
-      const normalized = evaluate(POSITIVE_QUERIES, query => lexicalAndRank(seeded.docs, query.text))
-      const tagHopped = evaluate(POSITIVE_QUERIES, query => tagHoppedRank(seeded.docs, query.text, query.tags))
-      const embedded = evaluate(POSITIVE_QUERIES, query => embeddingRank(seeded.docs, mock, query.text))
-      const hybrid = evaluate(POSITIVE_QUERIES, query => hybridRank(seeded.docs, mock, query.text))
-
-      // (a) Normalization + synonym map recovers paraphrase/morphology only.
-      expect(normalized.macro).toBeCloseTo(7 / 11, 10)
-      expect(normalized.byCategory).toEqual({
-        exact: 1,
-        paraphrase: 1,
-        'word-order': 1,
-        'tag-only': 0,
-        'multi-hop': 0,
-      })
-
-      // (b) One-hop tag expansion recovers tag-only and multi-hop as well.
-      expect(tagHopped.macro).toBe(1)
-      expect(tagHopped.byCategory).toEqual({
-        exact: 1,
-        paraphrase: 1,
-        'word-order': 1,
-        'tag-only': 1,
-        'multi-hop': 1,
-      })
-      for (const result of tagHopped.results) {
-        if (result.query.category === 'multi-hop') expect(result.recall).toBe(1)
-      }
-
-      // (c) The deterministic mock embedding matches (b) on this corpus; it
-      // shows no incremental recall, so it cannot justify a provider/dependency.
-      expect(embedded.macro).toBe(1)
-
-      // (d) Hybrid ranking also matches (b); no measured gain for the extra layer.
-      expect(hybrid.macro).toBe(1)
-    } finally {
-      seeded.store.close()
-    }
-  })
-
-  it('returns no results for negative controls under every strategy', () => {
-    const seeded = seedCorpus()
-    try {
-      const mock = new DeterministicMockEmbedding()
-      const rankers: ((text: string) => string[])[] = [
-        text => baselineRank(seeded, { id: 'negative', category: 'exact', text, relevant: [] }),
-        text => lexicalAndRank(seeded.docs, text),
-        text => tagHoppedRank(seeded.docs, text),
-        text => embeddingRank(seeded.docs, mock, text),
-        text => hybridRank(seeded.docs, mock, text),
-      ]
-      for (const text of NEGATIVE_QUERIES) {
-        for (const rank of rankers) expect(rank(text)).toEqual([])
-      }
-    } finally {
-      seeded.store.close()
-    }
-  })
-
-  it('is deterministic across repeated runs and a reopened SQLite store', () => {
+  it('is deterministic across repeated query() runs and a reopened SQLite store', () => {
+    const allQueries = [...POSITIVE_QUERIES, ...HELD_OUT_QUERIES]
     const first = seedCorpus()
-    let firstRanks: string[][] = []
+    let firstIds: string[][] = []
+    let repeatedIds: string[][] = []
     try {
-      firstRanks = POSITIVE_QUERIES.map(query => baselineRank(first, query))
+      firstIds = allQueries.map(query => queryIds(first.memory, query))
+      repeatedIds = allQueries.map(query => queryIds(first.memory, query))
     } finally {
       first.store.close()
     }
+    expect(repeatedIds).toEqual(firstIds)
 
     const reopened = new Store(first.home)
     try {
       const memory = new SpillBackedLongTermMemory(reopened)
-      const idToKey = new Map(memory.recent(CORPUS.length).map(entry => [
-        entry.id,
-        entry.ticketId.replace(/^ticket_/u, ''),
-      ]))
-      const secondRanks = POSITIVE_QUERIES.map(query => memory.query({
+      const reopenedIds = allQueries.map(query => queryIds(memory, query))
+      expect(reopenedIds).toEqual(firstIds)
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('remains bounded and deterministic on a 1000-entry fixture', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    let tick = 0
+    const memory = new SpillBackedLongTermMemory(store, {
+      now: () => new Date(Date.UTC(2026, 0, 1) + tick++ * 1_000),
+    })
+    store.atomic(() => {
+      for (let index = 0; index < 1000; index += 1) {
+        memory.put(`ticket_bulk_${index}`, `bulk note number ${index}`, { tags: ['bulk'] })
+      }
+    })
+    expect(store.listDocs('ltm')).toHaveLength(1000)
+
+    const spillReads = vi.spyOn(store, 'getSpill')
+    let firstIds: string[] = []
+    try {
+      const first = memory.query({ ticketId: 'ticket_reader', text: 'bulk', limit: 5 })
+      firstIds = first.map(entry => entry.id)
+      expect(first).toHaveLength(5)
+      // One readable body per retention-bounded entry; the hop index cannot
+      // cause a second scan or an unbounded walk.
+      expect(spillReads.mock.calls.length).toBeLessThanOrEqual(1000)
+
+      const repeated = memory.query({ ticketId: 'ticket_reader', text: 'bulk', limit: 5 })
+      expect(repeated.map(entry => entry.id)).toEqual(firstIds)
+      expect(spillReads.mock.calls.length).toBeLessThanOrEqual(2000)
+    } finally {
+      spillReads.mockRestore()
+      store.close()
+    }
+
+    const reopened = new Store(home)
+    try {
+      const reopenedMemory = new SpillBackedLongTermMemory(reopened)
+      expect(reopenedMemory.query({
         ticketId: 'ticket_reader',
-        text: query.text,
-        tags: query.tags,
-        limit: 3,
-      }).map(entry => idToKey.get(entry.id) ?? entry.id))
-      expect(secondRanks).toEqual(firstRanks)
+        text: 'bulk',
+        limit: 5,
+      }).map(entry => entry.id)).toEqual(firstIds)
     } finally {
       reopened.close()
     }
