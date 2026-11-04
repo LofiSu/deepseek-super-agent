@@ -67,7 +67,7 @@ The program is complete only when all of the following hold:
 |---|---|---|---|
 | A2A-HTTP + PEER-AUTH | design + owner gate | `src/channels/a2a-http.ts` (new), `src/channels/a2a-auth.ts` (new), tests | authenticated HTTP transport, signed envelope, timestamp + nonce replay window, size cap, identity never trusted from body |
 | CROSS-HOST-MESH | design + owner gate, depends on A2A auth | `src/harness/mesh.ts`, `src/harness/remote-node.ts` (new), tests | node registration/heartbeat, capacity, remote assignment dispatch, authenticated transport, fail-closed on unknown peer |
-| ROUTER-SHARD-MULTI-FILTER (T09/T46) | not started, depends on A2A auth for remote shards | `src/ingress/shards.ts`, `src/runtime.ts`, tests | multiple filters per shard, deterministic priority/registration arbitration, first matching shard owns reply and terminal decision, remote shard registration over the authenticated transport |
+| ROUTER-SHARD-MULTI-FILTER (T09/T46) | not started; local multi-filter first, remote registration depends on A2A auth | `src/ingress/shards.ts`, `src/runtime.ts`, tests | multiple filters per shard, deterministic priority/registration arbitration, first matching shard owns reply and terminal decision, remote shard registration over the authenticated transport |
 | A2A/UI THREAT MODEL | design | `docs/SECURITY.md` or ADR | adversary model, key distribution, rotation, TLS expectations, local-endpoint warning |
 
 ### W5 — Operations and release
