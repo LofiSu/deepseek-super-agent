@@ -33,9 +33,10 @@ Derived comparison: `extraModelCalls = 1`, `wallRatio = 1.0031`, verdict
 
 The dual run used a separate `router` Session plus `worker_ticket_1`; the
 single run used one Session and logged `single-session router turn skipped`.
-Both runs acknowledged the trigger, created one ticket, accepted one Eval, and
-delivered the worker's report. The full JSON is reproduced by the command
-below; the numbers above are the program's own `compareBakeoff` output.
+Both runs acknowledged the trigger, created one ticket, and accepted one Eval.
+The captured console log also shows the acknowledgement/outbox enqueue and the
+worker turn. The `BakeoffSample` itself records only model calls, tickets, Eval
+accepts, wall time, and counters; delivery status is not part of that artifact.
 
 ## Interpretation
 
@@ -74,5 +75,81 @@ DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash \
 NODE_NO_WARNINGS=1 pnpm bench:bakeoff
 ```
 
-Use your own provider values; never commit a real key. The command prints the
-JSON comparison to stdout.
+Use your own provider values; never commit a real key. The command re-runs the
+comparison. The exact JSON from the recorded run is in the appendix below.
+
+## Appendix — recorded comparison JSON
+
+```json
+{
+  "dual": {
+    "mode": "dual",
+    "modelCalls": 11,
+    "tickets": 1,
+    "evalAccepts": 1,
+    "wallMs": 38805,
+    "counters": {
+      "ingress.admit": 1,
+      "ingress.drop": 0,
+      "eval.accept": 1,
+      "bypass.fanout": 0,
+      "bypass.context": 0,
+      "executor.fail": 0,
+      "speculate.deliver": 0,
+      "speculate.discard": 0,
+      "watchdog.nudge": 0,
+      "watchdog.fail": 0,
+      "watchdog.idle": 0,
+      "model.error": 0,
+      "model.call": 11,
+      "router.shard": 1,
+      "mesh.assigned": 1,
+      "mesh.queued": 0,
+      "mesh.dequeued": 0,
+      "mesh.queue_rejected": 0,
+      "mesh.queue_drained": 0,
+      "memory.remembered": 0,
+      "memory.recalled": 0,
+      "a2a.delivery": 0
+    }
+  },
+  "single": {
+    "mode": "single",
+    "modelCalls": 10,
+    "tickets": 1,
+    "evalAccepts": 1,
+    "wallMs": 38684,
+    "counters": {
+      "ingress.admit": 1,
+      "ingress.drop": 0,
+      "eval.accept": 1,
+      "bypass.fanout": 0,
+      "bypass.context": 0,
+      "executor.fail": 0,
+      "speculate.deliver": 0,
+      "speculate.discard": 0,
+      "watchdog.nudge": 0,
+      "watchdog.fail": 0,
+      "watchdog.idle": 0,
+      "model.error": 0,
+      "model.call": 10,
+      "router.shard": 1,
+      "mesh.assigned": 1,
+      "mesh.queued": 0,
+      "mesh.dequeued": 0,
+      "mesh.queue_rejected": 0,
+      "mesh.queue_drained": 0,
+      "memory.remembered": 0,
+      "memory.recalled": 0,
+      "a2a.delivery": 0
+    }
+  },
+  "extraModelCalls": 1,
+  "ticketsPerCall": {
+    "dual": 0.09090909090909091,
+    "single": 0.1
+  },
+  "wallRatio": 1.003127908179092,
+  "verdict": "dual paid 1 extra model call(s) for Router sequencing"
+}
+```
