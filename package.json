@@ -5,10 +5,23 @@
   "license": "MIT",
   "author": "LofiSu <163713803+LofiSu@users.noreply.github.com>",
   "type": "module",
+  "bin": {
+    "ds-agent": "./dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "docs/MODULES.md",
+    "docs/REAL_CHANNELS.md"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsx scripts/copy-assets.ts",
+    "prepack": "pnpm build",
     "demo": "NODE_NO_WARNINGS=1 tsx src/cli/demos/run.ts",
     "demo:local": "NODE_NO_WARNINGS=1 tsx src/cli/demo.ts",
     "demo:feishu": "NODE_NO_WARNINGS=1 tsx src/cli/demos/feishu-smoke.ts",
