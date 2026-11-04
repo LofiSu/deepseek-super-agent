@@ -20,7 +20,7 @@ import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
-import { SessionJournal, workerSessionId } from './harness/session.ts'
+import { directChatRouterShard, SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
 import {
@@ -547,6 +547,10 @@ export class Runtime {
       takeGuidance: (ticketId, audience) => engine.takeGuidance(ticketId, audience),
       singleSession: opts.singleSession === true,
       routerSessions: ticket => {
+        // One Router session per direct iMessage thread: two conversations at
+        // once must not share history or bleed into each other's replies.
+        const direct = directChatRouterShard(ticket)
+        if (direct) return [direct]
         const disposition = store.getDoc<Disposition>('disposition', ticket.originTriggerId)
         return disposition?.shards?.length ? disposition.shards : ['default']
       },

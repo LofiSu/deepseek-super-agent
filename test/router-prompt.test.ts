@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { routerPromptFor } from '../src/harness/loop.ts'
+import { directChatRouterShard, routerSessionId } from '../src/harness/session.ts'
 import { systemPrompt } from '../src/harness/model.ts'
 import type { Ticket } from '../src/shared/types.ts'
 
@@ -45,5 +46,15 @@ describe('router prompt', () => {
 
   it('does not mark a GitHub issue as a direct chat', () => {
     expect(routerPromptFor(ticket())).not.toContain('direct-chat=true')
+  })
+
+  it('keeps one Router session per direct iMessage thread', () => {
+    const shard = directChatRouterShard(ticket({
+      threadKeys: ['imessage:chat:any;-;+1'],
+      channels: [{ source: 'imessage', thread: 'chat:any;-;+1', address: { handle: '+1' } }],
+    }))
+    expect(shard).toBe('thread:chat:any;-;+1')
+    expect(routerSessionId(shard!)).toBe('router:thread:chat:any;-;+1')
+    expect(directChatRouterShard(ticket())).toBeUndefined()
   })
 })

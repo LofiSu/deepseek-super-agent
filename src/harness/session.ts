@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { ToolCall } from './model.ts'
 import type { Store } from '../store/sqlite.ts'
+import type { Ticket } from '../shared/types.ts'
 
 export interface JournalEntry {
   role?: string
@@ -19,6 +20,16 @@ export function workerSessionId(ticketId: string): string {
 /** Router shards get their own session; the default shard keeps the legacy id. */
 export function routerSessionId(shard: string): string {
   return !shard || shard === 'default' || shard === 'router' ? 'router' : `router:${shard}`
+}
+
+/**
+ * A direct iMessage thread gets its own Router shard. Without this every
+ * conversation shares one Router session (and its history), so two people
+ * chatting at once can bleed into each other's replies.
+ */
+export function directChatRouterShard(ticket: Ticket): string | undefined {
+  const direct = ticket.channels.find(channel => channel.source === 'imessage' && channel.thread)
+  return direct?.thread ? `thread:${direct.thread}` : undefined
 }
 
 /** Append-only JSONL plus a SQLite copy so a restart can still read the session. */
