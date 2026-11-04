@@ -119,8 +119,8 @@ class FakeFeishuSource implements FeishuLoopSource {
 
 function spyIngest(runtime: Runtime): Trigger[] {
   const ingested: Trigger[] = []
-  const original = runtime.ingest.bind(runtime)
-  runtime.ingest = (incoming: Trigger) => {
+  const original = runtime.ingestAsync.bind(runtime)
+  runtime.ingestAsync = (incoming: Trigger) => {
     ingested.push(incoming)
     return original(incoming)
   }

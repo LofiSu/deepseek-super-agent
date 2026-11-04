@@ -139,7 +139,9 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[imessage] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
-            runtime.ingest(trigger)
+            // The opt-in model Slow Path lives behind ingestAsync; rules mode
+            // stays exactly the sync path, so this is a no-op by default.
+            await runtime.ingestAsync(trigger)
           } catch (error) {
             log(`[imessage] ingest failed ${messageOf(error)}`)
           }
