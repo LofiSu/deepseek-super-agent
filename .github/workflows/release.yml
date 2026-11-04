@@ -1,0 +1,108 @@
+name: Release check
+
+# Manual only: this workflow verifies a ref and uploads a tarball artifact.
+# It does not publish, has no tag trigger, and reads no secrets.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to check
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: offline gate and package artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install filesystem sandbox
+        # Worker bash fails closed without bubblewrap on Linux.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-net -- /bin/true
+
+      - name: Fetch base branch
+        run: git fetch --no-tags --depth=1 origin main
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        env:
+          DS_AGENT_FORMAT_BASE: origin/main
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Offline test
+        env:
+          CI: "true"
+          DS_AGENT_ALLOW_MOCK_FIXTURE: "1"
+          DS_AGENT_API_BASE: ""
+          DS_AGENT_API_KEY: ""
+          DS_AGENT_PROVIDER: ""
+          DEEPSEEK_API_KEY: ""
+          OPENAI_API_KEY: ""
+          OPENROUTER_API_KEY: ""
+          XAI_API_KEY: ""
+          GROK_API_KEY: ""
+          MOONSHOT_API_KEY: ""
+          KIMI_API_KEY: ""
+          ZHIPU_API_KEY: ""
+          GLM_API_KEY: ""
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+        run: npx vitest run
+
+      - name: Build
+        run: pnpm build
+
+      - name: Release check
+        run: npx tsx scripts/release-check.ts
+
+      - name: Pack tarball
+        # The build already ran above; skip prepack's second build.
+        run: npm pack --json --ignore-scripts | tee release-pack.json
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ds-agent-package-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            ds-agent-*.tgz
+            release-pack.json
