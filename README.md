@@ -328,6 +328,35 @@ DS_AGENT_INSTANCE_ID=alpha pnpm ds-agent chat "fix the login timeout"
 DS_AGENT_SHARDS='[{"id":"github","filter":"source:github"}]' pnpm ds-agent chat "CI failed"
 ```
 
+### MCP servers
+
+Workers can call tools from external Model Context Protocol servers configured
+as data. The Router and the Watchdog never see them.
+
+```bash
+export DS_AGENT_MCP_SERVERS='[
+  {"name":"krene","command":"/absolute/path/to/krene-mcp","args":["serve"],"timeoutMs":120000}
+]'
+```
+
+- `name` matches `[A-Za-z0-9_-]`, starts with a letter or digit, is at most 32
+  characters, and is unique. `command` is a non-empty executable (`/absolute/path`
+  is safest because the child inherits the current working directory).
+  `args` defaults to `[]`, `env` to `{}`, and `timeoutMs` to `120000`.
+- Tools appear to Workers as `mcp__<server>__<tool>`. Text stays text;
+  image/resource payloads are written to `<DS_AGENT_HOME>/mcp/<server>/` and
+  referenced by path; a result over 64 KB goes to spill and returns
+  `{ spillId, bytes, preview }`.
+- The child process inherits only `PATH`, `HOME`, `LANG`, `TZ`, `HTTP_PROXY`,
+  `HTTPS_PROXY`, and `NO_PROXY`, plus the server's own `env`. Put credentials in
+  `env`, not in your shell.
+- Unreadable configuration is logged as
+  `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` and ignored. A server that fails or
+  hangs while connecting increments `mcp.connect_error` and is omitted; the
+  runtime and the other servers keep working.
+
+`RuntimeOptions.mcpServers` accepts the same array when embedding the runtime.
+
 ## Models
 
 Both `DS_AGENT_API_BASE` and `DS_AGENT_API_KEY` win over the presets below. Omit the model and that pair sends `deepseek-chat`. For V4.1 Flash, set `deepseek-flash`.
