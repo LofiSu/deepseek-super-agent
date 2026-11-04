@@ -1,17 +1,19 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `8fa3a79` (`[SUPER-AGENT][IMESSAGE-THREAD-KEY] Separate
-> group and 1:1 conversation keys (#90)`)
+> Baseline: `main` at `9a0def3` (`[SUPER-AGENT][MESH-ASYNC-RELEASE] Release the
+> mesh node when a non-queued Worker turn rejects (#97)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
-## 0. Verified baseline (2026-11-03)
+## 0. Verified baseline (2026-11-04)
 
-The gate evidence below is from `main` CI at `8fa3a79` (run `41605279682`).
-The `34aef25` audit was produced locally in a detached worktree; the later
-figures are CI results:
+The gate evidence below starts from `main` CI at `8fa3a79` (run `41605279682`).
+The cycle-5 local gate on `9a0def3` produced: `tsc --noEmit` clean,
+`pnpm lint` ok (227 tracked files), `pnpm format:check` clean, and the offline
+suite 443 passed / 53 files (live test files excluded). CI results are cited
+with their run id where they differ:
 
 ```text
 pnpm lint                                              lint ok (227 tracked files)
@@ -49,8 +51,11 @@ Repository facts:
   `#91` (`1dd426a`), `#92` (`60bb9ae`), and `#90` (`8fa3a79`) then merged the
   state reconciliation, roadmap refresh, restart recovery, gateway token race
   fix, iMessage group edge fix, cycle-3 reconciliation, live-suite salvage,
-  mesh queue tests, and thread-key separation. Current `main` is `8fa3a79`.
-- Open PRs at this checkpoint: this cycle-4 checkpoint PR only. PR #86 was
+  mesh queue tests, and thread-key separation. `#93` (`d539e25`, cycle-4
+  checkpoint), `#94` (`4cef6df`, owner docs live reference), `#95` (`f8554cc`,
+  metrics assertions), `#96` (`ac1fd79`, gateway token branch tests), and #97
+  (`9a0def3`, mesh async release) followed. Current `main` is `9a0def3`.
+- Open PRs at this checkpoint: the cycle-5 checkpoint PR only. PR #86 was
   closed as superseded by #91.
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
@@ -64,13 +69,14 @@ Repository facts:
 |----|----------|-----|----------|--------|
 | IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling; #88 fixed join-order/page/ambiguity addresses and the group-to-1:1 outbound fallback; #90 separated group and 1:1 thread keys. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 + #88 + #90 (`8fa3a79`); APPROVE |
 | P1-3 | P1 | Worker-mesh capacity was advisory and the Harness wrote `Assignment.node` directly. #79 merged the queue and Engine-owned placement; its release-ordering bug is fixed by #84. | `src/harness/loop.ts`; `src/core/assignments.ts`; `test/worker-mesh.test.ts` | fixed by #79 + #84 |
-| MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`); APPROVE |
+| MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. #97 also covers the asynchronous non-queued rejection, which previously leaked the reserved node. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`) and #97 (`9a0def3`); APPROVE |
 | P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/core/assignments.ts`; `src/runtime.ts`; `test/restart-recovery.test.ts` | fixed by #85 (`10e9f3c`); APPROVE |
-| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. #87 fixed the concurrent first-create race and ELOOP fallback. Residual: POSIX-only mode caveat, EEXIST winner-reuse and create-path ELOOP branch tests, stale-empty-file recovery. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82/#87 merged; APPROVE |
+| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. #87 fixed the concurrent first-create race and ELOOP fallback; #96 covered the EEXIST winner-reuse and create-path ELOOP branches. Residual: POSIX-only mode caveat and stale-empty-file recovery. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82/#87/#96 merged; APPROVE |
 | GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
-| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84/#87 reviewed; #77 corrected |
+| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 reviewed; #77 corrected |
 | AUDIT-REFRESH | P2 | `docs/final-audit` (#74) was stale against `34aef25`; the roadmap audit did not include `#64`, `#75`-`#84`. | PR #74 merged `299b908` | fixed; APPROVE |
-| SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:206-221`; `docs/ROADMAP.md` | bounded design decision |
+| SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:228-277`; `docs/ROADMAP.md` | dispatched in cycle 6 (`agent/serve-imessage-loop`) |
+| OUTBOX-PERMANENT-FAILURE | P2 | A fail-closed group reply is still written to the outbox and retried with backoff until `failed`, even though the adapter refuses it deterministically. | `src/core/replies.ts:45-66`; `src/channels/outbox-adapter.ts:88-111`; `src/channels/imessage.ts:590-610` | dispatched in cycle 6 (`agent/outbox-permanent-failure`) |
 
 ## 2. Workstream ordering
 
@@ -103,11 +109,24 @@ Cycle 4 (follow-ups; completed)
   LIVE-SUITE-SALVAGE   Re-land #86's test-only determinism changes — merged
                        #91; #86 closed as superseded
 
-Next sessions (not started)
+Cycle 5 (post-cap follow-ups; completed)
   GATEWAY-TOKEN-TESTS  EEXIST winner-reuse and create-path ELOOP branch tests
-  METRICS-ASSERTIONS   Make the live-relaxed counter assertions meaningful
-  SERVE-CHANNEL-LOOP   Channel loop for serve (reuse Feishu/iMessage sources)
+                       — merged #96
+  METRICS-ASSERTIONS   Deterministic offline counter assertions — merged #95
+  MESH-ASYNC-RELEASE   Release the node on an asynchronous non-queued
+                       rejection — merged #97
+
+Cycle 6 (dispatched)
+  SERVE-CHANNEL-LOOP   Inbound iMessage loop for `serve` (reuse the existing
+                       source/admission; Feishu stays a follow-up)
+  OUTBOX-PERMANENT-FAILURE  Classify unroutable sends as permanent failures
+                       instead of retrying them to `failed`
+
+Next sessions (not started)
   Evaluate semantic long-term memory (roadmap open item)
+  STALE-GATEWAY-TOKEN  Recover from a stale empty token file without masking
+                       tampering (needs an ADR)
+  Ambiguous-group identity boundary (distinct chats from one sender)
 ```
 
 P1-6 and AUDIT-REFRESH were gated on P1-3 in earlier cycles; both are now

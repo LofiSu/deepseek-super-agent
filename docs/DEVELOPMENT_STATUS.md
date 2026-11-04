@@ -1,6 +1,6 @@
 # Development status
 
-> Checkpoint: 2026-11-03 · `main` = `8fa3a79`
+> Checkpoint: 2026-11-04 · `main` = `9a0def3`
 > Source of truth: `git`, GitHub PRs/checks, and the evidence in
 > `docs/PROJECT_AUDIT.md`. Do not trust this file without re-verifying.
 
@@ -8,78 +8,69 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `8fa3a79` |
-| Last merged PR | #90 iMessage group/1:1 thread-key separation |
-| Merged in cycle 4 | #90 thread keys, #91 live-suite test salvage, #92 mesh queue tests and non-queued start cleanup; all APPROVE |
+| Commit | `9a0def3` |
+| Last merged PR | #97 mesh async-release cleanup |
+| Merged in cycle 5 | #94 live reference run (owner), #95 metrics assertions, #96 gateway token branch tests, #97 mesh async release; all reviewed APPROVE |
+| Merged in cycle 4 | #90 thread keys, #91 live-suite test salvage, #92 mesh queue tests; all APPROVE |
 | Merged in cycle 3 | #87 gateway token race, #88 iMessage group edges, #89 cycle-3 reconciliation; all APPROVE |
-| Merged in cycle 2 integration | #83 state reconciliation, #74 roadmap audit refresh, #85 restart recovery |
-| Open PRs at checkpoint | this cycle-4 checkpoint PR only |
+| Open PRs at checkpoint | this cycle-5 checkpoint PR only |
 | Required check | `typecheck and test` |
-| Offline suite | 452 passed / 15 skipped (467 tests, 58 files) |
-| Coverage | 82.39% statements/lines (7837/9512), 80.97% branches (2814/3475), 90.11% functions (693/769) |
+| Offline suite | 443 passed / 53 files (local run on `9a0def3`, live files excluded) |
+| Coverage | not re-measured after #95–#97; `d539e25` CI (run `41609138691`) recorded 82.39% lines, 80.93% branches, 90.11% functions |
 
-The suite and coverage figures above are the `main` CI run at `8fa3a79`
-(run `41605279682`). Earlier `main` runs: `d3beb9c` reported 440 passed / 15
-skipped (455, 58 files) and 82.29% lines / 80.57% branches (2787/3459);
-`5fbfb00` reported 429/15 (444) and 82.27% / 80.52% (2779/3451); `10e9f3c`
-reported 425/15 (440, 56 files) and 82% / 80.05% (2746/3430). A local
-`10e9f3c` run reported 80.09% (2748/3431), a known one-branch V8 variance.
+The offline command used for the local figure is
+`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run` with
+`test/{live-demo,live-e2e,live-modules,team-live,demos-real-channels}.test.ts`
+excluded. CI runs the full suite with 15 live tests skipped when no provider
+credential is present.
 
 ## Active workstreams
 
 | Task | Priority | Branch | Owner | State |
 |------|----------|--------|-------|-------|
-| STATE-RECONCILIATION — docs to `34aef25` | P1 | `docs/state-reconciliation` | chief engineer | merged (#83, `cecfba0`), APPROVE |
-| AUDIT-REFRESH — roadmap audit | P2 | `docs/final-audit` | chief engineer | merged (#74, `299b908`), APPROVE |
-| P1-6 — restart recovery | P1 | `agent/P1-6-restart-recovery` | implementer | merged (#85, `10e9f3c`), APPROVE |
-| GATEWAY-TOKEN-RACE — first-create/ELOOP | P1 | `agent/gateway-token-race` | implementer | merged (#87, `5fbfb00`), security APPROVE |
-| IMESSAGE-GROUP-EDGES — join-order/page/ambiguity | P1 | `agent/imessage-group-edge-tests` | implementer | merged (#88, `d3beb9c`), APPROVE after fix |
-| STATE-DOCS — cycle-3 reconciliation | P1 | `docs/cycle-3-status` | chief engineer | merged (#89, `ed8980d`), APPROVE after corrections |
-| IMESSAGE-THREAD-KEY — group vs 1:1 context keys | P1 | `agent/imessage-thread-key` | implementer | merged (#90, `8fa3a79`), APPROVE |
-| LIVE-SUITE-SALVAGE — re-land #86 test-only changes | P2 | `test/live-suite-salvage` | implementer | merged (#91, `1dd426a`), APPROVE; #86 closed |
-| MESH-QUEUE-TESTS — skip branches and start cleanup | P2 | `agent/mesh-queue-tests` | implementer | merged (#92, `60bb9ae`), APPROVE |
-| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84/#85/#87 APPROVE; #77 corrected |
+| GATEWAY-TOKEN-TESTS — EEXIST/ELOOP branches | P2 | `agent/gateway-token-tests` | implementer | merged (#96, `ac1fd79`), APPROVE |
+| METRICS-ASSERTIONS — offline counter assertions | P2 | `agent/metrics-assertions` | implementer | merged (#95, `f8554cc`), APPROVE |
+| MESH-ASYNC-RELEASE — async rejection node release | P2 | `agent/mesh-async-release` | implementer | merged (#97, `9a0def3`), APPROVE |
+| SERVE-CHANNEL-LOOP — inbound iMessage loop for `serve` | P1 | `agent/serve-imessage-loop` | implementer | dispatched (cycle 6) |
+| OUTBOX-PERMANENT-FAILURE — stop retrying unroutable sends | P2 | `agent/outbox-permanent-failure` | implementer | dispatched (cycle 6) |
+| GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected |
+| CYCLE-5-CHECKPOINT — this checkpoint | P1 | `docs/cycle-5-checkpoint` | chief engineer | in review |
 
-## Completed this cycle
+## Completed this cycle (Cycle 5)
 
-- Merged #90 after an independent review APPROVE. Group thread keys are now
-  namespaced away from 1:1 keys (`chat:` / `group:` / `group-unknown:` vs
-  `handle:`), so an ambiguous group cannot share ticket context with a 1:1
-  conversation from the same sender. Positive-group guids and identifiers are
-  aggregated independently, so an identifier-only row cannot hide a later
-  guid. Three behavioral tests fail on the pre-fix base; CI green at `8fa3a79`.
-- Merged #91, re-landing the four test-only determinism changes from stale
-  #86 on current `main`. The default MockModel refusal is unchanged; only the
-  credential sentinel opts in explicitly. #86 was closed as superseded (its
-  docs conflict with current `main`; its live-run record stays in PR history
-  and was not reproduced).
-- Merged #92, covering the six previously untested `queueState()` skip branches
-  and adding a synchronous-throw cleanup for the non-queued start path. The
-  cleanup test fails on the base with a rejected launch; the branch tests are
-  mutation-verified. CI green at `60bb9ae`.
-- No live model or real-channel run was performed in this cycle.
+- Resumed after the cycle-4 checkpoint with the owner's explicit continuation
+  past the four-cycle cap (recorded in `.super-agent/state.json`).
+- Merged #95: the three live-relaxed counter assertions are now deterministic
+  under the offline MockModel and keep the live fallback.
+- Merged #96: direct tests for the gateway-token EEXIST winner-reuse path and
+  the create-path ELOOP failure; both fail on the base.
+- Merged #97: a non-queued Worker turn that rejects asynchronously now returns
+  the reserved mesh node and logs `[harness] worker failed ...`, matching the
+  synchronous-throw and queued paths.
+- Verified `main` `9a0def3` locally: `tsc --noEmit`, `pnpm lint`,
+  `pnpm format:check` clean; offline suite 443 passed / 53 files.
+- Confirmed PR #97 merged with `typecheck and test` green and zero unresolved
+  review threads; branch protection was not bypassed.
 
 ## Blockers
 
-- The session cycle budget is exhausted (4 completed cycles). No further
-  implementation work is dispatched in this session; this checkpoint is the
-  recovery record for the next one.
 - Live model and real-channel acceptance remain operator-only; no credentials
   were used.
-- Residual non-blocking items: gateway EEXIST winner-reuse and create-path
-  ELOOP branch tests; a stale empty gateway token file blocks startup until
-  removed manually; the delayed non-queued async-rejection node release
-  (unchanged from base); the `metrics.test.ts` replacement assertions for
-  `speculate.deliver`/`watchdog.idle` are tautological under a zeroed counter
-  map; fail-closed group tickets still enqueue outbox rows that retry to
-  `failed`; ambiguous groups from one sender across distinct chats still share
-  `group-unknown:<handle>` (never with 1:1).
-- `serve` still has no inbound channel loop; this remains a documented boundary.
+- Residual non-blocking items: stale empty gateway token file blocks startup
+  until removed manually; fail-closed group tickets still enqueue outbox rows
+  that retry to `failed` (now assigned to OUTBOX-PERMANENT-FAILURE);
+  ambiguous groups from one sender across distinct chats share
+  `group-unknown:<handle>` (never with 1:1); `serve` still lacks an inbound
+  channel loop (now assigned to SERVE-CHANNEL-LOOP).
+- The session has exceeded the automatic four-cycle budget under the owner's
+  explicit continuation; the override is recorded in state.
 
 ## Next actions
 
-1. Next session: reconcile this checkpoint and pick from the residual list;
-   gateway branch tests and the metrics assertion strength are the smallest.
-2. Do not reopen merged PRs. Branch from current `main` for each fix.
-3. Update `.super-agent/state.json` at each checkpoint; only the main
-   orchestrator writes it.
+1. Land this cycle-5 checkpoint after CI.
+2. Review the two cycle-6 implementation PRs when they arrive; merge only with
+   green `typecheck and test` and no unresolved threads.
+3. Cycle 6 checkpoint: update this file, `docs/AGENT_LOG.md`,
+   `docs/PR_REVIEW_LOG.md`, `docs/AGENT_REGISTRY.md`, and `.super-agent/state.json`.
+4. Then evaluate semantic long-term memory (roadmap open item) and the
+   remaining iMessage ambiguity boundary.

@@ -35,8 +35,14 @@
 | IMESSAGE-THREAD-KEY | Infrastructure/Security | `agent/imessage-thread-key` | 2026-11-03 | merged `8fa3a79`, APPROVE | #90 | integrated |
 | LIVE-SUITE-SALVAGE | QA/Testing | `test/live-suite-salvage` | 2026-11-03 | merged `1dd426a`, APPROVE; #86 closed | #91 | integrated |
 | MESH-QUEUE-TESTS | Orchestration | `agent/mesh-queue-tests` | 2026-11-03 | merged `60bb9ae`, APPROVE | #92 | integrated |
-| CYCLE-4-CHECKPOINT | Chief Engineer | `docs/cycle-4-checkpoint` | 2026-11-03 | docs update; PR under review | — | in progress |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90 APPROVE; #77 corrected | — | continuing |
+| CYCLE-4-CHECKPOINT | Chief Engineer | `docs/cycle-4-checkpoint` | 2026-11-03 | merged `d539e25`, APPROVE after correction | #93 | integrated |
+| METRICS-ASSERTIONS | QA/Testing | `agent/metrics-assertions` | 2026-11-03 | merged `f8554cc`, APPROVE | #95 | integrated |
+| GATEWAY-TOKEN-TESTS | Infrastructure/Security | `agent/gateway-token-tests` | 2026-11-03 | merged `ac1fd79`, APPROVE | #96 | integrated |
+| MESH-ASYNC-RELEASE | Orchestration | `agent/mesh-async-release` | 2026-11-03 | merged `9a0def3`, APPROVE | #97 | integrated |
+| SERVE-CHANNEL-LOOP | Core Runtime | `agent/serve-imessage-loop` | 2026-11-04 | dispatched cycle 6 | — | in progress |
+| OUTBOX-PERMANENT-FAILURE | Core Runtime | `agent/outbox-permanent-failure` | 2026-11-04 | dispatched cycle 6 | — | in progress |
+| CYCLE-5-CHECKPOINT | Chief Engineer | `docs/cycle-5-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 
@@ -60,6 +66,16 @@
   #84; merged #92).
 - LIVE-SUITE-SALVAGE: `test/credential-sentinel.test.ts`, `test/fixtures.ts`,
   `test/metrics.test.ts`, `test/team-live.test.ts` (merged #91).
+- SERVE-CHANNEL-LOOP: `src/cli/imessage.ts`, `src/cli/main.ts`, a new
+  `src/cli/channel-loop.ts` if needed, `test/cli-serve-imessage.test.ts` (new),
+  `docs/IMESSAGE.md`. Must not modify `src/channels/imessage.ts`; the existing
+  `ImessageSource`/`ImessageApi` exports are the seam.
+- OUTBOX-PERMANENT-FAILURE: `src/channels/outbox-adapter.ts`,
+  `src/channels/imessage.ts` (adapter error only), `test/outbox*.test.ts`,
+  `test/channels-imessage.test.ts`, `docs/MODULES.md` M4.
+- The two cycle-6 tasks have disjoint product files: only `docs/IMESSAGE.md`
+  is shared, and it belongs to SERVE-CHANNEL-LOOP. OUTBOX-PERMANENT-FAILURE
+  must not edit it; the orchestrator cross-links the outbox note at merge.
 - STATE-DOCS: the seven project-state docs on `docs/cycle-3-status`; the cycle-4
   checkpoint uses `docs/cycle-4-checkpoint`.
 - AUDIT-REFRESH: `docs/ROADMAP.md`, `docs/MODULES.md` (after P1-3 merges).
