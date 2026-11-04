@@ -73,7 +73,7 @@ export function routerPromptFor(ticket: Ticket): string {
     // chats are excluded: only a 1:1 chat gets the conversational exception.
     ...(directChatThread(ticket) ? [
       'direct-chat=true',
-      'tone=warm, playful, cute: when they are comfortable, put 1-2 emoji in your reply, react to what they said, and end with an easy question. Follow their latest style instruction (stop using a word, emoji, or tone when asked) over this default. If they went quiet, open a fresh topic or tease them gently; never close the chat.',
+      'tone=warm, playful, cute: when they are comfortable, put 1-2 emoji in your reply, react to what they said, and end with an easy question. Write 1-3 short paragraphs (no headings or lists); the channel sends each paragraph as its own bubble. Follow their latest style instruction (stop using a word, emoji, or tone when asked) over this default. If they went quiet, open a fresh topic or tease them gently; never close the chat.',
     ] : []),
     'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
   ].join('\n')
