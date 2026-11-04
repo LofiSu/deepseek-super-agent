@@ -4,6 +4,57 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Cycle 9 (long-term memory recall evaluation; checkpoint)
+
+### Observed
+
+- Cycle 8 closed at `5141e29` with green post-merge CI (run `41798560413`).
+  Cycle 9 dispatched one task, SEMANTIC-LTM (P2): measure semantic and
+  multi-hop recall against the current lexical `query()` and decide the next
+  step with evidence rather than inference.
+- While the agent ran, peer session work merged `#111` README-REFRESH at
+  `648eec9` (post-merge CI run `41798917702` green), so `#112` had to be
+  refreshed onto current `main` before merge.
+- #112 merged at `f6e5972` after its branch was updated onto `648eec9`
+  (reviewed head `15f7de1`, updated head `c7761ff`, CI run `41800074122`).
+  It touched only `docs/ARCHITECTURE_DECISIONS.md`, `docs/MODULES.md`,
+  `docs/ROADMAP.md`, and new `test/memory-recall-eval.test.ts`.
+
+### Decided
+
+- Keep M6 recall lexical-first. ADR-010 fixes an offline corpus and measures
+  macro recall@3: current `query()` 4/11 (0.364), normalization plus an in-repo
+  synonym/morphology map 7/11 (0.636), and that plus tag-aware one-hop expansion
+  11/11 (1.000). A deterministic mock embedding and a hybrid ranker also reach
+  11/11 but add zero recall over the lexical+hop option, so embeddings stay
+  unimplemented behind a documented `EmbeddingPort` boundary.
+- The follow-up implementation (normalization + tag-only retrieval + one-hop
+  expansion in `src/memory/long-term.ts`) is a candidate with acceptance
+  criteria in ADR-010: at least 10 held-out queries, both negative controls
+  empty, ACL grants and redaction unchanged, deterministic order, and a
+  1000-entry fixture. It was not started in this cycle.
+- The independent review made no blocking findings. Recorded non-blocking
+  caveats: the corpus is synthetic and small (14 entries / 11 queries), the
+  mock embedding is lexical, and month-scale is argued from the retention cap
+  rather than benchmarked.
+
+### Verified
+
+- Independent local run on the reviewed head: `test/memory-recall-eval.test.ts`
+  plus `test/long-term-memory.test.ts` → 20 passed / 2 files.
+- PR CI: `typecheck and test` green on `c7761ff` (run `41800074122`), zero
+  unresolved review threads.
+- Post-merge `main` CI green on `f6e5972` (run `41800320615`): 493 passed /
+  15 skipped (508), 61 files (58 passed, 3 fully skipped), 82.80%
+  statements/lines, 81.54% branches, 90.98% functions.
+- No live model or real-channel run. Branch protection was not bypassed.
+
+### Pending
+
+- Land the cycle-9 checkpoint after CI.
+- The memory-recall follow-up and the optional `--rotate-token` flag remain
+  candidates; the latter only if the owner asks.
+
 ## 2026-11-04 — Cycle 8 (ADR-009 implementation; checkpoint)
 
 ### Observed
