@@ -332,7 +332,7 @@ Router / Watchdog 用轻量模型，Worker 用强一点的。上表是进程级�
 
 `ds-agent gateway` 是本地 OpenAI 兼容代理，通过 `<stateDir>/gateway.token`（0600）签发并复用本地 bearer token；设置 `DS_AGENT_GATEWAY_URL` 时 CLI 会复用它。`gateway.token` 为零字节或只有空白字符时，网关会 fail closed 并给出明确错误；恢复是显式的运维操作，按 ADR-009 执行（确认文件确实陈旧后，才删除或替换），不会自动恢复。见 [docs/GATEWAY.md](./docs/GATEWAY.md)。
 
-`ds-agent imessage` 是面向专用 Apple ID 的双向 iMessage 信道：入站只读 `~/Library/Messages/chat.db`（`is_from_me = 0`），出站经 Messages.app 的 `osascript`，文本从环境变量传入。`serve --imessage` 会在 daemon 旁跑同一个入站轮询（默认 `serve` 没有入站轮询）；它沿用同样的默认拒绝发送者准入、cursor 和 outbox，并在 `chat.db` 打开前拒绝启动。见 [docs/IMESSAGE.md](./docs/IMESSAGE.md)。
+`ds-agent imessage` 是面向专用 Apple ID 的双向 iMessage 信道：入站只读 `~/Library/Messages/chat.db`（`is_from_me = 0`），出站经 Messages.app 的 `osascript`，文本从环境变量传入。`serve --imessage` 会在 daemon 旁跑同一个入站轮询（默认 `serve` 没有入站轮询）；它沿用同样的默认拒绝发送者准入、cursor 和 outbox，若 `chat.db` 无法打开则拒绝启动。见 [docs/IMESSAGE.md](./docs/IMESSAGE.md)。
 
 iMessage 的群聊与 1:1 使用不同线程键，群聊优先级严格为 `chat:<guid>` > `group:<identifier>` > `group-rowid:<rowid>` > `group-unknown:<handle>`；1:1 会话始终是 `handle:<handle>`。`group-rowid` 是每个数据库内的 SQLite 标识，只用于线程身份，从不用于出站。
 
