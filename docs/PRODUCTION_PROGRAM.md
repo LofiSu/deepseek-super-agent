@@ -67,6 +67,7 @@ The program is complete only when all of the following hold:
 |---|---|---|---|
 | A2A-HTTP + PEER-AUTH | design + owner gate | `src/channels/a2a-http.ts` (new), `src/channels/a2a-auth.ts` (new), tests | authenticated HTTP transport, signed envelope, timestamp + nonce replay window, size cap, identity never trusted from body |
 | CROSS-HOST-MESH | design + owner gate, depends on A2A auth | `src/harness/mesh.ts`, `src/harness/remote-node.ts` (new), tests | node registration/heartbeat, capacity, remote assignment dispatch, authenticated transport, fail-closed on unknown peer |
+| ROUTER-SHARD-MULTI-FILTER (T09/T46) | not started, depends on A2A auth for remote shards | `src/ingress/shards.ts`, `src/runtime.ts`, tests | multiple filters per shard, deterministic priority/registration arbitration, first matching shard owns reply and terminal decision, remote shard registration over the authenticated transport |
 | A2A/UI THREAT MODEL | design | `docs/SECURITY.md` or ADR | adversary model, key distribution, rotation, TLS expectations, local-endpoint warning |
 
 ### W5 — Operations and release
@@ -84,7 +85,7 @@ The program is complete only when all of the following hold:
 1. **Cycle A (current):** W1 migrations + read isolation; W2 semantic LTM (peer); live bake-off measurement; this program doc.
 2. **Cycle B:** model slow path ADR + implementation; packaging; lifecycle persistence.
 3. **Cycle C:** local UI; A2A HTTP + peer-auth ADR (owner gate).
-4. **Cycle D:** cross-host mesh on the shared auth primitive; backup/restore; container profile.
+4. **Cycle D:** cross-host mesh on the shared auth primitive; router shard multi-filter and remote registration; backup/restore; container profile.
 5. **Cycle E:** final audit, docs reconciliation, live acceptance, release.
 
 Do not start W4 before the W4 ADR is reviewed: it changes authentication and
@@ -112,10 +113,11 @@ alone.
 | STORE-MIGRATIONS | pending | — | — | — |
 | HOST-READ-ISOLATION | pending | — | — | — |
 | SEMANTIC-LTM-IMPL | peer-owned | — | — | — |
-| LIVE-BAKEOFF | #115 | — | — | local Magpie run 2026-11-04T08:44Z: dual 11 calls / 38,805 ms vs single 10 calls / 38,684 ms; `wallRatio=1.0031`; full output in `docs/BAKEOFF.md` |
+| LIVE-BAKEOFF | #115 | — | — | local Magpie run 2026-11-04T08:44Z: dual 11 calls / 38,805 ms vs single 10 calls / 38,684 ms; `wallRatio=1.0031`; summary and raw JSON appendix in `docs/BAKEOFF.md` |
 | MODEL-SLOW-PATH | not started | — | — | — |
 | LIFECYCLE-PERSISTENCE | not started | — | — | — |
 | LOCAL-UI | not started | — | — | — |
 | A2A-HTTP + PEER-AUTH | not started | — | — | owner gate |
 | CROSS-HOST-MESH | not started | — | — | owner gate |
+| ROUTER-SHARD-MULTI-FILTER (T09/T46) | not started | — | — | — |
 | PACKAGING/RELEASE | not started | — | — | — |
