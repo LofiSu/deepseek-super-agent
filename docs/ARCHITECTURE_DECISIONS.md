@@ -155,3 +155,35 @@ rewrite `PLAN.md`; link to the contract instead.
 - **Alternatives rejected:** enabling MockModel by default (removes the safety
   guard); a second fixture factory (duplicates runtime setup); skipping the
   sentinel under a live run (loses the credential-leak check).
+
+## ADR-008 — Worker start failure releases the reserved mesh slot and resolves the launch
+
+- **Date:** 2026-11-04
+- **Status:** accepted; implemented by #97
+- **Context:** #92 added synchronous-throw cleanup for the non-queued start
+  path, but an asynchronous rejection from `startWorkerTurn` still rejected
+  `Harness.launch` and left the picked mesh node reserved. The caller could not
+  release the reservation, and a rejected launch gave no actionable failure
+  record. The review of #92 recorded this as the remaining non-queued residual;
+  #97 fixed it.
+- **Decision:** `startNow` catches an asynchronous rejection from
+  `startWorkerTurn`, releases the picked node idempotently, logs the failure,
+  and resolves the launch. `activeWorkers` is left to `startWorkerTurn`'s
+  `.finally`; no node is released when no node was picked. The assignment stays
+  running for the Watchdog to detect, and the queued entry path is unchanged.
+- **Consequences:** a failed start is visible in logs and through the stuck
+  Assignment, not through `settleInflight` (the launch resolves). Capacity
+  accounting is no longer lost to an asynchronous failure. The gap noted at the
+  time — the Harness released the node but did not `pump()`, so an already-queued
+  Worker could remain parked with a free node until a later event — was closed
+  by MESH-FAILURE-PUMP (#99, `6184a27`), which releases and then pumps in both
+  `startNow` failure paths.
+- **Follow-up:** #99 (`6184a27`) adds release-then-`pump()` to both the
+  synchronous and asynchronous `startNow` failure paths, gated on a picked
+  node, and proves with a deterministic queued-Worker regression test that the
+  ordering cannot double-start. It is a separate change, not part of the #97
+  decision.
+- **Alternatives rejected:** rethrowing to the caller (rejects
+  `Harness.launch`, leaves mesh accounting to a caller that does not own it, and
+  leaks the node); marking the assignment failed from the Harness (the Engine
+  owns domain transitions, and the Watchdog is the established failure path).

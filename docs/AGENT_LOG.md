@@ -4,6 +4,54 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Cycle 5 checkpoint follow-up (ADR-008 and audit evidence)
+
+### Observed
+
+- The cycle-5 checkpoint merged as #98 at `ab8e4bf` with five docs files. It
+  did not add ADR-008 or update `docs/PROJECT_AUDIT.md`, and its
+  `docs/DEVELOPMENT_STATUS.md` stated that both #96 gateway-token tests fail on
+  the base.
+- The #96 premise was corrected during review: the EEXIST winner-reuse test
+  does not fail on pre-#87 `10e9f3c`, because the `if (raced) return raced`
+  branch pre-dates #87 and behaves identically. It is mutation-verified
+  (`return token` mutation fails). The create-path ELOOP test does fail on
+  `10e9f3c` with the raw `ELOOP` error.
+- The #97 review also found that after a failed non-queued Worker releases its
+  node the Harness does not `pump()`, so a queued Worker can stay parked with a
+  free node. That work was dispatched as MESH-FAILURE-PUMP and merged as #99
+  (`6184a27`) while this follow-up was being prepared. #100
+  (OUTBOX-PERMANENT-FAILURE) merged at `55f0d09`, #101 (SERVE-CHANNEL-LOOP) at
+  `2ae9740`, and #103 `[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST] Script the
+  many-to-many workers so fan-out no longer waits on a live model` at
+  `5e5a28b` (test-only `test/subscription.test.ts`, +4/−1).
+- The #99 review (heads `b2b0e4f`/`48aa718`) returned APPROVE: release-then-
+  `pump()` in both `startNow` failure paths, gated on a picked node, with a
+  deterministic queued-Worker regression test. CI was green on `48aa718`
+  (run `41791142621`).
+
+### Decided
+
+- Correct the #96 statement in place in the living status/plan docs and add the
+  non-vacuity correction to the review log rather than rewriting the merged #98
+  entry.
+- Add ADR-008 for #97's release-and-resolve behavior and record the cycle-5
+  merges and exact `9a0def3` CI figures in the audit conclusion.
+
+### Verified
+
+- `main` `9a0def3` CI (run `41615496540`) succeeded: 455 passed / 15 skipped
+  (470 tests, 58 files); coverage 454 passed across 54 files, 82.42%
+  statements/lines (7844/9517), 81.01% branches (2817/3477), 90.11% functions
+  (693/769).
+- Docs-only follow-up; `pnpm typecheck`, `pnpm lint`, and `pnpm format:check`
+  pass. No live model or real-channel run.
+- No GitHub review threads remained on #95–#97.
+
+### Pending
+
+- Write the cycle-6 checkpoint; do not reopen merged PRs.
+
 ## 2026-11-04 — Cycle 5 (post-cap follow-ups merged; checkpoint)
 
 ### Observed

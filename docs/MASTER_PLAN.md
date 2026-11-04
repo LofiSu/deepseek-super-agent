@@ -1,28 +1,30 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `9a0def3` (`[SUPER-AGENT][MESH-ASYNC-RELEASE] Release the
-> mesh node when a non-queued Worker turn rejects (#97)`)
+> Baseline: `main` at `5e5a28b` (`[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST]
+> Script the many-to-many workers so fan-out no longer waits on a live model
+> (#103)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
 ## 0. Verified baseline (2026-11-04)
 
-The gate evidence below starts from `main` CI at `8fa3a79` (run `41605279682`).
-The cycle-5 local gate on `9a0def3` produced: `tsc --noEmit` clean,
-`pnpm lint` ok (227 tracked files), `pnpm format:check` clean, and the offline
-suite 443 passed / 53 files (live test files excluded). CI results are cited
-with their run id where they differ:
+The gate evidence below is from `main` CI at `9a0def3` (run `41615496540`),
+the last product-code merge before the docs-only checkpoint #98. The cycle-5
+local gate on `9a0def3` produced: `tsc --noEmit` clean, `pnpm lint` ok (227
+tracked files), `pnpm format:check` clean, and the offline suite 443 passed /
+53 files with live test files excluded; that local figure is not the CI
+baseline.
 
 ```text
 pnpm lint                                              lint ok (227 tracked files)
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   452 passed, 15 skipped (467)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   455 passed, 15 skipped (470)
                                                       58 files: 55 with passing tests,
                                                       3 fully skipped
-pnpm test:coverage                                     451 passed; statements/lines
-                                                       82.39% (7837/9512), branches
-                                                       80.97% (2814/3475), functions
+pnpm test:coverage                                     454 passed; statements/lines
+                                                       82.42% (7844/9517), branches
+                                                       81.01% (2817/3477), functions
                                                        90.11% (693/769)
 ```
 
@@ -35,15 +37,21 @@ and 80.06% branches. The `10e9f3c` run recorded 425 passed / 15 skipped (440),
 commit reported 80.09% (2748/3431), a one-branch V8 variance. The `5fbfb00` run
 recorded 429 passed / 15 skipped (444), 58 files, 82.27% lines, and 80.52%
 branches (2779/3451). The `d3beb9c` run added the #88 iMessage edge and
-outbound-fail-closed tests (440/15, 82.29% / 80.57%). The `8fa3a79` run adds
-the #90 thread-key, #91 live-suite salvage, and #92 mesh queue tests.
+outbound-fail-closed tests (440/15, 82.29% / 80.57%). The `8fa3a79` run added
+the #90 thread-key, #91 live-suite salvage, and #92 mesh queue tests. The
+`9a0def3` run added the #95 metrics assertions, #96 gateway token branch tests,
+and #97 mesh async-release test (455/15, 82.42% / 81.01%, 90.11% functions).
+The cycle-5 docs checkpoint #98 then merged at `ab8e4bf` without changing the
+suite.
 
 Repository facts:
 
 - `#78` established the orchestration contract: the main session is the only
   orchestrator; at most 3 implementation agents run while the pipeline is being
   validated; at most 4 development cycles complete per session; subagents never
-  merge and never write `.super-agent/state.json`.
+  merge and never write `.super-agent/state.json`. The owner explicitly
+  continued past the four-cycle cap with "继续" for cycle 5; the cap remains a
+  guideline, not a silently changed policy.
 - `#75`, `#76`, `#77`, `#78`, `#79`, `#80`, `#81`, `#82`, and `#84` merged into
   `main` at `08ea78f`, `aae182c`, `03a4c02`, `cb32a17`, `1dc9500`, `2c02f4b`,
   `f4ba77a`, `1c165ef`, and `34aef25`. `#83` (`cecfba0`), `#74` (`299b908`),
@@ -53,10 +61,16 @@ Repository facts:
   fix, iMessage group edge fix, cycle-3 reconciliation, live-suite salvage,
   mesh queue tests, and thread-key separation. `#93` (`d539e25`, cycle-4
   checkpoint), `#94` (`4cef6df`, owner docs live reference), `#95` (`f8554cc`,
-  metrics assertions), `#96` (`ac1fd79`, gateway token branch tests), and #97
-  (`9a0def3`, mesh async release) followed. Current `main` is `9a0def3`.
-- Open PRs at this checkpoint: the cycle-5 checkpoint PR only. PR #86 was
-  closed as superseded by #91.
+  metrics assertions), `#96` (`ac1fd79`, gateway token branch tests), #97
+  (`9a0def3`, mesh async release), and `#98` (`ab8e4bf`, cycle-5 checkpoint)
+  followed. `#99` (`6184a27`, mesh failure pump), `#100` (`55f0d09`, outbox
+  permanent failure), `#101` (`2ae9740`, serve inbound iMessage loop), and
+  `#103` (`5e5a28b`, subscription fan-out test) then closed four residuals or
+  test gaps. The baseline for this record is `5e5a28b`; later merges are not
+  reflected.
+- Open PRs at this checkpoint: #102 (this cycle-5 docs follow-up) and #104
+  (cycle-6 checkpoint, open and not reviewed here). PR #86 was closed as
+  superseded by #91.
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
 - GitHub Issues are disabled, so work items live in this plan and the roadmap.
@@ -70,12 +84,13 @@ Repository facts:
 | IMESSAGE-ADMISSION | P0 | iMessage marked every message `addressed: direct`, the default run supplied no admission rules, and group metadata was not read. #77 merged the gate; #81 fixed multi-chat dedupe, missing metadata, handle trimming, and old-schema handling; #88 fixed join-order/page/ambiguity addresses and the group-to-1:1 outbound fallback; #90 separated group and 1:1 thread keys. | `src/channels/imessage.ts`; `src/ingress/filter.ts:36-58`; `docs/IMESSAGE.md` | fixed by #81 + #88 + #90 (`8fa3a79`); APPROVE |
 | P1-3 | P1 | Worker-mesh capacity was advisory and the Harness wrote `Assignment.node` directly. #79 merged the queue and Engine-owned placement; its release-ordering bug is fixed by #84. | `src/harness/loop.ts`; `src/core/assignments.ts`; `test/worker-mesh.test.ts` | fixed by #79 + #84 |
 | MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. #97 also covers the asynchronous non-queued rejection, which previously leaked the reserved node. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`) and #97 (`9a0def3`); APPROVE |
+| MESH-FAILURE-PUMP | P2 | After a failed non-queued Worker releases its node, the Harness does not `pump()`, so an already-queued Worker can stay parked with a free node until a later event. | `src/harness/loop.ts`; `test/worker-mesh.test.ts` | fixed by #99 (`6184a27`) |
 | P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/core/assignments.ts`; `src/runtime.ts`; `test/restart-recovery.test.ts` | fixed by #85 (`10e9f3c`); APPROVE |
 | GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. #87 fixed the concurrent first-create race and ELOOP fallback; #96 covered the EEXIST winner-reuse and create-path ELOOP branches. Residual: POSIX-only mode caveat and stale-empty-file recovery. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82/#87/#96 merged; APPROVE |
 | GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
 | GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 reviewed; #77 corrected |
 | AUDIT-REFRESH | P2 | `docs/final-audit` (#74) was stale against `34aef25`; the roadmap audit did not include `#64`, `#75`-`#84`. | PR #74 merged `299b908` | fixed; APPROVE |
-| SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:228-277`; `docs/ROADMAP.md` | dispatched in cycle 6 (`agent/serve-imessage-loop`) |
+| SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:228-277`; `docs/ROADMAP.md` | fixed by #101 (`2ae9740`) |
 | OUTBOX-PERMANENT-FAILURE | P2 | A fail-closed group reply is still written to the outbox and retried with backoff until `failed`, even though the adapter refuses it deterministically. | `src/core/replies.ts:45-66`; `src/channels/outbox-adapter.ts:88-111`; `src/channels/imessage.ts:590-610` | dispatched in cycle 6 (`agent/outbox-permanent-failure`) |
 
 ## 2. Workstream ordering
@@ -116,11 +131,14 @@ Cycle 5 (post-cap follow-ups; completed)
   MESH-ASYNC-RELEASE   Release the node on an asynchronous non-queued
                        rejection — merged #97
 
-Cycle 6 (dispatched)
-  SERVE-CHANNEL-LOOP   Inbound iMessage loop for `serve` (reuse the existing
-                       source/admission; Feishu stays a follow-up)
+Cycle 6 (completed)
   OUTBOX-PERMANENT-FAILURE  Classify unroutable sends as permanent failures
-                       instead of retrying them to `failed`
+                       instead of retrying them to `failed` — merged #100
+  SERVE-CHANNEL-LOOP   Inbound iMessage loop for `serve` (reuse the existing
+                       source/admission; Feishu stays a follow-up) — merged
+                       #101
+  SUBSCRIPTION-FANOUT-TEST  Script the many-to-many workers so fan-out no
+                       longer waits on a live model — merged #103
 
 Next sessions (not started)
   Evaluate semantic long-term memory (roadmap open item)
