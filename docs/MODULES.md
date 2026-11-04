@@ -253,8 +253,13 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the
 dual-layer path with `RuntimeOptions.singleSession`. `serve` runs the daemon
-timer over persisted state, has no inbound channel loop, and fixes its model at
-startup.
+timer over persisted state and fixes its model at startup. By default it has no
+inbound channel loop; `--imessage` (via `channel-loop.ts`) or `--feishu` (via
+`cli/feishu.ts`) opt into exactly one inbound poll loop, with a durable cursor
+and the same abort → await loop → `Runtime.finish()` shutdown ordering. The two
+flags cannot be combined. `--feishu` stores
+`feishu_cursor/cursor = { chatId, lastCreateTimeMs }` and seeds from `--since`,
+the stored value, or FeishuSource's now-5min default.
 
 `ds-agent memory [--limit N]` prints persisted long-term memories;
 `ds-agent a2a [--limit N]` prints persisted A2A envelopes. Both are offline
