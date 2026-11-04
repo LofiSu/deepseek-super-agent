@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
+import net from 'node:net'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -221,9 +222,23 @@ describe('gateway server', () => {
   })
 
   it('falls back to a healthy provider when the top provider is down', async () => {
-    const dead = createServer()
-    const deadPort = await listen(dead)
-    await new Promise<void>(resolve => dead.close(() => resolve()))
+    // Keep the port reserved for the whole test. Closing a listener and reusing
+    // its port for the gateway can make the "dead" provider point at the
+    // gateway itself, which returns 401 instead of a transport error. A socket
+    // destroying listener guarantees a connection failure and a stable port.
+    const dead = net.createServer(socket => socket.destroy())
+    const deadPort = await new Promise<number>((resolve, reject) => {
+      dead.once('error', reject)
+      dead.listen(0, '127.0.0.1', () => {
+        const address = dead.address()
+        if (!address || typeof address === 'string') {
+          reject(new Error('no address'))
+          return
+        }
+        resolve(address.port)
+      })
+    })
+    cleanup.push(() => new Promise<void>(resolve => dead.close(() => resolve())))
     const upstream = await startFakeUpstream()
     const gw = await startGateway([
       provider({ id: 'dead', baseUrl: `http://127.0.0.1:${deadPort}`, models: ['m1'], priority: 10 }),

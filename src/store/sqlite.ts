@@ -3,29 +3,37 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { DomainEventName } from '../shared/events.ts'
 import type { JobRow, OutboxRow, ReplyRow, SessionRow } from '../shared/types.ts'
-import { SCHEMA } from './schema.ts'
+import { migrate } from './schema.ts'
 
 export class Store {
   readonly path: string
   private readonly db: DatabaseSync
   private depth = 0
   private closed = false
+  private schemaVersionValue = 0
 
   constructor(home: string) {
     fs.mkdirSync(home, { recursive: true })
     this.path = path.join(home, 'ds-agent.db')
     this.db = new DatabaseSync(this.path)
+    try {
+      this.schemaVersionValue = migrate(this.db)
+    } catch (error) {
+      try {
+        this.db.close()
+      } catch {
+        // The handle may already be unusable.
+      }
+      throw error
+    }
+    // Switch to WAL only after migrating: a database recorded at a newer
+    // version must fail closed without touching the file.
     this.db.exec('PRAGMA journal_mode = WAL')
-    this.db.exec(SCHEMA)
-    this.ensureColumn('outbox', 'idempotency_key', 'TEXT')
-    this.ensureColumn('outbox', 'attempts', 'INTEGER NOT NULL DEFAULT 0')
-    this.ensureColumn('outbox', 'next_attempt_at', 'TEXT')
   }
 
-  private ensureColumn(table: string, column: string, ddl: string): void {
-    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
-    if (rows.some(row => row.name === column)) return
-    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+  /** The schema version recorded in this database after migration. */
+  get schemaVersion(): number {
+    return this.schemaVersionValue
   }
 
   get isOpen(): boolean {
