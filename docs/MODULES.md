@@ -294,19 +294,25 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 ## M11 — CLI and demo
 
-`src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `serve`, `chat`,
-`emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`, `resume`, `collab`,
-`team`, and `teams`. `src/cli/demos/run.ts` drives the acceptance scenarios against the
+`src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
+`serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
+`resume`, `collab`, `team`, and `teams`. `src/cli/demos/run.ts` drives the
+acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the
 dual-layer path with `RuntimeOptions.singleSession`. `serve` runs the daemon
 timer over persisted state and fixes its model at startup. By default it has no
-inbound channel loop; `--imessage` (via `channel-loop.ts`) or `--feishu` (via
-`cli/feishu.ts`) opt into exactly one inbound poll loop, with a durable cursor
-and the same abort → await loop → `Runtime.finish()` shutdown ordering. The two
-flags cannot be combined. `--feishu` stores
+inbound channel loop; `--imessage` (via `channel-loop.ts`) and/or `--feishu`
+(via `cli/feishu.ts`) opt into one inbound poll loop per configured channel,
+with independent abort controllers, durable cursors, and Outboxes over the same
+Runtime/SQLite store, and the same abort → await both loops → close iMessage →
+`Runtime.finish()` shutdown ordering. Both flags may be combined; both configs
+are resolved and validated before `Runtime.create`, and a loop failure is
+logged without stopping the other loop or daemon. `cli/channels.ts` owns that
+startup plus `channels check`, the no-model/no-send preflight. `--feishu` stores
 `feishu_cursor/cursor = { chatId, lastCreateTimeMs }` and seeds from `--since`,
-the stored value, or FeishuSource's now-5min default.
+the stored value, or FeishuSource's now-5min default; it polls one chat and
+does not run a webhook or long-connection listener.
 
 `ds-agent memory [--limit N]` prints persisted long-term memories;
 `ds-agent a2a [--limit N]` prints persisted A2A envelopes. Both are offline

@@ -14,7 +14,7 @@ import {
   type FeishuClient,
   type FeishuConfig,
 } from '../channels/feishu.ts'
-import { Outbox } from '../channels/outbox-adapter.ts'
+import { Outbox, type OutboundAdapter } from '../channels/outbox-adapter.ts'
 import type { Runtime } from '../runtime.ts'
 import type { Trigger } from '../shared/types.ts'
 
@@ -110,6 +110,13 @@ export interface FeishuLoopOptions {
   /** API used by the outbox adapter to send replies. */
   client: FeishuClient
   /**
+   * Outbound adapters for this loop's Outbox. A combined serve passes both
+   * channel adapters to both loops: `Outbox.flush()` scans every due row, so a
+   * loop with only its own adapter would mark the other channel's rows failed.
+   * Defaults to this loop's Feishu adapter.
+   */
+  outboxAdapters?: readonly OutboundAdapter[]
+  /**
    * Build the source with the resolved seed: explicit `--since`, the stored
    * cursor for this chat, or `undefined` to use FeishuSource's now-5min default.
    */
@@ -179,7 +186,7 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
 
   const outbox = new Outbox(
     runtime.store,
-    [new FeishuOutboxAdapter(client, log)],
+    options.outboxAdapters ?? [new FeishuOutboxAdapter(client, log)],
     { log },
   )
   outbox.start(400)
