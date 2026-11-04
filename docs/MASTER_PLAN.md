@@ -1,32 +1,32 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `00665d2` (`[SUPER-AGENT][IMESSAGE-GROUP-UNKNOWN]
-> Disambiguate legacy group chats by chat.ROWID (#107)`)
+> Baseline: `main` at `064ab06` (`Distinguish stale empty gateway token files
+> and fail the client path closed (#109)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
 ## 0. Verified baseline (2026-11-04)
 
-The gate evidence below is from post-merge `main` CI at `00665d2` (run
-`41795979512`). The cycle-7 local gate on `00665d2` produced: `tsc --noEmit`
+The gate evidence below is from post-merge `main` CI at `064ab06` (run
+`41797671287`). The cycle-8 local gate on `064ab06` produced: `tsc --noEmit`
 clean, `pnpm lint` ok (231 tracked files), `pnpm format:check` clean, and the
-offline suite 470 passed / 55 files with live test files excluded; that local
+offline suite 477 passed / 55 files with live test files excluded; that local
 figure is not the CI baseline. Peer session sulin-5f ran the last full live
 suite on `5e5a28b`: 476 passed / 3 skipped (479), 58 files passed, 567.76s,
 exit 0; it is a live-model run, not real-channel acceptance, and no live suite
-was run on `00665d2`.
+was run on `064ab06`.
 
 ```text
 pnpm lint                                              lint ok (231 tracked files)
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   482 passed, 15 skipped (497)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   489 passed, 15 skipped (504)
                                                       60 files: 57 with passing tests,
                                                       3 fully skipped
-pnpm test:coverage                                     481 passed; statements/lines
-                                                       82.81% (8156/9849), branches
-                                                       81.37% (2958/3635), functions
-                                                       90.97% (716/787)
+pnpm test:coverage                                     488 passed; statements/lines
+                                                       82.80% (8168/9864), branches
+                                                       81.56% (2968/3639), functions
+                                                       90.98% (717/788)
 ```
 
 The 3 fully skipped files are `test/demos-real-channels.test.ts`,
@@ -52,7 +52,10 @@ The cycle-5 docs follow-up #102 merged at `55f3e7b` without changing the suite.
 Cycle 7 added the Feishu serve loop and its offline tests (#106), the
 `chat.ROWID` thread-key fallback and regressions (#107), and the ADR-009 docs
 (#105); `00665d2` CI (run `41795979512`) recorded 482 passed / 15 skipped (497),
-82.81% lines, 81.37% branches, and 90.97% functions.
+82.81% lines, 81.37% branches, and 90.97% functions. Cycle 8 implemented
+ADR-009 (#109): a present-but-empty token now names itself distinctly and the
+client path fails closed; `064ab06` CI (run `41797671287`) recorded 489 passed /
+15 skipped (504), 82.80% lines, 81.56% branches, and 90.98% functions.
 
 Repository facts:
 
@@ -79,9 +82,10 @@ Repository facts:
   gaps, and `#102` (`55f3e7b`, cycle-5 docs follow-up) added ADR-008 and the
   audit evidence. `#106` (`e9a1978`, Feishu serve loop), `#105` (`69b6d3d`,
   ADR-009 stale-token policy), and `#107` (`00665d2`, group thread-key
-  disambiguation) closed the cycle-7 queue. The baseline for this record is
-  `00665d2`; later merges are not reflected.
-- Open PRs at this checkpoint: the cycle-7 checkpoint PR only. PR #86 was
+  disambiguation) closed the cycle-7 queue; `#109` (`064ab06`, ADR-009
+  implementation) closed the stale-token follow-up. The baseline for this
+  record is `064ab06`; later merges are not reflected.
+- Open PRs at this checkpoint: the cycle-8 checkpoint PR only. PR #86 was
   closed as superseded by #91.
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
@@ -98,13 +102,13 @@ Repository facts:
 | MESH-RELEASE-ORDER | P0 | Release hooks fired before the terminal ticket write, so a queued Worker could start after its ticket ended. #97 also covers the asynchronous non-queued rejection, which previously leaked the reserved node. | `src/core/assignments.ts`; `src/runtime.ts`; `src/harness/loop.ts` | fixed by #84 (`34aef25`) and #97 (`9a0def3`); APPROVE |
 | MESH-FAILURE-PUMP | P2 | After a failed non-queued Worker releases its node, the Harness does not `pump()`, so an already-queued Worker can stay parked with a free node until a later event. | `src/harness/loop.ts`; `test/worker-mesh.test.ts` | fixed by #99 (`6184a27`) |
 | P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/core/assignments.ts`; `src/runtime.ts`; `test/restart-recovery.test.ts` | fixed by #85 (`10e9f3c`); APPROVE |
-| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. #87 fixed the concurrent first-create race and ELOOP fallback; #96 covered the EEXIST winner-reuse and create-path ELOOP branches. Residual: POSIX-only mode caveat and stale-empty-file recovery. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82/#87/#96 merged; APPROVE |
+| GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. #87 fixed the concurrent first-create race and ELOOP fallback; #96 covered the EEXIST winner-reuse and create-path ELOOP branches. Residual: POSIX-only mode caveat; a stale empty file still blocks startup by design. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82/#87/#96 merged; APPROVE |
 | GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
 | GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107 reviewed; #77 corrected |
 | AUDIT-REFRESH | P2 | `docs/final-audit` (#74) was stale against `34aef25`; the roadmap audit did not include `#64`, `#75`-`#84`. | PR #74 merged `299b908` | fixed; APPROVE |
 | SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:228-277`; `docs/ROADMAP.md` | fixed by #101 (`2ae9740`) |
 | FEISHU-SERVE-LOOP | P2 | `serve --feishu` did not exist, so a Feishu chat could only be polled by a separate process; the daemon had no visible durable cursor for it. | `src/cli/feishu.ts`; `src/cli/main.ts`; `docs/REAL_CHANNELS.md` | fixed by #106 (`e9a1978`); APPROVE |
-| STALE-GATEWAY-TOKEN | P1 | A stale empty `gateway.token` aborts startup with a misleading concurrent-create error, and the client read path silently falls back instead of failing closed. | `src/gateway/token.ts:98-101,140-146`; `src/harness/model.ts:264-265`; `docs/ARCHITECTURE_DECISIONS.md` ADR-009 | ADR-009 merged (#105, `69b6d3d`); implementation follow-up open |
+| STALE-GATEWAY-TOKEN | P1 | A stale empty `gateway.token` aborted startup with a misleading concurrent-create error, and the client read path silently fell back instead of failing closed. | `src/gateway/token.ts`; `test/gateway-token.test.ts`; `docs/ARCHITECTURE_DECISIONS.md` ADR-009 | fixed by #109 (`064ab06`); ADR-009 merged as #105; APPROVE |
 | IMESSAGE-GROUP-UNKNOWN | P2 | Legacy group chats with no guid or identifier collapsed into `group-unknown:<handle>`, so distinct chats from one sender shared a thread. | `src/channels/imessage.ts`; `test/channels-imessage.test.ts`; `docs/IMESSAGE.md` | fixed by #107 (`00665d2`); APPROVE |
 | OUTBOX-PERMANENT-FAILURE | P2 | A fail-closed group reply is still written to the outbox and retried with backoff until `failed`, even though the adapter refuses it deterministically. | `src/core/replies.ts:45-66`; `src/channels/outbox-adapter.ts:88-111`; `src/channels/imessage.ts:590-610` | fixed by #100 (`55f0d09`); APPROVE |
 
@@ -169,9 +173,13 @@ Cycle 7 (completed)
                        (peer session)
   (cycle-7 checkpoint is a record, not a development task)
 
+Cycle 8 (completed)
+  STALE-GATEWAY-TOKEN-FOLLOWUP  Implement ADR-009: distinct stale-empty
+                       diagnostic, fail-closed client read, preserved
+                       concurrent-create message — merged #109
+  (cycle-8 checkpoint is a record, not a development task)
+
 Next sessions (not started)
-  ADR-009-FOLLOWUP     Implement the distinct stale-empty error and the
-                       fail-closed client read; tests in token.test.ts
   SEMANTIC-LTM         Evaluate semantic/multi-hop long-term memory recall
   ROTATE-TOKEN         Optional explicit `--rotate-token` operator flag,
                        only if the owner asks for it

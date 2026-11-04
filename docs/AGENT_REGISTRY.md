@@ -47,10 +47,12 @@
 | CYCLE-5-CHECKPOINT-FOLLOWUP | Chief Engineer (peer) | `docs/cycle-5-checkpoint-followup` | 2026-11-04 | merged `55f3e7b`, docs APPROVE | #102 | integrated |
 | CYCLE-6-CHECKPOINT | Chief Engineer | `docs/cycle-6-checkpoint` | 2026-11-04 | merged `3bdb90a`, docs APPROVE | #104 | integrated |
 | FEISHU-SERVE-LOOP | Core Runtime | `agent/feishu-serve-loop` | 2026-11-04 | merged `e9a1978`, APPROVE | #106 | integrated |
-| STALE-GATEWAY-TOKEN | Infrastructure/Security | `agent/stale-gateway-token-adr` | 2026-11-04 | merged `69b6d3d`, docs APPROVE after correction | #105 | integrated; implementation follow-up open |
+| STALE-GATEWAY-TOKEN | Infrastructure/Security | `agent/stale-gateway-token-adr` | 2026-11-04 | merged `69b6d3d`, docs APPROVE after correction | #105 | integrated; code follow-up in #109 |
+| STALE-GATEWAY-TOKEN-FOLLOWUP | Infrastructure/Security | `agent/stale-gateway-token-followup` | 2026-11-04 | merged `064ab06`, APPROVE | #109 | integrated |
 | IMESSAGE-GROUP-UNKNOWN | Infrastructure/Security (peer) | `agent/imessage-group-unknown` | 2026-11-04 | merged `00665d2`, reviewed APPROVE | #107 | integrated |
-| CYCLE-7-CHECKPOINT | Chief Engineer | `docs/cycle-7-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107 APPROVE; #77 corrected | — | continuing |
+| CYCLE-7-CHECKPOINT | Chief Engineer | `docs/cycle-7-checkpoint` | 2026-11-04 | merged `6e19bca`, docs APPROVE | #108 | integrated |
+| CYCLE-8-CHECKPOINT | Chief Engineer | `docs/cycle-8-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107/#109 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 
@@ -88,8 +90,10 @@
   `src/channels/feishu.ts` (cursor accessor only), `test/cli-serve-feishu.test.ts`
   (new), `docs/REAL_CHANNELS.md`, `docs/MODULES.md` M11 (merged #106).
 - STALE-GATEWAY-TOKEN: `docs/ARCHITECTURE_DECISIONS.md`, `docs/GATEWAY.md`
-  (docs-only ADR-009; merged #105). The implementation follow-up owns
-  `src/gateway/token.ts` and `test/gateway-token.test.ts`.
+  (docs-only ADR-009; merged #105).
+- STALE-GATEWAY-TOKEN-FOLLOWUP: `src/gateway/token.ts`,
+  `test/gateway-token.test.ts`, `docs/GATEWAY.md`,
+  `docs/ARCHITECTURE_DECISIONS.md` (merged #109).
 - IMESSAGE-GROUP-UNKNOWN: `src/channels/imessage.ts`,
   `test/channels-imessage.test.ts`, `docs/IMESSAGE.md` (merged #107).
 - The cycle-7 tasks are disjoint; only the shared `docs/MODULES.md` would have
