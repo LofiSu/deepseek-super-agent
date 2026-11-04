@@ -759,7 +759,7 @@ export interface RawEvent {
 | Files | `acl.ts`, `recall.ts`, `long-term.ts`, `index.ts` |
 | Inline | `recall.ts` 的 `inlineOrSpill`：写入 Session 的只有 summary + spill id |
 | Locality | `read_object` 工具（`tools.ts`）+ `acl.ts` 的 `readSpillFor`/`SPILL_PAGE`：按 ID 读取、分页、截断续读 |
-| Chain of Recall | 无独立 graph 文件：对象以 ID 引用，读取受 `spill_grants`（`acl.ts`）约束；`long-term.ts` 按标题召回 |
+| Chain of Recall | 无独立 graph 文件：对象以 ID 引用，读取受 `spill_grants`（`acl.ts`）约束；`long-term.ts` 实现 ADR-010 词法归一化、标签命中与一跳标签扩展召回；embedding 召回未实现 |
 | Tools | 注册 `read_object` 给 router+worker |
 | Tests | spill 链式召回；截断续读 |
 | Accept | demo Spill + read_object |
@@ -929,9 +929,9 @@ pnpm install && pnpm test && pnpm demo
 | T45 | 评测与指标 | §7 实验指标 | 计数 + optional latency curveSamples | `<stateDir>/metrics.json` · `ds-agent metrics` · `summarizeCurve` |
 | T46 | 扩展 | Router sharding / multi-filter | registry 常驻 Runtime；`DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在 | `RouterShardRegistry` |
 | T47 | 扩展 | Worker mesh | capacity registry 常驻 Runtime；`DS_AGENT_MESH_CAPACITY` / `RuntimeOptions.meshCapacity` | `WorkerMeshRegistry` |
-| T48 | 长期记忆 | Long-term memory | Spill-backed LTM 常驻 Runtime；终止 Ticket 写入并按标题召回 | `SpillBackedLongTermMemory` |
-| T49 | 产品层 | Product UX without Session | 无会话读取模型 `LifecycleBus` 常驻 Runtime；默认 UI 仍在另仓 | `core/lifecycle.ts` |
-| T50 | 互操作 | A2A | envelope router 常驻 Runtime；`runtime.sendA2A`；跨进程传输外置 | `A2ARouter` |
+| T48 | 长期记忆 | Long-term memory | Spill-backed LTM 常驻 Runtime；终止 Ticket 写入；ADR-010 词法+标签一跳召回；embedding/跨月实测未实现 | `SpillBackedLongTermMemory` |
+| T49 | 产品层 | Product UX without Session | 无会话读取模型 `LifecycleBus` 常驻 Runtime；只读 loopback UI 在本仓（`src/ui/server.ts`、`ds-agent ui`）；远程面板/多用户外置 | `core/lifecycle.ts` |
+| T50 | 互操作 | A2A | envelope router 常驻 Runtime；`runtime.sendA2A`；HMAC-SHA256 HTTP transport 已实现（`a2a-auth.ts`/`a2a-http.ts`），默认不监听 | `A2ARouter` |
 | T51 | 安全与隐私 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | allowlist + redact 已落地；vault / seccomp 仍外置 |
 
 ---

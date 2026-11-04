@@ -14,7 +14,7 @@ requires live evidence, not missing code.
 
 | Area | State | Evidence |
 |------|-------|----------|
-| Semantic LTM / store migration / restart replay | done | #112, #124; schema v3 `lifecycle_events`, replay tests |
+| Semantic LTM / store migration / restart replay | lexical + one tag hop done; embedding recall partial | #112/#118, #124; ADR-010 lexical/tag-hop recall, schema v3 `lifecycle_events`, replay tests |
 | Host read isolation | done (opt-in strict) | read-isolation tests; docs/safety boundary unchanged |
 | A2A + peer auth | done | #123 `7a1d732`; HMAC v1, replay cache, caps, deadline |
 | Model slow path | done and wired | #128 `788be60`; #135 `268809d`; `Runtime.ingestAsync` in iMessage/Feishu loops |

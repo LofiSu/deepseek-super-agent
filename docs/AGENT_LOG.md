@@ -27,8 +27,9 @@ with a new entry.
 - `gh pr view 132` reported `MERGED` at `a1985c0` (2026-11-04T12:35:21Z), but
   `main` later read `58c410a`. `git merge-base --is-ancestor a1985c0
   origin/main` confirms `a1985c0` is an ancestor: it was merged into `main`,
-  then #138's merge commit `58c410a` descended from it. Main has since moved to
-  `af6b011` (#139), with #134 `111481d` in between.
+  then #138's merge commit `58c410a` descended from it. Main has since moved
+  through #134 `111481d`, #136 `1e01862`, #135 `268809d`, #138 `58c410a`,
+  #139 `af6b011`, and #140 `661e56d` (current).
 - #132 was owner-gated and held by this session. No review by this session and
   no owner approval is recorded on the PR (`reviews: []`). It was merged
   outside this session; GitHub records only the owner account, so the actor

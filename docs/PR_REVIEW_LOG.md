@@ -694,7 +694,8 @@ head so a later reader can separate the reviewed tree from the merged tree.
   terminal/log control characters, and concurrent `ingestAsync` calls could
   spill twice after the policy await. Fixed with `clampPolicyReason` stripping
   `\p{Cc}\p{Cf}` and a post-await duplicate recheck; verified focused 77 and
-  full offline 545 passed/3 skipped. Sync `ingest` and A2A inbound stay
+  a full offline run at an intermediate head (545 passed/3 skipped; not
+  reproducible from the cited final head). Sync `ingest` and A2A inbound stay
   rules-only; `TriggerTrust.admission` cannot be supplied by trigger metadata.
 
 ## PR #130 — `[SUPER-AGENT][MESH] Remote registry, heartbeat, and A2A dispatch`
@@ -716,7 +717,9 @@ head so a later reader can separate the reviewed tree from the merged tree.
   rename; no integrity checks; backup could delete a race-created output.
   Fixed with force gating, pre-restore set + rollback, source/temp integrity
   checks, SHA-256, unique temp + `linkSync` install that preserves a race-created
-  output, and directory fsync. Focused 30/30; full offline 629 passed/3 skipped.
+  output, and directory fsync. Focused 30/30; a full offline run at an
+  intermediate head reported 629 passed/3 skipped (not reproduced at the cited
+  reviewed heads).
 
 ## PR #129 — `[SUPER-AGENT][LOCAL-UI] Read-only loopback UI`
 
@@ -757,7 +760,8 @@ head so a later reader can separate the reviewed tree from the merged tree.
   the text and adds assertions.
 
 - **#138 merged:** `58c410a` after CI green on `33b0941` (run `41845978818`);
-  no unresolved threads. #132 remains owner-gated.
+  no unresolved threads. At the time of writing #132 was still owner-gated; it
+  was later merged outside this session (see the #132 entry below).
 
 ## PR #132 — `[SUPER-AGENT][RELEASE] Add manual release-check workflow`
 
