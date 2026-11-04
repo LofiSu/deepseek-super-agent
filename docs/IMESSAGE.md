@@ -29,10 +29,11 @@ ImessageOutboxAdapter.send()  ── osascript → Messages.app → same convers
 
 ## Safety defaults
 
-Admission is **closed by default**. `ds-agent imessage` refuses to start when
-neither a sender allowlist (`--handle` / `DS_AGENT_IMESSAGE_HANDLE` or
-`DS_AGENT_ACTOR_ALLOWLIST`) nor an explicit opt-out (`--allow-any`) is set.
-The error is shown before `chat.db` is opened.
+Admission is **closed by default**. `ds-agent imessage` and
+`ds-agent serve --imessage` refuse to start when neither a sender allowlist
+(`--handle` / `DS_AGENT_IMESSAGE_HANDLE` or `DS_AGENT_ACTOR_ALLOWLIST`) nor an
+explicit opt-out (`--allow-any`) is set. The error is shown before `chat.db` is
+opened (and, for `serve`, before SQLite is opened).
 
 - **Only 1:1 messages are `addressed: 'direct'`.** A message in a group chat is
   never direct, even when group ingestion is enabled; it still has to pass the
@@ -116,6 +117,38 @@ names the safe example `--handle "+..."`. Opt into open use with `--allow-any`
 
 On first run the cursor starts at the current max ROWID, so only new messages
 are handled. Pass `--since <rowid>` to replay from an explicit point.
+
+## Running the loop from `serve`
+
+`ds-agent serve --imessage` runs the same inbound poll loop alongside the
+watchdog/daemon timer in one process (the loop is shared code, not a second
+implementation). Without `--imessage`, `serve` behavior is unchanged and opens
+no channel.
+
+```bash
+# daemon + inbound iMessage channel in one process
+DS_AGENT_IMESSAGE_HANDLE="+8613800000000" pnpm ds-agent serve --imessage
+
+# explicit opt-outs still apply
+pnpm ds-agent serve --imessage --allow-any
+
+# include group messages (never marked direct)
+pnpm ds-agent serve --imessage --handle "+8613800000000" --allow-groups
+```
+
+`serve --imessage` accepts the same admission flags and environment variables as
+`ds-agent imessage`: `--handle`, `--allow-any`, `--allow-groups`, `--interval`,
+`--since`, and `--db` (plus `--once` for a single poll; the daemon keeps
+running). Admission is checked before `Runtime.create` opens SQLite and before
+`chat.db` is opened, so a missing allowlist fails closed. The cursor is the same
+SQLite document, so `imessage` and `serve --imessage` resume from the same
+point.
+
+The first SIGINT/SIGTERM aborts polling, drains the loop and Runtime, and exits
+0; a second signal force-exits 1 if the drain hangs. Pull errors are logged and
+retried with bounded backoff; ingest errors are logged and skipped (the cursor
+still advances), so a transient `chat.db`/io failure does not kill the loop or
+the daemon.
 
 ## Limitations (MVP)
 

@@ -1,6 +1,7 @@
 import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
+import { ChatDbImessageApi, ImessageSource } from '../channels/imessage.ts'
 import { Engine } from '../core/engine.ts'
 import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
@@ -18,7 +19,8 @@ import { healthProbe } from '../watchdog/health.ts'
 import { startEmbeddedGateway } from '../gateway/embedded.ts'
 import { defaultHome, runDemo } from './demo.ts'
 import { runGatewayCommand } from './gateway.ts'
-import { runImessageCommand } from './imessage.ts'
+import { resolveImessageCliConfig, runImessageCommand } from './imessage.ts'
+import { runImessageLoop } from './channel-loop.ts'
 import { runProfileCommand, runWireCommand } from './wiring.ts'
 import { runSetupCommand } from './setup.ts'
 
@@ -111,7 +113,9 @@ function help(): void {
   pnpm ds-agent retry <ticketId> # new Assignment on the same Ticket
   pnpm ds-agent status
   pnpm ds-agent health
-  pnpm ds-agent serve            # daemon timer over persisted state; SIGINT/SIGTERM drain
+  pnpm ds-agent serve [--imessage] [--handle <id>] [--allow-any] [--allow-groups]
+                            # daemon timer over persisted state; optional inbound iMessage loop
+                            # SIGINT/SIGTERM drain
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
   pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLMs, write gateway.config.json
@@ -148,13 +152,20 @@ or a non-empty DS_AGENT_ACTOR_ALLOWLIST. --allow-any is an explicit opt-out that
 accepts any 1:1 sender; --allow-groups opens group ingestion, and group messages
 are never marked direct.
 
-serve starts the in-process watchdog/daemon timer over persisted SQLite state. It
-has no inbound channel loop: triggers written by a separate emit/chat process are
-not picked up. The model is fixed at Runtime.create, so mount credentials before
-starting and restart to change them. With no provider key the idle daemon uses
-MockModel, and Gate-deferred assessments stay queued for a live-model start.
-The first SIGINT/SIGTERM drains through Runtime.finish() (assessments, jobs,
-daemon timer, SQLite) and exits 0; a second signal force-exits 1 if it hangs.
+serve starts the in-process watchdog/daemon timer over persisted SQLite state. By
+default it has no inbound channel loop: triggers written by a separate emit/chat
+process are not picked up. Pass --imessage to run the same inbound iMessage poll
+loop as "ds-agent imessage" alongside the daemon; it uses that command's
+default-deny sender admission, cursor, and outbox, and refuses to start before
+chat.db is opened. --allow-groups opens group ingestion; group messages are never
+marked direct. Poll errors are logged and retried with bounded backoff, so they
+do not kill the loop or the daemon. The model is fixed at Runtime.create, so
+mount credentials before starting and restart to change them. With no provider
+key the idle daemon uses MockModel, and Gate-deferred assessments stay queued for
+a live-model start.
+The first SIGINT/SIGTERM aborts the inbound loop, drains through
+Runtime.finish() (assessments, jobs, daemon timer, SQLite), and exits 0; a second
+signal force-exits 1 if it hangs.
 
 State lives in DS_AGENT_HOME or ./.ds-agent (SQLite).
 Section 7 counters are written to <stateDir>/metrics.json and printed by metrics.
@@ -212,26 +223,41 @@ async function runWithEmbeddedGateway(home: string, run: () => Promise<void>): P
  * Daemon timer over persisted SQLite state: one Runtime for the process lifetime.
  *
  * Scope: starts the in-process watchdog/daemon timer and, when a live model is
- * configured, assesses Gate-deferred threads already in SQLite at startup. It
- * starts no inbound channel loop, so triggers written by a separate `emit`/`chat`
- * process are never picked up. The model is resolved once at Runtime.create;
- * changing credentials requires a restart. A keyless process falls back to
- * MockModel and leaves deferred assessments queued for a live-model start.
- * chat and serve may run on MockModel; demo/retry/resume require a live model.
+ * configured, assesses Gate-deferred threads already in SQLite at startup. By
+ * default it starts no inbound channel loop, so triggers written by a separate
+ * `emit`/`chat` process are never picked up. With `--imessage` it also runs the
+ * same inbound iMessage poll loop as `ds-agent imessage`, sharing that command's
+ * default-deny admission, cursor, and outbox. The model is resolved once at
+ * Runtime.create; changing credentials requires a restart. A keyless process
+ * falls back to MockModel and leaves deferred assessments queued for a
+ * live-model start. chat and serve may run on MockModel; demo/retry/resume
+ * require a live model.
  *
- * Shutdown is signal-driven. The first SIGINT/SIGTERM runs Runtime.finish(), which
- * waits for Main Agent assessments and Harness jobs, stops the Daemon timer, and
- * closes SQLite before exiting 0. A second signal force-exits 1 in case a live
- * turn or finish() itself hangs. In-flight turns are not reconstructed after a
- * restart; that boundary is documented in docs/MODULES.md.
+ * Shutdown is signal-driven. The first SIGINT/SIGTERM aborts the inbound poll
+ * loop, waits for its drain, then runs Runtime.finish(), which waits for Main
+ * Agent assessments and Harness jobs, stops the Daemon timer, and closes SQLite
+ * before exiting 0. A second signal force-exits 1 in case a live turn or
+ * finish() itself hangs. In-flight turns are not reconstructed after a restart;
+ * that boundary is documented in docs/MODULES.md.
  */
 async function serve(home: string): Promise<void> {
+  // Resolve and validate the opt-in inbound channel before Runtime.create opens
+  // SQLite (and long before ChatDbImessageApi opens chat.db). A missing
+  // allowlist must leave every permissioned resource untouched.
+  const imessage = process.argv.includes('--imessage') ? resolveImessageCliConfig() : undefined
+  if (imessage && !imessage.admission.allowed) throw new Error(imessage.admission.error)
+
   const runtime = Runtime.create({
     home,
     jobDelayMs: 20,
     watchdogIntervalMs: 60_000,
   })
   const canAssess = runtime.model.name !== 'MockModel'
+  const channelAbort = new AbortController()
+  let imessageApi: ChatDbImessageApi | undefined
+  // Resolved (never rejected) so shutdown can always await it. A loop failure
+  // is logged and leaves the daemon running.
+  let loopDone: Promise<void> = Promise.resolve()
   let stopping = false
   const shutdown = (signal: NodeJS.Signals): void => {
     if (stopping) {
@@ -239,8 +265,16 @@ async function serve(home: string): Promise<void> {
       process.exit(1)
     }
     stopping = true
+    // Stop polling first so no new Trigger is ingested while finish() drains.
+    channelAbort.abort()
     runtime.log.info(`[serve] shutdown signal=${signal}; draining (send again to force exit)`)
-    void runtime.finish()
+    void (async () => {
+      // The loop owns its outbox and cursor writes; let it finish before the
+      // API closes and Runtime.finish() closes SQLite.
+      await loopDone
+      imessageApi?.close()
+      await runtime.finish()
+    })()
       .then(() => {
         runtime.log.info('[serve] stopped')
         // Let the event loop drain so buffered stdout is flushed; the daemon
@@ -268,11 +302,50 @@ async function serve(home: string): Promise<void> {
   try {
     runtime.start({ assessPending: canAssess })
   } catch (error) {
+    channelAbort.abort()
+    imessageApi?.close()
     await runtime.finish().catch(() => undefined)
     throw error
   }
   if (!canAssess) {
     runtime.log.info('[serve] MockModel: deferred assessments left queued until a live-model start')
+  }
+  if (imessage && !stopping) {
+    if (imessage.allowAny) {
+      runtime.log.info(
+        '[imessage] WARNING: --allow-any is active; any sender in a 1:1 chat can trigger work. '
+        + 'Prefer --handle or DS_AGENT_ACTOR_ALLOWLIST unless this is intentional.',
+      )
+    }
+    if (imessage.allowGroups) {
+      runtime.log.info(
+        '[imessage] WARNING: --allow-groups is active; group messages are ingested, '
+        + 'but they are never marked direct and still pass normal admission.',
+      )
+    }
+    const api = new ChatDbImessageApi(imessage.dbPath)
+    imessageApi = api
+    loopDone = runImessageLoop({
+      runtime,
+      source: new ImessageSource(api, {
+        ...(imessage.handle ? { handle: imessage.handle } : {}),
+        allowGroups: imessage.allowGroups,
+      }),
+      api,
+      dbPath: imessage.dbPath,
+      handle: imessage.handle,
+      allowGroups: imessage.allowGroups,
+      allowAny: imessage.allowAny,
+      intervalMs: imessage.intervalMs,
+      since: imessage.since,
+      once: imessage.once,
+      signal: channelAbort.signal,
+      // A bad/unavailable chat.db must not kill the daemon; the loop retries
+      // with bounded backoff and keeps logging.
+      retrySchemaErrors: true,
+    }).then(() => undefined, error => {
+      runtime.log.info(`[imessage] loop stopped error=${error instanceof Error ? error.message : String(error)}`)
+    })
   }
   runtime.log.info(`ds-agent serve ready home=${home} pid=${process.pid} model=${runtime.model.name}`)
   // Keep the CLI promise pending; the daemon timer keeps the process alive and a
