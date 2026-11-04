@@ -1,6 +1,13 @@
 export { createModelFromEnv, requireLiveModelFromEnv, HttpOpenAI, MockModel } from './harness/model.ts'
 export { PROVIDER_PRESETS, resolveLiveApi, type LiveApi, type ProviderPreset } from './harness/providers.ts'
 export { Runtime, type RuntimeOptions } from './runtime.ts'
+export {
+  LocalAgentRegistry,
+  loadLocalAgents,
+  normalizeLocalAgents,
+  type LocalAgentSpec,
+  type LocalAgentRunResult,
+} from './env/local-agents.ts'
 export { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
 export { LocalA2ATransport, type A2ATransport } from './channels/a2a-transport.ts'
 export { LifecycleBus, type LifecycleEvent } from './core/lifecycle.ts'

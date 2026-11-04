@@ -1,5 +1,6 @@
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
+import type { LocalAgentRegistry } from '../env/local-agents.ts'
 import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
@@ -39,6 +40,8 @@ export interface ToolDeps {
   /** Append a nudge to the worker session journal (same effect as Watchdog.nudge). */
   nudge?: (sessionId: string, ticketId: string) => void
   teams?: TeamRegistry
+  /** Owner-configured local specialist agents. Absent means delegation is unavailable. */
+  localAgents?: LocalAgentRegistry
 }
 
 interface ToolDef extends ToolSpec {
@@ -83,6 +86,7 @@ export class ToolRegistry {
         teams: deps.teams,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
+      ...(deps.localAgents ? localAgentTools(deps.localAgents, log) : []),
     ]
   }
 
@@ -499,6 +503,43 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const jobId = String(args.jobId ?? '')
         if (jobId) store.completeJob(jobId, 'stopped')
         return { status: 'stopped', jobId }
+      }),
+    },
+  ]
+}
+
+/**
+ * Owner-configured local specialist agents. The model can only name an agent
+ * and supply a task; the command, argv, cwd, environment, and limits come from
+ * the owner's configuration. Workers delegate; the Router may only list.
+ */
+function localAgentTools(registry: LocalAgentRegistry, log: (line: string) => void): ToolDef[] {
+  return [
+    {
+      name: 'list_local_agents',
+      description: 'List local specialist agents configured on this machine.',
+      parameters: schema(),
+      roles: ['router', 'worker'],
+      run: async () => ({ agents: registry.list() }),
+    },
+    {
+      name: 'delegate_agent',
+      description: 'Run a configured local specialist agent on one self-contained task. Verify its output before reporting.',
+      parameters: schema({
+        agent: { type: 'string', description: 'Configured agent id; see list_local_agents.' },
+        task: { type: 'string', description: 'Complete task with all context the agent needs.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'delegate_agent', async (args, ctx) => {
+        const agent = String(args.agent ?? '').trim()
+        const task = String(args.task ?? '')
+        if (!agent) throw new UserError('delegate_agent needs an agent id')
+        const result = await registry.run(agent, task, ctx.sessionId)
+        log(
+          `[local-agent] agent=${agent} session=${ctx.sessionId} code=${result.code}`
+          + ` timedOut=${result.timedOut} truncated=${result.truncated}`,
+        )
+        return result
       }),
     },
   ]

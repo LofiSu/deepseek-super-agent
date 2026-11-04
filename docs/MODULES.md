@@ -328,14 +328,21 @@ a delivered one clears `speculative` and emits `speculate.delivered`.
 ## M9 — env
 
 `local-env.ts` confines work to `<stateDir>/workspaces`, caps output, and kills
-the process group on timeout. `sanitize.ts` keeps credential values out of tool
-output and prompts. `vault.ts` exposes FileVault names only. `seccomp.ts` wraps
-every worker bash: `sandbox-exec` on macOS, `bwrap` on Linux; a missing wrapper
-is a hard error, never a plain-bash fallback. `DS_AGENT_SANDBOX` no longer
-changes the policy. The wrapper confines writes and network (denied unless the
-policy allows it), but not reads: macOS allows broad `file-read*` and Linux uses
-`--ro-bind / /`, so the host read boundary (including the SQLite DB) remains
-external and needs a container or default-deny profile.
+the process group on timeout. `local-agents.ts` exposes an opt-in,
+owner-configured list of local specialist CLIs (`local-agents.json` or
+`DS_AGENT_LOCAL_AGENTS`); a Worker can only name an id and pass a task, and the
+runner uses `spawn(command, argv)` with `shell: false`, the Worker workspace as
+cwd, a timeout, an output cap, and an allowlisted environment. `sanitize.ts`
+keeps credential values out of tool output and prompts. `vault.ts` exposes
+FileVault names only. `seccomp.ts` wraps every worker bash: `sandbox-exec` on
+macOS, `bwrap` on Linux; a missing wrapper is a hard error, never a plain-bash
+fallback. `DS_AGENT_SANDBOX` no longer changes the policy. The wrapper confines
+writes and network (denied unless the policy allows it), but not reads: macOS
+allows broad `file-read*` and Linux uses `--ro-bind / /`, so the host read
+boundary (including the SQLite DB) remains external and needs a container or
+default-deny profile. The bash wrapper does not sandbox an arbitrary local
+specialist CLI; that agent's own permission policy is part of the owner's trust
+decision (see `docs/LOCAL_AGENTS.md`).
 
 ## M10 — watchdog
 
@@ -348,7 +355,7 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
 `serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
-`resume`, `collab`, `team`, `teams`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
+`resume`, `collab`, `team`, `teams`, `agents`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
 acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the

@@ -58,6 +58,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
 - [x] **Subagent / Team inside a Worker.** Async jobs + `spawn_team`/`team_status`/`complete_team` → member jobs → `TEAM_MEMBER_DONE` → aggregate report. Team rows persist in SQLite and `ds-agent team`/`teams` inspect them offline. Router only sees the parent Assignment report (T14; unit + harness + live e2e).
+- [x] **Local specialist agents inside a Worker.** When the owner configures them, a Worker can call `delegate_agent` to run a local CLI agent (Claude Code, Codex, OpenCode, Hermes, or a custom one) on one self-contained task. No shell, workspace cwd, bounded timeout/output, allowlisted environment. `ds-agent agents` lists the configuration; see [docs/LOCAL_AGENTS.md](docs/LOCAL_AGENTS.md).
 - [x] **One UI, many topics.** Several Tickets can exist at once. `LifecycleBus` is always wired as a read model, and `ds-agent ui` serves a read-only, token-gated loopback dashboard with tickets, threads, outbox metadata, health, metrics, and sanitized lifecycle events (T15/T49).
 
 ### §3 Event-driven

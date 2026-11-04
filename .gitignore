@@ -11,5 +11,6 @@ uploads
 .super-agent/
 .claude/worktrees/
 .claude/settings.local.json
+local-agents.json
 
 __pycache__/
