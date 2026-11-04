@@ -1,6 +1,6 @@
 # Project audit — 2026-11-04 (final integration)
 
-> Audit base: `main` after PR #138 (`58c410a`). This section supersedes the
+> Audit base: `main` after PR #139 (`af6b011`). This section supersedes the
 > 2026-11-03 audit below for current status; the older sections remain as
 > history. Checks were run in dedicated worktrees; the primary clone's unrelated
 > WIP was not used.
@@ -11,10 +11,10 @@
 
 | Item | Observation |
 |------|-------------|
-| `main` | `58c410a` merge of #138 |
-| Merged surfaces | A2A HMAC HTTP (`7a1d732`), lifecycle/schema v3 (`888f810`), slow path (`788be60`), remote mesh (`d9ded0b`), backup/release (`d67731a`), combined channels (`0cdea17`), local UI (`123ee40`), CLI wiring (`1e01862`), channel slow path (`268809d`), usage accuracy (`58c410a`) |
+| `main` | `af6b011` merge of #139 |
+| Merged surfaces | A2A HMAC HTTP (`7a1d732`), lifecycle/schema v3 (`888f810`), slow path (`788be60`), remote mesh (`d9ded0b`), backup/release (`d67731a`), combined channels (`0cdea17`), local UI (`123ee40`), CLI wiring (`1e01862`), channel slow path (`268809d`), usage accuracy (`58c410a`), release workflow (`a1985c0`), iMessage nanosecond dates (`111481d`), iMessage non-ASCII argv (`af6b011`) |
 | Required check | `typecheck and test`; strict, admins enforced, conversation resolution required |
-| CI evidence | #129 `41829844125` pass; #131 `41826730675` pass; #135 `41845266705` pass; #136 `41844155920` pass; post-merge main runs recorded in `docs/DEVELOPMENT_STATUS.md` |
+| CI evidence | #129 `41829844125` pass; #131 `41826730675` pass; #135 `41845266705` pass; #136 `41844155920` pass; #132 head `21cc421`, #134 head `56cb001`, #139 head `50cf9d1` green; post-merge main runs recorded in `docs/DEVELOPMENT_STATUS.md` |
 | Offline suite | #135 merged head: 75 files, 724 tests, 709 passed, 15 skipped, 0 failed (CI-equivalent env) |
 | Live evidence | none added by this program; bake-off remains unmeasured |
 
@@ -32,9 +32,15 @@
    open no listener; the UI binds loopback. The High A2A replay risk remains a
    deployment requirement (unique per-node secret or shared durable replay
    cache), unchanged by this program.
-4. **Owner gates remain.** The release workflow (#132) was kept unmerged, and
-   no production infrastructure, secret storage, auth redesign, destructive
-   migration, or live external send was performed.
+4. **The owner gate on #132 was bypassed, not honored.** This session held
+   #132 as owner-gated; another session merged it at `a1985c0` on 2026-11-04
+   without recorded owner approval. A post-merge audit found the workflow is
+   `workflow_dispatch` only, with `permissions: contents: read`, no
+   `secrets.*`, no publish step, and an artifact upload. That limits the blast
+   radius but does not constitute approval. #134 and #139 were also merged by
+   other sessions without independent review in this log; both heads had green
+   `typecheck and test`. No production infrastructure, secret storage, auth
+   redesign, destructive migration, or live external send was performed.
 5. **Verification limits are explicit.** CI and offline fixtures pass; no live
    model bake-off or real Feishu acceptance was run. iMessage daemon tests use
    fakes and no live send was made.

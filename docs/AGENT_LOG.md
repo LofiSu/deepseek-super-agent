@@ -4,6 +4,49 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Post-integration reconciliation (owner-gate deviation recorded)
+
+### Observed
+
+- `gh pr view 132` reported `MERGED` at `a1985c0` (2026-11-04T12:35:21Z), but
+  `main` later read `58c410a`. `git merge-base --is-ancestor a1985c0
+  origin/main` confirms `a1985c0` is an ancestor: it was merged into `main`,
+  then #138's merge commit `58c410a` descended from it. Main has since moved to
+  `af6b011` (#139), with #134 `111481d` in between.
+- #132 was owner-gated and held by this session. No review by this session and
+  no owner approval is recorded on the PR (`reviews: []`). Another session
+  merged it. Post-merge audit of `.github/workflows/release.yml`: manual
+  `workflow_dispatch`, `permissions: contents: read`, no `secrets.*`, no
+  publish step, artifact upload only.
+- #134 (iMessage nanosecond dates as BigInt) and #139 (non-ASCII replies via
+  osascript argv) were also merged by other sessions with no review in this
+  log. Both heads had green `typecheck and test` (`56cb001`, `50cf9d1`).
+- The prior entry's line "#132 remains open and owner-gated" is retained as
+  what was true when written; this entry supersedes it.
+
+### Decided
+
+- Record the #132 merge as a process deviation, not as owner approval. Do not
+  characterize the content as unreviewed-and-dangerous: it is manual,
+  read-only, and publishes nothing.
+- Do not revert #132 unilaterally. Reverting a merged workflow is another
+  repository-state change and needs an owner decision; document and surface it.
+- Treat #134/#139 as landed changes to verify, not to duplicate; both have
+  regression tests on the exact merged heads.
+
+### Verified
+
+- `a1985c0` is an ancestor of `origin/main`; `git log origin/main` shows
+  `af6b011`, `50cf9d1`, `58c410a`, `268809d`, `1e01862`.
+- Release workflow content has no write permission, no secrets, and no publish.
+- #132/#134/#139 exact heads each have a successful `typecheck and test`.
+
+### Pending
+
+- Merge this docs/status PR after CI.
+- Live bake-off, real Feishu acceptance, and remote mesh exposure still need
+  owner authorization/credentials.
+
 ## 2026-11-04 — Final integration cycle (A2A, slow path, mesh, UI, ops, channels)
 
 ### Observed

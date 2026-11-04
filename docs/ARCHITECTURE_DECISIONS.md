@@ -695,7 +695,9 @@ rewrite `PLAN.md`; link to the contract instead.
   moves the old DB plus WAL/SHM sidecars to
   `<state-dir>/backups/pre-restore-<timestamp>.db*`, and rolls back on failure.
   The release check validates semver, bin/dist entries, rules assets, and
-  `npm pack --dry-run`; the GitHub release workflow is manual and owner-gated.
+  `npm pack --dry-run`; the GitHub release workflow is manual (merged in #132
+  `a1985c0` without recorded owner approval; audited as `workflow_dispatch`,
+  `contents: read`, no secrets, no publish).
 - **Consequences:** the daemon must be stopped before restore; backup and
   install require a filesystem that supports hard links in the same directory.
   Backups are plaintext SQLite and inherit the state directory's permissions.

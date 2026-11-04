@@ -759,8 +759,32 @@ head so a later reader can separate the reviewed tree from the merged tree.
 - **#138 merged:** `58c410a` after CI green on `33b0941` (run `41845978818`);
   no unresolved threads. #132 remains owner-gated.
 
+## PR #132 — `[SUPER-AGENT][RELEASE] Add manual release-check workflow`
+
+- **Reviewed head:** `21cc421`. **Merged by another session:** `a1985c0`
+  (2026-11-04T12:35:21Z).
+- **Verdict:** not approved for merge by this session; the PR was owner-gated
+  and held. No review or owner approval is recorded on the PR (`reviews: []`).
+- **Post-merge audit:** `workflow_dispatch` only; `permissions: contents: read`;
+  no `secrets.*`; no publish step; artifact upload only. Exact head
+  `typecheck and test` green. The content is low-risk, but the merge is a
+  process deviation and is not retroactively approved.
+
+## PR #134 — `[SUPER-AGENT][IMESSAGE] Read nanosecond dates as BigInt`
+
+- **Head:** `56cb001`. **Merged by another session:** `111481d`.
+- **Review:** none in this log; merged before this session reviewed it.
+  `typecheck and test` green on the exact head. Regression test uses a real
+  nanosecond timestamp.
+
+## PR #139 — `[SUPER-AGENT][IMESSAGE] Send non-ASCII replies via argv`
+
+- **Head:** `50cf9d1`. **Merged by another session:** `af6b011`.
+- **Review:** none in this log; merged before this session reviewed it.
+  `typecheck and test` green on the exact head. The change passes reply text as
+  an osascript argv item instead of an env/system-attribute path.
+
 ## Pending reviews
 
-- #132 release workflow: owner-gated; no review approval for merge.
-- No other open implementation PRs. Live bake-off and real Feishu acceptance
-  are evidence tasks, not PRs.
+- No open implementation PRs. #141 is documentation-only and awaits CI/review.
+- Live bake-off and real Feishu acceptance are evidence tasks, not PRs.

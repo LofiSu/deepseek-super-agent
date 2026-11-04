@@ -61,7 +61,7 @@
 | HEALTH-OBSERVABILITY | Core Runtime | `agent/health-observability` | 2026-11-04 | merged `e700730`, APPROVE | #127 | integrated |
 | MODEL-SLOW-PATH | Model/Intelligence | `agent/model-slow-path` | 2026-11-04 | merged `788be60`, APPROVE after sanitization/duplicate fixes | #128 | integrated; channel wiring in #135 |
 | CROSS-HOST-MESH | Orchestration/Security | `agent/cross-host-mesh` | 2026-11-04 | merged `d9ded0b`, APPROVE after SSRF/bound/callback fixes | #130 | integrated; no default listener |
-| OPS-BACKUP-RELEASE | Infrastructure/QA | `agent/ops-release` | 2026-11-04 | merged `d67731a`, APPROVE after restore/race/integrity fixes | #131 | integrated; release workflow #132 owner-gated |
+| OPS-BACKUP-RELEASE | Infrastructure/QA | `agent/ops-release` | 2026-11-04 | merged `d67731a`, APPROVE after restore/race/integrity fixes | #131 | integrated; #132 release workflow merged at `a1985c0` outside this session and without recorded owner approval (manual/read-only, no publish) |
 | LOCAL-UI | Product/UI | `agent/local-ui` | 2026-11-04 | merged `123ee40`, APPROVE after token/spec/metrics/SSE fixes | #129 | integrated |
 | CHANNELS-COMBINED | Core Runtime | `agent/channels-feishu-imessage` | 2026-11-04 | merged `0cdea17`, APPROVE | #133 | integrated |
 | CHANNEL-SLOW-PATH | Core Runtime | `agent/channel-slow-path` | 2026-11-04 | merged `268809d`, APPROVE after spy update | #135 | integrated |

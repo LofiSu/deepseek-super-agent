@@ -1,7 +1,7 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` after PR #138 (`58c410a`); the cycle-9 baseline below is
+> Baseline: `main` after PR #139 (`af6b011`); the cycle-9 baseline below is
 > historical.
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
@@ -20,15 +20,16 @@ requires live evidence, not missing code.
 | Model slow path | done and wired | #128 `788be60`; #135 `268809d`; `Runtime.ingestAsync` in iMessage/Feishu loops |
 | Cross-host mesh | partial (no default listener) | #130 `d9ded0b`; registry/inbox/handler, operator-gated exposure |
 | Local UI | done (loopback, token) | #129 `123ee40`; #136 `1e01862`; sanitized read model, auth, SSE |
-| Backup/restore/release checks | done; release workflow owner-gated | #131 `d67731a`; #132 unmerged |
+| Backup/restore/release checks | done; release workflow on `main` via gate bypass | #131 `d67731a`; #132 merged `a1985c0` without recorded owner approval (manual, `contents: read`, no publish/secrets) |
 | Combined Feishu/iMessage | done | #133 `0cdea17`; one Runtime, independent loops/cursors/outboxes |
 | Live bake-off / real Feishu acceptance | not run | requires operator credentials and authorization |
 
 ### Verification at the checkpoint
 
-- `main` `58c410a`; required check `typecheck and test` green on each merged PR
+- `main` `af6b011`; required check `typecheck and test` green on each merged PR
   head (#129 `ab73604`, #131 `61128d7`, #133 `ffef7d1`, #135 `096e83c`,
-  #136 `740c61c`, #138 `33b0941`).
+  #136 `740c61c`, #138 `33b0941`, #132 `21cc421`, #134 `56cb001`,
+  #139 `50cf9d1`).
 - CI-equivalent offline suite on #135 merged head: 75 files, 724 tests,
   709 passed, 15 skipped, 0 failed.
 - Focused gates: UI 12/12, CLI wiring 4/4, channel slow path 4/4 plus the
@@ -38,8 +39,11 @@ requires live evidence, not missing code.
 
 ### Remaining decisions
 
-1. #132 release workflow: owner approval required; it builds/tests/checks and
-   uploads a tarball with `contents: read`, no publish step or secrets.
+1. #132 release workflow: merged at `a1985c0` by another session despite the
+   owner gate, without recorded owner approval. The content was audited as
+   manual (`workflow_dispatch`), read-only (`contents: read`), no secrets, no
+   publish step. Treat the merge as a documented deviation; publishing remains
+   an owner decision.
 2. Real Feishu acceptance needs `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/chat id and
    an authorized operator; `channels check` is the no-send preflight.
 3. Remote mesh exposure needs an operator-mounted listener, TLS off loopback,
