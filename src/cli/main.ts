@@ -7,6 +7,7 @@ import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
 import { buildSystemPrompt, describePromptLayers, loadPromptFiles } from '../harness/prompts.ts'
+import { LOCAL_AGENTS_FILE, loadLocalAgents } from '../env/local-agents.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import type { A2AEnvelope } from '../channels/a2a.ts'
@@ -145,6 +146,7 @@ function help(): void {
   pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
   pnpm ds-agent prompt [--role router|worker|watchdog] [--layers] [--json]
                             # the layered system prompt and where each layer comes from
+  pnpm ds-agent agents [--json]  # local specialist agents configured for delegation
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -776,6 +778,22 @@ async function main(): Promise<void> {
       return
     }
     console.log(buildSystemPrompt(input))
+    return
+  }
+  if (cmd === 'agents') {
+    const agents = loadLocalAgents(home, process.env)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(agents, null, 2))
+      return
+    }
+    if (!agents.length) {
+      console.log(`no local agents configured (${LOCAL_AGENTS_FILE} or DS_AGENT_LOCAL_AGENTS)`)
+      return
+    }
+    for (const agent of agents) {
+      const description = agent.description ? `  ${agent.description}` : ''
+      console.log(`${agent.id.padEnd(14)}${agent.command}${description}`)
+    }
     return
   }
   throw new Error(`unknown command ${cmd}`)

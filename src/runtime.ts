@@ -21,6 +21,7 @@ import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
 import { loadPromptFiles, type PromptFiles } from './harness/prompts.ts'
+import { LocalAgentRegistry, loadLocalAgents, type LocalAgentSpec } from './env/local-agents.ts'
 import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
@@ -67,6 +68,11 @@ export interface RuntimeOptions {
    * to PERSONA.md / AGENTS.md / USER.md in `home`, then DS_AGENT_* seeds.
    */
   prompts?: PromptFiles
+  /**
+   * Local specialist agents Workers may delegate to. Defaults to
+   * `local-agents.json` in `home`, then `DS_AGENT_LOCAL_AGENTS`.
+   */
+  localAgents?: LocalAgentSpec[]
   /** Local A2A address and mesh node id. Defaults to `DS_AGENT_INSTANCE_ID` or `local`. */
   instanceId?: string
   /** Worker slots this process advertises. Defaults to `DS_AGENT_MESH_CAPACITY` or 4. */
@@ -291,6 +297,8 @@ export class Runtime {
   readonly home: string
   /** Worker-internal Team registry. */
   readonly teams: TeamRegistry
+  /** Owner-configured local specialist agents; absent means delegation is off. */
+  readonly localAgents?: LocalAgentRegistry
   /** Local A2A address and Worker mesh node id. */
   readonly instanceId: string
   readonly routerShards: RouterShardRegistry
@@ -322,6 +330,7 @@ export class Runtime {
     model: Model
     metrics: Metrics
     teams: TeamRegistry
+    localAgents?: LocalAgentRegistry
     instanceId: string
     routerShards: RouterShardRegistry
     workerMesh: WorkerMeshRegistry
@@ -344,6 +353,7 @@ export class Runtime {
     this.model = parts.model
     this.metrics = parts.metrics
     this.teams = parts.teams
+    this.localAgents = parts.localAgents
     this.instanceId = parts.instanceId
     this.routerShards = parts.routerShards
     this.workerMesh = parts.workerMesh
@@ -369,6 +379,16 @@ export class Runtime {
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const now = opts.now ?? (() => new Date().toISOString())
     const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv)
+    const localAgentSpecs = opts.localAgents ?? loadLocalAgents(opts.home, baseEnv)
+    const localAgents = localAgentSpecs.length
+      ? new LocalAgentRegistry(localAgentSpecs, {
+        env: baseEnv,
+        workspace: workerId => env.workspace(workerId),
+      })
+      : undefined
+    if (localAgents) {
+      log.info(`[local-agent] configured agents=${localAgents.list().map(agent => agent.id).join(',')}`)
+    }
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
     const meshCapacity = Number.isSafeInteger(rawCapacity) && rawCapacity > 0 ? rawCapacity : 4
@@ -582,6 +602,7 @@ export class Runtime {
         store.addEvent('watchdog.nudge', { ticketId, sessionId })
       },
       teams,
+      localAgents,
     })
     const harness = new Harness({
       model,
@@ -680,6 +701,7 @@ export class Runtime {
       model,
       metrics,
       teams,
+      ...(localAgents ? { localAgents } : {}),
       instanceId,
       routerShards,
       workerMesh,

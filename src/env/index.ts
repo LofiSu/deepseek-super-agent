@@ -1,5 +1,16 @@
 export { LocalEnv, type LocalEnvOptions } from './local-env.ts'
 export {
+  LocalAgentRegistry,
+  loadLocalAgents,
+  normalizeLocalAgents,
+  LOCAL_AGENTS_FILE,
+  LOCAL_AGENTS_ENV,
+  type LocalAgentInfo,
+  type LocalAgentRegistryOptions,
+  type LocalAgentRunResult,
+  type LocalAgentSpec,
+} from './local-agents.ts'
+export {
   ENV_ALLOWLIST,
   MIN_SECRET_LENGTH,
   allowlistedEnv,
