@@ -35,6 +35,8 @@ describe('router prompt', () => {
     expect(prompt).toContain('direct-chat=true')
     expect(systemPrompt('router')).toContain('direct-chat=true')
     expect(systemPrompt('router')).toContain('reply_user')
+    expect(systemPrompt('router')).toContain('do not tell the other party to stop replying')
+    expect(systemPrompt('router')).toContain('Keep the conversation going')
   })
 
   it('does not mark a GitHub issue as a direct chat', () => {
