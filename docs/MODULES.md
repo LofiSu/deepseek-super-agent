@@ -91,6 +91,16 @@ Restart replay remains a boundary: an in-flight turn is not reconstructed after 
 restart, and unfinished jobs/sessions are not replayed. This is deliberate and
 documented, not hidden behavior.
 
+`prompts.ts` assembles the stable system-prompt stack in dependency order:
+identity, owner persona, standing instructions, owner context, reach, rules,
+memory guidance, style, long tasks, then the role contract. `PERSONA.md`,
+`AGENTS.md`, and `USER.md` in the agent home refine the owner-editable layers;
+`DS_AGENT_PERSONA` / `DS_AGENT_INSTRUCTIONS` / `DS_AGENT_OWNER` seed them when a
+file is absent. Files are capped and never override the rules or the role.
+Turn facts (principal, channel, recalled memory, clock, task) stay in the turn
+prompt so the system prefix remains cacheable. `ds-agent prompt --layers` shows
+the stack and each layer's source; see `docs/PROMPTS.md`.
+
 ## M2 — store
 
 `sqlite.ts` provides atomic document/spill operations, `replaceSpill` upsert,

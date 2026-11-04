@@ -20,6 +20,7 @@ import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
+import { loadPromptFiles, type PromptFiles } from './harness/prompts.ts'
 import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
@@ -61,6 +62,11 @@ export interface RuntimeOptions {
   now?: () => string
   /** Environment for the LocalEnv allowlist, secret redaction, model ids, and instance settings. */
   env?: NodeJS.ProcessEnv
+  /**
+   * Owner-editable persona, standing instructions, and owner context. Defaults
+   * to PERSONA.md / AGENTS.md / USER.md in `home`, then DS_AGENT_* seeds.
+   */
+  prompts?: PromptFiles
   /** Local A2A address and mesh node id. Defaults to `DS_AGENT_INSTANCE_ID` or `local`. */
   instanceId?: string
   /** Worker slots this process advertises. Defaults to `DS_AGENT_MESH_CAPACITY` or 4. */
@@ -362,6 +368,7 @@ export class Runtime {
     const metrics = new Metrics(opts.home)
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const now = opts.now ?? (() => new Date().toISOString())
+    const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv)
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
     const meshCapacity = Number.isSafeInteger(rawCapacity) && rawCapacity > 0 ? rawCapacity : 4
@@ -592,6 +599,7 @@ export class Runtime {
       redact,
       log: line => log.info(line),
       jobDelayMs: opts.jobDelayMs ?? 40,
+      prompts: promptFiles,
       teams,
       takeGuidance: (ticketId, audience) => engine.takeGuidance(ticketId, audience),
       singleSession: opts.singleSession === true,

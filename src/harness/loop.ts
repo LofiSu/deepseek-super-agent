@@ -4,7 +4,7 @@ import type { Metrics } from '../metrics/metrics.ts'
 import { formatRefs } from '../memory/graph.ts'
 import type { ObjectRef, Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
-import { systemPrompt } from './model.ts'
+import { systemPrompt, type PromptFiles } from './prompts.ts'
 import { routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
 import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
@@ -42,6 +42,8 @@ export interface HarnessOptions {
   releaseNode?: (ticketId: string) => void
   /** Cross-ticket recall lines injected into Router and Worker turns. */
   memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string; refs?: ObjectRef[] }[]
+  /** Owner-editable persona, standing instructions, and owner context. */
+  prompts?: PromptFiles
   /**
    * Router-only global memory. Defaults to `memory`; the Runtime narrows this
    * to same-Thread decisions/digests so a lexical query stays in the Worker
@@ -768,6 +770,7 @@ export class Harness {
         redact: this.opts.redact,
         session: { id: sessionId, role, ticketId },
         prompt,
+        prompts: this.opts.prompts,
         pause: () => this.pauseReason(ticketId, prompt),
       })
     } finally {
@@ -794,6 +797,7 @@ export async function runTurn(input: {
   redact: (text: string) => string
   session: { id: string; role: Role; ticketId?: string }
   prompt: string
+  prompts?: PromptFiles
   maxSteps?: number
   /** Return a reason to stop this turn before the next model call or tool call. */
   pause?: () => string | undefined
@@ -810,6 +814,7 @@ async function runTurnBody(input: {
   redact: (text: string) => string
   session: { id: string; role: Role; ticketId?: string }
   prompt: string
+  prompts?: PromptFiles
   maxSteps?: number
   pause?: () => string | undefined
 }): Promise<void> {
@@ -832,7 +837,7 @@ async function runTurnBody(input: {
     content: redact(message.content),
   }))
   const messages: ModelMessage[] = [
-    { role: 'system', content: redact(systemPrompt(input.session.role)) },
+    { role: 'system', content: redact(systemPrompt(input.session.role, input.prompts)) },
     ...prior,
     { role: 'user', content: prompt },
   ]
