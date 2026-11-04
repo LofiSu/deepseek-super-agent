@@ -608,9 +608,37 @@ head so a later reader can separate the reviewed tree from the merged tree.
 - **Merged:** `f8554cc`; CI green on the reviewed head. Zero unresolved
   threads.
 
+## PR #109 — `[SUPER-AGENT][STALE-GATEWAY-TOKEN] Implement ADR-009 stale-empty diagnostics and fail-closed client read`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; head `97fa166`; files `src/gateway/token.ts`,
+  `test/gateway-token.test.ts`, `docs/GATEWAY.md`,
+  `docs/ARCHITECTURE_DECISIONS.md`. Squash-merged as `064ab06`.
+- **Independent review:** **APPROVE**, no blocking findings. `readTokenFile`
+  throws the new internal `GatewayTokenEmptyFileError` (a subclass of
+  `GatewayTokenFileError`) when the file exists but holds only zero-length or
+  whitespace, with a diagnostic that tells the operator to remove it to mint a
+  new token. The `writeTokenFile` EEXIST path re-reads and maps only the empty
+  subclass to `was created concurrently and is empty`, so a genuine race keeps
+  its own message and any other read error propagates. `readGatewayToken` now
+  fails closed on a present empty file, while an absent file still falls back
+  to minting; an explicit `DS_AGENT_GATEWAY_TOKEN` or CLI override still wins
+  and leaves the file alone. Seven regression tests cover both empty shapes,
+  the client fail-closed path via `createModelFromEnv`, a valid-token control,
+  absent-file fallback, explicit-token bypass, override behavior, and the
+  preserved concurrent-race message. The ADR and GATEWAY docs were updated to
+  match; `ensurePrivateMode` still tightens a loose mode to 0600 before the
+  error, as the reviewed ADR states.
+- **Non-blocking observation:** the squash commit subject (`064ab06`) does not
+  carry the `[SUPER-AGENT][STALE-GATEWAY-TOKEN]` prefix present in the PR
+  title. No CI or branch rule enforces the prefix; noted for process hygiene.
+- **Merged:** `064ab06`. CI `typecheck and test` green on the reviewed head
+  (run `41797511158`); zero unresolved threads. Post-merge `main` CI run
+  `41797671287`: 489 passed / 15 skipped (504), 82.80% statements/lines,
+  81.56% branches, 90.98% functions.
+
 ## Pending reviews
 
-- None at this checkpoint. Cycle 7's #105, #106, and #107 are recorded above
-  and merged with green `typecheck and test` and zero unresolved threads. The
-  cycle-7 checkpoint PR is reviewed before merge. The ADR-009 implementation
-  follow-up is a candidate, not an open PR.
+- None. #109 is reviewed and merged. The cycle-8 checkpoint PR is reviewed
+  before merge. SEMANTIC-LTM and the optional `--rotate-token` flag are
+  candidates, not open PRs.
