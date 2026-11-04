@@ -1,14 +1,17 @@
 # Production completion program
 
-> Owner directive, 2026-11-04: finish **all** `PLAN.md` tasks (`[x]`), make the
-> product usable, and reach production readiness. This document turns that
-> directive into ordered workstreams. `PLAN.md` remains the architecture
-> contract; `docs/ROADMAP.md` remains the evidence board; this file is the
-> execution program for the remaining gaps.
+> Owner message, 2026-11-04, quoted verbatim:
 >
-> Baseline: `main` = `af834b7` (2026-11-04). CI on that commit is green.
-> Nothing in this document is a completion claim; each item needs code, tests,
-> independent review, green CI on the exact head, and a merge.
+> > PLAN 全部任务 [x]、产品可用、生产就绪语义长期记忆、UI、跨主机 mesh、网络 A2A + peer auth、模型慢路径、live bake-off 实测、host read isolation 和 store migration；全部完成
+>
+> This document turns that directive into ordered workstreams. `PLAN.md`
+> remains the architecture contract; `docs/ROADMAP.md` remains the evidence
+> board; this file is the execution program for the remaining gaps.
+>
+> Baseline: `main` = `af834b7` (2026-11-04). Post-merge CI run
+> `41801094141` on `af834b7` is green. Nothing in this document is a
+> completion claim; each item needs code, tests, independent review, green CI
+> on the exact head, and a merge.
 
 ## Definition of done
 
@@ -48,7 +51,7 @@ The program is complete only when all of the following hold:
 |---|---|---|---|
 | SEMANTIC-LTM-IMPL | peer agent running (`agent/memory-recall-followup`) | `src/memory/long-term.ts`, memory tests, M6 docs | ADR-010 acceptance: normalization + synonyms + tag-aware one-hop, held-out queries, 1000-entry bound, ACL preserved |
 | MODEL-SLOW-PATH (T17) | design required | `src/ingress/filter.ts`, `src/harness/model.ts`, admission path, tests | model-backed policy with structured output, timeout, deterministic fallback, no silent network in offline CI |
-| LIVE-BAKEOFF (T45) | measurement running | `docs/METRICS.md` or metrics section, no product code | dated local-Magpie run: dual vs single model calls, tickets, wall time; limitations stated |
+| LIVE-BAKEOFF (T45) | measured; evidence in PR #115 | `docs/BAKEOFF.md` (new), no product code | dated local-Magpie run: dual vs single model calls, tickets, wall time; limitations stated |
 
 ### W3 — Product shell (T49)
 
@@ -109,7 +112,7 @@ alone.
 | STORE-MIGRATIONS | pending | — | — | — |
 | HOST-READ-ISOLATION | pending | — | — | — |
 | SEMANTIC-LTM-IMPL | peer-owned | — | — | — |
-| LIVE-BAKEOFF | pending | — | — | local Magpie run 2026-11-04 (record output) |
+| LIVE-BAKEOFF | #115 | — | — | local Magpie run 2026-11-04T08:44Z: dual 11 calls / 38,805 ms vs single 10 calls / 38,684 ms; `wallRatio=1.0031`; full output in `docs/BAKEOFF.md` |
 | MODEL-SLOW-PATH | not started | — | — | — |
 | LIFECYCLE-PERSISTENCE | not started | — | — | — |
 | LOCAL-UI | not started | — | — | — |
