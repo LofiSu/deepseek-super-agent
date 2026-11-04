@@ -34,11 +34,16 @@ function dbPath(home: string): string {
  * A Runtime with no live model, no network, and a long watchdog interval. The
  * tests publish lifecycle events directly; no Engine work is scheduled.
  */
-function openRuntime(home: string, lifecycleMaxEvents?: number): Runtime {
+function openRuntime(
+  home: string,
+  lifecycleMaxEvents?: number,
+  lifecycleRetention?: number,
+): Runtime {
   const runtime = Runtime.create({
     home,
     model: new MockModel(),
     lifecycleMaxEvents,
+    lifecycleRetention,
     jobDelayMs: 0,
     watchdogIntervalMs: 60_000,
     stuckMs: 60_000,
@@ -103,12 +108,16 @@ describe('lifecycle event persistence', () => {
     expect(first.lifecycle.history).toEqual(expectedNewest)
 
     const persistedBeforeClose = lifecycleRows(home)
-    expect(persistedBeforeClose).toHaveLength(6)
+    // The durable log is bounded too: retention defaults to the in-memory cap.
+    expect(persistedBeforeClose).toHaveLength(3)
     expect(persistedBeforeClose.map(row => JSON.parse(row.payload) as { n: number })).toEqual(
-      [1, 2, 3, 4, 5, 6].map(n => ({ n })),
+      [4, 5, 6].map(n => ({ n })),
     )
     expect(persistedBeforeClose.every(row => row.kind === 'notice')).toBe(true)
     expect(persistedBeforeClose.every(row => row.at.length > 0)).toBe(true)
+    expect(persistedBeforeClose.map(row => row.id)).toEqual(
+      [...persistedBeforeClose.map(row => row.id)].sort((left, right) => left - right),
+    )
     closeRuntime(first)
 
     const second = openRuntime(home, 3)
@@ -133,9 +142,66 @@ describe('lifecycle event persistence', () => {
       { kind: 'notice', payload: { n: 6 } },
       { kind: 'notice', payload: { n: 7 } },
     ])
+    // Across three opens and seven publishes the table never exceeds the cap.
     expect(lifecycleRows(home).map(row => JSON.parse(row.payload) as { n: number })).toEqual(
-      [1, 2, 3, 4, 5, 6, 7].map(n => ({ n })),
+      [5, 6, 7].map(n => ({ n })),
     )
+  })
+
+  it('supports a larger durable retention window than the in-memory ring', () => {
+    const home = tempHome()
+    const first = openRuntime(home, 2, 4)
+    for (let n = 1; n <= 6; n += 1) publishNotice(first, n)
+
+    // The panel view stays bounded by maxEvents; the audit log keeps 4.
+    expect(first.lifecycle.history).toEqual([
+      { kind: 'notice', payload: { n: 5 } },
+      { kind: 'notice', payload: { n: 6 } },
+    ])
+    expect(lifecycleRows(home).map(row => JSON.parse(row.payload) as { n: number })).toEqual(
+      [3, 4, 5, 6].map(n => ({ n })),
+    )
+    closeRuntime(first)
+
+    const second = openRuntime(home, 2, 4)
+    expect(second.lifecycle.history).toEqual([
+      { kind: 'notice', payload: { n: 5 } },
+      { kind: 'notice', payload: { n: 6 } },
+    ])
+    publishNotice(second, 7)
+    expect(second.lifecycle.history).toEqual([
+      { kind: 'notice', payload: { n: 6 } },
+      { kind: 'notice', payload: { n: 7 } },
+    ])
+    expect(lifecycleRows(home).map(row => JSON.parse(row.payload) as { n: number })).toEqual(
+      [4, 5, 6, 7].map(n => ({ n })),
+    )
+    closeRuntime(second)
+
+    const third = openRuntime(home, 2, 4)
+    expect(third.lifecycle.history).toEqual([
+      { kind: 'notice', payload: { n: 6 } },
+      { kind: 'notice', payload: { n: 7 } },
+    ])
+    expect(lifecycleRows(home)).toHaveLength(4)
+  })
+
+  it('raises retention below the in-memory cap so replay is never shorter than the ring', () => {
+    const home = tempHome()
+    const first = openRuntime(home, 4, 2)
+    for (let n = 1; n <= 8; n += 1) publishNotice(first, n)
+    closeRuntime(first)
+
+    expect(lifecycleRows(home).map(row => JSON.parse(row.payload) as { n: number })).toEqual(
+      [5, 6, 7, 8].map(n => ({ n })),
+    )
+    const second = openRuntime(home, 4, 2)
+    expect(second.lifecycle.history).toEqual([
+      { kind: 'notice', payload: { n: 5 } },
+      { kind: 'notice', payload: { n: 6 } },
+      { kind: 'notice', payload: { n: 7 } },
+      { kind: 'notice', payload: { n: 8 } },
+    ])
   })
 
   it('round-trips JSON payloads exactly and stores only the published metadata', () => {
@@ -248,6 +314,10 @@ describe('lifecycle event persistence', () => {
       { kind: 'notice', payload: { n: 8 } },
     ])
     expect(new Set(second.lifecycle.history.map(event => JSON.stringify(event))).size).toBe(3)
+    // Startup prunes the oversized durable log to the new retention cap.
+    expect(lifecycleRows(home).map(row => JSON.parse(row.payload) as { n: number })).toEqual(
+      [6, 7, 8].map(n => ({ n })),
+    )
   })
 })
 

@@ -27,7 +27,8 @@ export type LifecyclePersistenceOperation = 'append' | 'recent'
  */
 export class LifecycleBus {
   readonly history: LifecycleEvent[] = []
-  private readonly maxEvents: number
+  /** The ring capacity; also the default persistent-log retention in Runtime. */
+  readonly maxEvents: number
   private readonly listeners = new Map<string, Set<(event: LifecycleEvent) => void>>()
   private persistence: LifecyclePersistence | undefined
   private errorReporter: ((error: unknown, operation: LifecyclePersistenceOperation) => void) | undefined

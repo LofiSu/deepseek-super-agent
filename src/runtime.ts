@@ -1,5 +1,4 @@
 import path from 'node:path'
-import type { DatabaseSync } from 'node:sqlite'
 import type {
   CollaborationView,
   InterveneInput,
@@ -29,7 +28,7 @@ import { inlineOrSpill } from './memory/recall.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
 import { Metrics } from './metrics/metrics.ts'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
-import { LifecycleBus, type LifecyclePersistence } from './core/lifecycle.ts'
+import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
 import { Logger } from './shared/log.ts'
 import type { Disposition, ReceiveResult, Thread, Ticket, Trigger, TriggerTrust } from './shared/types.ts'
@@ -82,6 +81,13 @@ export interface RuntimeOptions {
    * Defaults to 1000 and keeps the newest events.
    */
   lifecycleMaxEvents?: number
+  /**
+   * Durable lifecycle-log retention. Defaults to `lifecycleMaxEvents`; larger
+   * values keep a longer audit history, while smaller values are raised to the
+   * in-memory cap so restart replay can always refill the ring. The oldest
+   * rows are pruned on startup and after every append.
+   */
+  lifecycleRetention?: number
 }
 
 export interface MemoryRetention {
@@ -280,10 +286,23 @@ export class Runtime {
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
     const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
     const lifecycle = new LifecycleBus(opts.lifecycleMaxEvents)
-    // Restart replay: the ring is filled from the newest persisted events
-    // before this Runtime publishes anything new. A broken sink leaves the
-    // in-memory bus fully usable and is reported once.
-    lifecycle.attachSink(sqliteLifecyclePersistence(store), (error, operation) => {
+    const lifecycleRetention = lifecycleRetentionFor(opts.lifecycleRetention, lifecycle.maxEvents)
+    // Restart replay: first bound any existing durable log, then fill the ring
+    // from the newest persisted events before this Runtime publishes anything
+    // new. A broken sink leaves the in-memory bus fully usable and is
+    // reported once by the bus.
+    try {
+      store.pruneLifecycleEvents(lifecycleRetention)
+    } catch (error) {
+      log.info(`[lifecycle] retention prune failed; continuing: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    lifecycle.attachSink({
+      // Lifecycle payloads are existing metadata only; the Store writes the
+      // event as given plus a write-time `at`. Retention keeps the table
+      // bounded after every append.
+      append: event => store.appendLifecycleEvent(event, lifecycleRetention),
+      recent: limit => store.recentLifecycleEvents(limit),
+    }, (error, operation) => {
       log.info(`[lifecycle] persistence ${operation} failed; continuing in memory: ${error instanceof Error ? error.message : String(error)}`)
     })
     lifecycle.hydrateFromSink()
@@ -861,32 +880,15 @@ function a2aTrigger(envelope: A2AEnvelope, store: Store, at: string): Trigger | 
 }
 
 /**
- * Lifecycle persistence shares the Store's SQLite connection: publishes run
- * inside `Store.atomic`, so a second connection would wait on that write
- * transaction. The Store keeps its handle private (and `src/store/sqlite.ts`
- * is outside this task's owned files), so reach it through a narrow cast
- * rather than opening an independent connection.
+ * Durable lifecycle-log retention. The default is the in-memory replay window
+ * so a restart can refill the ring completely. A larger explicit value keeps a
+ * longer audit history without changing the bounded in-memory view; a smaller
+ * value is raised to `maxEvents` for the same reason.
  */
-function sqliteLifecyclePersistence(store: Store): LifecyclePersistence {
-  const db = (store as unknown as { db: DatabaseSync }).db
-  const insert = db.prepare(
-    'INSERT INTO lifecycle_events(at, kind, payload) VALUES(?, ?, ?)',
-  )
-  return {
-    append(event) {
-      // Lifecycle payloads are existing metadata only; do not add message
-      // bodies, tool output, file contents, or credentials here.
-      insert.run(new Date().toISOString(), event.kind, JSON.stringify(event.payload) ?? 'null')
-    },
-    recent(limit) {
-      if (!Number.isSafeInteger(limit) || limit < 1) return []
-      const rows = db.prepare(
-        'SELECT kind, payload FROM lifecycle_events ORDER BY id DESC LIMIT ?',
-      ).all(limit) as { kind: string; payload: string }[]
-      return rows.reverse().map(row => ({
-        kind: row.kind,
-        payload: JSON.parse(row.payload) as unknown,
-      }))
-    },
+function lifecycleRetentionFor(requested: number | undefined, maxEvents: number): number {
+  if (requested === undefined) return maxEvents
+  if (!Number.isSafeInteger(requested) || requested < 1) {
+    throw new Error('lifecycleRetention must be a positive integer')
   }
+  return Math.max(maxEvents, requested)
 }
