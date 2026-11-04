@@ -39,6 +39,9 @@ const DARWIN_READ_PATHS = [
   '/sbin',
   '/Library',
   '/private/etc',
+  // `/etc` is a symlink to `/private/etc`; path resolution through the link
+  // needs its own rule or `cat /etc/hosts` is denied.
+  '/etc',
   '/private/var/db/dyld',
   '/dev',
   '/private/tmp',
@@ -90,6 +93,9 @@ function darwinProfile(policy: SandboxPolicy, execPath: string): string {
     '(allow sysctl-read)',
   ]
   if (policy.readIsolation) {
+    // Path resolution starts at the filesystem root; without this literal rule
+    // macOS aborts even `/bin/echo` under the strict subpath allowlist.
+    lines.push('(allow file-read* (literal "/"))')
     for (const dir of darwinReadPaths(policy, execPath)) {
       lines.push(`(allow file-read* (subpath ${sbplString(dir)}))`)
     }

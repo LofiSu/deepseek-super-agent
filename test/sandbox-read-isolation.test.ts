@@ -1,4 +1,5 @@
 import os from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 import { LocalEnv, type LocalEnvOptions } from '../src/env/local-env.ts'
 import { readIsolationFromEnv, wrapBashCommand, type SandboxPolicy } from '../src/env/seccomp.ts'
@@ -12,6 +13,8 @@ const SYSTEM_PATHS = [
   '/sbin',
   '/Library',
   '/private/etc',
+  // `/etc` is a symlink to `/private/etc` and needs its own read rule.
+  '/etc',
   '/private/var/db/dyld',
   '/dev',
   '/private/tmp',
@@ -49,6 +52,8 @@ describe('strict read isolation (Darwin)', () => {
     })
 
     expect(profile).not.toContain('(allow file-read*)')
+    // The root literal is required for path resolution under strict rules.
+    expect(profile).toContain('(allow file-read* (literal "/"))')
     for (const path of SYSTEM_PATHS) {
       expect(profile).toContain(`(allow file-read* (subpath "${path}"))`)
     }
@@ -81,6 +86,37 @@ describe('strict read isolation (Darwin)', () => {
     const profile = darwinProfile({ enabled: true, readIsolation: true, allowNetwork: true })
     expect(profile).toContain('(allow network*)')
     expect(profile).not.toContain('(deny network*)')
+  })
+})
+
+const REAL_DARWIN_SANDBOX = process.platform === 'darwin'
+  && spawnSync('which', ['sandbox-exec'], { stdio: 'ignore' }).status === 0
+
+/**
+ * Generated-profile assertions cannot catch missing SBPL rules. This test runs
+ * the real macOS sandbox with strict mode and skips where it is unavailable.
+ */
+describe.skipIf(!REAL_DARWIN_SANDBOX)('strict read isolation smoke (macOS)', () => {
+  it('runs a shell, reads /etc/hosts, and denies reads outside the allowlist', async () => {
+    const env = new LocalEnv(tempHome(), {
+      timeoutMs: 15_000,
+      readIsolation: true,
+      env: { PATH: process.env.PATH, HOME: os.homedir() },
+      allowlist: ['PATH', 'HOME'],
+    })
+
+    const allowed = await env.bash(
+      'smoke',
+      'echo shell-ok; cat /etc/hosts >/dev/null && echo hosts-ok',
+    )
+    expect(allowed.code).toBe(0)
+    expect(allowed.stdout).toContain('shell-ok')
+    expect(allowed.stdout).toContain('hosts-ok')
+
+    // The home directory is deliberately outside the strict allowlist.
+    const denied = await env.bash('smoke', 'ls "$HOME"')
+    expect(denied.code).not.toBe(0)
+    expect(denied.stderr).toMatch(/Operation not permitted|Permission denied/)
   })
 })
 
