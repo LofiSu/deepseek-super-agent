@@ -12,8 +12,8 @@ import {
 } from '../src/channels/a2a-auth.ts'
 
 const PEER = 'peer-a'
-const SECRET = 'a2a-test-secret-never-log-me'
-const OTHER_SECRET = 'a2a-other-secret-never-log-me'
+const SECRET = 'a2a-test-secret-never-log-me-0123456789'
+const OTHER_SECRET = 'a2a-other-secret-never-log-me-0123456789'
 const NOW = 1_700_000_000_000
 const NONCE = '0123456789abcdef0123456789abcdef'
 const BODY = JSON.stringify({ from: PEER, to: 'worker-b', body: { text: 'hello' } })
@@ -176,6 +176,26 @@ describe('A2A request verification', () => {
     }).peerId).toBe(PEER)
   })
 
+  it('rejects replay at the exact skew boundary', () => {
+    const cache = createA2AReplayCache()
+    const headers = sign({ timestamp: NOW }).headers
+    const input: A2AVerifyInput = {
+      headers,
+      body: BODY,
+      secret: SECRET,
+      now: NOW,
+      replayCache: cache,
+    }
+    expect(verifyA2ARequest(input).peerId).toBe(PEER)
+
+    // NOW + 60 s is still accepted by the skew check, so the nonce must still
+    // be retained at exactly `timestamp + windowMs` (not pruned early).
+    expectAuthError(
+      () => verifyA2ARequest({ ...input, now: NOW + 60_000 }),
+      'replay',
+    )
+  })
+
   it('does not consume the nonce when the signature fails', () => {
     const cache = createA2AReplayCache()
     const headers = sign().headers
@@ -209,8 +229,27 @@ describe('A2A request verification', () => {
     expect(cache.checkAndAdd(PEER, nonceC, NOW, NOW)).toBe(false)
     expect(cache.size).toBe(2)
 
+    cache.prune(NOW + 60_000)
+    expect(cache.size).toBe(2)
     cache.prune(NOW + 60_001)
     expect(cache.size).toBe(0)
+  })
+
+  it('enforces the nonce length floor and cap', () => {
+    expectAuthError(() => sign({ nonce: 'a'.repeat(31) }), 'malformed_header')
+    expectAuthError(() => sign({ nonce: 'a'.repeat(257) }), 'malformed_header')
+
+    const maxLength = sign({ nonce: 'a'.repeat(256) }).headers
+    expect(verify({ headers: maxLength, replayCache: createA2AReplayCache() }).peerId).toBe(PEER)
+
+    const tooLong = {
+      ...sign().headers,
+      [A2A_AUTH_HEADERS.nonce]: 'a'.repeat(257),
+    }
+    expectAuthError(
+      () => verify({ headers: tooLong, replayCache: createA2AReplayCache() }),
+      'malformed_header',
+    )
   })
 
   it('scopes replay entries by peer', () => {
@@ -225,6 +264,26 @@ describe('A2A request verification', () => {
       secret: SECRET,
       replayCache: cache,
     }).peerId).toBe('peer-b')
+  })
+
+  it('documents multi-node replay scope: shared secrets need a shared cache', () => {
+    const headers = sign().headers
+
+    // Two process-local caches with the same shared secret accept the same
+    // captured request. This is the documented multi-node risk.
+    expect(verify({ headers, replayCache: createA2AReplayCache() }).peerId).toBe(PEER)
+    expect(verify({ headers, replayCache: createA2AReplayCache() }).peerId).toBe(PEER)
+
+    // Sharing one replay cache across verifiers rejects the cross-node replay.
+    const shared = createA2AReplayCache()
+    expect(verify({ headers, replayCache: shared }).peerId).toBe(PEER)
+    expectAuthError(() => verify({ headers, replayCache: shared }), 'replay')
+
+    // A unique per-verifier secret makes the capture unusable elsewhere.
+    expectAuthError(
+      () => verify({ headers, secret: OTHER_SECRET, replayCache: createA2AReplayCache() }),
+      'invalid_signature',
+    )
   })
 
   it('rejects an unknown peer through resolveSecret', () => {
@@ -252,15 +311,21 @@ describe('A2A request verification', () => {
     expect(result.peerId).toBe(PEER)
   })
 
-  it('rejects an empty secret without echoing it', () => {
-    expectAuthError(
-      () => verify({ secret: '' }),
-      'invalid_secret',
-    )
-    expectAuthError(
-      () => sign({ secret: '' }),
-      'invalid_secret',
-    )
+  it('requires a secret of at least 32 bytes', () => {
+    for (const secret of ['', 'x'.repeat(31)]) {
+      expectAuthError(() => verify({ secret }), 'invalid_secret')
+      expectAuthError(() => sign({ secret }), 'invalid_secret')
+    }
+
+    const exactly32 = 'k'.repeat(32)
+    expect(
+      sign({ secret: exactly32 }).headers[A2A_AUTH_HEADERS.signature],
+    ).toMatch(/^[0-9a-f]{64}$/)
+    expect(verify({
+      headers: sign({ secret: exactly32 }).headers,
+      secret: exactly32,
+      replayCache: createA2AReplayCache(),
+    }).peerId).toBe(PEER)
   })
 
   it('never puts the secret or signature in an error message', () => {

@@ -11,6 +11,18 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
  *
  * This module only defines the primitives. It opens no listener and stores no
  * keys; secret distribution and rotation remain an operator concern.
+ *
+ * MULTI-NODE DEPLOYMENT REQUIREMENT
+ * The canonical string is intentionally the protocol's v1 form: it binds the
+ * authenticated peer and the request bytes, but not the target host, path, or
+ * method. The replay cache is process-local. In a mesh that shares one secret
+ * across verifier nodes, a captured request can therefore be replayed to a
+ * different node within the ±60 s window. Operators MUST either (a) give each
+ * verifier node its own unique secret (so a capture for node A fails at node
+ * B), or (b) share one replay-cache instance (or an equivalent durable store)
+ * across every verifier that shares a secret. Do both for defence in depth.
+ * `createA2AHttpHandler({ replayCache })` accepts such a shared cache; the
+ * module-level default cache is only safe for a single verifier process.
  */
 
 export const A2A_AUTH_HEADERS = {
@@ -23,13 +35,19 @@ export const A2A_AUTH_HEADERS = {
 /** Requests whose timestamp is farther than this from the verifier clock fail. */
 export const A2A_AUTH_MAX_SKEW_MS = 60_000
 
+/**
+ * Minimum HMAC key length. Shorter secrets are offline-brute-forceable from a
+ * single captured request, so both signing and verification refuse them.
+ */
+export const A2A_MIN_SECRET_BYTES = 32
+
 /** Default bounded replay cache size. */
 const DEFAULT_REPLAY_CACHE_ENTRIES = 10_000
 
 /** Peer ids are authenticated identities, not display names: no whitespace/control characters. */
 const PEER_ID_PATTERN = /^[^\s\u0000-\u001f\u007f]{1,200}$/u
 const TIMESTAMP_PATTERN = /^\d{1,16}$/u
-const NONCE_PATTERN = /^[0-9a-fA-F]{32,}$/u
+const NONCE_PATTERN = /^[0-9a-fA-F]{32,256}$/u
 const SIGNATURE_PATTERN = /^[0-9a-f]{64}$/u
 
 export type A2AHeaderBag = Record<string, string | readonly string[] | undefined>
@@ -92,6 +110,23 @@ export interface A2AVerifiedRequest {
   peerId: string
 }
 
+/** Header-shape data validated before the request body is read. */
+export interface A2ARequestShape {
+  peerId: string
+  timestamp: number
+  timestampText: string
+  nonce: string
+  signature: string
+}
+
+export interface A2AInspectInput {
+  headers: A2AHeaderBag
+  /** Verifier clock in epoch milliseconds. Defaults to `Date.now()`. */
+  now?: number
+  /** Allowed clock skew. Defaults to `A2A_AUTH_MAX_SKEW_MS`. */
+  maxSkewMs?: number
+}
+
 export interface A2AReplayCacheOptions {
   /** Maximum retained nonces. Oldest insertions are evicted first. */
   maxEntries?: number
@@ -128,7 +163,9 @@ export function createA2AReplayCache(options: A2AReplayCacheOptions = {}): A2ARe
 
   const prune = (now = Date.now()): void => {
     for (const [key, expiresAt] of entries) {
-      if (expiresAt <= now) entries.delete(key)
+      // Retain through the exact boundary: verification accepts a request at
+      // timestamp ± skew, so a nonce must stay remembered at `expiresAt`.
+      if (expiresAt < now) entries.delete(key)
     }
   }
 
@@ -220,16 +257,24 @@ function bytesOf(value: A2ABodyBytes): Buffer {
   throw new A2AAuthError('malformed_header', 'A2A body must be bytes')
 }
 
-function secretBytes(value: A2ASecret): Buffer {
-  const bytes = typeof value === 'string'
-    ? Buffer.from(value, 'utf8')
-    : value instanceof Uint8Array
-      ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-      : undefined
-  if (!bytes || bytes.length === 0) {
-    throw new A2AAuthError('invalid_secret', 'A2A peer secret is not configured')
+/** True for a string/byte secret of at least `A2A_MIN_SECRET_BYTES` UTF-8 bytes. */
+export function isA2ASecret(value: unknown): value is A2ASecret {
+  if (typeof value === 'string') {
+    return Buffer.byteLength(value, 'utf8') >= A2A_MIN_SECRET_BYTES
   }
-  return bytes
+  return value instanceof Uint8Array && value.byteLength >= A2A_MIN_SECRET_BYTES
+}
+
+function secretBytes(value: A2ASecret): Buffer {
+  if (!isA2ASecret(value)) {
+    throw new A2AAuthError(
+      'invalid_secret',
+      `A2A peer secret must be at least ${A2A_MIN_SECRET_BYTES} bytes`,
+    )
+  }
+  return typeof value === 'string'
+    ? Buffer.from(value, 'utf8')
+    : Buffer.from(value.buffer, value.byteOffset, value.byteLength)
 }
 
 function canonicalString(
@@ -278,12 +323,13 @@ export function signA2ARequest(input: A2ASignInput): A2ASignedRequest {
 }
 
 /**
- * Verifies one HTTP A2A request. Checks, in order: peer header shape,
- * timestamp shape and ±60 s skew, nonce shape, signature hex shape, shared
- * secret presence, constant-time HMAC comparison, and nonce replay. Any
- * failure throws `A2AAuthError`.
+ * Validates every authentication property that does not need the request body:
+ * peer header shape, timestamp shape and ±60 s skew, nonce shape/length, and
+ * signature hex shape. The HTTP handler calls this before buffering the body so
+ * malformed or skewed requests cannot consume the 64 KiB cap. Any failure
+ * throws `A2AAuthError`.
  */
-export function verifyA2ARequest(input: A2AVerifyInput): A2AVerifiedRequest {
+export function inspectA2ARequest(input: A2AInspectInput): A2ARequestShape {
   const peerId = peerIdOf(input.headers)
 
   const timestampText = requiredHeader(input.headers, A2A_AUTH_HEADERS.timestamp)
@@ -314,8 +360,25 @@ export function verifyA2ARequest(input: A2AVerifyInput): A2AVerifiedRequest {
     throw new A2AAuthError('timestamp_skew', 'A2A request timestamp outside the allowed window')
   }
 
+  return { peerId, timestamp, timestampText, nonce, signature }
+}
+
+/**
+ * Verifies one HTTP A2A request. Checks, in order: header shape and clock skew
+ * (via `inspectA2ARequest`), shared secret presence/length, constant-time HMAC
+ * comparison, then nonce replay. A failed signature never consumes the nonce.
+ * Any failure throws `A2AAuthError`.
+ */
+export function verifyA2ARequest(input: A2AVerifyInput): A2AVerifiedRequest {
+  const now = input.now ?? Date.now()
+  const shape = inspectA2ARequest({
+    headers: input.headers,
+    now,
+    maxSkewMs: input.maxSkewMs,
+  })
+
   const secret = input.resolveSecret
-    ? input.resolveSecret(peerId)
+    ? input.resolveSecret(shape.peerId)
     : input.secret
   if (secret === undefined) {
     if (input.resolveSecret) {
@@ -324,17 +387,22 @@ export function verifyA2ARequest(input: A2AVerifyInput): A2AVerifiedRequest {
     throw new A2AAuthError('invalid_secret', 'A2A peer secret is not configured')
   }
 
-  const canonical = canonicalString(peerId, timestampText, nonce, bytesOf(input.body))
+  const canonical = canonicalString(
+    shape.peerId,
+    shape.timestampText,
+    shape.nonce,
+    bytesOf(input.body),
+  )
   const expected = Buffer.from(signCanonical(secret, canonical), 'hex')
-  const supplied = Buffer.from(signature, 'hex')
+  const supplied = Buffer.from(shape.signature, 'hex')
   if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
     throw new A2AAuthError('invalid_signature', 'invalid A2A request signature')
   }
 
   const replayCache = input.replayCache ?? defaultReplayCache
-  if (!replayCache.checkAndAdd(peerId, nonce, timestamp, now)) {
+  if (!replayCache.checkAndAdd(shape.peerId, shape.nonce, shape.timestamp, now)) {
     throw new A2AAuthError('replay', 'A2A request nonce was already used')
   }
 
-  return { peerId }
+  return { peerId: shape.peerId }
 }

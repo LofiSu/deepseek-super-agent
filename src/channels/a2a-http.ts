@@ -2,9 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { A2ADelivery, A2AEnvelope, A2ARouter } from './a2a.ts'
 import type { A2ATransport } from './a2a-transport.ts'
 import {
-  A2AAuthError,
   createA2AReplayCache,
-  readA2APeerId,
+  inspectA2ARequest,
+  isA2ASecret,
   signA2ARequest,
   verifyA2ARequest,
   type A2AReplayCache,
@@ -27,11 +27,25 @@ import {
  * - Secrets and signatures are never logged, returned, or placed in errors.
  * - Delivery goes through `A2ARouter.send`; this adapter never builds a
  *   Trigger and never bypasses the ingress boundary.
+ *
+ * MULTI-NODE DEPLOYMENT REQUIREMENT
+ * The signed canonical string binds the peer and body, not the target host,
+ * path, or method, and replay caches are process-local by default. A mesh that
+ * shares one peer secret across verifiers lets a captured request replay to a
+ * different node within ±60 s. Operators MUST use a unique secret per verifier
+ * node and/or pass one shared `replayCache` to every handler that shares a
+ * secret. See `a2a-auth.ts` for the full requirement.
+ *
+ * The outbound transport only accepts `https:` URLs, or `http:` on a loopback
+ * host for local tests/processes. Redirects are refused, and responses must be
+ * JSON within a byte cap before they are trusted.
  */
 
 export const A2A_HTTP_PATH = '/a2a'
 export const A2A_HTTP_MAX_BODY_BYTES = 64 * 1024
-/** Default inbound socket-inactivity and outbound request timeout. */
+/** Outbound delivery responses are JSON and must fit this cap. */
+export const A2A_HTTP_MAX_RESPONSE_BYTES = 128 * 1024
+/** Default inbound absolute/inactivity and outbound request timeout. */
 export const A2A_HTTP_DEFAULT_TIMEOUT_MS = 30_000
 
 const JSON_CONTENT_TYPE = 'application/json'
@@ -52,8 +66,10 @@ export interface A2AHttpHandlerOptions {
   /** Replay cache shared by all requests to this handler. */
   replayCache?: A2AReplayCache
   /**
-   * Inbound socket-inactivity timeout in milliseconds. A stalled request is
-   * destroyed instead of holding a body read open forever. Defaults to 30 s.
+   * Inbound request budget in milliseconds. It is both an absolute deadline
+   * from handler entry and a socket-inactivity timeout. On expiry the request
+   * is destroyed and an in-flight `resolveSecret` is abandoned. Defaults to
+   * 30 s.
    */
   requestTimeoutMs?: number
 }
@@ -83,11 +99,46 @@ class BodyTooLargeError extends Error {
   }
 }
 
+class RequestTimeoutError extends Error {
+  constructor() {
+    super('A2A request timed out')
+    this.name = 'RequestTimeoutError'
+  }
+}
+
+class ResponseTooLargeError extends Error {
+  constructor() {
+    super('A2A response is too large')
+    this.name = 'ResponseTooLargeError'
+  }
+}
+
 function positiveTimeout(value: number | undefined): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return Math.floor(value)
   }
   return A2A_HTTP_DEFAULT_TIMEOUT_MS
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+}
+
+/**
+ * Fail closed on endpoints that cannot protect the peer secret in transit.
+ * Plain HTTP is allowed only to a loopback host (local process/tests).
+ */
+function assertAllowedEndpoint(raw: string): void {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error('A2A HTTP transport requires an absolute URL')
+  }
+  if (url.protocol === 'https:') return
+  if (url.protocol === 'http:' && isLoopbackHost(url.hostname)) return
+  throw new Error('A2A HTTP transport requires https or a loopback http URL')
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -97,6 +148,8 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
     res.writeHead(status, {
       'content-type': JSON_CONTENT_TYPE,
       'content-length': Buffer.byteLength(body, 'utf8'),
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
     })
     res.end(body)
   } catch {
@@ -193,11 +246,30 @@ export function createA2AHttpHandler(options: A2AHttpHandlerOptions): A2AHttpHan
   const requestTimeoutMs = positiveTimeout(options.requestTimeoutMs)
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // A stalled client cannot hold a body read open forever. Once the response
-    // finishes, clear the socket timeout so an idle keep-alive socket is not
-    // destroyed later.
+    // Inactivity guard: a stalled socket is destroyed, and an idle keep-alive
+    // socket is not destroyed after a completed response.
     req.setTimeout(requestTimeoutMs, () => { req.destroy() })
-    res.once('finish', () => { req.setTimeout(0) })
+
+    // Absolute deadline from handler entry. Unlike the inactivity timeout, a
+    // one-byte-per-interval drip cannot extend it. It also bounds a hanging
+    // `resolveSecret`; the request is destroyed when it expires.
+    let rejectDeadline!: (error: Error) => void
+    const deadline = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject
+    })
+    const absoluteTimer = setTimeout(() => {
+      req.destroy()
+      rejectDeadline(new RequestTimeoutError())
+    }, requestTimeoutMs)
+    const clearDeadline = (): void => {
+      clearTimeout(absoluteTimer)
+      req.setTimeout(0)
+    }
+    res.once('finish', clearDeadline)
+    res.once('close', clearDeadline)
+    // Some early-return paths never race this promise; keep its rejection
+    // handled while preserving the same rejected promise for Promise.race.
+    void deadline.catch(() => {})
 
     let pathname: string
     try {
@@ -218,6 +290,36 @@ export function createA2AHttpHandler(options: A2AHttpHandlerOptions): A2AHttpHan
       sendJson(res, 400, { error: 'bad request' })
       return
     }
+    const now = options.now ? options.now() : Date.now()
+
+    // Header/clock shape is checked before any body bytes are buffered, so
+    // malformed, skewed, or unknown peers cannot consume the 64 KiB cap.
+    let shape: ReturnType<typeof inspectA2ARequest>
+    try {
+      shape = inspectA2ARequest({
+        headers: req.headers,
+        now,
+        maxSkewMs: options.maxSkewMs,
+      })
+    } catch {
+      sendJson(res, 401, { error: 'unauthorized' })
+      return
+    }
+    const peerId = shape.peerId
+
+    let secret: A2ASecret | undefined
+    try {
+      const resolving = options.resolveSecret(peerId)
+      secret = await Promise.race([Promise.resolve(resolving), deadline])
+    } catch {
+      sendJson(res, 401, { error: 'unauthorized' })
+      return
+    }
+    if (!isA2ASecret(secret)) {
+      sendJson(res, 401, { error: 'unauthorized' })
+      return
+    }
+
     if (declaredBodyTooLarge(req)) {
       req.resume()
       sendJson(res, 400, { error: 'bad request' })
@@ -226,27 +328,9 @@ export function createA2AHttpHandler(options: A2AHttpHandlerOptions): A2AHttpHan
 
     let raw: Buffer
     try {
-      raw = await readRawBody(req, A2A_HTTP_MAX_BODY_BYTES)
+      raw = await Promise.race([readRawBody(req, A2A_HTTP_MAX_BODY_BYTES), deadline])
     } catch {
       sendJson(res, 400, { error: 'bad request' })
-      return
-    }
-
-    const peerId = readA2APeerId(req.headers)
-    if (!peerId) {
-      sendJson(res, 401, { error: 'unauthorized' })
-      return
-    }
-
-    let secret: A2ASecret | undefined
-    try {
-      secret = await options.resolveSecret(peerId)
-    } catch {
-      sendJson(res, 401, { error: 'unauthorized' })
-      return
-    }
-    if (secret === undefined) {
-      sendJson(res, 401, { error: 'unauthorized' })
       return
     }
 
@@ -255,16 +339,12 @@ export function createA2AHttpHandler(options: A2AHttpHandlerOptions): A2AHttpHan
         headers: req.headers,
         body: raw,
         secret,
-        now: options.now?.(),
+        now,
         maxSkewMs: options.maxSkewMs,
         replayCache,
       })
-    } catch (error) {
+    } catch {
       // Auth failures and resolver misconfiguration all fail closed as 401.
-      if (error instanceof A2AAuthError) {
-        sendJson(res, 401, { error: 'unauthorized' })
-        return
-      }
       sendJson(res, 401, { error: 'unauthorized' })
       return
     }
@@ -333,8 +413,60 @@ function isDelivery(value: unknown): value is A2ADelivery {
   if (value.status !== 'delivered' && value.status !== 'unroutable' && value.status !== 'failed') {
     return false
   }
-  if (typeof value.delivered !== 'number' || typeof value.persisted !== 'boolean') return false
-  return isRecord(value.envelope)
+  if (typeof value.delivered !== 'number'
+    || !Number.isInteger(value.delivered)
+    || value.delivered < 0) {
+    return false
+  }
+  if (typeof value.persisted !== 'boolean') return false
+  if (value.error !== undefined && typeof value.error !== 'string') return false
+  const envelope = value.envelope
+  if (!isRecord(envelope)) return false
+  if (typeof envelope.from !== 'string' || envelope.from.length === 0) return false
+  if (typeof envelope.to !== 'string' || envelope.to.length === 0) return false
+  if (!hasOwn(envelope, 'body')) return false
+  return true
+}
+
+function deliveryMatchesRequest(delivery: A2ADelivery, envelope: A2AEnvelope): boolean {
+  return delivery.envelope.from === envelope.from && delivery.envelope.to === envelope.to
+}
+
+async function readResponseBytes(
+  response: Awaited<ReturnType<typeof globalThis.fetch>>,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength > maxBytes) throw new ResponseTooLargeError()
+    return bytes
+  }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      size += value.byteLength
+      if (size > maxBytes) throw new ResponseTooLargeError()
+      chunks.push(value)
+    }
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // A cancelled/errored stream may already be released.
+    }
+  }
+  const merged = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
 }
 
 function failedDelivery(envelope: A2AEnvelope, error: string): A2ADelivery {
@@ -354,6 +486,9 @@ export class A2AHttpTransport implements A2ATransport {
   private readonly timeoutMs: number
 
   constructor(options: A2AHttpTransportOptions) {
+    // Fail closed unless the peer secret is protected in transit. Plain HTTP
+    // is only permitted for loopback local processes and tests.
+    assertAllowedEndpoint(options.url)
     this.url = options.url
     this.peerId = options.peerId
     this.secret = options.secret
@@ -394,11 +529,12 @@ export class A2AHttpTransport implements A2ATransport {
       timer = setTimeout(() => {
         timedOut = true
         controller.abort()
-        reject(new Error('A2A request timed out'))
+        reject(new RequestTimeoutError())
       }, this.timeoutMs)
     })
 
-    let response: Awaited<ReturnType<typeof globalThis.fetch>>
+    let response: Awaited<ReturnType<typeof globalThis.fetch>> | undefined
+    let parsed: unknown
     try {
       response = await Promise.race([
         this.fetchImpl(this.url, {
@@ -409,25 +545,60 @@ export class A2AHttpTransport implements A2ATransport {
           },
           body: payload,
           signal: controller.signal,
+          // A redirect could silently move the signed request to an
+          // untrusted endpoint; refuse instead of following it.
+          redirect: 'error',
         }),
         deadline,
       ])
-    } catch {
+
+      const mediaType = (response.headers.get('content-type') ?? '')
+        .split(';', 1)[0]!
+        .trim()
+        .toLowerCase()
+      if (mediaType !== JSON_CONTENT_TYPE) {
+        return failedDelivery(envelope, 'A2A response was not JSON')
+      }
+
+      // Keep the timer and abort signal alive through the body read. A peer
+      // can send headers and then stall the JSON payload forever.
+      const bytes = await Promise.race([
+        readResponseBytes(response, A2A_HTTP_MAX_RESPONSE_BYTES),
+        deadline,
+      ])
+      try {
+        parsed = JSON.parse(Buffer.from(bytes).toString('utf8'))
+      } catch {
+        return failedDelivery(envelope, 'A2A response was invalid')
+      }
+    } catch (error) {
+      if (error instanceof ResponseTooLargeError) {
+        return failedDelivery(envelope, 'A2A response was too large')
+      }
       return failedDelivery(
         envelope,
         timedOut ? 'A2A request timed out' : 'A2A request failed',
       )
     } finally {
+      controller.abort()
       if (timer !== undefined) clearTimeout(timer)
     }
+    if (!response) return failedDelivery(envelope, 'A2A response was invalid')
 
-    let result: unknown
-    try {
-      result = await response.json()
-    } catch {
-      result = undefined
+    // Trust a response only when both the HTTP status and the validated
+    // delivery agree, and when its envelope matches what this transport sent.
+    if (response.status === 200
+      && isDelivery(parsed)
+      && parsed.status === 'delivered'
+      && deliveryMatchesRequest(parsed, envelope)) {
+      return parsed
     }
-    if (isDelivery(result)) return result
+    if (response.status === 404
+      && isDelivery(parsed)
+      && parsed.status === 'unroutable'
+      && deliveryMatchesRequest(parsed, envelope)) {
+      return parsed
+    }
     if (!response.ok) {
       return failedDelivery(envelope, `A2A request failed with status ${response.status}`)
     }
