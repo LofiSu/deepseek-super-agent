@@ -216,7 +216,9 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[feishu] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
-            runtime.ingest(trigger)
+            // The opt-in model Slow Path lives behind ingestAsync; rules mode
+            // stays exactly the sync path, so this is a no-op by default.
+            await runtime.ingestAsync(trigger)
           } catch (error) {
             log(`[feishu] ingest failed ${messageOf(error)}`)
           }
