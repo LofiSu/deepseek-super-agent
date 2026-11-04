@@ -301,6 +301,39 @@ describe('lifecycle event persistence', () => {
     expect(reported).toEqual(['recent'])
   })
 
+  it('a throwing persistence-error reporter cannot escape publish or hydration', () => {
+    const bus = new LifecycleBus(10, {
+      append: () => {
+        throw new Error('injected sink failure')
+      },
+      recent: () => {
+        throw new Error('injected recent failure')
+      },
+    }, () => {
+      throw new Error('injected reporter failure')
+    })
+
+    const received: LifecycleEvent[] = []
+    bus.subscribe('notice', event => received.push(event))
+
+    const event = { kind: 'notice', payload: { n: 1 } }
+    expect(bus.publish(event)).toBe(event)
+    // Report failure before listeners; the reporter exception must not skip them.
+    expect(received).toEqual([event])
+    expect(bus.history).toEqual([event])
+
+    const hydrated = new LifecycleBus(10, {
+      append: () => undefined,
+      recent: () => {
+        throw new Error('injected recent failure')
+      },
+    }, () => {
+      throw new Error('injected reporter failure')
+    })
+    expect(hydrated.hydrateFromSink()).toBe(false)
+    expect(hydrated.history).toEqual([])
+  })
+
   it('hydrates only maxEvents from a large persisted log', () => {
     const home = tempHome()
     const first = openRuntime(home, 1000)

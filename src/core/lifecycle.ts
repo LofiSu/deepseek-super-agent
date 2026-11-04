@@ -123,6 +123,11 @@ export class LifecycleBus {
   private reportPersistenceFailure(error: unknown, operation: LifecyclePersistenceOperation): void {
     if (this.persistenceErrorReported) return
     this.persistenceErrorReported = true
-    this.errorReporter?.(error, operation)
+    try {
+      this.errorReporter?.(error, operation)
+    } catch {
+      // Reporting is best-effort too: a broken reporter must not turn a
+      // contained persistence failure into a publish/hydration failure.
+    }
   }
 }
