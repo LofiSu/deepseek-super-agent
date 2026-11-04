@@ -42,6 +42,7 @@ describe('router prompt', () => {
     expect(systemPrompt('router')).toContain('Keep the conversation going')
     expect(systemPrompt('router')).toContain('Be proactive')
     expect(systemPrompt('router')).toContain('their preference wins')
+    expect(systemPrompt('router')).toContain('short quote')
   })
 
   it('does not mark a GitHub issue as a direct chat', () => {
