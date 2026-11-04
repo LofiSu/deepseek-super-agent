@@ -157,6 +157,19 @@ function seed(store: Store, metrics: Metrics): void {
     meta: {},
   }
   store.putDoc('thread', thread.key, thread)
+  // Production creates a real subscription row for a speculative ticket at
+  // ticket creation, before the delivery gate. The read model must not expose
+  // its id or thread key just because those rows exist.
+  store.addSubscription(SPEC_THREAD, 'tkt_ui_spec', now)
+  store.putDoc('thread', SPEC_THREAD, {
+    key: SPEC_THREAD,
+    ref: { source: 'im', id: 'spec-secret-thread' },
+    createdAt: now,
+    subscriptions: ['tkt_ui_spec'],
+    correlated: [],
+    pending: [],
+    meta: {},
+  } satisfies Thread)
   store.enqueueOutbox({
     id: 'out_ui_1',
     replyId: 'reply_ui_1',

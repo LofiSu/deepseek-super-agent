@@ -173,7 +173,10 @@ export function buildSnapshot(
 
   // Threads live in two places: a persisted Thread document (pending/correlated
   // state) and the subscription table. Show the union so a subscription seeded
-  // by the Engine is visible even before a Thread document exists.
+  // by the Engine is visible even before a Thread document exists. Only IDs of
+  // visible tickets may appear: a speculative ticket is written with a real
+  // subscription row before the delivery gate, so an unfiltered union would
+  // leak its id (and a spec-only thread key) even though `tickets` hides it.
   const threadDocs = new Map<string, Thread>()
   for (const thread of store.listDocs<Thread>('thread')) threadDocs.set(thread.key, thread)
   const subscribed = new Map<string, Set<string>>()
@@ -185,11 +188,25 @@ export function buildSnapshot(
     }
     ticketIds.add(row.ticketId)
   }
-  const threadKeys = new Set<string>([...threadDocs.keys(), ...subscribed.keys()])
+  const threadKeys = new Set<string>()
+  for (const ticket of visibleTickets) {
+    for (const key of ticket.threadKeys) threadKeys.add(key)
+  }
+  for (const [key, ticketIds] of subscribed) {
+    if ([...ticketIds].some(ticketId => visibleTicketIds.has(ticketId))) threadKeys.add(key)
+  }
+  for (const [key, thread] of threadDocs) {
+    // Pending/deferred eval work is inbound state, not a hidden ticket.
+    if ((thread.pending?.length ?? 0) > 0 || thread.deferred === true) threadKeys.add(key)
+  }
   const threads = [...threadKeys].sort().map(key => {
     const thread = threadDocs.get(key)
-    const subscriptions = new Set<string>(thread?.subscriptions ?? [])
-    for (const ticketId of subscribed.get(key) ?? []) subscriptions.add(ticketId)
+    const subscriptions = new Set<string>(
+      (thread?.subscriptions ?? []).filter(ticketId => visibleTicketIds.has(ticketId)),
+    )
+    for (const ticketId of subscribed.get(key) ?? []) {
+      if (visibleTicketIds.has(ticketId)) subscriptions.add(ticketId)
+    }
     const view: SnapshotThread = {
       key,
       subscriptions: [...subscriptions].sort(),
