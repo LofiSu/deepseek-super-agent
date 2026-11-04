@@ -202,7 +202,8 @@ rewrite `PLAN.md`; link to the contract instead.
   (`src/gateway/token.ts:140-146`). Both `ds-agent gateway`
   (`src/cli/gateway.ts:42-43`) and the embedded gateway
   (`src/gateway/embedded.ts:26`) call this before binding a port, so startup
-  aborts and the file is left byte-for-byte and inode-for-inode untouched. A
+  aborts and the file's content and inode are left unchanged. On POSIX the
+  existing mode check may first tighten a loosened mode to `0600`. A
   zero-length file and a whitespace-only file behave identically.
   `startGatewayServer` has a second empty-token guard
   (`src/gateway/server.ts:250-251`), but the file path normally throws earlier.
@@ -224,8 +225,13 @@ rewrite `PLAN.md`; link to the contract instead.
   four.
 - **Decision:** keep fail-closed and never recover automatically. An existing
   zero-length or whitespace-only token file must abort startup with a
-  `GatewayTokenFileError`; the process must not delete, rename, truncate,
-  chmod, or overwrite it, and must not mint a token. Recovery is an explicit
+  `GatewayTokenFileError`; the process must not delete, rename, truncate, or
+  overwrite it, must leave its content and inode unchanged, and must not mint a
+  token. The existing `ensurePrivateMode` check
+  (`src/gateway/token.ts:57-67,99`) may tighten a loosened mode to `0600` on
+  POSIX before the empty result is rejected; that is the standing security
+  invariant, not recovery, and the failing path must never loosen the mode or
+  use the empty content. Recovery is an explicit
   operator action: stop gateway/agent processes, inspect the file (regular file,
   `nlink == 1`, owned by the intended user, mode `0600`, parent directory not
   group/world-writable), decide whether the empty state is expected (crash) or
@@ -240,10 +246,11 @@ rewrite `PLAN.md`; link to the contract instead.
   scripted as an unconditional "if empty, delete".
 - **Failure behavior:** any empty token file (zero-length or whitespace-only)
   fails startup with a diagnostic that names the path and the stale-empty
-  condition; the file and its metadata remain unchanged; no token is returned;
-  no port is bound. An explicit token still works because it bypasses the file
-  (`src/gateway/token.ts:162-163`), but it is not persisted and every client
-  must be configured with it.
+  condition; content and inode remain unchanged, and on POSIX a loosened mode is
+  tightened to `0600` by the existing check (it is never loosened); no token is
+  returned; no port is bound. An explicit token still works because it bypasses
+  the file (`src/gateway/token.ts:162-163`), but it is not persisted and every
+  client must be configured with it.
 - **Follow-up implementation (not in this docs PR; scope
   `src/gateway/token.ts` + tests):**
   1. Distinguish "absent" from "present but empty" inside `readTokenFile`
@@ -261,11 +268,12 @@ rewrite `PLAN.md`; link to the contract instead.
      considered too breaking, record the fallback as an explicit residual
      instead.
   4. Tests: zero-length and whitespace-only fixtures in
-     `test/gateway-token.test.ts`, asserting the distinct error, no
-     content/inode/mode change, no new token, and fail-closed behavior on the
-     client read; keep the existing concurrent-create test
-     (`test/gateway-token.test.ts:29-41`). Cover the explicit-override bypass
-     and a valid-token control.
+     `test/gateway-token.test.ts`, asserting the distinct error, unchanged
+     content and inode, and a mode that is exactly `0600` after the check on
+     POSIX (never looser; skip the mode assertion on win32), no new token, and
+     fail-closed behavior on the client read; keep the existing
+     concurrent-create test (`test/gateway-token.test.ts:29-41`). Cover the
+     explicit-override bypass and a valid-token control.
   5. Do not add automatic regeneration, rename-aside, or in-place overwrite in
      this follow-up. An explicit `--rotate-token` flag is a possible later
      ergonomic addition (it would touch `src/cli/gateway.ts`), but only as an
@@ -283,8 +291,8 @@ rewrite `PLAN.md`; link to the contract instead.
   - **Quarantine the empty file (rename aside) and fail.** This preserves
     evidence but still mutates the live path, has the same concurrent-create
     race, implicitly gives the next start a fresh token (a two-restart silent
-    recovery), and makes operator reasoning harder. An untouched file plus an
-    explicit removal is safer.
+    recovery), and makes operator reasoning harder. Leaving content and inode
+    untouched, then requiring an explicit removal, is safer.
   - **An explicit operator rotate/reset flag as the primary policy.** The
     intent is correct, but it is not needed to recover today (manual removal is
     already explicit) and would add CLI surface and persistence semantics.

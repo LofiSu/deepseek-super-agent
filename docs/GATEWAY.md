@@ -182,8 +182,11 @@ process still writing the file, or an attacker truncating it. Overwriting it
 would erase evidence, could destroy a concurrent creator's token, and would
 mint a valid-looking credential in place of a tamper signal
 (`src/gateway/token.ts:110-116,140-146`). The file is not deleted, renamed,
-truncated, or recreated. The server's empty-token guard
-(`src/gateway/server.ts:250-251`) is a second line of defense.
+truncated, or recreated, and its content and inode stay unchanged. The existing
+mode check may tighten a loosened file to `0600` on POSIX before the empty
+result is rejected; that is the standing security invariant, not recovery. The
+server's empty-token guard (`src/gateway/server.ts:250-251`) is a second line of
+defense.
 
 The client read path also sees no token. An agent started with
 `DS_AGENT_GATEWAY_URL` set can therefore fall back silently to another model
