@@ -55,6 +55,22 @@ export function normalizeQueueLimit(value: number | undefined): number {
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
+export function routerPromptFor(ticket: Ticket): string {
+  const mode = ticket.speculative ? 'speculative' : 'normal'
+  return [
+    ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
+    `ticketId=${ticket.id}`,
+    `triggerId=${ticket.originTriggerId}`,
+    `title=${ticket.title}`,
+    `mode=${mode}`,
+    'decision=accepted-by-gate',
+    // A direct iMessage is a conversation, not a thread ticket: the Router may
+    // answer it briefly instead of leaving a vetoed message unanswered.
+    ...(ticket.channels.some(channel => channel.source === 'imessage') ? ['direct-chat=true'] : []),
+    'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
+  ].join('\n')
+}
+
 export class Harness {
   private readonly chains = new Map<string, Promise<void>>()
   private inflight: Promise<void>[] = []
@@ -106,16 +122,7 @@ export class Harness {
       this.opts.log(`[harness] parallel workers=${this.running.size} sessions=${[...this.running].join(',')}`)
     }
     if (!ticket.assignments.at(-1)) throw new Error(`ticket ${ticket.id} has no assignment`)
-    const mode = ticket.speculative ? 'speculative' : 'normal'
-    const routerPrompt = [
-      ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
-      `ticketId=${ticket.id}`,
-      `triggerId=${ticket.originTriggerId}`,
-      `title=${ticket.title}`,
-      `mode=${mode}`,
-      'decision=accepted-by-gate',
-      'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
-    ].join('\n')
+    const routerPrompt = routerPromptFor(ticket)
     // Sequence point (T06/T08): Router turn(s) complete first. A Router veto
     // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
     // Capacity is picked after the Routers so a veto never consumes a slot.
