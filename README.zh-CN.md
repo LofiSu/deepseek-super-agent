@@ -55,10 +55,11 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Trigger 批处理（拥堵时合并进下一轮）** — `batchWindowMs > 0` 时同 Thread 合并；由 `test/batching-bench.test.ts` 覆盖。真实信道 demo 用默认窗口 0，不验证合并
 - [~] **Router 水平切分 / 多层过滤** — `RouterShardRegistry` 常驻 Runtime（PLAN T09/T46）；用 `DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
-- [x] **分层 Prompt Stack** — 身份、主人声音、常驻指令、主人资料、团队、渠道、规则、记忆指引、表达风格、角色契约按依赖顺序装配；`PERSONA.md`、`AGENTS.md`、`USER.md` 由主人编辑，团队层只列已配置的本地专家；`ds-agent prompt --layers` 查看每层及来源。详见 [docs/PROMPTS.md](./docs/PROMPTS.md)
+- [x] **分层 Prompt Stack** — 身份、主人声音、常驻指令、主人资料、团队、技能、渠道、规则、记忆指引、表达风格、角色契约按依赖顺序装配；`PERSONA.md`、`AGENTS.md`、`USER.md` 由主人编辑，团队层只列已配置的本地专家；`ds-agent prompt --layers` 查看每层及来源。详见 [docs/PROMPTS.md](./docs/PROMPTS.md)
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
 - [x] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team`/`team_status`/`complete_team` → member job → `TEAM_MEMBER_DONE` → 汇总报告；team 行持久化到 SQLite，`ds-agent team`/`teams` 可离线查看。Router 只见父 Assignment 报告（T14；unit + harness + live e2e）
+- [x] **主人编写的技能** — 在 agent home 的 `skills/<id>/SKILL.md` 添加一份操作手册，无需改代码。Prompt 只带 id 和一行描述（上限 2000 字符），`read_skill` 按需加载正文；技能不能授予工具或扩大角色权限。`ds-agent skills` 查看索引。详见 [docs/SKILLS.md](./docs/SKILLS.md)
 - [x] **Worker 调用本地专家 Agent** — 主人配置后，Worker 可用 `delegate_agent` 让本机 CLI Agent（Claude Code、Codex、OpenCode、Hermes 或自定义）执行一个自包含任务。不经过 shell，cwd 为 Worker 工作区，超时/输出有界，环境变量走白名单；`ds-agent agents` 查看配置。详见 [docs/LOCAL_AGENTS.md](./docs/LOCAL_AGENTS.md)
 - [x] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；`LifecycleBus` 常驻提供读取模型，`ds-agent ui` 提供只读、必需 token 的 loopback 面板（T15/T49）
 

@@ -19,7 +19,7 @@ that make a personal agent worth talking to and worth delegating work to.
 | **Local specialist agents** | Skills and subagents; MCP tools | Subagents and tools | Skills, routines, integrations | `delegate_agent` to owner-configured local CLIs; Workers only; no shell; bounded | **Newly at parity**, with a narrower trust surface than Muse/Instinct connectors |
 | **Subagents / team** | Subagent prompts get the shared frame plus a role | Subagents | Routines and skills | Router/Worker split, Worker-internal teams, persisted jobs, aggregate report | **Parity** for execution topology |
 | **Memory** | `MEMORY.md` + daily journal; bounded digest every turn | `MEMORY.md` + memory search/explain tools; strict write rules | Bot memory | Typed refs, `read_object` chain of recall, lexical recall, hot/cold retention, cold Thread digests, per-hop ACL | **Ahead on safety and provenance**, **behind on semantic recall and an owner-editable daily journal** |
-| **Skills** | `skills/` with `SKILL.md`; loaded on demand | Tools and workspace files | Skills | None; tools only | **Missing** |
+| **Skills** | `skills/` with `SKILL.md`; loaded on demand | Tools and workspace files | Skills | `skills/<id>/SKILL.md` index in the prompt; `read_skill` loads the body | **Parity on the core loop**; no bundled starter set yet |
 | **Proactivity / routines** | Scheduled etiquette and routines | `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, scheduling | Routines | Watchdog timer and speculative assignments; no owner-defined recurring routines | **Partial**; the proactive loop exists, the owner-facing scheduler does not |
 | **Channels** | Texting, email, A2A, chat | App / channel surfaces | Bot connectors | CLI, iMessage, Feishu, GitHub, A2A, OpenAI-compatible gateway, loopback UI | **Ahead in one runtime**, **behind on email, browser, calendar, payments** |
 | **Approvals** | Dedicated approvals layer | Safety policy | Approval before send, publish, delete, spend | Prompt boundary plus Engine pause/intervene/resume; no interactive approval card or token | **Partial**; the state machine exists, the owner-facing approval flow does not |
@@ -53,10 +53,11 @@ implementation.
 
 ## Where the gap is real
 
-1. **Skills.** Instinct and Muse let the owner add a capability as a file, not a
-   code change. ds-agent only has built-in tools. A skill loader is the highest
-   leverage next step: `skills/<id>/SKILL.md`, a bounded index layer, a
-   `read_skill` tool, and no execution beyond the tools already granted.
+1. **Skills.** The core loop now exists: an owner adds
+   `skills/<id>/SKILL.md`, the prompt carries a bounded index, and `read_skill`
+   loads the body. What is still missing is a bundled starter set, an
+   owner-facing editor, and any way for a skill to declare which existing tool
+   it expects. A skill still cannot grant a tool.
 2. **Owner-defined routines.** The daemon can watch and speculate, but the owner
    cannot say "every weekday at 8, check the deploy and tell me only if it is
    red." This is Muse's `HEARTBEAT.md` and Grok Bot's routines.
@@ -80,7 +81,7 @@ implementation.
 
 | Priority | Work | Acceptance evidence |
 |---|---|---|
-| P0 | Skills loader and `read_skill` | Offline tests for index injection, size caps, path traversal, role guard; `ds-agent skills`; docs |
+| ~~P0~~ | ~~Skills loader and `read_skill`~~ — shipped in #149 | ✅ index injection, size caps, symlink/path rejection, role guards, `ds-agent skills`, docs |
 | P0 | Owner-defined routines / heartbeat | Persisted schedule rows, fake-clock daemon tests, owner-only creation, no outward action without approval |
 | P1 | Interactive approval flow | Worker requests approval, ticket pauses, Router asks, owner approves/denies, resume is audited |
 | P1 | Semantic memory behind `EmbeddingPort` | Deterministic mock, hybrid ranking, recall eval stays green, no CI provider call |

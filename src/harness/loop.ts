@@ -4,6 +4,7 @@ import type { Metrics } from '../metrics/metrics.ts'
 import { formatRefs } from '../memory/graph.ts'
 import type { ObjectRef, Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
+import type { SkillInfo } from '../env/skills.ts'
 import { systemPrompt, type PromptFiles } from './prompts.ts'
 import type { LocalAgentInfo } from '../env/local-agents.ts'
 import { routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
@@ -47,6 +48,8 @@ export interface HarnessOptions {
   prompts?: PromptFiles
   /** Configured local specialists, by id and description only. */
   localAgents?: readonly LocalAgentInfo[]
+  /** Owner-authored playbooks, by id and description only. */
+  skills?: readonly SkillInfo[]
   /**
    * Router-only global memory. Defaults to `memory`; the Runtime narrows this
    * to same-Thread decisions/digests so a lexical query stays in the Worker
@@ -783,6 +786,7 @@ export class Harness {
         prompt,
         prompts: this.opts.prompts,
         localAgents: this.opts.localAgents,
+        skills: this.opts.skills,
         pause: () => this.pauseReason(ticketId, prompt),
       })
     } finally {
@@ -811,6 +815,7 @@ export async function runTurn(input: {
   prompt: string
   prompts?: PromptFiles
   localAgents?: readonly LocalAgentInfo[]
+  skills?: readonly SkillInfo[]
   maxSteps?: number
   /** Return a reason to stop this turn before the next model call or tool call. */
   pause?: () => string | undefined
@@ -829,6 +834,7 @@ async function runTurnBody(input: {
   prompt: string
   prompts?: PromptFiles
   localAgents?: readonly LocalAgentInfo[]
+  skills?: readonly SkillInfo[]
   maxSteps?: number
   pause?: () => string | undefined
 }): Promise<void> {
@@ -851,7 +857,7 @@ async function runTurnBody(input: {
     content: redact(message.content),
   }))
   const messages: ModelMessage[] = [
-    { role: 'system', content: redact(systemPrompt(input.session.role, input.prompts, input.localAgents)) },
+    { role: 'system', content: redact(systemPrompt(input.session.role, input.prompts, input.localAgents, input.skills)) },
     ...prior,
     { role: 'user', content: prompt },
   ]
