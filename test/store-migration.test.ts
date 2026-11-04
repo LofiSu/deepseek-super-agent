@@ -267,7 +267,9 @@ CREATE TABLE documents (
 
     const failing: StoreMigration = {
       version: LATEST_SCHEMA_VERSION + 1,
-      up: () => {
+      up: db => {
+        db.exec('CREATE TABLE migration_side_effect (id INTEGER PRIMARY KEY)')
+        db.prepare('INSERT INTO migration_side_effect(id) VALUES(1)').run()
         throw new Error('injected migration failure')
       },
     }
@@ -280,6 +282,7 @@ CREATE TABLE documents (
     }
 
     expect(migrationRows(home)).toEqual(rowsBefore)
+    expect(tableNames(home)).not.toContain('migration_side_effect')
     expect(rawDocument(home, 'note', 'doc_1')).toBe(documentBefore)
     expect(rawSpill(home, 'spill_1')).toBe(spillBefore)
 
