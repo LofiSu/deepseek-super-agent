@@ -95,6 +95,62 @@ Outbound: `FeishuOutboxAdapter` replies in-thread with
 `/open-apis/im/v1/messages/:message_id/reply` when the source message is known,
 otherwise sends to the chat with `/open-apis/im/v1/messages`.
 
+### Inbound poll loop from `serve --feishu`
+
+`ds-agent serve --feishu` runs an inbound Feishu poll loop alongside the daemon
+timer. The loop lives in `src/cli/feishu.ts` and mirrors `src/cli/channel-loop.ts`
+(the shared iMessage loop): pull, ingest, persist the cursor, await
+`jobsSettled()`, flush the durable outbox, then sleep abortably between polls.
+
+Requirements, validated before `Runtime.create` and before any network call:
+
+| Input | Meaning |
+|-------|---------|
+| `FEISHU_APP_ID` + `FEISHU_APP_SECRET` | Required together by `feishuConfigFromEnv`; missing/half-set refuses to start |
+| `--chat <oc_...>` or `FEISHU_CHAT_ID` | Required poll target; `--chat` wins |
+| `--interval <ms>` or `FEISHU_INTERVAL_MS` | Poll interval, clamped to at least 1000ms (default 2000ms) |
+| `--since <epoch-ms>` or `FEISHU_SINCE` | Optional one-run seed, in milliseconds matching Feishu `create_time` |
+| `--once` | One poll then return (smoke/testing) |
+
+A missing credential or chat id throws before SQLite is opened, so the daemon
+state directory is not created. `--imessage` and `--feishu` cannot be combined;
+`serve` rejects the pair before `Runtime.create` rather than running two inbound
+loops in one process. Default `serve` (no flag) is unchanged.
+
+**Cursor semantics.** The loop stores one document, `feishu_cursor/cursor`, as
+`{ chatId, lastCreateTimeMs }`, where `lastCreateTimeMs` is the highest message
+`create_time` observed by `FeishuSource`. Seed precedence is: explicit
+`--since`/`FEISHU_SINCE` (positive finite ms) > stored cursor for this chat >
+`FeishuSource` default `now - 5 minutes`. The cursor is written only after a
+successful pull and ingest, and only when it advances. On restart the stored
+value is passed back to `FeishuSource`, so the previous window is not replayed.
+`FeishuSource` queries one second before the cursor to catch messages sharing a
+boundary second; any overlap is deduped by Trigger id (`feishu_<message_id>`) in
+`Runtime.ingest`, so a message already processed is never processed twice. A
+stored cursor whose `chatId` differs from the current chat is ignored.
+
+**Admission semantics.** The loop calls `runtime.ingest(trigger)` with the
+Trigger returned by `feishuTriggerFromMessage`; it does not mark anything
+`direct` and does not bypass the ingress filter. That mapper sets
+`channel.address.group = message.chat_id`, so `DS_AGENT_GROUP_ALLOWLIST=<chat id>`
+admits or denies the chat in `src/ingress/filter.ts`. It sets
+`addressed='mention'` only when the text or mentions actually name the bot;
+otherwise `addressed` is unset and normal keyword/observed admission applies.
+`trigger.meta` carries provider ids for outbox routing only and is never read by
+admission. A denied message is persisted as a filtered disposition and cannot
+become a Ticket.
+
+**Shutdown.** The first SIGINT/SIGTERM aborts the poll loop, waits for the
+in-flight poll and its drain (jobs, outbox flush), and only then runs
+`Runtime.finish()` to stop the daemon and close SQLite. The loop never closes the
+Runtime or the client; `serve` owns them. A failed pull is logged and retried
+with bounded exponential backoff (cap 30s); stream/ingest errors are logged and
+skipped like the iMessage loop.
+
+**No live run was performed** for this loop: the tests use a fake source and a
+`FeishuClient` whose fetch throws, so CI never calls Feishu. Live verification is
+the same as the adapter check above (`pnpm demo:feishu`) once credentials exist.
+
 Verify the wiring when credentials exist:
 
 ```bash
