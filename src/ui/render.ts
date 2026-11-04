@@ -93,7 +93,6 @@ function outboxRows(outbox: readonly SnapshotOutbox[]): string[][] {
     code(row.thread),
     code(row.ticketId),
     String(row.attempts),
-    `<span class="wrap">${escapeHtml(row.text)}</span>`,
     code(row.createdAt),
   ])
 }
@@ -152,7 +151,7 @@ export function renderHtml(snapshot: UiSnapshot): string {
 </section>
 <section>
   <h2>Outbox<span class="count">${snapshot.outbox.length}</span></h2>
-  ${table(['id', 'status', 'channel', 'thread', 'ticket', 'attempts', 'text', 'created'], outboxRows(snapshot.outbox), 'no outbox rows')}
+  ${table(['id', 'status', 'channel', 'thread', 'ticket', 'attempts', 'created'], outboxRows(snapshot.outbox), 'no outbox rows')}
 </section>
 <section>
   <h2>Lifecycle events<span class="count">${snapshot.events.length}</span></h2>

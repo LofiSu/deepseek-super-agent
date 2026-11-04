@@ -2,6 +2,7 @@ import { Metrics } from '../metrics/metrics.ts'
 import { Store } from '../store/sqlite.ts'
 import {
   DEFAULT_UI_PORT,
+  MIN_TOKEN_LENGTH,
   isLoopbackHost,
   startUiServer,
   type UiServerHandle,
@@ -11,6 +12,8 @@ export interface UiCommandOptions {
   /** Loopback host to accept; the server always binds 127.0.0.1. */
   host?: string
   port?: number
+  /** Explicit token; otherwise --token, then DS_AGENT_UI_TOKEN. */
+  token?: string
 }
 
 /** Callback shape for the follow-up `main.ts` wiring PR. */
@@ -35,6 +38,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function resolveToken(explicit: string | undefined): string {
+  const token = (explicit ?? flag('token') ?? process.env.DS_AGENT_UI_TOKEN ?? '').trim()
+  if (token.length < MIN_TOKEN_LENGTH) {
+    throw new Error(
+      `ds-agent ui requires a token of at least ${MIN_TOKEN_LENGTH} characters; `
+      + 'set DS_AGENT_UI_TOKEN (preferred, not visible in process listings) or pass --token',
+    )
+  }
+  return token
+}
+
 /**
  * `ds-agent ui` — read-only loopback dashboard over persisted state.
  *
@@ -48,6 +62,7 @@ export async function runUi(home: string, options: UiCommandOptions = {}): Promi
   if (!isLoopbackHost(host)) {
     throw new Error(`ds-agent ui only binds loopback addresses; refusing host ${host}`)
   }
+  const token = resolveToken(options.token)
   const port = resolvePort(options.port)
 
   let store: Store
@@ -67,7 +82,7 @@ export async function runUi(home: string, options: UiCommandOptions = {}): Promi
 
   let handle: UiServerHandle
   try {
-    handle = await startUiServer({ home, store, metrics, host, port })
+    handle = await startUiServer({ home, store, metrics, host, port, token })
   } catch (error) {
     if (store.isOpen) store.close()
     throw new Error(`ds-agent ui: cannot start server on 127.0.0.1:${port}: ${errorMessage(error)}`)

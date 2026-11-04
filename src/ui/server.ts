@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { ticketStage } from '../core/stage.ts'
@@ -10,6 +11,10 @@ import { renderHtml } from './render.ts'
 /** The local UI only ever binds loopback. */
 export const UI_HOST = '127.0.0.1'
 export const DEFAULT_UI_PORT = 4318
+
+/** Browser cookie used after the `GET /?token=` bootstrap. */
+export const AUTH_COOKIE = 'ds_ui_token'
+export const MIN_TOKEN_LENGTH = 16
 
 /** How many lifecycle events the snapshot and page include. */
 export const SNAPSHOT_EVENT_LIMIT = 50
@@ -71,7 +76,6 @@ export interface SnapshotOutbox {
   thread: string
   attempts: number
   createdAt: string
-  text: string
 }
 
 export interface SnapshotHealth {
@@ -107,7 +111,9 @@ export function buildSnapshot(
   home: string,
   opts: { eventLimit?: number } = {},
 ): UiSnapshot {
-  const tickets = store.listDocs<Ticket>('ticket').map(ticket => ({
+  const tickets = store.listDocs<Ticket>('ticket')
+    .filter(ticket => ticket.speculative !== true)
+    .map(ticket => ({
     id: ticket.id,
     title: ticket.title,
     stage: ticketStage(ticket),
@@ -153,7 +159,6 @@ export function buildSnapshot(
     thread: row.thread,
     attempts: row.attempts ?? 0,
     createdAt: row.createdAt,
-    text: row.text,
   }))
 
   const eventLimit = opts.eventLimit ?? SNAPSHOT_EVENT_LIMIT
@@ -179,21 +184,63 @@ export function isAllowedHostHeader(value: string | string[] | undefined): boole
   if (typeof value !== 'string') return false
   const host = value.trim().toLowerCase()
   if (host.length === 0) return false
-  if (host === '::1' || host === '[::1]') return true
   if (host.startsWith('[')) {
     const end = host.indexOf(']')
     if (end < 0) return false
-    return host.slice(0, end + 1) === '[::1]'
+    if (host.slice(0, end + 1) !== '[::1]') return false
+    const suffix = host.slice(end + 1)
+    return suffix === '' || /^:\d+$/u.test(suffix)
   }
-  const colon = host.lastIndexOf(':')
-  const hostname = colon >= 0 ? host.slice(0, colon) : host
-  return hostname === '127.0.0.1' || hostname === 'localhost'
+  const parts = host.split(':')
+  if (parts.length > 2) return false
+  const [hostname, port] = parts
+  if (hostname !== '127.0.0.1' && hostname !== 'localhost') return false
+  return port === undefined || /^\d+$/u.test(port)
+}
+
+function sha256(value: string): Buffer {
+  return createHash('sha256').update(value, 'utf8').digest()
+}
+
+/** Constant-time token comparison over fixed-length SHA-256 digests. */
+function tokenMatches(presented: string | undefined, expected: string): boolean {
+  return timingSafeEqual(sha256(presented ?? ''), sha256(expected))
+}
+
+function bearerToken(header: string | string[] | undefined): string | undefined {
+  if (typeof header !== 'string') return undefined
+  const match = /^Bearer[ \t]+(.+)$/iu.exec(header.trim())
+  return match?.[1]?.trim()
+}
+
+function cookieValue(header: string | string[] | undefined, name: string): string | undefined {
+  if (typeof header !== 'string') return undefined
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=')
+    if (index < 0) continue
+    if (part.slice(0, index).trim() !== name) continue
+    const raw = part.slice(index + 1).trim()
+    try {
+      return decodeURIComponent(raw)
+    } catch {
+      return raw
+    }
+  }
+  return undefined
+}
+
+function isAuthorized(req: http.IncomingMessage, token: string): boolean {
+  const presented = bearerToken(req.headers.authorization)
+    ?? cookieValue(req.headers.cookie, AUTH_COOKIE)
+  return tokenMatches(presented, token)
 }
 
 export interface UiServerOptions {
   home: string
   store: Store
   metrics: Metrics
+  /** Required bearer token; at least MIN_TOKEN_LENGTH characters. */
+  token: string
   host?: string
   port?: number
   eventIntervalMs?: number
@@ -215,6 +262,13 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
   if (!isLoopbackHost(host)) {
     throw new Error(`ui refuses non-loopback host ${host}; bind 127.0.0.1`)
   }
+  const token = (options.token ?? '').trim()
+  if (token.length < MIN_TOKEN_LENGTH) {
+    throw new Error(
+      `ui requires a token of at least ${MIN_TOKEN_LENGTH} characters `
+      + '(DS_AGENT_UI_TOKEN or --token); refusing to start',
+    )
+  }
   const port = options.port ?? DEFAULT_UI_PORT
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`invalid ui port: ${port}`)
@@ -231,16 +285,48 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
       sendText(res, 403, 'forbidden\n')
       return
     }
-    if (req.method !== 'GET') {
-      sendText(res, 405, 'method not allowed\n', { allow: 'GET' })
+
+    let url: URL
+    try {
+      url = new URL(req.url ?? '/', `http://${UI_HOST}`)
+    } catch {
+      sendText(res, 400, 'bad request\n')
+      return
+    }
+    const pathname = url.pathname
+
+    // Browser bootstrap: the token appears in the address bar once, is
+    // exchanged for an HttpOnly cookie, and the redirect lands on a clean `/`.
+    if (pathname === '/' && req.method === 'GET') {
+      const queryToken = url.searchParams.get('token')
+      if (queryToken !== null) {
+        if (!tokenMatches(queryToken, token)) {
+          sendText(res, 401, 'unauthorized\n')
+          return
+        }
+        res.writeHead(303, {
+          ...SECURITY_HEADERS,
+          'set-cookie': `${AUTH_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`,
+          location: '/',
+        })
+        res.end()
+        return
+      }
+    }
+
+    // Liveness only: no auth and no state.
+    if (pathname === '/health' && req.method === 'GET') {
+      sendText(res, 200, '{"ok":true}', { 'content-type': 'application/json; charset=utf-8' })
       return
     }
 
-    let pathname: string
-    try {
-      pathname = new URL(req.url ?? '/', `http://${UI_HOST}`).pathname
-    } catch {
-      sendText(res, 400, 'bad request\n')
+    // Auth precedes routing so an unknown path cannot be probed without a token.
+    if (!isAuthorized(req, token)) {
+      sendText(res, 401, 'unauthorized\n')
+      return
+    }
+    if (req.method !== 'GET') {
+      sendText(res, 405, 'method not allowed\n', { allow: 'GET' })
       return
     }
 
@@ -303,8 +389,13 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
       sseClients.delete(res)
     }
     const writeFrame = (): void => {
+      if (res.writableEnded || res.destroyed) {
+        cleanup()
+        return
+      }
+      let flushed: boolean
       try {
-        res.write(`data: ${JSON.stringify(snapshot())}\n\n`)
+        flushed = res.write(`data: ${JSON.stringify(snapshot())}\n\n`)
       } catch {
         // A broken read model must close the stream, not leave the client
         // waiting for the next frame forever.
@@ -314,6 +405,12 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         } catch {
           // The client may already be gone.
         }
+        return
+      }
+      if (!flushed) {
+        // Never let a slow client buffer frames without bound.
+        cleanup()
+        res.destroy()
       }
     }
     // One immediate frame so a client sees state without waiting 2 s.
@@ -326,6 +423,10 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
     res.on('close', cleanup)
     res.on('error', cleanup)
   }
+
+  server.headersTimeout = 10_000
+  server.requestTimeout = 30_000
+  server.keepAliveTimeout = 5_000
 
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error): void => {
