@@ -187,3 +187,118 @@ rewrite `PLAN.md`; link to the contract instead.
   `Harness.launch`, leaves mesh accounting to a caller that does not own it, and
   leaks the node); marking the assignment failed from the Harness (the Engine
   owns domain transitions, and the Watchdog is the established failure path).
+
+## ADR-009 — A stale empty gateway token file fails closed and is recovered only by explicit operator action
+
+- **Date:** 2026-11-04
+- **Status:** accepted; diagnostic implementation follow-up not started
+- **Context:** `<stateDir>/gateway.token` is the gateway's self-issued local
+  bearer token. `readTokenFile` trims the file and treats an empty result as
+  "no token" (`src/gateway/token.ts:98-100`). `loadOrCreateGatewayToken` then
+  mints a token and attempts an exclusive create
+  (`src/gateway/token.ts:164-168`). If the path already exists, `O_EXCL` fails
+  with `EEXIST`; the re-read still sees no token, so the call throws
+  `GatewayTokenFileError(file, 'was created concurrently and is empty')`
+  (`src/gateway/token.ts:140-146`). Both `ds-agent gateway`
+  (`src/cli/gateway.ts:42-43`) and the embedded gateway
+  (`src/gateway/embedded.ts:26`) call this before binding a port, so startup
+  aborts and the file's content and inode are left unchanged. On POSIX the
+  existing mode check may first tighten a loosened mode to `0600`. A
+  zero-length file and a whitespace-only file behave identically.
+  `startGatewayServer` has a second empty-token guard
+  (`src/gateway/server.ts:250-251`), but the file path normally throws earlier.
+  On the client side, `gatewayApiFromEnv` uses `readGatewayToken`, gets
+  `undefined`, and silently falls back to another model source
+  (`src/harness/model.ts:264-265`), so a truncated token can also cause a silent
+  gateway bypass rather than a visible error.
+- **Threat model:** An empty token file can be (1) a crashed first create
+  (SIGKILL/power loss between `O_CREAT` and `write`, or a filesystem that
+  exposes a zero-length file), (2) an in-progress create by another process
+  (the race the current code deliberately protects at
+  `src/gateway/token.ts:110-116`), or (3) deliberate truncation by an attacker.
+  Content alone cannot distinguish them. A same-uid or root attacker can already
+  read a 0600 file, so the property at stake is not secrecy against that
+  attacker; it is (a) preserving a tamper signal, (b) not minting a fresh
+  valid-looking credential over evidence, (c) not desynchronizing a running
+  gateway from its clients, and (d) not letting a truncated token silently
+  downgrade the agent to another provider path. Automatic recovery breaks all
+  four.
+- **Decision:** keep fail-closed and never recover automatically. An existing
+  zero-length or whitespace-only token file must abort startup with a
+  `GatewayTokenFileError`; the process must not delete, rename, truncate, or
+  overwrite it, must leave its content and inode unchanged, and must not mint a
+  token. The existing `ensurePrivateMode` check
+  (`src/gateway/token.ts:57-67,99`) may tighten a loosened mode to `0600` on
+  POSIX before the empty result is rejected; that is the standing security
+  invariant, not recovery, and the failing path must never loosen the mode or
+  use the empty content. Recovery is an explicit
+  operator action: stop gateway/agent processes, inspect the file (regular file,
+  `nlink == 1`, owned by the intended user, mode `0600`, parent directory not
+  group/world-writable), decide whether the empty state is expected (crash) or
+  suspicious (tamper), then remove the file deliberately and restart, or start
+  with an explicit `--token` / `DS_AGENT_GATEWAY_TOKEN` without touching the
+  file. If the state is suspicious, preserve a copy as evidence and treat the
+  local token and any upstream credentials as potentially compromised before
+  minting a replacement.
+- **Preconditions for manual recovery:** the operator has confirmed the path is
+  a plain, singly-linked, user-owned `0600` file; no concurrent first-create is
+  in progress; and the state directory is trusted. Recovery must not be
+  scripted as an unconditional "if empty, delete".
+- **Failure behavior:** any empty token file (zero-length or whitespace-only)
+  fails startup with a diagnostic that names the path and the stale-empty
+  condition; content and inode remain unchanged, and on POSIX a loosened mode is
+  tightened to `0600` by the existing check (it is never loosened); no token is
+  returned; no port is bound. An explicit token still works because it bypasses
+  the file (`src/gateway/token.ts:162-163`), but it is not persisted and every
+  client must be configured with it.
+- **Follow-up implementation (not in this docs PR; scope
+  `src/gateway/token.ts` + tests):**
+  1. Distinguish "absent" from "present but empty" inside `readTokenFile`
+     (for example, return a discriminated result instead of using `undefined`
+     for both). Keep every existing symlink, hard-link, and mode check.
+  2. Make the startup path (`loadOrCreateGatewayToken`) throw a distinct,
+     actionable error for an existing empty file, such as `gateway token file
+     <path> is empty (zero-length or whitespace-only); remove it to mint a new
+     token`, instead of the misleading concurrent-create message. Preserve the
+     concurrent-create message for the genuine `EEXIST` race
+     (`src/gateway/token.ts:140-146`).
+  3. Make the client read path (`readGatewayToken`, used at
+     `src/harness/model.ts:264`) fail closed on an existing empty file too, so
+     truncation cannot silently downgrade to a non-gateway model; if that is
+     considered too breaking, record the fallback as an explicit residual
+     instead.
+  4. Tests: zero-length and whitespace-only fixtures in
+     `test/gateway-token.test.ts`, asserting the distinct error, unchanged
+     content and inode, and a mode that is exactly `0600` after the check on
+     POSIX (never looser; skip the mode assertion on win32), no new token, and
+     fail-closed behavior on the client read; keep the existing
+     concurrent-create test (`test/gateway-token.test.ts:29-41`). Cover the
+     explicit-override bypass and a valid-token control.
+  5. Do not add automatic regeneration, rename-aside, or in-place overwrite in
+     this follow-up. An explicit `--rotate-token` flag is a possible later
+     ergonomic addition (it would touch `src/cli/gateway.ts`), but only as an
+     explicitly requested action and never the default.
+- **Alternatives rejected:**
+  - **Automatic regeneration when the file is zero-length, owned by the current
+    user, mode `0600`, and not a symlink or hard link.** The preconditions are
+    checkable, but they do not distinguish crash truncation from attacker
+    truncation; regeneration erases evidence and produces a valid-looking fresh
+    token. It also races with a concurrent first creator whose file is
+    legitimately still empty (`src/gateway/token.ts:110-116`), and a
+    check-then-unlink-then-create sequence is TOCTOU-prone. A running gateway
+    or agent may keep the old token, producing `401`s that look unrelated to
+    the original event.
+  - **Quarantine the empty file (rename aside) and fail.** This preserves
+    evidence but still mutates the live path, has the same concurrent-create
+    race, implicitly gives the next start a fresh token (a two-restart silent
+    recovery), and makes operator reasoning harder. Leaving content and inode
+    untouched, then requiring an explicit removal, is safer.
+  - **An explicit operator rotate/reset flag as the primary policy.** The
+    intent is correct, but it is not needed to recover today (manual removal is
+    already explicit) and would add CLI surface and persistence semantics.
+    Retained only as an optional future convenience on top of fail-closed, not
+    as the recovery default.
+  - **Treating the empty file as a missing file and minting over it.** That
+    would silently convert tampering into a new credential and could destroy a
+    mid-write file. The current exclusive create already prevents this; it must
+    stay.

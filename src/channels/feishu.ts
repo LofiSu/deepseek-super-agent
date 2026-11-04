@@ -302,14 +302,14 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
 
 /** Polling Source over a real Feishu chat. Repeated pulls are safe (Trigger ids dedupe). */
 export class FeishuSource {
-  private cursorMs: number
+  private cursorMsValue: number
 
   constructor(
     private readonly client: FeishuClient,
     private readonly chatId: string,
     options: { sinceMs?: number; threadId?: string; pageSize?: number; config?: FeishuConfig } = {},
   ) {
-    this.cursorMs = options.sinceMs ?? Date.now() - 5 * 60_000
+    this.cursorMsValue = options.sinceMs ?? Date.now() - 5 * 60_000
     this.threadId = options.threadId
     this.pageSize = options.pageSize
     this.config = options.config
@@ -319,8 +319,16 @@ export class FeishuSource {
   private readonly pageSize?: number
   private readonly config?: FeishuConfig
 
+  /**
+   * Highest message `create_time` (ms) observed so far, or the seed when none
+   * was seen. A polling loop persists this as its durable cursor.
+   */
+  get cursorMs(): number {
+    return this.cursorMsValue
+  }
+
   async pull(): Promise<Trigger[]> {
-    const startTimeSec = Math.max(0, Math.floor((this.cursorMs - 1_000) / 1_000))
+    const startTimeSec = Math.max(0, Math.floor((this.cursorMsValue - 1_000) / 1_000))
     const items = await this.client.listMessages(this.chatId, {
       startTimeSec,
       pageSize: this.pageSize,
@@ -330,7 +338,7 @@ export class FeishuSource {
       if (this.threadId && item.thread_id !== this.threadId) continue
       triggers.push(feishuTriggerFromMessage(item, this.config))
       const at = Number(item.create_time)
-      if (Number.isFinite(at) && at > this.cursorMs) this.cursorMs = at
+      if (Number.isFinite(at) && at > this.cursorMsValue) this.cursorMsValue = at
     }
     return triggers
   }

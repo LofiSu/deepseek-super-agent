@@ -144,7 +144,8 @@ process is needed.
   an upstream provider.
 - **Empty token**: the server refuses to start with an empty or whitespace-only
   token. Use the generated `<stateDir>/gateway.token` or pass `--token` /
-  `DS_AGENT_GATEWAY_TOKEN`.
+  `DS_AGENT_GATEWAY_TOKEN`. A *stale* empty token file is a separate failing
+  case; see [Token rotation and stale-token troubleshooting](#token-rotation-and-stale-token-troubleshooting).
 - **Token file**: `<stateDir>/gateway.token` is re-checked on every read and
   re-applied as mode `0600` if it was loosened. If the file cannot be secured,
   the gateway fails closed instead of using it. The path must be a plain,
@@ -160,6 +161,71 @@ process is needed.
   `Cache-Control: no-store`.
 - **Dashboard**: `GET /` and `GET /ui` are read-only, fetch only `/health`, and
   never embed the bearer token or any credential.
+
+## Token rotation and stale-token troubleshooting
+
+The bearer token is generated once and persisted as `<stateDir>/gateway.token`
+(mode `0600`). It is reused on every start; there is no automatic rotation.
+
+### Current behavior when the token file is empty (fail closed)
+
+A zero-length or whitespace-only token file is read as "no token", but the
+exclusive create then refuses to overwrite the existing path. Startup aborts
+before binding, with:
+
+```
+GatewayTokenFileError: gateway token file <stateDir>/gateway.token was created concurrently and is empty; refusing to use it
+```
+
+This is deliberate. The same shape can be a crashed first create, another
+process still writing the file, or an attacker truncating it. Overwriting it
+would erase evidence, could destroy a concurrent creator's token, and would
+mint a valid-looking credential in place of a tamper signal
+(`src/gateway/token.ts:110-116,140-146`). The file is not deleted, renamed,
+truncated, or recreated, and its content and inode stay unchanged. The existing
+mode check may tighten a loosened file to `0600` on POSIX before the empty
+result is rejected; that is the standing security invariant, not recovery. The
+server's empty-token guard (`src/gateway/server.ts:250-251`) is a second line of
+defense.
+
+The client read path also sees no token. An agent started with
+`DS_AGENT_GATEWAY_URL` set can therefore fall back silently to another model
+source (`src/harness/model.ts:264-265`), so recovery must include restarting
+clients, not just the gateway.
+
+### Recommended operator action (ADR-009)
+
+[ADR-009](ARCHITECTURE_DECISIONS.md#adr-009--a-stale-empty-gateway-token-file-fails-closed-and-is-recovered-only-by-explicit-operator-action)
+keeps this fail-closed and makes recovery an explicit decision:
+
+1. Stop the gateway and every agent using it.
+2. Inspect, do not overwrite:
+   `ls -l <stateDir>/gateway.token` and `stat <stateDir>/gateway.token`.
+   Confirm it is a regular, singly-linked file owned by the intended user with
+   mode `0600`, and that the state directory is not group/world-writable.
+3. If the empty file is expected (for example, a crash during first create, with
+   no tamper indicators), remove it explicitly:
+   `rm -- <stateDir>/gateway.token`, then restart the gateway (or let `chat` /
+   `imessage` start the embedded gateway). A new `gw_<random>` token is written
+   with mode `0600`.
+4. If the truncation is unexpected, treat it as a tamper signal: preserve a
+   copy, investigate, and rotate any upstream credentials before minting a new
+   local token. Do not script unconditional deletion of empty token files.
+5. To start without touching the file, pass `--token` or set
+   `DS_AGENT_GATEWAY_TOKEN`. An explicit token wins and is not persisted
+   (`src/gateway/token.ts:162-163`); every client must then be configured with
+   it explicitly.
+
+After recovery or rotation, restart clients (or update
+`DS_AGENT_GATEWAY_TOKEN`): a running gateway and a client holding the old token
+will get `401`.
+
+### Rotation
+
+Today rotation is the same manual operation: stop the processes, remove
+`<stateDir>/gateway.token` deliberately, restart, and restart clients with the
+new token. A future `--rotate-token` flag would be an explicit opt-in, not a
+default (ADR-009 follow-up).
 
 ## Plugins (gateway extension points)
 
