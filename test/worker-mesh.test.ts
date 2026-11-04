@@ -114,6 +114,9 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
       events.push(`${ticketId}:call${n}`)
       const gated = held.get(ticketId)
       if (n === 1 && gated) await gated.promise
+      // `plain` ends the turn with text and no report, so neither the Ticket
+      // nor its Assignment ends and the mesh slot stays reserved.
+      if (kinds.get(ticketId) === 'plain') return { text: 'worker-done' }
       const reported = request.messages.some(message =>
         message.role === 'tool' && message.name === 'report_to_router')
       if (!reported) {
@@ -757,6 +760,56 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
     await waitFor(() => events.some(event => event.startsWith(`${later.ticketId}:call1`)), 'queued worker start')
     await expect(settlesWithin(queued, 2_000)).resolves.toBe(true)
     expect(load(runtime, later.ticketId).ended?.outcome).toBe('ready')
+  })
+
+  it('pumps a queued Worker after a non-queued Worker turn rejects and releases its node', async () => {
+    const events: string[] = []
+    const held = new Map<string, Gate>()
+    const kinds = new Map<string, string>()
+    const runtime = start(events, held, {}, kinds)
+    const a = createTicket(runtime, 'trg_pump_a')
+    const b = createTicket(runtime, 'trg_pump_b')
+    // A's Worker turn returns plain text: it reports nothing, so neither its
+    // Ticket nor its Assignment ends and the picked mesh slot stays reserved
+    // until `startNow`'s failure handler releases it.
+    kinds.set(a.ticketId, 'plain')
+    const gateA = gate()
+    held.set(a.ticketId, gateA)
+
+    // Reject only A's turn, after its Worker run finished: `run`'s finally
+    // writes the idle session row. A model error would be caught and end the
+    // turn cleanly, which never exercises this path.
+    const originalUpsert = runtime.store.upsertSession.bind(runtime.store)
+    vi.spyOn(runtime.store, 'upsertSession').mockImplementation(row => {
+      if (row.id === `worker_${a.ticketId}` && row.status === 'idle') {
+        throw new Error('worker run finally exploded')
+      }
+      originalUpsert(row)
+    })
+
+    const firstLaunch = runtime.harness.launch(load(runtime, a.ticketId))
+    await waitFor(() => events.includes(`${a.ticketId}:call1`), 'first worker start')
+    const secondLaunch = runtime.harness.launch(load(runtime, b.ticketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${b.ticketId}`),
+      'queued worker parked',
+    )
+    expect(events.some(event => event.startsWith(`${b.ticketId}:`))).toBe(false)
+
+    // This is the only event that can free the slot: no stop, follow-up,
+    // delivery, or host release() runs for A or B.
+    gateA.release()
+    await expect(settlesWithin(firstLaunch, 2_000)).resolves.toBe(true)
+    expect(runtime.log.text()).toContain(
+      `[harness] worker failed ticketId=${a.ticketId} error=Error: worker run finally exploded`,
+    )
+
+    // Without the pump the launch stays parked on a free node forever.
+    await expect(settlesWithin(secondLaunch, 2_000)).resolves.toBe(true)
+    expect(events.some(event => event.startsWith(`${b.ticketId}:call1`))).toBe(true)
+    expect(load(runtime, b.ticketId).ended?.outcome).toBe('ready')
+    expect(runtime.workerMesh.inFlight('mesh-test')).toBe(0)
+    expect(runtime.metrics.snapshot().counters['mesh.dequeued']).toBe(1)
   })
 
   it('releases the mesh node when a non-queued Worker turn rejects asynchronously', async () => {
