@@ -75,8 +75,9 @@ describe('ds-agent ui / backup / restore wiring', () => {
     const result = runCli(tempDir('ds-agent-wiring-help-'), ['--help'])
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('ds-agent ui')
-    expect(result.stdout).toContain('ds-agent backup')
-    expect(result.stdout).toContain('ds-agent restore')
+    expect(result.stdout).toContain('ds-agent backup --out <file.db>')
+    expect(result.stdout).not.toContain('ds-agent backup [--out')
+    expect(result.stdout).toContain('ds-agent restore <file.db> [--force]')
   })
 
   it('fails closed without a valid ui token and never starts listening', () => {
