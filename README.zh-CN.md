@@ -73,7 +73,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Inline：摘要进上下文** — `memory/recall`
 - [x] **Spill：长内容外置 + id** — `store/spill`
 - [x] **局部性：先 ID/摘要，再按需展开** — `read_object`
-- [x] **链式召回 Chain of Recall** — spillId / 对象引用按需拉取（T25 最小实现）
+- [x] **链式召回 Chain of Recall** — 类型化 `kind:id` 句柄；`read_object` 返回下一跳（`memory/graph`）
 - [x] **投机执行：后台先跑** — speculative Assignment
 - [x] **有价值才交付，否则安静丢弃** — `deliver=true` gate；demo 验证
 
@@ -111,7 +111,7 @@ LofiSu × Grokbot（CoderBot）。
 ### §8 未决问题（明确不做进 M11）
 
 - [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime（放置是逻辑的，远端传输外置）；等待启动的 Worker 进入有界 FIFO 队列（`DS_AGENT_MESH_QUEUE`，默认 100），非队列启动失败会释放已预留节点并泵送队列
-- [~] 跨 Ticket 长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime（尚未到跨月）
+- [~] 跨 Ticket / 跨月长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime：hot Ticket/Decision（1000 条 / 90 天）+ cold Thread digest（200 条 / 3650 天）；真实跨月行为有界但未按自然月测量
 - [~] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；暂无默认 UI
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— `A2ARouter` 常驻 Runtime（进程内；`runtime.sendA2A`）

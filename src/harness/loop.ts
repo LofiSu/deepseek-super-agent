@@ -1,7 +1,8 @@
 import { withSessionRole } from '../core/session-role.ts'
 import { redactRecord } from '../env/sanitize.ts'
 import type { Metrics } from '../metrics/metrics.ts'
-import type { Role, Ticket, Trigger } from '../shared/types.ts'
+import { formatRefs } from '../memory/graph.ts'
+import type { ObjectRef, Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
 import { routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
@@ -39,14 +40,26 @@ export interface HarnessOptions {
   queueLimit?: number
   /** Return a reserved mesh slot when a queued Worker fails before it starts. */
   releaseNode?: (ticketId: string) => void
-  /** Cross-ticket recall lines injected into the Worker task. */
-  memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string }[]
+  /** Cross-ticket recall lines injected into Router and Worker turns. */
+  memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string; refs?: ObjectRef[] }[]
+  /**
+   * Router-only global memory. Defaults to `memory`; the Runtime narrows this
+   * to same-Thread decisions/digests so a lexical query stays in the Worker
+   * callback (a query failure rejects that Worker turn, not `launch`).
+   */
+  routerMemory?: (ticket: Ticket) => { id: string; spillId?: string; text: string; refs?: ObjectRef[] }[]
   /** T45 bake-off baseline: one turn chain, no Router session. */
   singleSession?: boolean
 }
 
 /** Bound for an in-process Worker backlog. Environment parsing already sanitizes. */
 export const DEFAULT_QUEUE_LIMIT = 100
+
+/** One redacted entry in a resident Router Session's journal. */
+export interface RouterObservation {
+  kind: string
+  [key: string]: unknown
+}
 
 /** Programmatic queue limits are untrusted too: NaN, negative, and fractional fall back. */
 export function normalizeQueueLimit(value: number | undefined): number {
@@ -80,12 +93,83 @@ export class Harness {
     return this.opts.models?.[role] ?? this.opts.model
   }
 
+  /**
+   * A Router is a resident Session, not a per-Ticket worker. `Runtime.start()`
+   * arms every configured shard so the Session row and its journal exist
+   * before the first Trigger; a later process keeps the original `createdAt`
+   * and appends a resume event instead of a second start.
+   */
   armRouter(shard = 'router'): void {
     if (this.opts.singleSession) return
     const sessionId = routerSessionId(shard)
     if (this.routersReady.has(sessionId)) return
     this.routersReady.add(sessionId)
-    this.opts.log(`[harness] MainSession start session=${sessionId} role=router`)
+    const now = new Date().toISOString()
+    const existing = this.opts.store.isOpen
+      ? this.opts.store.listSessions().find(row => row.id === sessionId)
+      : undefined
+    if (this.opts.store.isOpen) {
+      this.opts.store.upsertSession({
+        id: sessionId,
+        role: 'router',
+        status: 'idle',
+        heartbeat: now,
+        createdAt: existing?.createdAt ?? now,
+      })
+    }
+    this.opts.journal.append(sessionId, existing
+      ? {
+        kind: 'session.resumed',
+        content: `resumed role=router resident=true since=${existing.createdAt}`,
+      }
+      : { kind: 'session.started', content: 'started role=router resident=true' })
+    this.opts.log(
+      `[harness] MainSession start session=${sessionId} role=router resident=true`
+      + (existing ? ' resumed=true' : ''),
+    )
+  }
+
+  /**
+   * Append one redacted event to a resident Router journal. Only an armed
+   * Router observes; events before `Runtime.start()` are not part of its life.
+   * The entry has no model role, so it is durable session memory rather than a
+   * fake user turn in the replay.
+   */
+  routerObserve(shard: string, event: RouterObservation): void {
+    if (this.opts.singleSession) return
+    const sessionId = routerSessionId(shard)
+    if (!this.routersReady.has(sessionId)) return
+    this.opts.journal.append(sessionId, {
+      kind: `observe.${event.kind}`,
+      content: this.opts.redact(describeObservation(event)),
+    })
+  }
+
+  /** Recent observed events and assessment outcomes from one Router Session. */
+  routerHistory(shard = 'router', limit = 12): string[] {
+    if (limit <= 0) return []
+    const sessionId = routerSessionId(shard)
+    return this.opts.journal.history(sessionId)
+      .filter(entry => typeof entry.content === 'string' && entry.kind?.startsWith('observe.'))
+      .slice(-limit)
+      .map(entry => entry.content as string)
+  }
+
+  /**
+   * Run one Router-owned unit of work on that shard's Session chain. Assessment
+   * and ticket turns then share one sequence, so a resident Session never has
+   * two overlapping turns.
+   */
+  routerExclusive<T>(shard: string, work: () => Promise<T>): Promise<T> {
+    if (this.opts.singleSession) return work()
+    this.armRouter(shard)
+    return this.enqueue(routerSessionId(shard), work)
+  }
+
+  private withRouterHistory(shard: string, prompt: string): string {
+    const history = this.routerHistory(shard, 6)
+    if (!history.length) return prompt
+    return `${prompt}\n${history.map(line => `observed=${line}`).join('\n')}`
   }
 
   launch(ticket: Ticket): Promise<void> {
@@ -107,6 +191,7 @@ export class Harness {
     }
     if (!ticket.assignments.at(-1)) throw new Error(`ticket ${ticket.id} has no assignment`)
     const mode = ticket.speculative ? 'speculative' : 'normal'
+    const refsLine = formatRefs(ticket.refs)
     const routerPrompt = [
       ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
       `ticketId=${ticket.id}`,
@@ -114,6 +199,8 @@ export class Harness {
       `title=${ticket.title}`,
       `mode=${mode}`,
       'decision=accepted-by-gate',
+      ...(refsLine ? [refsLine] : []),
+      ...this.memoryLines(ticket, 'router'),
       'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
     ].join('\n')
     // Sequence point (T06/T08): Router turn(s) complete first. A Router veto
@@ -130,7 +217,7 @@ export class Harness {
           session,
           'router',
           undefined,
-          `${routerPrompt}\nshard=${shard}`,
+          `${this.withRouterHistory(shard, routerPrompt)}\nshard=${shard}`,
         )))
       }
     }
@@ -350,6 +437,8 @@ export class Harness {
     ]
     if (ticket.spillId) task.push(`spillId=${ticket.spillId}`)
     if (node) task.push(`node=${node}`)
+    const refs = formatRefs(ticket.refs)
+    if (refs) task.push(refs)
     // Restart recovery (P1-6): the relaunch turn must tell the Worker that a
     // previous process died. Only RECOVERED context inputs are injected here;
     // ordinary context inputs stay read-only background for resume/report paths.
@@ -358,11 +447,21 @@ export class Harness {
         task.push(`recovered=${input.text}`)
       }
     }
-    for (const entry of this.opts.memory?.(ticket) ?? []) {
-      const spill = entry.spillId ? ` spillId=${entry.spillId}` : ''
-      task.push(`memory=${entry.id}${spill} text=${entry.text}`)
-    }
+    for (const line of this.memoryLines(ticket, 'worker')) task.push(line)
     return task.join('\n')
+  }
+
+  /**
+   * Chain-of-recall lines. Every entry keeps its spill id and next-hop refs in
+   * the window; the model follows them with `read_object` only when needed.
+   */
+  private memoryLines(ticket: Ticket, role: 'router' | 'worker'): string[] {
+    const source = role === 'router' ? this.opts.routerMemory ?? this.opts.memory : this.opts.memory
+    return (source?.(ticket) ?? []).map(entry => {
+      const spill = entry.spillId ? ` spillId=${entry.spillId}` : ''
+      const refs = formatRefs(entry.refs)
+      return `memory=${entry.id}${spill}${refs ? ` ${refs}` : ''} text=${entry.text}`
+    })
   }
 
   deliver(ticketId: string, trigger: Trigger, spillId?: string): Promise<void> {
@@ -382,6 +481,8 @@ export class Harness {
     // Engine-owned spill only: the ingress sidecar, or the spill already on the ticket.
     const owned = spillId ?? ticket?.spillId ?? ''
     if (owned) lines.push(`spillId=${owned}`)
+    const refs = formatRefs(trigger.refs)
+    if (refs) lines.push(refs)
     const sessionId = workerSessionId(ticketId)
     return this.track(this.enqueue(sessionId, () => this.run(sessionId, 'worker', ticketId, lines.join('\n'))))
   }
@@ -442,6 +543,9 @@ export class Harness {
         `mode=${mode}`,
       ]
       for (const text of guidance) lines.push(`guidance=${text}`)
+      const refsLine = formatRefs(ticket.refs)
+      if (refsLine) lines.push(refsLine)
+      for (const memory of this.memoryLines(ticket, 'router')) lines.push(memory)
       lines.push('The human resumed this paused task. Keep the acknowledgement short; leave the work to the Worker.')
       return lines.join('\n')
     }
@@ -463,7 +567,8 @@ export class Harness {
         const session = routerSessionId(shard)
         chain = chain.then(() => this.enqueue(
           session,
-          () => guarded(session, 'router', guidance => `${routerPrompt(guidance)}\nshard=${shard}`),
+          () => guarded(session, 'router', guidance =>
+            `${this.withRouterHistory(shard, routerPrompt(guidance))}\nshard=${shard}`),
         ))
       }
     }
@@ -632,7 +737,7 @@ export class Harness {
     return `at=${paused.at} by=${paused.by}${reason}`
   }
 
-  private enqueue(sessionId: string, fn: () => Promise<void>): Promise<void> {
+  private enqueue<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.chains.get(sessionId) ?? Promise.resolve()
     const next = prev.then(fn, fn)
     this.chains.set(sessionId, next.then(() => undefined, () => undefined))
@@ -641,7 +746,10 @@ export class Harness {
 
   private async run(sessionId: string, role: Role, ticketId: string | undefined, prompt: string): Promise<void> {
     if (!this.opts.store.isOpen) return
-    const createdAt = new Date().toISOString()
+    // A resident Router owns one stable creation time; a ticket turn must not
+    // reset it like a per-Ticket Worker session.
+    const existing = this.opts.store.listSessions().find(row => row.id === sessionId)
+    const createdAt = existing?.createdAt ?? new Date().toISOString()
     this.opts.store.upsertSession({
       id: sessionId,
       role,
@@ -801,6 +909,20 @@ async function runTurnBody(input: {
 
 /** Bound the replayed transcript. The full journal stays on disk. */
 const MAX_HISTORY_ENTRIES = 200
+
+/** A resident Router keeps a compact timeline; long bodies stay in the spill. */
+const MAX_OBSERVATION_CHARS = 400
+const MAX_OBSERVATION_FIELD_CHARS = 160
+
+function describeObservation(event: RouterObservation): string {
+  const parts = [`event=${event.kind}`]
+  for (const [key, value] of Object.entries(event)) {
+    if (key === 'kind' || value === undefined || value === null || value === '') continue
+    const text = Array.isArray(value) ? value.join(',') : String(value)
+    parts.push(`${key}=${text.replace(/\s+/g, ' ').trim().slice(0, MAX_OBSERVATION_FIELD_CHARS)}`)
+  }
+  return parts.join(' ').slice(0, MAX_OBSERVATION_CHARS)
+}
 
 function messagesFromJournal(entries: JournalEntry[]): ModelMessage[] {
   const messages: ModelMessage[] = []

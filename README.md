@@ -72,7 +72,7 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Inline.** Short summaries stay in context (`memory/recall`).
 - [x] **Spill.** Long content is stored out of band, with an id (`store/spill`).
 - [x] **Locality.** IDs and summaries first. Expand on demand (`read_object`).
-- [x] **Chain of Recall.** Pull a spill id or object ref when needed (minimal T25).
+- [x] **Chain of Recall.** Typed `kind:id` handles; `read_object` returns the next hop (`memory/graph`).
 - [x] **Speculative work.** A background Assignment can run first.
 - [x] **Deliver gate.** `deliver=true`, or the result is dropped. The demo checks this.
 
@@ -114,7 +114,7 @@ Article evals. They do not block the release.
 Kept out of M11.
 
 - [~] Router scale-out / Worker-direct topology (§8.1) — always-wired `RouterShardRegistry` + `WorkerMeshRegistry` (placement is logical; a remote transport is external)
-- [~] Memory that spans tickets (§8.1) — always-wired `SpillBackedLongTermMemory` (not month-scale yet)
+- [~] Memory that spans tickets and months (§8.1) — always-wired `SpillBackedLongTermMemory`: hot tickets/decisions (1000 / 90 days) plus cold Thread digests (200 / 3650 days); calendar-month behavior is bounded, not measured across real months
 - [~] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model; no default UI yet
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
 - [x] Panel · Execution — `ds-agent panel` derives Open/Pending/Working/Waiting/Blocked/Awaiting from Ticket facts, with Mandate, Executor Session, directory, report, and Outbox delivery counts (`src/core/panel.ts`)
@@ -317,7 +317,7 @@ The functional domains keep the T45–T51 ids: evaluation and metrics, extension
 
 - `runtime.routerShards` — `src/ingress/shards.ts`; configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`. The default shard always exists.
 - `runtime.workerMesh` — `src/harness/mesh.ts`; `DS_AGENT_MESH_CAPACITY` or `RuntimeOptions.meshCapacity`; waiting launches use a bounded FIFO queue (`DS_AGENT_MESH_QUEUE`, default 100), and a failed non-queued start releases the reserved node and pumps the queue.
-- `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket.
+- `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket and per Router Decision, with a cold Thread-digest tier for month-scale recall.
 - `runtime.lifecycle` — `src/core/lifecycle.ts`; read-model events for panels and CLI views.
 - `runtime.a2aRouter` / `runtime.sendA2A` — `src/channels/a2a.ts`; the Runtime registers its instance as the local recipient.
 

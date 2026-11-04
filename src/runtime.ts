@@ -32,13 +32,14 @@ import {
 } from './ingress/policy.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
 import { inlineOrSpill } from './memory/recall.ts'
+import { refsForTrigger, triggerRef } from './memory/graph.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
 import { Metrics } from './metrics/metrics.ts'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
 import { Logger } from './shared/log.ts'
-import type { Disposition, ReceiveResult, Thread, Ticket, Trigger, TriggerTrust } from './shared/types.ts'
+import { threadKey, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
 import { settleSpeculation } from './speculate/silent.ts'
@@ -106,6 +107,9 @@ export interface RuntimeOptions {
 export interface MemoryRetention {
   maxEntries?: number
   maxAgeDays?: number
+  /** Cold thread digests that survive hot-entry pruning (§8.1). */
+  coldMaxEntries?: number
+  coldMaxAgeDays?: number
 }
 
 export interface SlowPathOptions {
@@ -183,6 +187,9 @@ function resolveSlowPath(
 /** Conservative defaults: bound index growth without dropping recent history. */
 export const DEFAULT_MEMORY_MAX_ENTRIES = 1000
 export const DEFAULT_MEMORY_MAX_AGE_DAYS = 90
+/** Cold digests are small and intentionally month-scale. */
+export const DEFAULT_MEMORY_COLD_MAX_ENTRIES = 200
+export const DEFAULT_MEMORY_COLD_MAX_AGE_DAYS = 3650
 /** Bounded in-process Worker backlog when every mesh slot is busy. */
 export const DEFAULT_MESH_QUEUE = 100
 
@@ -201,6 +208,10 @@ export function memoryRetentionFromEnv(
       ?? parseNonNegativeInt(env.DS_AGENT_MEMORY_MAX_ENTRIES, DEFAULT_MEMORY_MAX_ENTRIES),
     maxAgeDays: override.maxAgeDays
       ?? parseNonNegativeInt(env.DS_AGENT_MEMORY_MAX_AGE_DAYS, DEFAULT_MEMORY_MAX_AGE_DAYS),
+    coldMaxEntries: override.coldMaxEntries
+      ?? parseNonNegativeInt(env.DS_AGENT_MEMORY_COLD_MAX_ENTRIES, DEFAULT_MEMORY_COLD_MAX_ENTRIES),
+    coldMaxAgeDays: override.coldMaxAgeDays
+      ?? parseNonNegativeInt(env.DS_AGENT_MEMORY_COLD_MAX_AGE_DAYS, DEFAULT_MEMORY_COLD_MAX_AGE_DAYS),
   }
 }
 
@@ -472,6 +483,16 @@ export class Runtime {
             threads: ticket.threadKeys,
           },
         })
+        const shards = store.getDoc<Disposition>('disposition', ticket.originTriggerId)?.shards ?? ['default']
+        for (const shard of shards) {
+          late.harness?.routerObserve(shard, {
+            kind: 'ticket.created',
+            ticketId: ticket.id,
+            title: ticket.title,
+            threads: ticket.threadKeys,
+            speculative: ticket.speculative,
+          })
+        }
       },
       onTicketEnded: ticket => {
         // One durable memory entry per finished ticket; the next ticket recalls it.
@@ -488,8 +509,36 @@ export class Runtime {
             memoryId: entry.id,
           },
         })
+        const shards = store.getDoc<Disposition>('disposition', ticket.originTriggerId)?.shards ?? ['default']
+        for (const shard of shards) {
+          late.harness?.routerObserve(shard, {
+            kind: 'ticket.ended',
+            ticketId: ticket.id,
+            outcome: ticket.ended?.outcome ?? 'unknown',
+            by: ticket.ended?.by ?? 'unknown',
+            memoryId: entry.id,
+          })
+        }
         metrics.increment('memory.remembered')
         log.info(`[memory] ticket.ended ticketId=${ticket.id} memory=${entry.id}`)
+      },
+      onDecision: decision => {
+        // Router global memory (§2.1): decisions survive Tickets and channels.
+        const entry = longTermMemory.rememberDecision(decision)
+        lifecycle.publish({
+          kind: 'decision.remembered',
+          payload: { decisionId: decision.id, kind: decision.kind, memoryId: entry.id },
+        })
+        late.harness?.routerObserve('default', {
+          kind: 'decision',
+          decisionId: decision.id,
+          action: decision.kind,
+          thread: decision.threadKey,
+          ticketId: decision.ticketId,
+          triggerIds: decision.triggerIds,
+        })
+        metrics.increment('memory.decision')
+        log.info(`[memory] decision.remembered decisionId=${decision.id} memory=${entry.id}`)
       },
       onAssignmentEnded: ticketId => {
         // blocked/failed/waiting end the Assignment but leave the Ticket open.
@@ -560,13 +609,43 @@ export class Runtime {
         workerMesh.release(ticketId)
       },
       memory: ticket => {
-        const entries = longTermMemory.query({
+        const lexical = longTermMemory.query({
           ticketId: ticket.id,
           text: ticket.title,
           limit: 3,
         })
+        // Router global memory: same-Thread decisions and cold digests are
+        // injected even when the new title shares no lexical token.
+        const threaded = longTermMemory.forThreads(ticket.threadKeys, 3, ticket.id)
+        const seen = new Set<string>()
+        const entries = [...threaded, ...lexical].filter(entry => {
+          if (seen.has(entry.id)) return false
+          seen.add(entry.id)
+          return true
+        }).slice(0, 5)
         if (entries.length) metrics.increment('memory.recalled', entries.length)
-        return entries.map(entry => ({ id: entry.id, spillId: entry.spillId, text: entry.text }))
+        return entries.map(entry => ({
+          id: entry.id,
+          spillId: entry.spillId,
+          text: entry.text,
+          refs: entry.refs ?? [],
+        }))
+      },
+      routerMemory: ticket => {
+        const seen = new Set<string>()
+        return [
+          ...longTermMemory.recentDecisions(3, ticket.id),
+          ...longTermMemory.forThreads(ticket.threadKeys, 3, ticket.id),
+        ].filter(entry => {
+          if (seen.has(entry.id)) return false
+          seen.add(entry.id)
+          return true
+        }).slice(0, 5).map(entry => ({
+          id: entry.id,
+          spillId: entry.spillId,
+          text: entry.text,
+          refs: entry.refs ?? [],
+        }))
       },
     })
     late.harness = harness
@@ -637,7 +716,7 @@ export class Runtime {
     for (const thread of this.store.listDocs<Thread>('thread')) {
       if (!thread.deferred || !thread.pending.length || this.assessingThreads.has(thread.key)) continue
       this.assessingThreads.add(thread.key)
-      const work = Promise.resolve().then(async () => {
+      const work = this.harness.routerExclusive('default', async () => {
         // The snapshot is taken when the queued Router turn starts, coalescing same-tick ingress.
         const current = this.store.getDoc<Thread>('thread', thread.key)
         const pending = [...(current?.pending ?? [])]
@@ -658,9 +737,30 @@ export class Runtime {
           .filter((trigger): trigger is Trigger => trigger != null)
         const live = arbitrateSubscribers(this.store.listDocs<Ticket>('ticket').filter(ticket =>
           current!.subscriptions.includes(ticket.id) && !ticket.ended))
-        const outcome = await assessWithMainAgent(this.model, triggers, live)
+        const seen = new Set<string>()
+        const memory = [
+          ...this.longTermMemory.recentDecisions(3, live?.id),
+          ...this.longTermMemory.forThreads([thread.key], 3, live?.id),
+        ].filter(entry => {
+          if (seen.has(entry.id)) return false
+          seen.add(entry.id)
+          return true
+        }).map(entry => ({
+          id: entry.id,
+          text: entry.text,
+          refs: entry.refs ?? [],
+        }))
+        const history = this.harness.routerHistory('default', 12)
+        const outcome = await assessWithMainAgent(this.model, triggers, live, 'policy-v1', memory, history)
         if (!this.store.isOpen) return
         const decision = withSessionRole('router', () => this.engine.commitAssessed(thread.key, ids, outcome))
+        this.harness.routerObserve('default', {
+          kind: 'assessment',
+          thread: thread.key,
+          action: outcome.kind,
+          triggerIds: ids,
+          ticketId: decision?.ticketId,
+        })
         if (decision?.kind === 'accept' && decision.ticketId) {
           const ticket = this.store.getDoc<Ticket>('ticket', decision.ticketId)
           if (ticket) this.harness.launch(ticket)
@@ -683,12 +783,19 @@ export class Runtime {
    */
   start(options: { assessPending?: boolean } = {}): void {
     this.assessmentsEnabled = options.assessPending !== false
+    // The Router layer is resident: every configured shard gets its Session
+    // before recovery, assessment, or the first Trigger.
+    this.armResidentRouters()
     this.recoverInterrupted()
     this.daemon.start()
     if (this.assessmentsEnabled) {
       // Resume Gate-deferred work left in SQLite by a previous process.
       this.assessPending()
     }
+  }
+
+  private armResidentRouters(): void {
+    for (const shard of this.routerShards.list()) this.harness.armRouter(shard.id)
   }
 
   /**
@@ -814,7 +921,12 @@ export class Runtime {
     let incoming: Trigger = { ...safe, meta: {} }
     let trust: TriggerTrust = { admission }
     if (verdict.action === 'pass') {
-      const recall = inlineOrSpill(safe.text, body => this.store.putSpill(body))
+      const triggerRefs = refsForTrigger(safe, undefined, this.neighborTriggerRefs(safe))
+      const recall = inlineOrSpill(
+        safe.text,
+        (body, refs) => this.store.putSpill(body, refs),
+        triggerRefs,
+      )
       if (recall.spillId) {
         this.log.info(`[memory] Inline/Spill chain-of-recall spillId=${recall.spillId} bytes=${recall.bytes}`)
       }
@@ -825,13 +937,15 @@ export class Runtime {
       trust = {
         admission,
         spillId: recall.spillId,
+        refs: triggerRefs,
         strength: safe.speculate === true ? 'maybe' : verdict.strength,
         filterText: safe.text,
         shards,
       }
-      incoming = { ...safe, text: recall.inline, meta: {} }
+      incoming = { ...safe, text: recall.inline, meta: {}, refs: triggerRefs }
     }
     const result = this.engine.receive(incoming, trust)
+    this.observeIngress(incoming, verdict, trust, result)
     this.log.info(`[engine] Intake.receive id=${incoming.id} result=${result}`)
     if (result === 'filtered') {
       const disposition = this.store.getDoc<Disposition>('disposition', incoming.id)
@@ -846,6 +960,54 @@ export class Runtime {
     const disposition = this.store.getDoc<Disposition>('disposition', incoming.id)
     for (const ticketId of disposition?.fanout ?? []) this.harness.deliver(ticketId, incoming, trust.spillId)
     return result
+  }
+
+  /**
+   * Feed the resident Router Session the ingress sequence. A filtered Trigger
+   * is global coordination context (default shard); an admitted one is written
+   * to every shard that routed it so each resident Router sees its own work.
+   */
+  private observeIngress(
+    trigger: Trigger,
+    verdict: FilterVerdict,
+    trust: TriggerTrust,
+    result: ReceiveResult,
+  ): void {
+    const text = trigger.text.replace(/\s+/g, ' ').trim().slice(0, 160)
+    if (verdict.action !== 'pass') {
+      this.harness.routerObserve('default', {
+        kind: 'trigger.filtered',
+        triggerId: trigger.id,
+        reason: `${verdict.layer}:${verdict.reason}`,
+        text,
+      })
+      return
+    }
+    for (const shard of trust.shards ?? ['default']) {
+      this.harness.routerObserve(shard, {
+        kind: `trigger.${result}`,
+        triggerId: trigger.id,
+        threads: trigger.threads.map(threadKey),
+        actor: `${trigger.actor.source}:${trigger.actor.id}`,
+        text,
+      })
+    }
+  }
+
+  /**
+   * Locality for a new Trigger: the three most recent Triggers in the same
+   * Thread are inlined as next-hop refs, so the model does not need a search
+   * tool call to see the immediately preceding messages.
+   */
+  private neighborTriggerRefs(trigger: Trigger): ObjectRef[] {
+    const keys = new Set(trigger.threads.map(threadKey))
+    return this.store.listDocs<Trigger>('trigger')
+      .filter(item => item.id !== trigger.id && item.threads.some(ref => keys.has(threadKey(ref))))
+      .slice(-3)
+      .map(item => triggerRef(
+        item.id,
+        typeof item.meta.label === 'string' ? item.meta.label : undefined,
+      ))
   }
 
   /**

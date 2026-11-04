@@ -39,7 +39,7 @@ describe('health probe', () => {
         watchdogIdle: true,
       })
       expect(result.capabilities.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
-      expect(LATEST_SCHEMA_VERSION).toBe(3)
+      expect(LATEST_SCHEMA_VERSION).toBe(4)
       expect(result.capabilities.readIsolation).toEqual({ requested: 'off', enforced: 'unknown' })
       expect(result.capabilities.workerSandbox).toEqual({ requested: 'on', enforced: 'unknown' })
       expect(result.capabilities.a2aTransport).toBe('in-process')

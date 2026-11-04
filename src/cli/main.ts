@@ -496,6 +496,9 @@ async function main(): Promise<void> {
           recent: memories.slice(-limit).map(entry => ({
             id: entry.id,
             ticketId: entry.ticketId,
+            kind: entry.kind ?? 'note',
+            tier: entry.tier ?? 'hot',
+            refs: entry.refs?.map(ref => ref.id) ?? [],
             text: entry.text,
           })),
         }, null, 2))

@@ -11,7 +11,10 @@ export {
   type LongTermMemoryEntry,
   type LongTermMemoryKind,
   type LongTermMemoryQuery,
+  type LongTermMemoryTier,
 } from './memory/long-term.ts'
+export { readObjectFor, readSpillFor, type SpillPage } from './memory/acl.ts'
+export { formatRefs, parseHandle, refsForDecision, refsForTicket, refsForTrigger } from './memory/graph.ts'
 export { compareBakeoff, type BakeoffComparison, type BakeoffSample } from './metrics/bakeoff.ts'
 export {
   GatewayRouter,

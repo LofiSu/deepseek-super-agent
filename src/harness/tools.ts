@@ -1,6 +1,6 @@
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
-import { readSpillFor } from '../memory/acl.ts'
+import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
@@ -337,7 +337,7 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
     },
     {
       name: 'read_object',
-      description: 'Recall one page of a spilled object. The caller ticket or session must be granted.',
+      description: 'Recall one page of a spilled object or follow a ref from Chain of Recall. The caller ticket or session must be granted.',
       parameters: schema({
         id: { type: 'string' },
         offset: { type: 'number' },
@@ -347,14 +347,14 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
       run: guard('worker', 'read_object', async (args, ctx) => {
         const offset = Number(args.offset ?? 0)
         const limit = args.limit == null ? undefined : Number(args.limit)
-        const page = readSpillFor(store, String(args.id ?? ''), {
+        const page = readObjectFor(store, String(args.id ?? ''), {
           ticketId: ctx.ticketId,
           sessionId: ctx.sessionId,
         }, {
           offset: Number.isFinite(offset) ? offset : 0,
           limit: limit != null && Number.isFinite(limit) ? limit : undefined,
         })
-        log(`[memory] read_object id=${page.id} bytes=${page.text.length} total=${page.total}`)
+        log(`[memory] read_object id=${page.id} bytes=${page.text.length} total=${page.total} refs=${page.refs.length}`)
         return page
       }),
     },
