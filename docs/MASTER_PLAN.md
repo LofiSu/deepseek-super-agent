@@ -39,7 +39,7 @@ requires live evidence, not missing code.
 
 ### Remaining decisions
 
-1. #132 release workflow: merged at `a1985c0` by another session despite the
+1. #132 release workflow: merged at `a1985c0` outside this session despite the
    owner gate, without recorded owner approval. The content was audited as
    manual (`workflow_dispatch`), read-only (`contents: read`), no secrets, no
    publish step. Treat the merge as a documented deviation; publishing remains

@@ -33,13 +33,13 @@
    deployment requirement (unique per-node secret or shared durable replay
    cache), unchanged by this program.
 4. **The owner gate on #132 was bypassed, not honored.** This session held
-   #132 as owner-gated; another session merged it at `a1985c0` on 2026-11-04
-   without recorded owner approval. A post-merge audit found the workflow is
+   #132 as owner-gated; it was merged outside this session at `a1985c0` on
+   2026-11-04 without recorded owner approval. A post-merge audit found the workflow is
    `workflow_dispatch` only, with `permissions: contents: read`, no
    `secrets.*`, no publish step, and an artifact upload. That limits the blast
    radius but does not constitute approval. #134, #139, and #140 were also
-   merged by other sessions without independent review in this log; all three
-   heads had green `typecheck and test`. No production infrastructure, secret storage, auth
+   merged outside this session without independent review in this log; all
+   three heads had green `typecheck and test`. No production infrastructure, secret storage, auth
    redesign, destructive migration, or live external send was performed.
 5. **Verification limits are explicit.** CI and offline fixtures pass; no live
    model bake-off or real Feishu acceptance was run. iMessage daemon tests use

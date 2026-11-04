@@ -7,7 +7,7 @@ tarball built from the tagged commit, and a GitHub release attached to that
 tarball.
 
 `.github/workflows/release.yml` is on `main` (PR #132, merge `a1985c0`). That
-PR was owner-gated and merged by another session without recorded owner
+PR was owner-gated and merged outside this session without recorded owner
 approval; the merge is recorded as a process deviation in
 `docs/DEVELOPMENT_STATUS.md` and `docs/AGENT_LOG.md`. The workflow itself is
 `workflow_dispatch` only: it has no tag trigger, does not publish anything, has

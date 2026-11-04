@@ -761,7 +761,7 @@ head so a later reader can separate the reviewed tree from the merged tree.
 
 ## PR #132 — `[SUPER-AGENT][RELEASE] Add manual release-check workflow`
 
-- **Reviewed head:** `21cc421`. **Merged by another session:** `a1985c0`
+- **Reviewed head:** `21cc421`. **Merged outside this session:** `a1985c0`
   (2026-11-04T12:35:21Z).
 - **Verdict:** not approved for merge by this session; the PR was owner-gated
   and held. No review or owner approval is recorded on the PR (`reviews: []`).
@@ -772,21 +772,21 @@ head so a later reader can separate the reviewed tree from the merged tree.
 
 ## PR #134 — `[SUPER-AGENT][IMESSAGE] Read nanosecond dates as BigInt`
 
-- **Head:** `56cb001`. **Merged by another session:** `111481d`.
+- **Head:** `56cb001`. **Merged outside this session:** `111481d`.
 - **Review:** none in this log; merged before this session reviewed it.
   `typecheck and test` green on the exact head. Regression test uses a real
   nanosecond timestamp.
 
 ## PR #139 — `[SUPER-AGENT][IMESSAGE] Send non-ASCII replies via argv`
 
-- **Head:** `50cf9d1`. **Merged by another session:** `af6b011`.
+- **Head:** `50cf9d1`. **Merged outside this session:** `af6b011`.
 - **Review:** none in this log; merged before this session reviewed it.
   `typecheck and test` green on the exact head. The change passes reply text as
   an osascript argv item instead of an env/system-attribute path.
 
 ## PR #140 — `[SUPER-AGENT][IMESSAGE] Suppress canned acknowledgement in chats`
 
-- **Head:** `69a243c`. **Merged by another session:** `661e56d`.
+- **Head:** `69a243c`. **Merged outside this session:** `661e56d`.
 - **Review:** none in this log; merged before this session reviewed it.
   `typecheck and test` green on the exact head and in post-merge main CI run
   `41848077717`. Adds a reply-layer guard plus an outbox regression test; no

@@ -11,8 +11,8 @@ with a new entry.
 - While the docs PR was in review, `main` moved from `af6b011` to `661e56d`
   (PR #140, merge of `69a243c`: suppress canned acknowledgements in chat
   conversations so a veto does not leave an ack plus silence).
-- #140 was merged by another session with no review in this log. Its exact head
-  `69a243c` has green `typecheck and test`; post-merge `main` CI run
+- #140 was merged outside this session with no review in this log. Its exact
+  head `69a243c` has green `typecheck and test`; post-merge `main` CI run
   `41848077717` also passed.
 
 ### Decided
@@ -30,12 +30,14 @@ with a new entry.
   then #138's merge commit `58c410a` descended from it. Main has since moved to
   `af6b011` (#139), with #134 `111481d` in between.
 - #132 was owner-gated and held by this session. No review by this session and
-  no owner approval is recorded on the PR (`reviews: []`). Another session
-  merged it. Post-merge audit of `.github/workflows/release.yml`: manual
+  no owner approval is recorded on the PR (`reviews: []`). It was merged
+  outside this session; GitHub records only the owner account, so the actor
+  cannot be distinguished from the record. Post-merge audit of
+  `.github/workflows/release.yml`: manual
   `workflow_dispatch`, `permissions: contents: read`, no `secrets.*`, no
   publish step, artifact upload only.
 - #134 (iMessage nanosecond dates as BigInt) and #139 (non-ASCII replies via
-  osascript argv) were also merged by other sessions with no review in this
+  osascript argv) were also merged outside this session with no review in this
   log. Both heads had green `typecheck and test` (`56cb001`, `50cf9d1`).
 - The prior entry's line "#132 remains open and owner-gated" is retained as
   what was true when written; this entry supersedes it.
