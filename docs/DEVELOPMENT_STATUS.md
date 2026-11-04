@@ -26,9 +26,9 @@ The CI figures are the post-merge `main` run at `00665d2` (run `41795979512`,
 `CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run` with
 `test/{live-demo,live-e2e,live-modules,team-live,demos-real-channels}.test.ts`
 excluded. CI runs the full suite with the 15 live tests skipped when no provider
-credential is present. The last full live suite in this session was the
-peer-run run on `5e5a28b` (476 passed / 3 skipped, exit 0); no live suite was
-run on `00665d2`.
+credential is present. The last full live suite available at this checkpoint was
+run by peer session sulin-5f on `5e5a28b` (476 passed / 3 skipped, exit 0); no
+live suite was run on `00665d2`.
 
 ## Active workstreams
 
