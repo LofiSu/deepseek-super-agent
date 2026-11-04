@@ -174,6 +174,17 @@ bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
   in the Worker task.
 - Recall requires the reader ticket id; an `ltm` id alone is not a capability.
 
+Recall is lexical-first. ADR-010 records the measured baseline on the fixed
+corpus in `test/memory-recall-eval.test.ts`: macro recall@3 is 4/11 = 0.364
+(exact 2/2, word order 2/2, paraphrase 0/3, tag-only 0/2, multi-hop 0/2), and
+both negative controls return no results. The chosen next step is lexical
+normalization plus a small in-repo synonym/morphology map, tag-only retrieval,
+and one-hop tag expansion; ADR-010 holds the acceptance criteria. Embeddings
+are **not implemented**: any future semantic index must sit behind an
+`EmbeddingPort` with a deterministic offline mock and no provider call in CI.
+Retention defaults (1000 entries / 90 days) bound the month-scale cost; ADR-010
+records the full evaluation and security constraints.
+
 ## M7 — speculate
 
 `speculate/silent.ts` creates silent Assignments; `gate.ts` decides deliver or
