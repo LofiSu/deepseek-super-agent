@@ -517,9 +517,10 @@ head so a later reader can separate the reviewed tree from the merged tree.
 
 ## Pending reviews
 
-- PR #102, this cycle-5 docs follow-up, is open. #100 OUTBOX-PERMANENT-FAILURE
-  was merged by the parallel orchestrator at `55f0d09` and #101
-  SERVE-CHANNEL-LOOP at `2ae9740`; neither is reviewed in this log. PR #98
-  (cycle-5 checkpoint) was merged docs-only at `ab8e4bf`; this follow-up
-  records the missing ADR-008 and audit evidence and corrects the #96
-  non-vacuity statement.
+- PR #102 (this cycle-5 docs follow-up) and PR #104 (cycle-6 checkpoint) are
+  open; #104 is not reviewed here. #100 OUTBOX-PERMANENT-FAILURE was merged by
+  the parallel orchestrator at `55f0d09`, #101 SERVE-CHANNEL-LOOP at `2ae9740`,
+  and #103 SUBSCRIPTION-FANOUT-TEST at `5e5a28b`; none of the three is
+  reviewed in this log. PR #98 (cycle-5 checkpoint) was merged docs-only at
+  `ab8e4bf`; this follow-up records the missing ADR-008 and audit evidence and
+  corrects the #96 non-vacuity statement.

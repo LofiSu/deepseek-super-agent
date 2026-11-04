@@ -1,8 +1,9 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `2ae9740` (`[SUPER-AGENT][SERVE-CHANNEL-LOOP] Run an
-> inbound iMessage loop from serve (#101)`)
+> Baseline: `main` at `5e5a28b` (`[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST]
+> Script the many-to-many workers so fan-out no longer waits on a live model
+> (#103)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
@@ -63,11 +64,13 @@ Repository facts:
   metrics assertions), `#96` (`ac1fd79`, gateway token branch tests), #97
   (`9a0def3`, mesh async release), and `#98` (`ab8e4bf`, cycle-5 checkpoint)
   followed. `#99` (`6184a27`, mesh failure pump), `#100` (`55f0d09`, outbox
-  permanent failure), and `#101` (`2ae9740`, serve inbound iMessage loop) then
-  closed three residuals. The baseline for this record is `2ae9740`; later
-  merges are not reflected.
-- Open PRs at this checkpoint: #102, this cycle-5 docs follow-up. PR #86 was
-  closed as superseded by #91.
+  permanent failure), `#101` (`2ae9740`, serve inbound iMessage loop), and
+  `#103` (`5e5a28b`, subscription fan-out test) then closed four residuals or
+  test gaps. The baseline for this record is `5e5a28b`; later merges are not
+  reflected.
+- Open PRs at this checkpoint: #102 (this cycle-5 docs follow-up) and #104
+  (cycle-6 checkpoint, open and not reviewed here). PR #86 was closed as
+  superseded by #91.
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
 - GitHub Issues are disabled, so work items live in this plan and the roadmap.
@@ -134,6 +137,8 @@ Cycle 6 (completed)
   SERVE-CHANNEL-LOOP   Inbound iMessage loop for `serve` (reuse the existing
                        source/admission; Feishu stays a follow-up) — merged
                        #101
+  SUBSCRIPTION-FANOUT-TEST  Script the many-to-many workers so fan-out no
+                       longer waits on a live model — merged #103
 
 Next sessions (not started)
   Evaluate semantic long-term memory (roadmap open item)

@@ -221,7 +221,10 @@ coverage run reports 454 passed across 54 files, 82.42% statements/lines
 (7844/9517), 81.01% branches (2817/3477), and 90.11% functions (693/769).
 The cycle-5 checkpoint itself merged as #98 at `ab8e4bf` (docs-only). After
 the checkpoint, #99 (mesh failure pump) merged at `6184a27`, #100 (outbox
-permanent failure) at `55f0d09`, and #101 (serve inbound iMessage loop) at
-`2ae9740`, closing three residuals; the baseline for this record is `2ae9740`
-and later merges are not reflected. The remaining non-blocking work is tracked
-in the review log and the current status lives in `docs/DEVELOPMENT_STATUS.md`.
+permanent failure) at `55f0d09`, #101 (serve inbound iMessage loop) at
+`2ae9740`, and #103 `[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST] Script the
+many-to-many workers so fan-out no longer waits on a live model` at `5e5a28b`
+(test-only `test/subscription.test.ts`, +4/−1), closing four residuals or test
+gaps; the baseline for this record is `5e5a28b` and later merges are not
+reflected. The remaining non-blocking work is tracked in the review log and the
+current status lives in `docs/DEVELOPMENT_STATUS.md`.

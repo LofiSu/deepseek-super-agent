@@ -42,7 +42,9 @@
 | MESH-FAILURE-PUMP | Orchestration | `agent/mesh-failure-pump` | 2026-11-03 | merged `6184a27`, APPROVE | #99 | integrated |
 | SERVE-CHANNEL-LOOP | Core Runtime | `agent/serve-imessage-loop` | 2026-11-04 | merged `2ae9740` | #101 | integrated |
 | OUTBOX-PERMANENT-FAILURE | Core Runtime | `agent/outbox-permanent-failure` | 2026-11-04 | merged `55f0d09` | #100 | integrated |
+| SUBSCRIPTION-FANOUT-TEST | QA/Testing | `debug/subscription-timeout` | 2026-11-04 | merged `5e5a28b` | #103 | integrated |
 | CYCLE-5-CHECKPOINT | Chief Engineer | `docs/cycle-5-checkpoint` | 2026-11-04 | merged `ab8e4bf` (docs; follow-up adds ADR-008/audit) | #98 | integrated |
+| CYCLE-6-CHECKPOINT | Chief Engineer | `docs/cycle-6-checkpoint` | 2026-11-04 | PR #104 open; not reviewed or merged | #104 | in progress |
 | GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
@@ -76,6 +78,7 @@
 - OUTBOX-PERMANENT-FAILURE: `src/channels/outbox-adapter.ts`,
   `src/channels/imessage.ts` (adapter error only), `test/outbox*.test.ts`,
   `test/channels-imessage.test.ts`, `docs/MODULES.md` M4.
+- SUBSCRIPTION-FANOUT-TEST: `test/subscription.test.ts` only (merged #103).
 - The two cycle-6 tasks have disjoint product files: only `docs/IMESSAGE.md`
   is shared, and it belongs to SERVE-CHANNEL-LOOP. OUTBOX-PERMANENT-FAILURE
   must not edit it; the orchestrator cross-links the outbox note at merge.

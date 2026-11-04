@@ -1,6 +1,6 @@
 # Development status
 
-> Checkpoint: 2026-11-04 · baseline `main` = `2ae9740`
+> Checkpoint: 2026-11-04 · baseline `main` = `5e5a28b`
 > Source of truth: `git`, GitHub PRs/checks, and the evidence in
 > `docs/PROJECT_AUDIT.md`. Do not trust this file without re-verifying; later
 > merges after this baseline are not reflected.
@@ -9,13 +9,13 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `2ae9740` |
-| Last merged PR | #101 SERVE-CHANNEL-LOOP |
+| Commit | `5e5a28b` |
+| Last merged PR | #103 SUBSCRIPTION-FANOUT-TEST |
 | Merged in cycle 5 | #94 live reference run (owner, outside this session), #95/#96/#97 test hardening (reviewed APPROVE), #98 checkpoint (docs) |
-| Merged after the cycle-5 checkpoint | #99 MESH-FAILURE-PUMP (`6184a27`), #100 OUTBOX-PERMANENT-FAILURE (`55f0d09`), #101 SERVE-CHANNEL-LOOP (`2ae9740`) |
+| Merged after the cycle-5 checkpoint | #99 MESH-FAILURE-PUMP (`6184a27`), #100 OUTBOX-PERMANENT-FAILURE (`55f0d09`), #101 SERVE-CHANNEL-LOOP (`2ae9740`), #103 SUBSCRIPTION-FANOUT-TEST (`5e5a28b`) |
 | Merged in cycle 4 | #90 thread keys, #91 live-suite test salvage, #92 mesh queue tests; all APPROVE |
 | Merged in cycle 3 | #87 gateway token race, #88 iMessage group edges, #89 cycle-3 reconciliation; all APPROVE |
-| Open PRs at checkpoint | #102 this cycle-5 docs follow-up |
+| Open PRs at checkpoint | #102 this cycle-5 docs follow-up; #104 cycle-6 checkpoint (open, not reviewed or merged) |
 | Required check | `typecheck and test` |
 | Offline suite | 455 passed / 15 skipped (470 tests, 58 files) at `9a0def3` |
 | Coverage | 82.42% statements/lines (7844/9517), 81.01% branches (2817/3477), 90.11% functions (693/769) at `9a0def3` |
@@ -25,7 +25,7 @@ The suite and coverage figures above are the `main` CI run at `9a0def3`
 checkpoint; the coverage job reported 454 passed across 54 files. A post-merge
 `main` CI at `6184a27` (run `41791336153`) reported 456 passed / 15 skipped
 (471 tests), statements/lines 82.42% (7846/9519), branches 81.03% (2820/3480),
-and functions 90.11%. #100 and #101 added tests afterward, so the current
+and functions 90.11%. #100, #101, and #103 added tests afterward, so the current
 `main` count is higher and is left to their CI runs rather than restated here.
 CI runs the full suite with the 15 live tests skipped when no provider
 credential is present. A local cycle-5 gate on `9a0def3` with the live test
@@ -42,8 +42,10 @@ it is not the CI baseline.
 | MESH-FAILURE-PUMP — pump queued Workers after a failed release | P2 | `agent/mesh-failure-pump` | implementer | merged (#99, `6184a27`), APPROVE |
 | SERVE-CHANNEL-LOOP — inbound iMessage loop for `serve` | P1 | `agent/serve-imessage-loop` | implementer | merged (#101, `2ae9740`) |
 | OUTBOX-PERMANENT-FAILURE — stop retrying unroutable sends | P2 | `agent/outbox-permanent-failure` | implementer | merged (#100, `55f0d09`) |
+| SUBSCRIPTION-FANOUT-TEST — deterministic many-to-many workers | P2 | `debug/subscription-timeout` | implementer | merged (#103, `5e5a28b`) |
 | GATEWAY-REVIEW — review #64 surface | P2 | review only | review lead | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97 APPROVE; #77 corrected |
 | CYCLE-5-CHECKPOINT — this checkpoint | P1 | `docs/cycle-5-checkpoint` | chief engineer | merged (#98, `ab8e4bf`) |
+| CYCLE-6-CHECKPOINT — cycle-6 record | P1 | `docs/cycle-6-checkpoint` | chief engineer | PR #104 open; not reviewed or merged |
 
 ## Completed this cycle (Cycle 5)
 
@@ -66,7 +68,8 @@ it is not the CI baseline.
 - Merged the cycle-5 checkpoint as #98 at `ab8e4bf` (docs-only).
 - After the checkpoint, #99 (pump queued Workers after a failed non-queued
   release) merged at `6184a27`, #100 (outbox permanent failure) merged at
-  `55f0d09`, and #101 (`serve` inbound iMessage loop) merged at `2ae9740`.
+  `55f0d09`, #101 (`serve` inbound iMessage loop) merged at `2ae9740`, and #103
+  (deterministic subscription fan-out test) merged at `5e5a28b`.
 - Confirmed PR #97 merged with `typecheck and test` green and zero unresolved
   review threads; branch protection was not bypassed.
 
@@ -86,8 +89,7 @@ it is not the CI baseline.
 
 1. Land this cycle-5 follow-up (#102) after CI; the checkpoint itself is #98
    (`ab8e4bf`).
-2. Write the cycle-6 checkpoint: #99/#100/#101 are merged and their docs state
-   is current in this file, `docs/AGENT_LOG.md`, `docs/PR_REVIEW_LOG.md`,
-   `docs/AGENT_REGISTRY.md`, and `.super-agent/state.json`.
+2. PR #104 is the open cycle-6 checkpoint; it is not reviewed or merged here.
+   Reconcile #102 and #104 before the next cycle.
 3. Then evaluate semantic long-term memory (roadmap open item) and the
    remaining iMessage ambiguity boundary.

@@ -21,8 +21,10 @@ with a new entry.
   node the Harness does not `pump()`, so a queued Worker can stay parked with a
   free node. That work was dispatched as MESH-FAILURE-PUMP and merged as #99
   (`6184a27`) while this follow-up was being prepared. #100
-  (OUTBOX-PERMANENT-FAILURE) merged at `55f0d09` and #101
-  (SERVE-CHANNEL-LOOP) merged at `2ae9740`.
+  (OUTBOX-PERMANENT-FAILURE) merged at `55f0d09`, #101 (SERVE-CHANNEL-LOOP) at
+  `2ae9740`, and #103 `[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST] Script the
+  many-to-many workers so fan-out no longer waits on a live model` at
+  `5e5a28b` (test-only `test/subscription.test.ts`, +4/−1).
 - The #99 review (heads `b2b0e4f`/`48aa718`) returned APPROVE: release-then-
   `pump()` in both `startNow` failure paths, gated on a picked node, with a
   deterministic queued-Worker regression test. CI was green on `48aa718`
