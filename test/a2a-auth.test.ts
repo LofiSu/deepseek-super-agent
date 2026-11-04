@@ -176,6 +176,23 @@ describe('A2A request verification', () => {
     }).peerId).toBe(PEER)
   })
 
+  it('does not consume the nonce when the signature fails', () => {
+    const cache = createA2AReplayCache()
+    const headers = sign().headers
+    const tampered = {
+      ...headers,
+      [A2A_AUTH_HEADERS.signature]: '0'.repeat(64),
+    }
+
+    expectAuthError(
+      () => verify({ headers: tampered, replayCache: cache }),
+      'invalid_signature',
+    )
+    // Signature verification precedes the replay check, so the first failed
+    // attempt must not burn the nonce for the corrected retry.
+    expect(verify({ headers, replayCache: cache }).peerId).toBe(PEER)
+  })
+
   it('keeps the replay cache bounded and prunes expired entries', () => {
     const cache = createA2AReplayCache({ maxEntries: 2 })
     const nonceA = 'a'.repeat(32)

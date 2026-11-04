@@ -1,4 +1,5 @@
-import { createServer, type Server } from 'node:http'
+import { createServer, request as httpRequest, type Server } from 'node:http'
+import { connect } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from '../src/channels/a2a.ts'
 import {
@@ -240,6 +241,84 @@ describe('A2A HTTP handler', () => {
     expect(received).toHaveLength(0)
   })
 
+  it('enforces the streaming 64 KiB cap when content-length is absent', async () => {
+    const { url, received } = await harness()
+    const oversized = JSON.stringify({
+      from: PEER,
+      to: 'worker',
+      body: 'x'.repeat(64 * 1024),
+    })
+    const headers = {
+      'content-type': 'application/json',
+      ...signedHeaders(oversized),
+    }
+
+    let hadContentLength = false
+    const result = await new Promise<{ status: number; hadContentLength: boolean }>(
+      (resolve, reject) => {
+        const req = httpRequest(url, { method: 'POST', headers }, res => {
+          res.resume()
+          res.on('end', () => {
+            resolve({ status: res.statusCode ?? 0, hadContentLength })
+          })
+          res.on('error', reject)
+        })
+        hadContentLength = req.getHeader('content-length') !== undefined
+        req.on('error', reject)
+        // No content-length header: Node streams this with chunked encoding,
+        // so `declaredBodyTooLarge` cannot short-circuit and `readRawBody` must
+        // enforce the cap itself.
+        req.write(oversized)
+        req.end()
+      },
+    )
+
+    expect(result.hadContentLength).toBe(false)
+    expect(result.status).toBe(400)
+    expect(received).toHaveLength(0)
+  })
+
+  it('destroys a stalled request after the configured timeout', async () => {
+    const { url, received } = await harness({ requestTimeoutMs: 50 })
+    const port = Number(new URL(url).port)
+    const socket = connect({ host: '127.0.0.1', port })
+    const closed = new Promise<void>(resolve => {
+      socket.once('close', () => resolve())
+      socket.once('error', () => resolve())
+    })
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', () => resolve())
+      socket.once('error', reject)
+    })
+
+    const headers = signedHeaders(BODY)
+    const head = [
+      'POST /a2a HTTP/1.1',
+      'Host: 127.0.0.1',
+      'Content-Type: application/json',
+      'Content-Length: 100',
+      ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+    ].join('\r\n')
+
+    let guard: ReturnType<typeof setTimeout> | undefined
+    try {
+      socket.write(`${head}\r\n\r\n{`)
+      await Promise.race([
+        closed,
+        new Promise<never>((_resolve, reject) => {
+          guard = setTimeout(
+            () => reject(new Error('stalled request was not destroyed')),
+            2_000,
+          )
+        }),
+      ])
+    } finally {
+      if (guard !== undefined) clearTimeout(guard)
+      socket.destroy()
+    }
+    expect(received).toHaveLength(0)
+  })
+
   it('maps an unroutable envelope to 404 and preserves it through the transport', async () => {
     const { url } = await harness({ now: realClock() })
     const body = JSON.stringify({ from: PEER, to: 'nobody', body: 'work' })
@@ -309,15 +388,48 @@ describe('A2AHttpTransport', () => {
     expect(JSON.stringify(delivery)).not.toContain(SECRET)
   })
 
-  it('returns a failed delivery when the forged from is rejected by the server', async () => {
-    const { url, received } = await harness({ now: realClock() })
-    const transport = new A2AHttpTransport({ url, peerId: PEER, secret: SECRET })
+  it('rejects a from mismatch locally without making a request', async () => {
+    let calls = 0
+    const fetchImpl: typeof globalThis.fetch = () => {
+      calls += 1
+      return Promise.resolve(new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+    }
+    const transport = new A2AHttpTransport({
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: PEER,
+      secret: SECRET,
+      fetch: fetchImpl,
+    })
 
     const delivery = await transport.send({ from: 'human', to: 'worker', body: 'nope' })
 
     expect(delivery.status).toBe('failed')
-    expect(delivery.error).toMatch(/status 400/)
-    expect(received).toHaveLength(0)
+    expect(delivery.delivered).toBe(0)
+    expect(delivery.error).toMatch(/does not match the authenticated peer/)
+    expect(calls).toBe(0)
+  })
+
+  it('returns a failed delivery when the request times out', async () => {
+    const neverFetch: typeof globalThis.fetch = () => new Promise<never>(() => {})
+    const transport = new A2AHttpTransport({
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: PEER,
+      secret: SECRET,
+      fetch: neverFetch,
+      timeoutMs: 25,
+    })
+
+    const started = Date.now()
+    const delivery = await transport.send({ from: PEER, to: 'worker', body: 'slow' })
+
+    expect(delivery.status).toBe('failed')
+    expect(delivery.delivered).toBe(0)
+    expect(delivery.error).toMatch(/timed out/)
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(JSON.stringify(delivery)).not.toContain(SECRET)
   })
 })
 

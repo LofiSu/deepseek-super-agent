@@ -31,6 +31,8 @@ import {
 
 export const A2A_HTTP_PATH = '/a2a'
 export const A2A_HTTP_MAX_BODY_BYTES = 64 * 1024
+/** Default inbound socket-inactivity and outbound request timeout. */
+export const A2A_HTTP_DEFAULT_TIMEOUT_MS = 30_000
 
 const JSON_CONTENT_TYPE = 'application/json'
 
@@ -49,6 +51,11 @@ export interface A2AHttpHandlerOptions {
   maxSkewMs?: number
   /** Replay cache shared by all requests to this handler. */
   replayCache?: A2AReplayCache
+  /**
+   * Inbound socket-inactivity timeout in milliseconds. A stalled request is
+   * destroyed instead of holding a body read open forever. Defaults to 30 s.
+   */
+  requestTimeoutMs?: number
 }
 
 export type A2AHttpHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
@@ -62,6 +69,11 @@ export interface A2AHttpTransportOptions {
   secret: A2ASecret
   /** Injectable fetch for tests. Defaults to the runtime's global fetch. */
   fetch?: typeof globalThis.fetch
+  /**
+   * End-to-end request timeout in milliseconds. The request is aborted and a
+   * failed delivery is returned. Defaults to 30 s.
+   */
+  timeoutMs?: number
 }
 
 class BodyTooLargeError extends Error {
@@ -69,6 +81,13 @@ class BodyTooLargeError extends Error {
     super('A2A request body is too large')
     this.name = 'BodyTooLargeError'
   }
+}
+
+function positiveTimeout(value: number | undefined): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value)
+  }
+  return A2A_HTTP_DEFAULT_TIMEOUT_MS
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -171,8 +190,15 @@ function readRawBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
 export function createA2AHttpHandler(options: A2AHttpHandlerOptions): A2AHttpHandler {
   const replayCache = options.replayCache
     ?? createA2AReplayCache({ windowMs: options.maxSkewMs })
+  const requestTimeoutMs = positiveTimeout(options.requestTimeoutMs)
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // A stalled client cannot hold a body read open forever. Once the response
+    // finishes, clear the socket timeout so an idle keep-alive socket is not
+    // destroyed later.
+    req.setTimeout(requestTimeoutMs, () => { req.destroy() })
+    res.once('finish', () => { req.setTimeout(0) })
+
     let pathname: string
     try {
       pathname = new URL(req.url ?? '/', 'http://a2a.invalid').pathname
@@ -325,15 +351,23 @@ export class A2AHttpTransport implements A2ATransport {
   private readonly peerId: string
   private readonly secret: A2ASecret
   private readonly fetchImpl: typeof globalThis.fetch
+  private readonly timeoutMs: number
 
   constructor(options: A2AHttpTransportOptions) {
     this.url = options.url
     this.peerId = options.peerId
     this.secret = options.secret
     this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.timeoutMs = positiveTimeout(options.timeoutMs)
   }
 
   async send(envelope: A2AEnvelope): Promise<A2ADelivery> {
+    if (envelope.from !== this.peerId) {
+      // The transport signs as `this.peerId`; a different claimed sender would
+      // be rejected remotely. Fail locally instead of rewriting identity.
+      return failedDelivery(envelope, 'A2A envelope sender does not match the authenticated peer')
+    }
+
     let payload: string
     try {
       // The wire envelope is exactly { from, to, body }; unknown fields drop.
@@ -353,18 +387,38 @@ export class A2AHttpTransport implements A2ATransport {
       return failedDelivery(envelope, 'A2A request could not be signed')
     }
 
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+        reject(new Error('A2A request timed out'))
+      }, this.timeoutMs)
+    })
+
     let response: Awaited<ReturnType<typeof globalThis.fetch>>
     try {
-      response = await this.fetchImpl(this.url, {
-        method: 'POST',
-        headers: {
-          'content-type': JSON_CONTENT_TYPE,
-          ...signed.headers,
-        },
-        body: payload,
-      })
+      response = await Promise.race([
+        this.fetchImpl(this.url, {
+          method: 'POST',
+          headers: {
+            'content-type': JSON_CONTENT_TYPE,
+            ...signed.headers,
+          },
+          body: payload,
+          signal: controller.signal,
+        }),
+        deadline,
+      ])
     } catch {
-      return failedDelivery(envelope, 'A2A request failed')
+      return failedDelivery(
+        envelope,
+        timedOut ? 'A2A request timed out' : 'A2A request failed',
+      )
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
     }
 
     let result: unknown
