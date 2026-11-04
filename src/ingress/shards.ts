@@ -1,10 +1,16 @@
 import type { Trigger } from '../shared/types.ts'
 
-/** One Router shard. Predicates live in `filter`; see `compileFilter`. */
+/** One Router shard. Predicates live in `filter` or `filters`; see `compileFilter`. */
 export interface RouterShard {
   id: string
   /** `source:github,thread:pr/7` — comma joins predicates with AND. Default shard has no filter. */
   filter?: string
+  /**
+   * Alternative filters ORed together. Each entry keeps the comma/AND grammar,
+   * so a trigger matches when any entry matches. Mutually exclusive with
+   * `filter`; must be non-empty. Default shard has neither.
+   */
+  filters?: readonly string[]
   /**
    * Higher runs first in `route`; ties keep registration order. The default
    * shard is always the fallback, regardless of this value.
@@ -15,6 +21,8 @@ export interface RouterShard {
 interface ShardEntry {
   id: string
   priority: number
+  filter?: string
+  filters?: readonly string[]
   matcher: (trigger: Trigger) => boolean
 }
 
@@ -43,11 +51,38 @@ export class RouterShardRegistry {
 
   register(shard: RouterShard): void {
     if (!shard.id.trim()) throw new Error('Router shard id must not be empty')
-    if (shard.id === 'default' && shard.filter) throw new Error('Default router shard cannot have a filter')
-    const matcher = shard.filter ? compileFilter(shard.filter) : () => true
+    if (shard.filter !== undefined && shard.filters !== undefined) {
+      throw new Error(`Router shard ${shard.id} cannot set both filter and filters`)
+    }
+    if (shard.id === 'default' && (shard.filter !== undefined || shard.filters !== undefined)) {
+      throw new Error('Default router shard cannot have a filter')
+    }
+    let filter: string | undefined
+    let filters: readonly string[] | undefined
+    let matcher: (trigger: Trigger) => boolean
+    if (shard.filters !== undefined) {
+      if (!Array.isArray(shard.filters) || shard.filters.length === 0) {
+        throw new Error(`Router shard ${shard.id} filters must be a non-empty array`)
+      }
+      filters = [...shard.filters]
+      const matchers = filters.map(entry => {
+        if (typeof entry !== 'string') {
+          throw new Error(`Invalid router shard filter: ${String(entry)}`)
+        }
+        return compileFilter(entry)
+      })
+      matcher = trigger => matchers.some(matches => matches(trigger))
+    } else if (shard.filter !== undefined) {
+      filter = shard.filter
+      matcher = compileFilter(filter)
+    } else {
+      matcher = () => true
+    }
     this.shards.set(shard.id, {
       id: shard.id,
       priority: Number.isFinite(shard.priority) ? shard.priority! : 0,
+      filter,
+      filters,
       matcher,
     })
   }
@@ -59,11 +94,11 @@ export class RouterShardRegistry {
 
   get(id: string): RouterShard | undefined {
     const entry = this.shards.get(id)
-    return entry ? { id: entry.id, priority: entry.priority } : undefined
+    return entry ? toRouterShard(entry) : undefined
   }
 
   list(): RouterShard[] {
-    return [...this.shards.values()].map(entry => ({ id: entry.id, priority: entry.priority }))
+    return [...this.shards.values()].map(toRouterShard)
   }
 
   /**
@@ -80,6 +115,14 @@ export class RouterShardRegistry {
       .map(({ entry }) => entry.id)
     return matches.length ? matches : ['default']
   }
+}
+
+/** Public metadata snapshot; `filters` is copied so callers cannot mutate state. */
+function toRouterShard(entry: ShardEntry): RouterShard {
+  const shard: RouterShard = { id: entry.id, priority: entry.priority }
+  if (entry.filter !== undefined) shard.filter = entry.filter
+  if (entry.filters !== undefined) shard.filters = [...entry.filters]
+  return shard
 }
 
 /** Supported predicates: source, thread, actor, human, and text; comma joins with AND. */

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { cliTrigger } from '../src/channels/cli.ts'
 import { githubTrigger } from '../src/channels/github.ts'
 import { imTrigger } from '../src/channels/im.ts'
 import type { Runtime } from '../src/runtime.ts'
@@ -50,6 +51,26 @@ describe('Runtime services', () => {
     expect(runtime.workerMesh.pickNode('ticket_1')?.id).toBe('alpha')
     expect(runtime.workerMesh.pickNode('ticket_2')?.id).toBe('alpha')
     expect(runtime.workerMesh.pickNode('ticket_3')).toBeUndefined()
+  })
+
+  it('accepts multiple filters from DS_AGENT_SHARDS and RuntimeOptions.routerShards', () => {
+    const previous = process.env.DS_AGENT_SHARDS
+    process.env.DS_AGENT_SHARDS = JSON.stringify([
+      { id: 'env-multi', filters: ['source:github', 'thread:pr/9'], priority: 4 },
+    ])
+    try {
+      runtime = freshRuntime({
+        routerShards: [{ id: 'opt-multi', filters: ['source:im', 'thread:topic/x'], priority: 5 }],
+      })
+    } finally {
+      if (previous === undefined) delete process.env.DS_AGENT_SHARDS
+      else process.env.DS_AGENT_SHARDS = previous
+    }
+
+    expect(runtime.log.text()).toContain('[routing] shards configured count=1')
+    expect(runtime.routerShards.route(githubTrigger({ pr: 9, text: 'CI failed' }))).toEqual(['env-multi'])
+    expect(runtime.routerShards.route(imTrigger({ thread: 'topic/x', text: 'hello' }))).toEqual(['opt-multi'])
+    expect(runtime.routerShards.route(cliTrigger({ text: 'hello' }))).toEqual(['default'])
   })
 
   it('publishes lifecycle events and routes local envelopes', () => {

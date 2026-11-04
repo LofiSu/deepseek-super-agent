@@ -77,4 +77,70 @@ describe('Router shards', () => {
       text: 'the login timeout is back',
     }))).toEqual(['text-hit', 'source-hit', 'thread-hit'])
   })
+
+  it('ORs filters entries while ANDing predicates inside each entry', () => {
+    const shards = new RouterShardRegistry()
+    shards.register({ id: 'default' })
+    shards.register({
+      id: 'multi',
+      filters: ['source:github,text:failed', 'thread:topic/incident'],
+    })
+
+    // First entry: source AND text.
+    expect(shards.route(githubTrigger({ pr: 11, text: 'CI failed' }))).toEqual(['multi'])
+    expect(shards.route(githubTrigger({ pr: 11, text: 'CI passed' }))).toEqual(['default'])
+    // Second entry matches independently on thread, even though source differs.
+    expect(shards.route(imTrigger({ thread: 'topic/incident', text: 'hello' }))).toEqual(['multi'])
+    // A trigger matching no entry falls back to default.
+    expect(shards.route(imTrigger({ thread: 'topic/other', text: 'hello' }))).toEqual(['default'])
+  })
+
+  it('orders filter-array shards by priority then registration order', () => {
+    const shards = new RouterShardRegistry()
+    shards.register({ id: 'low-first', filters: ['source:im'], priority: 1 })
+    shards.register({ id: 'im-or-thread', filters: ['thread:topic/overlap', 'source:im'], priority: 5 })
+    shards.register({ id: 'low-later', filters: ['source:im'], priority: 1 })
+
+    expect(shards.route(imTrigger({ thread: 'topic/overlap', text: 'hello' }))).toEqual([
+      'im-or-thread',
+      'low-first',
+      'low-later',
+    ])
+  })
+
+  it('rejects conflicting, empty, default, and malformed filter-array configs', () => {
+    const shards = new RouterShardRegistry()
+    expect(() => shards.register({ id: 'both', filter: 'source:im', filters: ['source:im'] })).toThrow()
+    expect(() => shards.register({ id: 'empty', filters: [] })).toThrow()
+    expect(() => shards.register({ id: 'default', filters: ['source:im'] })).toThrow()
+    expect(() => shards.register({ id: 'bad', filters: ['source:im', 'unsupported:value'] })).toThrow()
+    expect(shards.list()).toEqual([])
+  })
+
+  it('round-trips configured filter and filters through get and list without sharing state', () => {
+    const shards = new RouterShardRegistry()
+    shards.register({ id: 'single', filter: 'source:im', priority: 2 })
+    shards.register({ id: 'multi', filters: ['source:im', 'thread:topic/x'], priority: 3 })
+
+    expect(shards.get('single')).toEqual({ id: 'single', priority: 2, filter: 'source:im' })
+    expect(shards.get('multi')).toEqual({
+      id: 'multi',
+      priority: 3,
+      filters: ['source:im', 'thread:topic/x'],
+    })
+    expect(shards.get('missing')).toBeUndefined()
+    expect(shards.list()).toEqual([
+      { id: 'single', priority: 2, filter: 'source:im' },
+      { id: 'multi', priority: 3, filters: ['source:im', 'thread:topic/x'] },
+    ])
+
+    const snapshot = shards.get('multi')!
+    ;(snapshot.filters as string[]).push('source:github')
+    expect(shards.get('multi')?.filters).toEqual(['source:im', 'thread:topic/x'])
+    expect(JSON.parse(JSON.stringify(shards.get('multi')))).toEqual({
+      id: 'multi',
+      priority: 3,
+      filters: ['source:im', 'thread:topic/x'],
+    })
+  })
 })
