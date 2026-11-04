@@ -142,24 +142,20 @@ function tableExists(db: DatabaseSync, name: string): boolean {
   return row !== undefined
 }
 
-function userTableCount(db: DatabaseSync): number {
-  const row = db.prepare(
-    `SELECT COUNT(*) AS count FROM sqlite_master
-     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
-  ).get() as { count: number }
-  return Number(row.count)
-}
-
 /**
- * Bring `db` to `latest` inside one transaction.
+ * Bring `db` to `latest` inside one serialized transaction.
  *
  * - A fresh database runs every migration starting at version 1.
- * - A legacy database (tables but no `schema_migrations`) is baselined at
- *   version 1 without re-running creation, then later migrations are applied.
+ * - A legacy or partially-created database (no `schema_migrations` ledger)
+ *   runs every migration too; `SCHEMA` uses `CREATE TABLE IF NOT EXISTS`, so
+ *   existing tables and rows are left alone while missing tables are filled in.
  * - A database recorded above `latest` fails closed before any write.
  *
- * Migration list versions must be unique. On any migration failure the whole
- * transaction rolls back, so the database stays at its previous version.
+ * Migration list versions must be unique. Openers serialize on
+ * `BEGIN IMMEDIATE` and re-read the ledger inside the transaction, so two
+ * processes opening the same fresh database cannot both apply version 1.
+ * On any migration failure the whole transaction rolls back, so the database
+ * stays at its previous version.
  */
 export function migrate(
   db: DatabaseSync,
@@ -183,36 +179,40 @@ export function migrate(
     }
   }
 
-  const hasMigrationTable = tableExists(db, 'schema_migrations')
-  let current = 0
-  if (hasMigrationTable) {
+  // Fail closed before taking a write lock, so a newer database is untouched.
+  if (tableExists(db, 'schema_migrations')) {
     const row = db.prepare(
       'SELECT MAX(version) AS version FROM schema_migrations',
     ).get() as { version: number | null }
-    current = row.version == null ? 0 : Number(row.version)
-    if (current > latest) {
-      throw new UserError(
-        `database schema version ${current} is newer than this build supports (${latest}); ` +
-        'upgrade ds-agent before opening this store',
-      )
-    }
+    const known = row.version == null ? 0 : Number(row.version)
+    if (known > latest) throw newerVersionError(known, latest)
+    if (known >= latest) return known
   }
 
-  const legacy = !hasMigrationTable && userTableCount(db) > 0
-  const pending = ordered.filter(migration => migration.version > current)
-  if (pending.length === 0) return current
-
-  db.exec('BEGIN')
+  db.exec('PRAGMA busy_timeout = 5000')
+  db.exec('BEGIN IMMEDIATE')
   try {
+    // Re-read inside the write transaction: another opener may have applied
+    // migrations while this connection waited for the lock.
     db.exec(SCHEMA_MIGRATIONS_DDL)
+    const row = db.prepare(
+      'SELECT MAX(version) AS version FROM schema_migrations',
+    ).get() as { version: number | null }
+    const current = row.version == null ? 0 : Number(row.version)
+    if (current > latest) throw newerVersionError(current, latest)
+
+    const pending = ordered.filter(migration => migration.version > current)
+    if (pending.length === 0) {
+      db.exec('COMMIT')
+      return current
+    }
+
     const record = db.prepare(
       'INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)',
     )
     let applied = current
     for (const migration of pending) {
-      // A legacy tree already has version 1's tables; record the baseline but
-      // do not recreate or rewrite them.
-      if (!(legacy && migration.version === 1)) migration.up(db)
+      migration.up(db)
       record.run(migration.version, new Date().toISOString())
       applied = migration.version
     }
@@ -226,4 +226,11 @@ export function migrate(
     }
     throw error
   }
+}
+
+function newerVersionError(current: number, latest: number): UserError {
+  return new UserError(
+    `database schema version ${current} is newer than this build supports (${latest}); ` +
+    'upgrade ds-agent before opening this store',
+  )
 }

@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import { UserError } from '../src/shared/errors.ts'
 import {
   LATEST_SCHEMA_VERSION,
@@ -13,6 +16,25 @@ import {
 import { Store } from '../src/store/sqlite.ts'
 
 const homes: string[] = []
+const execFileAsync = promisify(execFile)
+
+/**
+ * Child-process opener for the interleaving test. Both processes wait for the
+ * same wall-clock start so their `migrate()` calls overlap on one fresh file.
+ */
+const OPENER_SCRIPT = `
+import { DatabaseSync } from 'node:sqlite'
+import { pathToFileURL } from 'node:url'
+
+const [schemaPath, dbFile, startAtRaw] = process.argv.slice(2)
+const waitMs = Number(startAtRaw) - Date.now()
+if (waitMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs)
+const { migrate, MIGRATIONS, LATEST_SCHEMA_VERSION } = await import(pathToFileURL(schemaPath).href)
+const db = new DatabaseSync(dbFile)
+const version = migrate(db, MIGRATIONS, LATEST_SCHEMA_VERSION)
+db.close()
+process.stdout.write(String(version))
+`
 
 afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true })
@@ -53,6 +75,16 @@ function tableNames(home: string): string[] {
   )
 }
 
+function tableSql(home: string): Record<string, string> {
+  return inspect(home, db => {
+    const rows = db.prepare(
+      `SELECT name, sql FROM sqlite_master
+       WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`,
+    ).all() as { name: string; sql: string }[]
+    return Object.fromEntries(rows.map(row => [row.name, row.sql]))
+  })
+}
+
 function rawDocument(home: string, kind: string, id: string): string | undefined {
   return inspect(home, db =>
     (db.prepare('SELECT payload FROM documents WHERE kind = ? AND id = ?')
@@ -83,8 +115,9 @@ function captureError(work: () => unknown): Error {
 }
 
 /**
- * Version 1 tables as they existed before migrations, with an outbox that
- * predates `idempotency_key`, `attempts`, and `next_attempt_at`.
+ * Deliberately partial pre-migration tree: core tables are missing (as after
+ * a crash during first creation) and the outbox predates `idempotency_key`,
+ * `attempts`, and `next_attempt_at`.
  */
 const LEGACY_SCHEMA = `
 CREATE TABLE documents (
@@ -186,22 +219,26 @@ describe('store schema migrations', () => {
     expect(tableNames(home)).toContain('schema_migrations')
   })
 
-  it('baselines a legacy database without rewriting its tables or data', () => {
+  it('completes a partial legacy database without rewriting its tables or data', () => {
     const home = tempHome()
     const db = new DatabaseSync(dbPath(home))
     db.exec(LEGACY_SCHEMA)
     db.prepare('INSERT INTO documents(kind, id, payload) VALUES(?, ?, ?)')
       .run('note', 'doc_1', JSON.stringify({ body: 'keep me', nested: { n: 7 } }))
     db.prepare('INSERT INTO spills(id, body, created_at) VALUES(?, ?, ?)')
-      .run('spill_1', 'legacy spill body', '2026-01-01T00:00:00.000Z')
+      .run('legacy_spill_1', 'legacy spill body', '2026-01-01T00:00:00.000Z')
     db.close()
 
-    const legacyTables = tableNames(home)
+    const legacySql = tableSql(home)
 
     const store = new Store(home)
     expect(store.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
     expect(store.getDoc('note', 'doc_1')).toEqual({ body: 'keep me', nested: { n: 7 } })
-    expect(store.getSpill('spill_1')).toBe('legacy spill body')
+    expect(store.getSpill('legacy_spill_1')).toBe('legacy spill body')
+    // Version 1 fills in the tables the partial tree was missing, so core
+    // Store operations work after migration.
+    expect(store.putSpill('post-migration spill')).toBe('spill_1')
+    expect(store.getSpill('spill_1')).toBe('post-migration spill')
     store.close()
 
     expect(migrationRows(home).map(row => row.version)).toEqual([1, LATEST_SCHEMA_VERSION])
@@ -209,10 +246,65 @@ describe('store schema migrations', () => {
     for (const column of ['idempotency_key', 'attempts', 'next_attempt_at']) {
       expect(columns).toContain(column)
     }
-    // The legacy tree is only baselined: version 1's creation is not re-run.
-    expect(tableNames(home).sort()).toEqual([...legacyTables, 'schema_migrations'].sort())
+    // Missing core tables are created; existing tables and rows are not
+    // recreated or rewritten. The outbox DDL changes only because version 2
+    // adds columns with ALTER TABLE.
+    const tablesAfter = tableNames(home)
+    for (const table of ['id_seq', 'spill_grants', 'subscriptions', 'artifacts', 'events']) {
+      expect(tablesAfter).toContain(table)
+    }
+    const sqlAfter = tableSql(home)
+    for (const [table, sql] of Object.entries(legacySql)) {
+      if (table === 'outbox') continue
+      expect(sqlAfter[table]).toBe(sql)
+    }
     expect(rawDocument(home, 'note', 'doc_1')).toBe(JSON.stringify({ body: 'keep me', nested: { n: 7 } }))
-    expect(rawSpill(home, 'spill_1')).toBe('legacy spill body')
+    expect(rawSpill(home, 'legacy_spill_1')).toBe('legacy spill body')
+  })
+
+  it('serializes a second connection opening the same database', () => {
+    const home = tempHome()
+    const first = new DatabaseSync(dbPath(home))
+    const second = new DatabaseSync(dbPath(home))
+    try {
+      expect(migrate(first, MIGRATIONS, LATEST_SCHEMA_VERSION)).toBe(LATEST_SCHEMA_VERSION)
+      const rowsAfterFirst = first.prepare(
+        'SELECT version, applied_at FROM schema_migrations ORDER BY version',
+      ).all() as { version: number; applied_at: string }[]
+
+      // The second opener re-reads the ledger and finds nothing left to do.
+      expect(migrate(second, MIGRATIONS, LATEST_SCHEMA_VERSION)).toBe(LATEST_SCHEMA_VERSION)
+      const rowsAfterSecond = second.prepare(
+        'SELECT version, applied_at FROM schema_migrations ORDER BY version',
+      ).all() as { version: number; applied_at: string }[]
+      expect(rowsAfterSecond).toEqual(rowsAfterFirst)
+      expect(new Set(rowsAfterSecond.map(row => row.version)).size).toBe(LATEST_SCHEMA_VERSION)
+    } finally {
+      second.close()
+      first.close()
+    }
+  })
+
+  it('serializes two processes opening a fresh database at the same time', async () => {
+    const home = tempHome()
+    const script = path.join(home, 'opener.mjs')
+    fs.writeFileSync(script, OPENER_SCRIPT)
+    const schemaPath = fileURLToPath(new URL('../src/store/schema.ts', import.meta.url))
+    const startAt = Date.now() + 400
+    const results = await Promise.all([0, 1].map(() =>
+      execFileAsync(
+        process.execPath,
+        ['--experimental-strip-types', script, schemaPath, dbPath(home), String(startAt)],
+        { encoding: 'utf8', timeout: 15_000 },
+      ),
+    ))
+    for (const result of results) {
+      expect(String(result.stdout).trim()).toBe(String(LATEST_SCHEMA_VERSION))
+    }
+    expect(migrationRows(home).map(row => row.version)).toEqual([1, LATEST_SCHEMA_VERSION])
+    const reopened = new Store(home)
+    expect(reopened.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
+    reopened.close()
   })
 
   it('fails closed without writing when the database is newer than this build', () => {
