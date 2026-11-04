@@ -557,7 +557,13 @@ export class ChatDbImessageApi implements ImessageApi {
         LIMIT ?
       )
       ORDER BY m.ROWID ASC, c.ROWID ASC`
-    const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>
+    // macOS 14+ writes `message.date` in Apple-epoch nanoseconds (~8e17), which
+    // is beyond Number.MAX_SAFE_INTEGER; node:sqlite throws while converting
+    // such a column unless the statement reads integers as BigInt. Every
+    // integer consumer below normalizes explicitly (Number(), safeChatRowId).
+    const statement = db.prepare(sql)
+    statement.setReadBigInts(true)
+    const rows = statement.all(...params) as Array<Record<string, unknown>>
 
     interface Aggregate {
       row: Record<string, unknown>

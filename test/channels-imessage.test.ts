@@ -540,6 +540,42 @@ describe('ChatDbImessageApi pull', () => {
     }
   })
 
+  it('reads macOS nanosecond dates that exceed Number.MAX_SAFE_INTEGER', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-date-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+    `)
+    // A real macOS 14+ timestamp: nanoseconds since 2001, ~8.15e17. node:sqlite
+    // throws converting this column to a JS number unless the statement reads
+    // integers as BigInt, which would stall the poll loop on every new message.
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat (ROWID, guid, chat_identifier, style) VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45);
+      INSERT INTO message VALUES (1, 'G1', 'nanosecond date', NULL, 815487932020665600, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1);
+    `)
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.rowId).toBe(1)
+      expect(rows[0]?.at).toBe('2026-11-04T12:25:32.020Z')
+      expect(rows[0]?.isGroup).toBe(false)
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('reads group metadata from chat.style and chat.room_name', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-group-'))
     const dbPath = path.join(dir, 'chat.db')
