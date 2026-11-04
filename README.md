@@ -38,6 +38,8 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 
 `[x]` done and covered. `[~]` partial. `[ ]` not done. Extension domains are always-wired Runtime services, not an opt-in gate: router shards, Worker mesh, long-term memory, lifecycle events, and A2A are assembled on every run. See [docs/MODULES.md](./docs/MODULES.md).
 
+Where this stands against Instinct, Muse, and Grok Bot, including the gaps we have not closed: [docs/COMPETITIVE_GAP.md](./docs/COMPETITIVE_GAP.md).
+
 ### §1 Four traits
 
 - [x] **Continuous.** IM and GitHub-style channels share one domain state. Sessions stay inside the runtime. (Harness Session + Engine Thread/Ticket)
