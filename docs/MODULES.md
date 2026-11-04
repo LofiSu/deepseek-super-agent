@@ -92,10 +92,12 @@ restart, and unfinished jobs/sessions are not replayed. This is deliberate and
 documented, not hidden behavior.
 
 `prompts.ts` assembles the stable system-prompt stack in dependency order:
-identity, owner persona, standing instructions, owner context, team, reach, rules,
-memory guidance, style, long tasks, then the role contract. The team layer names
+identity, owner persona, standing instructions, owner context, team, skills,
+reach, rules, memory guidance, style, long tasks, then the role contract. The team layer names
 configured local specialist agents by id and description only; their command,
-environment, and limits stay in `local-agents.json`. `PERSONA.md`,
+environment, and limits stay in `local-agents.json`. The skills layer lists
+owner-authored playbooks by id and description only; `read_skill` loads one
+body on demand and cannot grant a tool or widen a role. `PERSONA.md`,
 `AGENTS.md`, and `USER.md` in the agent home refine the owner-editable layers;
 `DS_AGENT_PERSONA` / `DS_AGENT_INSTRUCTIONS` / `DS_AGENT_OWNER` seed them when a
 file is absent. Files are capped and never override the rules or the role.
@@ -334,7 +336,10 @@ the process group on timeout. `local-agents.ts` exposes an opt-in,
 owner-configured list of local specialist CLIs (`local-agents.json` or
 `DS_AGENT_LOCAL_AGENTS`); a Worker can only name an id and pass a task, and the
 runner uses `spawn(command, argv)` with `shell: false`, the Worker workspace as
-cwd, a timeout, an output cap, and an allowlisted environment. `sanitize.ts`
+cwd, a timeout, an output cap, and an allowlisted environment. `skills.ts` reads
+owner playbooks from `skills/<id>/SKILL.md`: regular files only (symlinks are
+skipped), a 2000-character prompt index, a 16000-character body cap, and a
+`read_skill` tool that is documentation, not a capability. `sanitize.ts`
 keeps credential values out of tool output and prompts. `vault.ts` exposes
 FileVault names only. `seccomp.ts` wraps every worker bash: `sandbox-exec` on
 macOS, `bwrap` on Linux; a missing wrapper is a hard error, never a plain-bash
@@ -357,7 +362,7 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
 `serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
-`resume`, `collab`, `team`, `teams`, `agents`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
+`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
 acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the

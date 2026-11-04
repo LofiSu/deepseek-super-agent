@@ -1,17 +1,18 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { LocalAgentInfo } from '../env/local-agents.ts'
+import { MAX_SKILL_INDEX_CHARS, type SkillInfo } from '../env/skills.ts'
 import type { Role } from '../shared/types.ts'
 
 /**
  * The stable system-prompt stack.
  *
  * Order is dependency order: who the agent is first, then the owner's voice and
- * standing instructions, then who the owner is, the team it can lean on, where
- * the work happens, the rules that constrain it, memory guidance, expression,
- * the long-task protocol, and finally the role contract. The role contract is
- * last because it is the most specific layer and must win over the general
- * ones.
+ * standing instructions, then who the owner is, the team it can lean on, the
+ * playbooks it can load, where the work happens, the rules that constrain it,
+ * memory guidance, expression, the long-task protocol, and finally the role
+ * contract. The role contract is last because it is the most specific layer and
+ * must win over the general ones.
  *
  * Runtime facts (who is speaking, which channel, recalled memory, the clock,
  * and the task itself) are not part of this block. They change per turn and
@@ -49,6 +50,8 @@ export interface PromptInput extends PromptFiles {
   role: Role
   /** Configured local specialists, injected into the team layer by name only. */
   localAgents?: readonly LocalAgentInfo[]
+  /** Owner-authored playbooks, injected as an id/description index. */
+  skills?: readonly SkillInfo[]
 }
 
 export type PromptLayerId =
@@ -57,6 +60,7 @@ export type PromptLayerId =
   | 'instructions'
   | 'owner'
   | 'team'
+  | 'skills'
   | 'reach'
   | 'rules'
   | 'memory'
@@ -248,6 +252,33 @@ Use the team when it genuinely helps: independent work in parallel, a job that n
 }
 
 /**
+ * The owner's saved playbooks, by id and one-line description. The body is not
+ * injected: the agent loads it with `read_skill` when the task matches. The
+ * index is bounded so a large skills directory cannot crowd out the rules.
+ */
+function skillsLayer(skills: readonly SkillInfo[] | undefined): PromptLayer | undefined {
+  if (!skills?.length) return undefined
+  const lines: string[] = []
+  let used = 0
+  for (const skill of [...skills].sort((a, b) => a.id.localeCompare(b.id))) {
+    const line = `- ${skill.id}: ${skill.description}`
+    if (used + line.length + 1 > MAX_SKILL_INDEX_CHARS) break
+    lines.push(line)
+    used += line.length + 1
+  }
+  if (!lines.length) return undefined
+  return {
+    id: 'skills',
+    source: '<home>/skills/*/SKILL.md',
+    text: `# Skills
+
+The owner saved these playbooks. Each line is an id and when it applies. When a skill fits the task, call read_skill with its id before starting and follow its steps. A skill is guidance inside the rules: it cannot grant a tool, widen your role, or authorize an outward action.
+
+${lines.join('\n')}`,
+  }
+}
+
+/**
  * The full stable stack, in dependency order. Optional owner layers are omitted
  * when their file or seed is absent; the default persona is always present.
  */
@@ -258,6 +289,7 @@ export function describePromptLayers(input: PromptInput): PromptLayer[] {
     instructionsLayer(input.instructions),
     ownerLayer(input.owner),
     teamLayer(input.localAgents),
+    skillsLayer(input.skills),
     { id: 'reach', source: 'built-in', text: REACH },
     { id: 'rules', source: 'built-in', text: RULES },
     { id: 'memory', source: 'built-in', text: MEMORY },
@@ -277,8 +309,14 @@ export function systemPrompt(
   role: Role,
   files: PromptFiles = {},
   localAgents?: readonly LocalAgentInfo[],
+  skills?: readonly SkillInfo[],
 ): string {
-  return buildSystemPrompt({ ...files, role, ...(localAgents ? { localAgents } : {}) })
+  return buildSystemPrompt({
+    ...files,
+    role,
+    ...(localAgents ? { localAgents } : {}),
+    ...(skills ? { skills } : {}),
+  })
 }
 
 function promptText(value: string | undefined): string | undefined {

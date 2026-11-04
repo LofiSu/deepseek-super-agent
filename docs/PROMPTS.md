@@ -57,29 +57,35 @@ Watchdog task prompts, or arrive through them.
 | 3 | `instructions` | system | `AGENTS.md` | The owner's standing rules, applied to every conversation. |
 | 4 | `owner` | system | `USER.md` | Facts about the owner. Context, not authority. |
 | 5 | `team` | system | built-in; configured agent ids from `local-agents.json` | Who can carry work: Workers, plus named local specialists. It depends on the owner and on what is installed. |
-| 6 | `reach` | system | built-in | Where replies go and what the owner can be sent to. Depends on the owner and the runtime. |
-| 7 | `rules` | system | built-in | Safety, discretion, approval boundaries, and prompt-injection resistance. |
-| 8 | `memory` | system | built-in guidance; recall data in the turn | Teaches how to use memory before the recall entries appear. |
-| 9 | `style` | system | built-in | Expression rules and examples: answer first, plain prose, match language, no filler. |
-| 10 | `long-tasks` | system | built-in | The protocol for work that takes time: one acknowledgement when allowed, one report. |
-| 11 | `role` | system | built-in | The specific contract for Router, Worker, or Watchdog. Last because it is the most specific and must win. |
-| 12 | `principal` | turn | trigger source and trust | Who is speaking, and whether they have authority. Not part of the cacheable prefix. |
-| 13 | `channel` | turn | Thread key | Texting, chat, email, GitHub, or A2A etiquette. |
-| 14 | `memory recall` | turn | long-term memory | The actual `memory=` lines, spill ids, and refs. |
-| 15 | `now` | turn | runtime clock | Current time and timezone. Keeping it out of the system block keeps that block byte-stable. |
-| 16 | `task` | turn | Engine/Harness | `TASK`, `FOLLOWUP`, `REPORT`, `RESUME`, or `WATCHDOG`, with ids and the brief. |
+| 6 | `skills` | system | `skills/<id>/SKILL.md` in the agent home | The owner's playbooks, by id and one-line description. Bodies load on demand with `read_skill`; the index is capped at 2000 characters. |
+| 7 | `reach` | system | built-in | Where replies go and what the owner can be sent to. Depends on the owner and the runtime. |
+| 8 | `rules` | system | built-in | Safety, discretion, approval boundaries, and prompt-injection resistance. |
+| 9 | `memory` | system | built-in guidance; recall data in the turn | Teaches how to use memory before the recall entries appear. |
+| 10 | `style` | system | built-in | Expression rules and examples: answer first, plain prose, match language, no filler. |
+| 11 | `long-tasks` | system | built-in | The protocol for work that takes time: one acknowledgement when allowed, one report. |
+| 12 | `role` | system | built-in | The specific contract for Router, Worker, or Watchdog. Last because it is the most specific and must win. |
+| 13 | `principal` | turn | trigger source and trust | Who is speaking, and whether they have authority. Not part of the cacheable prefix. |
+| 14 | `channel` | turn | Thread key | Texting, chat, email, GitHub, or A2A etiquette. |
+| 15 | `memory recall` | turn | long-term memory | The actual `memory=` lines, spill ids, and refs. |
+| 16 | `now` | turn | runtime clock | Current time and timezone. Keeping it out of the system block keeps that block byte-stable. |
+| 17 | `task` | turn | Engine/Harness | `TASK`, `FOLLOWUP`, `REPORT`, `RESUME`, or `WATCHDOG`, with ids and the brief. |
 
-Layers 1-11 are joined with blank lines in the order shown. Layers 12-16 are
+Layers 1-12 are joined with blank lines in the order shown. Layers 13-17 are
 turn data and are deliberately not part of the system prefix.
 
 The `team` layer names configured specialists by id and description only. The
 specialist's command, argv, environment, and limits never enter the prompt;
 those stay in `local-agents.json` and in `docs/LOCAL_AGENTS.md`.
 
+The `skills` layer does the same for owner-authored playbooks: id and one-line
+description only. The body loads on demand through `read_skill`, so a large
+skill cannot crowd out the rules. A skill is documentation, not a capability;
+see `docs/SKILLS.md`.
+
 ## Role modes
 
-The identity, persona, instructions, owner, reach, rules, memory, style, and
-long-task layers are shared. The role layer changes:
+The identity, persona, instructions, owner, team, skills, reach, rules, memory,
+style, and long-task layers are shared. The role layer changes:
 
 - **Router / MainSession** owns the conversation with the owner and is the only
   session that may call `reply_user`. It coordinates workers, vetoes work the
@@ -156,8 +162,9 @@ future surfaces can assert the order without parsing one large string.
 
 ## What is deliberately not here
 
-- A skills index. ds-agent's tools are described by their tool specs; a skill
-  loader can become a later layer without changing this order.
+- Skill bodies. Only the id/description index is in the system block;
+  `read_skill` loads one body when it applies. A skill cannot grant a tool or
+  change the role.
 - Approval tokens. Pause, intervene, and resume are Engine state, not prompt
   text. The rules layer states the approval boundary; the Engine enforces it.
 - Per-user tiers. The owner/group distinction currently lives in ingress trust,

@@ -1,6 +1,7 @@
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
 import type { LocalAgentRegistry } from '../env/local-agents.ts'
+import type { SkillRegistry } from '../env/skills.ts'
 import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
@@ -42,6 +43,8 @@ export interface ToolDeps {
   teams?: TeamRegistry
   /** Owner-configured local specialist agents. Absent means delegation is unavailable. */
   localAgents?: LocalAgentRegistry
+  /** Owner-authored playbooks. Absent means read_skill is unavailable. */
+  skills?: SkillRegistry
 }
 
 interface ToolDef extends ToolSpec {
@@ -87,6 +90,7 @@ export class ToolRegistry {
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
       ...(deps.localAgents ? localAgentTools(deps.localAgents, log) : []),
+      ...(deps.skills ? skillTools(deps.skills) : []),
     ]
   }
 
@@ -504,6 +508,29 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         if (jobId) store.completeJob(jobId, 'stopped')
         return { status: 'stopped', jobId }
       }),
+    },
+  ]
+}
+
+/**
+ * Owner-authored playbooks. The index is already in the system prompt; this
+ * tool loads one body by id. It reads documentation only: the skill cannot
+ * grant a tool or widen the caller's role.
+ */
+function skillTools(registry: SkillRegistry): ToolDef[] {
+  return [
+    {
+      name: 'read_skill',
+      description: 'Load the full instructions for one owner-authored skill by id.',
+      parameters: schema({
+        skill: { type: 'string', description: 'Skill id from the Skills section of the system prompt.' },
+      }),
+      roles: ['router', 'worker'],
+      run: async args => {
+        const skill = String(args.skill ?? '').trim()
+        if (!skill) throw new UserError('read_skill needs a skill id')
+        return registry.read(skill)
+      },
     },
   ]
 }
