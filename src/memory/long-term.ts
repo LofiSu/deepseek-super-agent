@@ -499,8 +499,13 @@ function tierRank(candidate: QueryCandidate): number {
   return candidate.entry.tier === 'cold' ? 1 : 0
 }
 
+/**
+ * Injective, filesystem-safe encoding for a Thread key. Two distinct keys must
+ * never share one digest: base64url is one-to-one, while character
+ * substitution would merge e.g. `github:pr/7` and `github:pr_7`.
+ */
 function encodeId(key: string): string {
-  return key.replace(/[^A-Za-z0-9:_-]/g, '_')
+  return Buffer.from(key, 'utf8').toString('base64url')
 }
 
 /** Cold digests stay bounded even after many pruning passes. */

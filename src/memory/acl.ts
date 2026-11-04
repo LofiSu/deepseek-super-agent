@@ -71,7 +71,9 @@ export function readObjectFor(
       const trigger = store.getDoc<Trigger>('trigger', parsed.objectId)
       if (!trigger) throw new UserError(`unknown trigger ${parsed.objectId}`)
       requireSharedThread(reader, trigger.threads.map(threadKey), `trigger ${parsed.objectId}`)
-      return page(id, trigger.text, trigger.refs ?? refsForTrigger(trigger), opts)
+      const self = trigger.refs?.find(ref => ref.kind === 'trigger' && ref.id === id)
+      const body = self?.spillId ? store.getSpill(self.spillId) : undefined
+      return page(id, body ?? trigger.text, trigger.refs ?? refsForTrigger(trigger), opts)
     }
     case 'thread': {
       const thread = store.getDoc<Thread>('thread', parsed.objectId)
