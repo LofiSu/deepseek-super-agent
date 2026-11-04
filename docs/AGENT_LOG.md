@@ -4,6 +4,52 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Cycle 7 (Feishu inbound loop, stale-token ADR, group identity; checkpoint)
+
+### Observed
+
+- Cycle 6 closed at `3bdb90a` with green post-merge CI (run `41794376297`).
+  Cycle 7 dispatched two disjoint tasks: FEISHU-SERVE-LOOP (P2) and the
+  STALE-GATEWAY-TOKEN ADR (P1 security residual). Peer session sulin-3a ran
+  GROUP-UNKNOWN-DISAMBIGUATION in parallel on files disjoint from both.
+- #106 merged the opt-in `serve --feishu` loop at `e9a1978`; #105 merged
+  ADR-009 at `69b6d3d` after one accuracy correction; #107 merged the
+  `chat.ROWID` thread-key fallback at `00665d2`.
+- The #105 draft stated the failing empty-token path never chmods. That was
+  false: `ensurePrivateMode` tightens a loosened mode to 0600 on every read, so
+  the ADR was corrected to treat mode repair as the standing invariant (probe:
+  0644 → error → 0600, same inode, empty content). This was the only blocking
+  review finding in the cycle.
+
+### Decided
+
+- Keep ADR-009's fail-closed policy: never auto-regenerate a stale empty token
+  file; recovery is an explicit operator action. The implementation follow-up
+  (distinct stale-empty error, fail-closed client read) remains a candidate.
+- Merge order was #106 → #105 → #107 because strict up-to-date protection
+  invalidated each later branch; every branch was refreshed and re-ran CI.
+- Next candidates: the ADR-009 implementation, SEMANTIC-LTM evaluation, and an
+  operator move (`--rotate-token`) only if requested. Feishu live acceptance is
+  operator-only and was not performed.
+
+### Verified
+
+- Local offline suite on `00665d2`: 470 passed / 55 files (live files
+  excluded). Local Feishu tests: 28/28.
+- PR CI: #106 `6c2f1da` run `41795247006`; #105 `42d313a` run `41795531295`;
+  #107 `74c627e` run `41795794639` — all `typecheck and test` green, zero
+  unresolved threads.
+- Post-merge `main` CI green on `e9a1978` (run `41795497081`) and `69b6d3d`
+  (run `41795761804`).
+- No live model or Feishu network run in this session. Branch protection was
+  not bypassed.
+
+### Pending
+
+- Land the cycle-7 checkpoint after CI.
+- Implement ADR-009's diagnostics and client fail-closed behavior in a later
+  cycle.
+
 ## 2026-11-04 — Cycle 6 (serve loop, outbox permanent failure, pump follow-up; checkpoint)
 
 ### Observed
