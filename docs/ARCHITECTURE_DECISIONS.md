@@ -306,8 +306,9 @@ rewrite `PLAN.md`; link to the contract instead.
 ## ADR-010 — Long-term memory recall stays lexical-first with an offline evaluation harness; embeddings stay behind a port
 
 - **Date:** 2026-11-04
-- **Status:** accepted; evaluation only. This ADR adds no recall behavior and
-  does not implement semantic search or embeddings.
+- **Status:** accepted and implemented (2026-11-04). Recall remains
+  lexical-first; this ADR still does not implement semantic search or
+  embeddings.
 - **Context:** `SpillBackedLongTermMemory.query`
   (`src/memory/long-term.ts`) is word-AND substring matching over the
   lower-cased redacted spill body. Requested tags are an exact AND filter, and
@@ -453,6 +454,21 @@ rewrite `PLAN.md`; link to the contract instead.
     deterministic.
   - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, the two memory test
     files, and the full offline suite stay green.
+- **Implementation result (2026-11-04):** options (a)+(b) are implemented in
+  `src/memory/long-term.ts`; options (c)/(d) remain rejected and embeddings
+  remain unimplemented. `test/memory-recall-eval.test.ts` now measures the
+  shipped `query()` path and records: original 11/11 macro recall@3 = 1.000
+  (exact 2/2, word order 2/2, paraphrase 3/3, tag-only 2/2, multi-hop 2/2),
+  15/15 additional held-out-style queries authored in the same follow-up PR
+  (regression coverage, not a blind independent set) across paraphrase,
+  morphology, tag-only, and multi-hop, and four negative controls returning
+  zero results. Deterministic
+  ids are asserted across repeated runs and a reopened SQLite store, and a
+  deterministic 1000-entry fixture remains bounded to at most one body read per
+  entry (no wall-clock assertion). `query()` still throws without a reader
+  `ticketId`, every returned hit (direct or expanded) grants that ticket the
+  exact spill, redaction is unchanged, and no lookup-by-id API was added. No
+  new dependency, provider, network, sleep, or model call is used.
 - **Alternatives rejected:**
   - **Implement embeddings now.** Zero measured recall gain over (a)+(b) on the
     fixed corpus, plus provider, dependency, egress, and nondeterminism costs.
