@@ -32,9 +32,13 @@ export function directChatRouterShard(ticket: Ticket): string | undefined {
   return thread ? `thread:${thread}` : undefined
 }
 
-/** The iMessage thread a ticket belongs to, when it is a direct chat. */
+/** The iMessage thread a ticket belongs to, when it is a 1:1 direct chat. */
 export function directChatThread(ticket: Ticket): string | undefined {
-  return ticket.channels.find(channel => channel.source === 'imessage' && channel.thread)?.thread
+  return ticket.channels.find(channel =>
+    channel.source === 'imessage'
+    && channel.thread
+    // A group address carries `group`; group threads are not direct chats.
+    && !channel.address?.group)?.thread
 }
 
 /** True when both tickets belong to the same direct iMessage thread. */

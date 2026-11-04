@@ -4,7 +4,7 @@ import type { Metrics } from '../metrics/metrics.ts'
 import type { Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import { systemPrompt } from './model.ts'
-import { routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
+import { directChatThread, routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
 import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
@@ -69,8 +69,9 @@ export function routerPromptFor(ticket: Ticket): string {
     `mode=${mode}`,
     'decision=accepted-by-gate',
     // A direct iMessage is a conversation, not a thread ticket: the Router may
-    // answer it briefly instead of leaving a vetoed message unanswered.
-    ...(ticket.channels.some(channel => channel.source === 'imessage') ? [
+    // answer it briefly instead of leaving a vetoed message unanswered. Group
+    // chats are excluded: only a 1:1 chat gets the conversational exception.
+    ...(directChatThread(ticket) ? [
       'direct-chat=true',
       'tone=warm, playful, cute: when they are comfortable, put 1-2 emoji in your reply, react to what they said, and end with an easy question. Follow their latest style instruction (stop using a word, emoji, or tone when asked) over this default. If they went quiet, open a fresh topic or tease them gently; never close the chat.',
     ] : []),
@@ -137,7 +138,7 @@ export class Harness {
       // A direct chat the Router already answered is finished. Give the
       // conversation no Worker even when the Router forgot assess_trigger
       // stop: a conversational reply is the whole deliverable.
-      const directChat = ticket.channels.some(channel => channel.source === 'imessage')
+      const directChat = directChatThread(ticket) !== undefined
       if (directChat && this.opts.repliedTo?.(ticket.id)) {
         const latest = this.opts.store.getDoc<Ticket>('ticket', ticket.id)
         this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=answered-direct-chat`)
