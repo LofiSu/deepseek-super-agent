@@ -92,8 +92,10 @@ restart, and unfinished jobs/sessions are not replayed. This is deliberate and
 documented, not hidden behavior.
 
 `prompts.ts` assembles the stable system-prompt stack in dependency order:
-identity, owner persona, standing instructions, owner context, reach, rules,
-memory guidance, style, long tasks, then the role contract. `PERSONA.md`,
+identity, owner persona, standing instructions, owner context, team, reach, rules,
+memory guidance, style, long tasks, then the role contract. The team layer names
+configured local specialist agents by id and description only; their command,
+environment, and limits stay in `local-agents.json`. `PERSONA.md`,
 `AGENTS.md`, and `USER.md` in the agent home refine the owner-editable layers;
 `DS_AGENT_PERSONA` / `DS_AGENT_INSTRUCTIONS` / `DS_AGENT_OWNER` seed them when a
 file is absent. Files are capped and never override the rules or the role.

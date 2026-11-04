@@ -621,6 +621,7 @@ export class Runtime {
       log: line => log.info(line),
       jobDelayMs: opts.jobDelayMs ?? 40,
       prompts: promptFiles,
+      ...(localAgents ? { localAgents: localAgents.list() } : {}),
       teams,
       takeGuidance: (ticketId, audience) => engine.takeGuidance(ticketId, audience),
       singleSession: opts.singleSession === true,

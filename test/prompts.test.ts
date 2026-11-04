@@ -36,6 +36,7 @@ describe('prompt stack order', () => {
       'persona',
       'instructions',
       'owner',
+      'team',
       'reach',
       'rules',
       'memory',
@@ -43,6 +44,17 @@ describe('prompt stack order', () => {
       'long-tasks',
       'role',
     ])
+  })
+
+  it('puts the team layer after the owner and before reach', () => {
+    const ids = describePromptLayers({
+      role: 'router',
+      persona: 'Dry wit.',
+      instructions: 'Reply in Chinese.',
+      owner: 'Name: Lin.',
+    }).map(layer => layer.id)
+    expect(ids.indexOf('team')).toBeGreaterThan(ids.indexOf('owner'))
+    expect(ids.indexOf('team')).toBeLessThan(ids.indexOf('reach'))
   })
 
   it('keeps the role contract last so it is the most specific instruction', () => {
@@ -88,13 +100,33 @@ describe('prompt layers', () => {
       instructions: 'Never book before 9am.',
     })
     expect(prompt.indexOf('Dry wit.')).toBeLessThan(prompt.indexOf('Never book before 9am.'))
-    expect(prompt.indexOf('Never book before 9am.')).toBeLessThan(prompt.indexOf('# Rules'))
+    expect(prompt.indexOf('Never book before 9am.')).toBeLessThan(prompt.indexOf("# What you won't do"))
   })
 
   it('adds owner context only when supplied', () => {
     const withOwner = buildSystemPrompt({ role: 'router', owner: 'Name: Sam. Timezone: Europe/Oslo.' })
     expect(withOwner).toContain('Name: Sam. Timezone: Europe/Oslo.')
-    expect(withOwner.indexOf('Name: Sam.')).toBeLessThan(withOwner.indexOf('# Rules'))
+    expect(withOwner.indexOf('Name: Sam.')).toBeLessThan(withOwner.indexOf("# What you won't do"))
+  })
+
+  it('describes the team and lists configured local specialists', () => {
+    const withAgents = buildSystemPrompt({
+      role: 'router',
+      localAgents: [{ id: 'claude', description: 'Claude Code' }, { id: 'codex' }],
+    })
+    expect(withAgents).toContain('Workers')
+    expect(withAgents).toContain('claude (Claude Code)')
+    expect(withAgents).toContain('codex')
+
+    const withoutAgents = buildSystemPrompt({ role: 'router' })
+    expect(withoutAgents).toContain('Workers')
+    expect(withoutAgents).not.toContain('Configured specialists')
+  })
+
+  it('sounds like a person rather than a rulebook', () => {
+    const prompt = buildSystemPrompt({ role: 'router' })
+    expect(prompt).toContain('close friend')
+    expect(prompt).not.toContain('1. Only the owner')
   })
 
   it('does not rewrite headings inside a fenced code block', () => {
@@ -109,7 +141,7 @@ describe('role contracts', () => {
   it('gives the router the user-facing voice and no shell work', () => {
     const prompt = buildSystemPrompt({ role: 'router' })
     expect(prompt).toContain('reply_user')
-    expect(prompt).toContain('never send a second acknowledgement')
+    expect(prompt).toMatch(/never send a second acknowledgement/i)
     expect(prompt).toContain('Do not run shell commands')
   })
 

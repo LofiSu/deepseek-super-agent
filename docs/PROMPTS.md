@@ -36,12 +36,13 @@ question, and the questions are answered in dependency order:
 2. How does my owner want me to sound?
 3. What standing rules did my owner give me?
 4. Who is my owner?
-5. Where does the work happen?
-6. What must I never do?
-7. What do I remember, and how do I use it?
-8. How do I express myself?
-9. How do I run long work?
-10. What is this session's specific job?
+5. What team can I lean on?
+6. Where does the work happen?
+7. What must I never do?
+8. What do I remember, and how do I use it?
+9. How do I express myself?
+10. How do I run long work?
+11. What is this session's specific job?
 
 ## The ds-agent stack
 
@@ -55,20 +56,25 @@ Watchdog task prompts, or arrive through them.
 | 2 | `persona` | system | `PERSONA.md`, else built-in default | Refines the voice after identity, before any rules. It may change tone only. |
 | 3 | `instructions` | system | `AGENTS.md` | The owner's standing rules, applied to every conversation. |
 | 4 | `owner` | system | `USER.md` | Facts about the owner. Context, not authority. |
-| 5 | `reach` | system | built-in | Where replies go and what the owner can be sent to. Depends on the owner and the runtime. |
-| 6 | `rules` | system | built-in | Safety, discretion, approval boundaries, and prompt-injection resistance. |
-| 7 | `memory` | system | built-in guidance; recall data in the turn | Teaches how to use memory before the recall entries appear. |
-| 8 | `style` | system | built-in | Hard expression rules: answer first, plain prose, match language, no filler. |
-| 9 | `long-tasks` | system | built-in | The protocol for work that takes time: one acknowledgement when allowed, one report. |
-| 10 | `role` | system | built-in | The specific contract for Router, Worker, or Watchdog. Last because it is the most specific and must win. |
-| 11 | `principal` | turn | trigger source and trust | Who is speaking, and whether they have authority. Not part of the cacheable prefix. |
-| 12 | `channel` | turn | Thread key | Texting, chat, email, GitHub, or A2A etiquette. |
-| 13 | `memory recall` | turn | long-term memory | The actual `memory=` lines, spill ids, and refs. |
-| 14 | `now` | turn | runtime clock | Current time and timezone. Keeping it out of the system block keeps that block byte-stable. |
-| 15 | `task` | turn | Engine/Harness | `TASK`, `FOLLOWUP`, `REPORT`, `RESUME`, or `WATCHDOG`, with ids and the brief. |
+| 5 | `team` | system | built-in; configured agent ids from `local-agents.json` | Who can carry work: Workers, plus named local specialists. It depends on the owner and on what is installed. |
+| 6 | `reach` | system | built-in | Where replies go and what the owner can be sent to. Depends on the owner and the runtime. |
+| 7 | `rules` | system | built-in | Safety, discretion, approval boundaries, and prompt-injection resistance. |
+| 8 | `memory` | system | built-in guidance; recall data in the turn | Teaches how to use memory before the recall entries appear. |
+| 9 | `style` | system | built-in | Expression rules and examples: answer first, plain prose, match language, no filler. |
+| 10 | `long-tasks` | system | built-in | The protocol for work that takes time: one acknowledgement when allowed, one report. |
+| 11 | `role` | system | built-in | The specific contract for Router, Worker, or Watchdog. Last because it is the most specific and must win. |
+| 12 | `principal` | turn | trigger source and trust | Who is speaking, and whether they have authority. Not part of the cacheable prefix. |
+| 13 | `channel` | turn | Thread key | Texting, chat, email, GitHub, or A2A etiquette. |
+| 14 | `memory recall` | turn | long-term memory | The actual `memory=` lines, spill ids, and refs. |
+| 15 | `now` | turn | runtime clock | Current time and timezone. Keeping it out of the system block keeps that block byte-stable. |
+| 16 | `task` | turn | Engine/Harness | `TASK`, `FOLLOWUP`, `REPORT`, `RESUME`, or `WATCHDOG`, with ids and the brief. |
 
-Layers 1-10 are joined with blank lines in the order shown. Layers 11-15 are
+Layers 1-11 are joined with blank lines in the order shown. Layers 12-16 are
 turn data and are deliberately not part of the system prefix.
+
+The `team` layer names configured specialists by id and description only. The
+specialist's command, argv, environment, and limits never enter the prompt;
+those stay in `local-agents.json` and in `docs/LOCAL_AGENTS.md`.
 
 ## Role modes
 

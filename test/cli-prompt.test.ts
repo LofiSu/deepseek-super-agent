@@ -58,6 +58,18 @@ describe('ds-agent prompt', () => {
     expect(layers.at(-1)?.id).toBe('role')
   })
 
+  it('shows the configured local specialists in the team layer', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'local-agents.json'), JSON.stringify({
+      agents: [{ id: 'claude', command: 'claude', description: 'Claude Code' }],
+    }))
+    const result = runCli(home, ['prompt', '--layers'])
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toMatch(/team\s+\d+ chars\s+.*local-agents\.json/)
+    const full = runCli(home, ['prompt'])
+    expect(full.stdout).toContain('claude (Claude Code)')
+  })
+
   it('rejects an unknown role', () => {
     const result = runCli(tempHome(), ['prompt', '--role', 'nope'])
     expect(result.status).not.toBe(0)
