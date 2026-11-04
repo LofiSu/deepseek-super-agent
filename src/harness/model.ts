@@ -1,6 +1,13 @@
 import path from 'node:path'
 import { readGatewayToken } from '../gateway/token.ts'
 import { ruleClassify, type SemanticHit, type SemanticModel } from '../ingress/filter.ts'
+import {
+  clampPolicyReason,
+  DEFAULT_POLICY_TIMEOUT_MS,
+  isValidSemanticHit,
+  PolicyOutputError,
+  type SemanticPolicy,
+} from '../ingress/policy.ts'
 import type { Role } from '../shared/types.ts'
 import type { Trigger } from '../shared/types.ts'
 import { resolveLiveApi } from './providers.ts'
@@ -44,6 +51,60 @@ export interface Model extends SemanticModel {
   complete(request: CompletionRequest): Promise<Completion>
 }
 
+/** System prompt for the opt-in Slow Path policy. One JSON object, no prose, no tools. */
+const POLICY_SYSTEM_PROMPT = [
+  'Classify one chat trigger for an assistant.',
+  'Reply with exactly one JSON object and no prose:',
+  '{"pass":boolean,"strength":"explicit"|"inferred"|"maybe","reason":string}.',
+  'pass=true only when the text asks for or clearly implies action for the assistant.',
+  'strength=explicit for a direct request, inferred for a clear implication, maybe for speculation.',
+  'reason must be a short single-line explanation.',
+].join(' ')
+
+/** Source and address are structured hints; the text is already redacted by ingress. */
+function policyUserContent(trigger: Trigger): string {
+  return [
+    `source=${trigger.source}`,
+    `addressed=${trigger.addressed ?? 'none'}`,
+    'text=',
+    trigger.text,
+  ].join('\n')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Parse the model's one JSON object. A surrounding Markdown fence is the only
+ * tolerated decoration; missing/unknown fields, wrong types, or extra prose are
+ * invalid. The thrown error never contains the response body.
+ */
+export function parsePolicyContent(content: string): SemanticHit {
+  let raw = content.trim()
+  const fenced = /^```[A-Za-z0-9_-]*\s*\n?([\s\S]*?)\n?```$/u.exec(raw)
+  if (fenced) raw = fenced[1]!.trim()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new PolicyOutputError()
+  }
+  if (!isRecord(parsed)) throw new PolicyOutputError()
+  const keys = Object.keys(parsed).sort()
+  if (keys.join(',') !== 'pass,reason,strength') throw new PolicyOutputError()
+  if (typeof parsed.pass !== 'boolean') throw new PolicyOutputError()
+  if (typeof parsed.reason !== 'string') throw new PolicyOutputError()
+  const hit: SemanticHit = {
+    pass: parsed.pass,
+    strength: parsed.strength as SemanticHit['strength'],
+    reason: clampPolicyReason(parsed.reason),
+  }
+  if (!isValidSemanticHit(hit)) throw new PolicyOutputError()
+  return hit
+}
+
+
 export function systemPrompt(role: Role): string {
   if (role === 'router') {
     return 'You are the MainSession. The Engine already acknowledged an accepted ticket; do not send a second acknowledgement. Speak to the user with reply_user only when a worker report delivers a result. Do not run bash. Stay quiet on speculative work until a report delivers.'
@@ -85,10 +146,15 @@ function call(name: string, args: Record<string, unknown>, n = 0): Completion {
 }
 
 /** Legacy deterministic stand-in. Demo and the default test suite must not instantiate this. */
-export class MockModel implements Model {
+export class MockModel implements Model, SemanticPolicy {
   readonly name = 'MockModel'
 
   classify(trigger: Trigger): SemanticHit {
+    return ruleClassify(trigger)
+  }
+
+  /** Deterministic Slow Path policy: same rules, async to satisfy the policy port. */
+  async classifyPolicy(trigger: Trigger): Promise<SemanticHit> {
     return ruleClassify(trigger)
   }
 
@@ -155,8 +221,9 @@ export class MockModel implements Model {
 }
 
 /** OpenAI-compatible chat completions. Posts to `{base}/chat/completions` with a Bearer token. */
-export class HttpOpenAI implements Model {
+export class HttpOpenAI implements Model, SemanticPolicy {
   readonly name = 'HttpOpenAI'
+  private policyTimeoutMs: number
 
   constructor(
     private readonly base: string,
@@ -164,10 +231,52 @@ export class HttpOpenAI implements Model {
     private readonly model: string,
     /** Hard per-request budget. An unanswered HTTP call must not hold a session chain. */
     private readonly timeoutMs = 60_000,
-  ) {}
+    /** Hard bound for the opt-in Slow Path call; the classifier adds its own race. */
+    policyTimeoutMs = DEFAULT_POLICY_TIMEOUT_MS,
+  ) {
+    this.policyTimeoutMs = policyTimeoutMs
+  }
 
   classify(trigger: Trigger): SemanticHit {
     return ruleClassify(trigger)
+  }
+
+  /** Runtime-configured Slow Path budget; also bounds the HTTP abort signal. */
+  setPolicyTimeout(timeoutMs: number): void {
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) this.policyTimeoutMs = timeoutMs
+  }
+
+  /**
+   * One tool-free, temperature-0 chat call that must return a strict JSON hit.
+   * Only the HTTP status appears in an error; the key, request body, and model
+   * output are never logged or attached to an error.
+   */
+  async classifyPolicy(trigger: Trigger): Promise<SemanticHit> {
+    const url = `${this.base.replace(/\/$/, '')}/chat/completions`
+    const response = await fetch(url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(this.policyTimeoutMs),
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0,
+        max_tokens: 96,
+        messages: [
+          { role: 'system', content: POLICY_SYSTEM_PROMPT },
+          { role: 'user', content: policyUserContent(trigger) },
+        ],
+      }),
+    })
+    if (!response.ok) throw new Error(`slow-path policy HTTP ${response.status}`)
+    const json = await response.json() as {
+      choices?: Array<{ message?: { content?: unknown } }>
+    }
+    const content = json.choices?.[0]?.message?.content
+    if (typeof content !== 'string') throw new PolicyOutputError()
+    return parsePolicyContent(content)
   }
 
   async complete(request: CompletionRequest): Promise<Completion> {

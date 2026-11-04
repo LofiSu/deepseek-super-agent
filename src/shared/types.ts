@@ -67,6 +67,12 @@ export interface TriggerTrust {
   filterText?: string
   /** Router shard ids. Computed by the ingress layer, never read from `meta`. */
   shards?: string[]
+  /**
+   * Ingress-owned admission verdict for this trigger. When present, Intake uses
+   * it instead of re-running `host.scope.admit`. Only `Runtime` constructs this;
+   * external callers cannot set it through `trigger.meta` (docs/REVIEW.md C1).
+   */
+  admission?: { listened: boolean; reason: string }
 }
 
 /**
