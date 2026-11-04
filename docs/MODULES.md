@@ -45,9 +45,11 @@ registers peers with validated https/loopback endpoints, minimum-length secrets,
 and no URL userinfo; tracks heartbeat/capacity with a 60 s stale window and
 bounded node counts; picks a least-loaded eligible node and releases
 stale/offline assignments; and dispatches assignment envelopes fail-closed.
-`MeshInbox` / `createRemoteMeshHandler` is the authenticated receiver seam and
-bounds inbound nodes and addresses. The module starts no listener and makes no
-remote-execution claim; mounting it in Runtime/CLI remains owner-gated.
+`MeshInbox` / `createRemoteMeshHandler` is the authenticated receiver seam,
+bounds inbound nodes and addresses, and rejects peer-registered loopback
+endpoints unless the operator opts in; its assignment callback is synchronous.
+The module starts no listener and makes no remote-execution claim; mounting it
+in Runtime/CLI remains owner-gated.
 Capacity is enforced in-process with a bounded FIFO queue owned by the Harness
 (the registry stays pure accounting):
 

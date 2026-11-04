@@ -121,9 +121,13 @@ async function startInbox(
     now: () => Date.now(),
     replayCache: createA2AReplayCache(),
     ...overrides,
+    allowLoopbackRegistration: overrides.allowLoopbackRegistration ?? true,
     registry,
     resolveSecret: overrides.resolveSecret ?? (peerId => peers[peerId]),
-    onAssignment: overrides.onAssignment ?? (event => { received.push(event) }),
+    onAssignment: overrides.onAssignment ?? (event => {
+      received.push(event)
+      return undefined
+    }),
   })
   const url = await listen(inbox.handler)
   return { url, registry, received, inbox }
@@ -545,6 +549,49 @@ describe('remote mesh inbox', () => {
     expect(harness.received).toHaveLength(0)
   })
 
+  it('rejects peer-registered loopback endpoints by default and accepts explicit opt-in', async () => {
+    const received: RemoteMeshAssignmentEvent[] = []
+    const registry = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => Date.now() })
+    const defaultInbox = new MeshInbox({
+      registry,
+      onAssignment: (event => {
+        received.push(event)
+        return undefined
+      }),
+      resolveSecret: peerId => (peerId === PEER ? SECRET : undefined),
+      localPeerId: LOCAL,
+      now: () => Date.now(),
+      replayCache: createA2AReplayCache(),
+    })
+    const defaultUrl = await listen(defaultInbox.handler)
+    const defaultTransport = new A2AHttpTransport({
+      url: defaultUrl,
+      peerId: PEER,
+      secret: SECRET,
+    })
+    const registerBody = (url: string, id: string) => ({
+      from: PEER,
+      to: LOCAL,
+      body: { kind: 'register', id, url },
+    })
+
+    const rejected = await defaultTransport.send(registerBody('http://127.0.0.1:9/a2a', 'loopback'))
+    expect(rejected.status).toBe('failed')
+    const localhost = await defaultTransport.send(registerBody('http://localhost:9/a2a', 'localhost'))
+    expect(localhost.status).toBe('failed')
+    expect(defaultInbox.registry.list()).toHaveLength(0)
+
+    const optedIn = await startInbox({ allowLoopbackRegistration: true })
+    const optedInTransport = new A2AHttpTransport({
+      url: optedIn.url,
+      peerId: PEER,
+      secret: SECRET,
+    })
+    const accepted = await optedInTransport.send(registerBody('http://127.0.0.1:9/a2a', 'loopback'))
+    expect(accepted.status).toBe('delivered')
+    expect(optedIn.registry.list()).toHaveLength(1)
+  })
+
   it('rejects heartbeats too far in the future but keeps past timestamps working', async () => {
     const harness = await startInbox()
     const transport = new A2AHttpTransport({ url: harness.url, peerId: PEER, secret: SECRET })
@@ -710,13 +757,17 @@ describe('remote mesh inbox', () => {
     expect(calls).toBe(1)
   })
 
-  it('fails an asynchronous callback closed instead of claiming delivery', async () => {
+  it('rejects an async onAssignment at the type level and before invocation', async () => {
+    // @ts-expect-error -- onAssignment must return undefined, not Promise<void>
+    const asyncCallback: RemoteMeshHandlerOptions['onAssignment'] = async () => {}
+    expect(asyncCallback).toBeTypeOf('function')
+
     let calls = 0
     const harness = await startInbox({
-      onAssignment: async () => {
+      onAssignment: (async () => {
         calls += 1
         throw new Error('late failure')
-      },
+      }) as unknown as RemoteMeshHandlerOptions['onAssignment'],
     })
     const body = JSON.stringify({
       to: LOCAL,
@@ -725,9 +776,10 @@ describe('remote mesh inbox', () => {
 
     const response = await postSigned(harness.url, body)
     expect(response.status).toBe(502)
-    expect(calls).toBe(1)
-    // Give the rejected callback a turn; it must not crash the process.
+    // Detected as an AsyncFunction before invocation, so no work starts.
+    expect(calls).toBe(0)
     await new Promise(resolve => setTimeout(resolve, 10))
+    expect(calls).toBe(0)
   })
 
   it('rejects a duplicate node id registered by another authenticated peer', async () => {

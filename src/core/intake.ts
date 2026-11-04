@@ -26,7 +26,12 @@ export class Intake {
     if (!trigger.threads.length) throw new UserError('A trigger must belong to at least one thread')
     if (this.host.repo.getDoc<Trigger>('trigger', trigger.id)) return 'duplicate'
     const at = this.host.now()
-    const gate = this.host.scope.admit(
+    // The Runtime's async ingress already filtered this trigger (including an
+    // opt-in model policy) and passes that verdict in the ingress-owned trust
+    // sidecar. Re-running the rules here could undo a model drop or pass. A
+    // caller that supplies no admission sidecar keeps the original re-filter
+    // behavior.
+    const gate = trust.admission ?? this.host.scope.admit(
       trust.filterText ? { ...trigger, text: trust.filterText } : trigger,
     )
     // Persist engine-authored meta only. Caller meta is data, not a decision.

@@ -148,6 +148,24 @@ function assertNoUrlCredentials(url: string): void {
   }
 }
 
+/**
+ * Loopback and unspecified local addresses. Used only for the inbound
+ * registration policy; the local registry still accepts an operator-supplied
+ * loopback endpoint for tests and deliberate local deployments.
+ */
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  if (host === 'localhost'
+    || host === '0.0.0.0'
+    || host === '::'
+    || host === '[::]'
+    || host === '::1'
+    || host === '[::1]') {
+    return true
+  }
+  return /^127(?:\.\d{1,3}){3}$/u.test(host)
+}
+
 function capacityOf(value: number | undefined): number {
   const capacity = value ?? 1
   if (!Number.isSafeInteger(capacity) || capacity < 1) {
@@ -462,9 +480,10 @@ export interface RemoteMeshHandlerOptions {
   registry?: RemoteMeshRegistry
   /**
    * Synchronous callback seam for delivered assignments. It is invoked at most
-   * once per accepted request. A thrown error becomes a non-leaking 502.
+   * once per accepted request. The `undefined` return type makes TypeScript
+   * reject an `async` callback; a thrown error becomes a non-leaking 502.
    */
-  onAssignment: (event: RemoteMeshAssignmentEvent) => void
+  onAssignment: (event: RemoteMeshAssignmentEvent) => undefined
   /** Inbound peer secret lookup, also used for the outbound registry entry. */
   resolveSecret: A2ASecretResolver
   /** Local identity; also the default inbox address. */
@@ -480,6 +499,13 @@ export interface RemoteMeshHandlerOptions {
   maxNodes?: number
   /** Maximum distinct inbound addresses this inbox binds. Defaults to 64. */
   maxAddresses?: number
+  /**
+   * Allow inbound `register` bodies to name loopback endpoints. Defaults to
+   * `false`: a peer-supplied loopback URL would turn dispatch into a request
+   * against local services. Tests and deliberate local deployments opt in.
+   * Private-network reachability remains operator policy either way.
+   */
+  allowLoopbackRegistration?: boolean
   now?: () => number
   maxSkewMs?: number
   replayCache?: A2AReplayCache
@@ -527,6 +553,7 @@ export class MeshInbox {
   private readonly maxNodes: number
   private readonly maxAddresses: number
   private readonly maxSkewMs: number
+  private readonly allowLoopbackRegistration: boolean
   private readonly capturedSecrets = new Map<string, A2ASecret>()
   private readonly boundAddresses = new Set<string>()
 
@@ -534,6 +561,7 @@ export class MeshInbox {
     this.options = options
     this.maxNodes = boundedInteger(options.maxNodes, DEFAULT_REMOTE_MAX_NODES)
     this.maxAddresses = boundedInteger(options.maxAddresses, DEFAULT_REMOTE_MAX_ADDRESSES)
+    this.allowLoopbackRegistration = options.allowLoopbackRegistration === true
     const skew = options.maxSkewMs ?? A2A_AUTH_MAX_SKEW_MS
     this.maxSkewMs = Number.isFinite(skew) && skew >= 0 ? Math.floor(skew) : A2A_AUTH_MAX_SKEW_MS
     this.registry = options.registry
@@ -619,6 +647,21 @@ export class MeshInbox {
 
   private handleRegister(peerId: string, body: Record<string, unknown>): void {
     if (!nonEmptyString(body.url)) throw new Error('mesh register requires a url')
+    const url = body.url
+    if (!this.allowLoopbackRegistration) {
+      let parsed: URL
+      try {
+        parsed = new URL(url)
+      } catch {
+        throw new Error('mesh register has an invalid url')
+      }
+      // An authenticated peer must not be able to point our outbound dispatch
+      // at arbitrary local services. Private-network policy stays with the
+      // operator; this module only closes the loopback default.
+      if (isLoopbackHostname(parsed.hostname)) {
+        throw new Error('mesh register rejects loopback endpoints')
+      }
+    }
     const requestedId = body.id ?? body.nodeId
     if (requestedId !== undefined && !nonEmptyString(requestedId)) {
       throw new Error('mesh register has an invalid node id')
@@ -638,7 +681,7 @@ export class MeshInbox {
     }
     this.registry.register({
       id,
-      url: body.url,
+      url,
       peerId,
       secret,
       capacity: capacity as number | undefined,
@@ -683,13 +726,20 @@ export class MeshInbox {
       envelope,
     }
     // Exactly once per accepted request. The A2A router calls this handler once.
-    const result = this.options.onAssignment(event) as unknown
-    if (result !== undefined && result !== null
-      && typeof (result as PromiseLike<unknown>).then === 'function') {
-      // The HTTP handler's router seam is synchronous, so an asynchronous
-      // callback cannot be awaited before the response. Fail closed instead of
-      // reporting a delivery we cannot confirm, and swallow its rejection.
-      void Promise.resolve(result).catch(() => {})
+    const callback = this.options.onAssignment
+    // The HTTP router seam is synchronous. Reject a known async function before
+    // invoking it so its body cannot keep running after we report failure.
+    if ((callback as unknown as { constructor?: { name?: string } })
+      .constructor?.name === 'AsyncFunction') {
+      throw new Error('mesh assignment callback must be synchronous')
+    }
+    const result: unknown = callback(event)
+    if (result !== undefined) {
+      if (result !== null && typeof (result as PromiseLike<unknown>).then === 'function') {
+        // Defensive for JS/cast callers: the callback escaped the typed
+        // synchronous contract. Swallow the rejection and fail the delivery.
+        void Promise.resolve(result).catch(() => {})
+      }
       throw new Error('mesh assignment callback must be synchronous')
     }
   }
