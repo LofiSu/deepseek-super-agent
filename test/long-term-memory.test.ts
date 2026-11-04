@@ -185,6 +185,62 @@ describe('Long-term memory', () => {
     store.close()
   })
 
+  it('normalizes case, punctuation, stop words, and synonyms', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store)
+    const saved = memory.put('ticket_a', 'The DEPLOY token was rotated after the incident.', {
+      tags: ['deploy'],
+    })
+
+    expect(memory.query({ ticketId: 'ticket_b', text: 'who rotated the deploy credential?' })
+      .map(entry => entry.id)).toEqual([saved.id])
+    expect(memory.query({ ticketId: 'ticket_b', text: 'deploy-token' })
+      .map(entry => entry.id)).toEqual([saved.id])
+    // NFKC + normalization must not turn an unrelated query into a hit.
+    expect(memory.query({ ticketId: 'ticket_b', text: 'ＫＵＢＥＲＮＥＴＥＳ helm chart' }))
+      .toEqual([])
+    store.close()
+  })
+
+  it('retrieves tag-only queries and expands exactly one hop over shared tags', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store)
+    const owner = memory.put('ticket_owner', 'platform team owns deploy pipeline', {
+      tags: ['deploy', 'ownership'],
+    })
+    const token = memory.put('ticket_token', 'deploy token rotated', {
+      tags: ['deploy', 'security'],
+    })
+    // Shares `security` with token, but token is only an expansion candidate;
+    // a second hop must never reach this entry.
+    const far = memory.put('ticket_far', 'unrelated note', { tags: ['security'] })
+
+    expect(() => readSpillFor(store, token.spillId, { ticketId: 'reader' })).toThrow()
+    const hits = memory.query({ ticketId: 'reader', text: 'ownership' })
+    expect(hits.map(entry => entry.id)).toEqual([owner.id, token.id])
+
+    // Every ranked hit, including the expanded one, grants the reader ticket.
+    expect(readSpillFor(store, owner.spillId, { ticketId: 'reader' }).text)
+      .toBe('platform team owns deploy pipeline')
+    expect(readSpillFor(store, token.spillId, { ticketId: 'reader' }).text)
+      .toBe('deploy token rotated')
+    expect(() => readSpillFor(store, far.spillId, { ticketId: 'reader' })).toThrow()
+    store.close()
+  })
+
+  it('keeps requested tags as an exact AND filter while query words match tags', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store)
+    const upper = memory.put('ticket_a', 'common body', { tags: ['Auth', 'prod'] })
+    const lower = memory.put('ticket_b', 'common body', { tags: ['auth'] })
+
+    expect(memory.query({ ticketId: 'reader', text: 'auth', tags: ['auth'] })
+      .map(entry => entry.id)).toEqual([lower.id])
+    expect(memory.query({ ticketId: 'reader', text: 'auth', tags: ['Auth'] })
+      .map(entry => entry.id)).toEqual([upper.id])
+    store.close()
+  })
+
   it('redacts caller-supplied text before writing the spill and summary', () => {
     const store = new Store(tempHome())
     const memory = new SpillBackedLongTermMemory(store, text => text.replace('s3cret', '[redacted]'))
