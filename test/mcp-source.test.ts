@@ -51,10 +51,8 @@ describe('McpToolSource', () => {
       { name: 'fake', command: process.execPath, args: [serverPath] },
       { name: 'fake_extra', command: process.execPath, args: [serverPath] },
     ])
-    const result = await source.invoke('mcp__fake_extra__echo', { text: 'hi' }) as {
-      content: { text: string }[]
-    }
-    expect(result.content[0].text).toBe('{"text":"hi"}')
+    const result = await source.invoke('mcp__fake_extra__echo', { text: 'hi' })
+    expect(result).toBe('{"text":"hi"}')
     await source.close()
   })
 

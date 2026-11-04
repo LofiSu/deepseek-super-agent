@@ -1,3 +1,6 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { MetricName } from '../metrics/metrics.ts'
@@ -22,7 +25,39 @@ export interface McpToolSourceLike {
 
 const NAME_PREFIX = 'mcp__'
 const LIST_TIMEOUT_MS = 10_000
+const SPILL_LIMIT = 64 * 1024
+const PREVIEW_LIMIT = 500
 const TIMED_OUT = Symbol('timed-out')
+
+const MIME_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/svg+xml': 'svg',
+  'text/plain': 'txt',
+  'text/markdown': 'md',
+  'application/json': 'json',
+  'application/pdf': 'pdf',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+}
+
+function extensionFor(mimeType: string): string {
+  return MIME_EXT[mimeType.split(';')[0].trim().toLowerCase()] ?? 'bin'
+}
+
+type CallToolResult = Awaited<ReturnType<Client['callTool']>>
+
+/** Structural view of an MCP content block; the SDK's unions vary by version. */
+interface McpBlock {
+  type: string
+  text?: string
+  data?: string
+  mimeType?: string
+  resource?: { mimeType?: string; text?: string; blob?: string }
+}
 
 const INHERITED_ENV = [
   'PATH',
@@ -110,7 +145,32 @@ export class McpToolSource implements McpToolSourceLike {
     if (!connected) throw new UserError(`mcp server ${connection.config.name} is not connected`)
     const tool = name.slice(mcpToolName(connection.config.name, '').length)
     if (!tool) throw new UserError(`mcp tool ${name} is not configured`)
-    return connection.client.callTool({ name: tool, arguments: args })
+
+    const timeoutMs = connection.config.timeoutMs
+    let result: CallToolResult | typeof TIMED_OUT
+    try {
+      result = await withTimeout(connection.client.callTool({ name: tool, arguments: args }), timeoutMs)
+    } catch (error) {
+      this.deps.metrics.increment('mcp.call_error')
+      throw new UserError(`mcp tool ${name} failed: ${this.deps.redact(errorMessage(error))}`)
+    }
+    if (result === TIMED_OUT) {
+      this.deps.metrics.increment('mcp.call_timeout')
+      throw new UserError(`mcp tool ${name} timed out after ${timeoutMs}ms`)
+    }
+    const blocks = (result.content ?? []) as McpBlock[]
+    if (result.isError === true) {
+      this.deps.metrics.increment('mcp.call_error')
+      const text = blocks
+        .filter(block => block.type === 'text')
+        .map(block => block.text ?? '')
+        .join('\n')
+      throw new UserError(`mcp tool ${name} failed: ${this.deps.redact(text || 'tool reported an error')}`)
+    }
+
+    const normalized = await this.normalize(connection.config.name, blocks)
+    this.deps.metrics.increment('mcp.call')
+    return this.maybeSpill(normalized)
   }
 
   async close(): Promise<void> {
@@ -163,6 +223,68 @@ export class McpToolSource implements McpToolSourceLike {
       }
     }))
     return specs
+  }
+
+  /**
+   * Turn MCP content blocks into transcript-safe data: text stays text, and
+   * image/resource payloads become files under the workspace. Raw base64 must
+   * never reach the model conversation.
+   */
+  private async normalize(server: string, blocks: McpBlock[]): Promise<unknown> {
+    const texts: string[] = []
+    const paths: string[] = []
+    const mimeTypes: string[] = []
+
+    const write = async (data: Buffer, mimeType: string): Promise<void> => {
+      paths.push(await this.writeBlock(server, data, mimeType))
+      mimeTypes.push(mimeType)
+    }
+
+    for (const block of blocks) {
+      if (block.type === 'text') {
+        texts.push(block.text ?? '')
+        continue
+      }
+      if (block.type === 'image' || block.type === 'audio') {
+        await write(Buffer.from(block.data ?? '', 'base64'), block.mimeType ?? 'application/octet-stream')
+        continue
+      }
+      if (block.type === 'resource' && block.resource) {
+        const resource = block.resource
+        const mimeType = resource.mimeType ?? (resource.text !== undefined ? 'text/plain' : 'application/octet-stream')
+        if (resource.text !== undefined) {
+          await write(Buffer.from(resource.text, 'utf8'), mimeType)
+        } else if (resource.blob !== undefined) {
+          await write(Buffer.from(resource.blob, 'base64'), mimeType)
+        }
+        continue
+      }
+      // resource_link and future block types keep their description rather than
+      // disappearing from the transcript.
+      texts.push(JSON.stringify(block))
+    }
+
+    const text = texts.join('\n')
+    if (paths.length === 0) return text
+    return { text, paths, mimeTypes }
+  }
+
+  private async writeBlock(server: string, data: Buffer, mimeType: string): Promise<string> {
+    const dir = path.join(this.deps.workspaceDir, server)
+    await fs.promises.mkdir(dir, { recursive: true })
+    const file = path.join(dir, `${randomUUID()}.${extensionFor(mimeType)}`)
+    await fs.promises.writeFile(file, data)
+    return file
+  }
+
+  private maybeSpill(normalized: unknown): unknown {
+    const json = JSON.stringify(normalized) ?? ''
+    if (json.length <= SPILL_LIMIT) return normalized
+    return {
+      spillId: this.deps.spill.put(json),
+      bytes: Buffer.byteLength(json),
+      preview: json.slice(0, PREVIEW_LIMIT),
+    }
   }
 
   /** Longest configured `mcp__<server>__` prefix wins; server names may contain `_`. */

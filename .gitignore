@@ -13,3 +13,6 @@ uploads
 .claude/settings.local.json
 
 __pycache__/
+
+# Scratch directories written by tests (MCP tool results)
+test/tmp-*/
