@@ -29,6 +29,8 @@ export const METRIC_NAMES = [
   'memory.remembered',
   'memory.recalled',
   'a2a.delivery',
+  'mcp.connect',
+  'mcp.connect_error',
 ] as const
 
 export type MetricName = (typeof METRIC_NAMES)[number]
@@ -71,6 +73,8 @@ function blankCounters(): Record<MetricName, number> {
     'memory.remembered': 0,
     'memory.recalled': 0,
     'a2a.delivery': 0,
+    'mcp.connect': 0,
+    'mcp.connect_error': 0,
   }
 }
 
