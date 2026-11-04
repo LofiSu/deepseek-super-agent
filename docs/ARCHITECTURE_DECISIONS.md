@@ -191,7 +191,7 @@ rewrite `PLAN.md`; link to the contract instead.
 ## ADR-009 — A stale empty gateway token file fails closed and is recovered only by explicit operator action
 
 - **Date:** 2026-11-04
-- **Status:** accepted; diagnostic implementation follow-up not started
+- **Status:** accepted; implemented (stale-empty diagnostics and fail-closed client read)
 - **Context:** `<stateDir>/gateway.token` is the gateway's self-issued local
   bearer token. `readTokenFile` trims the file and treats an empty result as
   "no token" (`src/gateway/token.ts:98-100`). `loadOrCreateGatewayToken` then

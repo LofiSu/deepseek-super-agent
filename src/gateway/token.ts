@@ -27,6 +27,20 @@ export class GatewayTokenFileError extends Error {
   }
 }
 
+const EMPTY_REASON = 'is empty (zero-length or whitespace-only); remove it to mint a new token'
+
+/**
+ * A pre-existing token file that trims to empty. Kept as a subclass so the
+ * exclusive-create path can tell "the file was already empty before we tried"
+ * apart from "another process won the create race with a still-empty file".
+ * Both are `GatewayTokenFileError`.
+ */
+class GatewayTokenEmptyFileError extends GatewayTokenFileError {
+  constructor(file: string) {
+    super(file, EMPTY_REASON)
+  }
+}
+
 /** Local gateway bearer token lives here (mode 0600) so ds-agent can auto-read it. */
 export function gatewayTokenPath(home: string): string {
   return path.join(home, 'gateway.token')
@@ -71,6 +85,12 @@ function ensurePrivateMode(file: string, fd: number): void {
  * mint a token), but a symlink, non-regular file, hard link, or a file that
  * cannot be secured throws so the caller fails closed instead of using it.
  *
+ * A pre-existing file whose content trims to empty also throws (distinct
+ * `GatewayTokenFileError`): "absent" and "present but empty" are different
+ * situations. The empty file is never deleted, renamed, truncated, or
+ * overwritten, and no token is minted over it. On POSIX a loosened mode is
+ * still tightened to 0600 before the empty content is rejected.
+ *
  * `ELOOP` means the path was swapped for a symlink (or a symlinked parent)
  * between `lstat` and `open`; `O_NOFOLLOW` refused to follow it. Treating that
  * as "not found" would let a racing attacker make the gateway mint a new token
@@ -97,7 +117,8 @@ function readTokenFile(file: string): string | undefined {
     assertSameFile(file, before, after)
     const token = fs.readFileSync(fd, 'utf8').trim()
     ensurePrivateMode(file, fd)
-    return token || undefined
+    if (!token) throw new GatewayTokenEmptyFileError(file)
+    return token
   } catch (error) {
     if (error instanceof GatewayTokenPermissionError || error instanceof GatewayTokenFileError) throw error
     return undefined
@@ -138,7 +159,19 @@ function writeTokenFile(file: string, token: string): string | undefined {
       throw new GatewayTokenFileError(file, 'changed while being opened (ELOOP)')
     }
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      const raced = readTokenFile(file)
+      let raced: string | undefined
+      try {
+        raced = readTokenFile(file)
+      } catch (readError) {
+        // A pre-existing empty file is the stale-file case and keeps its
+        // distinct diagnostic. Here the file was absent at the initial read,
+        // so an empty file means another process won the create race and may
+        // still be writing it.
+        if (readError instanceof GatewayTokenEmptyFileError) {
+          throw new GatewayTokenFileError(file, 'was created concurrently and is empty')
+        }
+        throw readError
+      }
       if (raced) return raced
       // The file exists but holds no token yet (empty or still being written
       // by the process that won the create race). Returning our freshly

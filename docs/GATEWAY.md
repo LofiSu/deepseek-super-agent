@@ -169,29 +169,37 @@ The bearer token is generated once and persisted as `<stateDir>/gateway.token`
 
 ### Current behavior when the token file is empty (fail closed)
 
-A zero-length or whitespace-only token file is read as "no token", but the
-exclusive create then refuses to overwrite the existing path. Startup aborts
-before binding, with:
+A zero-length or whitespace-only token file is rejected with a distinct,
+actionable error. Startup aborts before binding, with:
 
 ```
-GatewayTokenFileError: gateway token file <stateDir>/gateway.token was created concurrently and is empty; refusing to use it
+GatewayTokenFileError: gateway token file <stateDir>/gateway.token is empty (zero-length or whitespace-only); remove it to mint a new token; refusing to use it
 ```
 
-This is deliberate. The same shape can be a crashed first create, another
-process still writing the file, or an attacker truncating it. Overwriting it
-would erase evidence, could destroy a concurrent creator's token, and would
-mint a valid-looking credential in place of a tamper signal
-(`src/gateway/token.ts:110-116,140-146`). The file is not deleted, renamed,
-truncated, or recreated, and its content and inode stay unchanged. The existing
-mode check may tighten a loosened file to `0600` on POSIX before the empty
-result is rejected; that is the standing security invariant, not recovery. The
-server's empty-token guard (`src/gateway/server.ts:250-251`) is a second line of
-defense.
+The genuine first-create race keeps a separate message: if the file was absent
+for the initial read and another process wins the exclusive create with a
+still-empty file, the call reports `was created concurrently and is empty`
+instead, because that file may be mid-write. The two cases are deliberately
+distinguishable.
 
-The client read path also sees no token. An agent started with
-`DS_AGENT_GATEWAY_URL` set can therefore fall back silently to another model
-source (`src/harness/model.ts:264-265`), so recovery must include restarting
-clients, not just the gateway.
+Both errors are deliberate. The same shape can be a crashed first create,
+another process still writing the file, or an attacker truncating it.
+Overwriting it would erase evidence, could destroy a concurrent creator's
+token, and would mint a valid-looking credential in place of a tamper signal
+(`src/gateway/token.ts`). The file is not deleted, renamed, truncated, or
+recreated, and its content and inode stay unchanged. The existing mode check
+may tighten a loosened file to `0600` on POSIX before the empty result is
+rejected; that is the standing security invariant, not recovery. The server's
+empty-token guard (`src/gateway/server.ts`) is a second line of defense.
+
+The client read path also fails closed. An agent started with
+`DS_AGENT_GATEWAY_URL` set and an existing empty token file propagates the
+`GatewayTokenFileError` instead of silently falling back to another model
+source, so a truncated token cannot quietly bypass the gateway. An absent token
+file keeps the pre-ADR-009 behavior: gateway configuration is skipped and the
+normal provider resolution (including fallback) applies. An explicit
+`DS_AGENT_GATEWAY_TOKEN` still wins and is checked before the file. Recovery
+must include restarting clients, not just the gateway.
 
 ### Recommended operator action (ADR-009)
 
