@@ -86,7 +86,7 @@ export class ToolRegistry {
     ]
   }
 
-  specsFor(role: Role): ToolSpec[] {
+  async specsFor(role: Role): Promise<ToolSpec[]> {
     return this.tools.filter(tool => tool.roles.includes(role)).map(({ name, description, parameters }) => ({
       name,
       description,

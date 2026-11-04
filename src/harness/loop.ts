@@ -729,7 +729,7 @@ async function runTurnBody(input: {
     { role: 'user', content: prompt },
   ]
   input.journal.append(input.session.id, { role: 'user', kind: 'message', content: prompt })
-  const tools = input.tools.specsFor(input.session.role)
+  const tools = await input.tools.specsFor(input.session.role)
   const maxSteps = input.maxSteps ?? 10
   for (let step = 0; step < maxSteps; step += 1) {
     const paused = input.pause?.()
