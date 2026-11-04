@@ -1,13 +1,56 @@
-# Project audit — 2026-11-03
+# Project audit — 2026-11-04 (final integration)
 
-> Audit base: `main` at `34aef25` (`[SUPER-AGENT][P1-3] Defer mesh pump until
-> terminal state is committed (#84)`). Commands were run in a detached worktree
-> at `origin/main`; the primary clone contained unrelated uncommitted WIP and
-> was not used. This audit supersedes the stale `fa974ca` evidence in PR #74 and
-> the earlier `bb11c96`/`cb32a17`/`03a4c02`/`1dc9500`/`f4ba77a`/`1c165ef`
-> checkpoints.
+> Audit base: `main` after PR #138 (`58c410a`). This section supersedes the
+> 2026-11-03 audit below for current status; the older sections remain as
+> history. Checks were run in dedicated worktrees; the primary clone's unrelated
+> WIP was not used.
 
-## 1. Repository state
+## 0. Final integration audit (2026-11-04)
+
+### Repository and integration state
+
+| Item | Observation |
+|------|-------------|
+| `main` | `58c410a` merge of #138 |
+| Merged surfaces | A2A HMAC HTTP (`7a1d732`), lifecycle/schema v3 (`888f810`), slow path (`788be60`), remote mesh (`d9ded0b`), backup/release (`d67731a`), combined channels (`0cdea17`), local UI (`123ee40`), CLI wiring (`1e01862`), channel slow path (`268809d`), usage accuracy (`58c410a`) |
+| Required check | `typecheck and test`; strict, admins enforced, conversation resolution required |
+| CI evidence | #129 `41829844125` pass; #131 `41826730675` pass; #135 `41845266705` pass; #136 `41844155920` pass; post-merge main runs recorded in `docs/DEVELOPMENT_STATUS.md` |
+| Offline suite | #135 merged head: 75 files, 724 tests, 709 passed, 15 skipped, 0 failed (CI-equivalent env) |
+| Live evidence | none added by this program; bake-off remains unmeasured |
+
+### Findings
+
+1. **The implementation now matches the architecture contract for the shipped
+   surfaces.** `PLAN.md` T09/T17/T47/T48/T49/T50 were corrected from stale
+   “not wired”/`[~]` descriptions. T47 and T48 remain honestly partial: remote
+   mesh has no default listener, and memory recall has no embedding path.
+2. **The security model is implemented, not planned.** `docs/SECURITY.md` now
+   documents the merged A2A, remote mesh, and local UI controls, including the
+   required UI token, speculative-ticket filtering, event-field whitelist,
+   per-request metrics read, and bounded SSE backpressure.
+3. **No new Critical/High defect is exposed by default.** A2A and mesh still
+   open no listener; the UI binds loopback. The High A2A replay risk remains a
+   deployment requirement (unique per-node secret or shared durable replay
+   cache), unchanged by this program.
+4. **Owner gates remain.** The release workflow (#132) was kept unmerged, and
+   no production infrastructure, secret storage, auth redesign, destructive
+   migration, or live external send was performed.
+5. **Verification limits are explicit.** CI and offline fixtures pass; no live
+   model bake-off or real Feishu acceptance was run. iMessage daemon tests use
+   fakes and no live send was made.
+
+### Corrected contradictions and residual risk
+
+- `PLAN.md` slow-path wording, `docs/ROADMAP.md` T49 row, `docs/UI.md` CLI
+  wiring note, and `docs/DEVELOPMENT_STATUS.md` baseline were stale after the
+  merges and are corrected here.
+- The UI's shared-token, single-user, plain-loopback model and the A2A
+  process-local replay cache are documented residual risks, not hidden
+  assumptions.
+- T48's lexical recall evaluation is synthetic and small; month-scale and
+  embedding recall are not claimed.
+
+## 1. Repository state (2026-11-03 audit, historical)
 
 | Item | Observation |
 |------|-------------|

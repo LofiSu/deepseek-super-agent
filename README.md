@@ -57,13 +57,13 @@ Checked against [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWP
 - [x] **Workers report upward.** `report` goes to the Router. The Router sends the reply. A worker session holds `WorkerPorts`, not the Engine, and cannot `reply` or `decide`.
 - [x] **Worker ↔ Thread subscriptions.** Many-to-many, via `subscribe` and fan-out.
 - [x] **Subagent / Team inside a Worker.** Async jobs + `spawn_team`/`team_status`/`complete_team` → member jobs → `TEAM_MEMBER_DONE` → aggregate report. Team rows persist in SQLite and `ds-agent team`/`teams` inspect them offline. Router only sees the parent Assignment report (T14; unit + harness + live e2e).
-- [~] **One UI, many topics.** Several Tickets can exist at once. `LifecycleBus` is always wired as a read model; there is no default UI yet (T15/T49).
+- [x] **One UI, many topics.** Several Tickets can exist at once. `LifecycleBus` is always wired as a read model, and `ds-agent ui` serves a read-only, token-gated loopback dashboard with tickets, threads, outbox metadata, health, metrics, and sanitized lifecycle events (T15/T49).
 
 ### §3 Event-driven
 
 - [x] **Triggers.** Semi-structured events from IM / GitHub-style sources.
 - [x] **Fast Path.** Deterministic source and noise rules (`ingress/filter`).
-- [x] **Slow Path.** Semantic or policy filter. The shipped classifier is deterministic (`ruleClassify`) for both `MockModel` and `HttpOpenAI`; a model-backed policy classifier is not wired, so rules stand in. `test/slow-path-policy.test.ts` pins this and proves classification never calls the network.
+- [x] **Slow Path.** Fast Path first, then an opt-in model policy (`DS_AGENT_SLOW_PATH=model`) with a deterministic rule fallback on timeout, error, or invalid output (`ingress/policy.ts`). The default is rules-only (`ruleClassify`); `Runtime.ingestAsync` is used by the real channel loops, while synchronous `ingest` and A2A inbound stay rules-only. Offline tests pin the fallback and prove the default path never calls the network.
 - [x] **Thread.** One topic or PR. One event stream. Thread key.
 - [x] **Already subscribed.** Straight to the Worker. Log line `bypass=subscription` plus `ticketId`.
 - [x] **Not subscribed.** Cold start: Intake → Eval → Ticket.
@@ -113,9 +113,9 @@ Article evals. They do not block the release.
 
 Kept out of M11.
 
-- [~] Router scale-out / Worker-direct topology (§8.1) — always-wired `RouterShardRegistry` + `WorkerMeshRegistry` (placement is logical; a remote transport is external)
-- [~] Memory that spans tickets (§8.1) — always-wired `SpillBackedLongTermMemory` (not month-scale yet)
-- [~] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model; no default UI yet
+- [~] Router scale-out / Worker-direct topology (§8.1) — always-wired `RouterShardRegistry` + `WorkerMeshRegistry`; `RemoteMeshRegistry`/`MeshInbox` add authenticated A2A registration/heartbeat/dispatch, but no listener starts by default and remote dispatch is not connected to the local queue yet.
+- [~] Memory that spans tickets (§8.1) — always-wired `SpillBackedLongTermMemory` with retention, dedupe, and lexical/tag-hop recall; no embedding recall and not month-scale yet.
+- [x] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model plus `ds-agent ui`, a read-only, required-token loopback dashboard with sanitized lifecycle events and no message bodies.
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
 - [x] Panel · Execution — `ds-agent panel` derives Open/Pending/Working/Waiting/Blocked/Awaiting from Ticket facts, with Mandate, Executor Session, directory, report, and Outbox delivery counts (`src/core/panel.ts`)
 - [~] A2A across instances (§8.3) — always-wired `A2ARouter` (in-process; `runtime.sendA2A`)

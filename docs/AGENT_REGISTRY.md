@@ -55,6 +55,17 @@
 | SEMANTIC-LTM | Model/Intelligence | `agent/semantic-ltm-evaluation` | 2026-11-04 | merged `f6e5972`, APPROVE | #112 | integrated; follow-up implementation open |
 | CYCLE-9-CHECKPOINT | Chief Engineer | `docs/cycle-9-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
 | GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107/#109/#112 APPROVE; #77 corrected | — | continuing |
+| A2A-HTTP-AUTH | Infrastructure/Security | `agent/a2a-http-auth` | 2026-11-04 | merged `7a1d732`, security APPROVE | #123 | integrated |
+| LIFECYCLE-PERSISTENCE | Core Runtime | `agent/lifecycle-persistence` | 2026-11-04 | merged `888f810`, schema v3/replay APPROVE | #124 | integrated |
+| SECURITY-THREAT-MODEL | Infrastructure/Security | `docs/security-threat-model` | 2026-11-04 | merged `6db42b7`, docs APPROVE after status/citation fixes | #126 | integrated; updated by this PR for merged UI/mesh |
+| HEALTH-OBSERVABILITY | Core Runtime | `agent/health-observability` | 2026-11-04 | merged `e700730`, APPROVE | #127 | integrated |
+| MODEL-SLOW-PATH | Model/Intelligence | `agent/model-slow-path` | 2026-11-04 | merged `788be60`, APPROVE after sanitization/duplicate fixes | #128 | integrated; channel wiring in #135 |
+| CROSS-HOST-MESH | Orchestration/Security | `agent/cross-host-mesh` | 2026-11-04 | merged `d9ded0b`, APPROVE after SSRF/bound/callback fixes | #130 | integrated; no default listener |
+| OPS-BACKUP-RELEASE | Infrastructure/QA | `agent/ops-release` | 2026-11-04 | merged `d67731a`, APPROVE after restore/race/integrity fixes | #131 | integrated; release workflow #132 owner-gated |
+| LOCAL-UI | Product/UI | `agent/local-ui` | 2026-11-04 | merged `123ee40`, APPROVE after token/spec/metrics/SSE fixes | #129 | integrated |
+| CHANNELS-COMBINED | Core Runtime | `agent/channels-feishu-imessage` | 2026-11-04 | merged `0cdea17`, APPROVE | #133 | integrated |
+| CHANNEL-SLOW-PATH | Core Runtime | `agent/channel-slow-path` | 2026-11-04 | merged `268809d`, APPROVE after spy update | #135 | integrated |
+| CLI-WIRING | Chief Engineer/CLI | `agent/cli-command-wiring` | 2026-11-04 | squash-merged `1e01862`; usage accuracy split to #138, merged `58c410a` | #136/#138 | integrated |
 
 ## Ownership boundaries
 

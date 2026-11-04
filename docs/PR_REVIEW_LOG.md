@@ -667,8 +667,100 @@ head so a later reader can separate the reviewed tree from the merged tree.
 - **Merged:** `f6e5972`. CI `typecheck and test` green on the updated head
   `c7761ff` (run `41800074122`); zero unresolved threads.
 
+## PR #123 — `[SUPER-AGENT][A2A-HTTP] Authenticated HTTP transport`
+
+- **Reviewed head:** `9130d4c` / `98020c9`. **Merged:** `7a1d732`.
+- **Verdict:** APPROVE (security). HMAC binds peer + timestamp + nonce + body;
+  ±60 s skew, 32-byte minimum secret, replay cache, 64 KiB request / 128 KiB
+  response caps, deadlines, TLS/loopback guard.
+
+## PR #124 — `[SUPER-AGENT][LIFECYCLE] Persist lifecycle events and replay on restart`
+
+- **Reviewed head:** `7487e5c`. **Merged:** `888f810`.
+- **Verdict:** APPROVE after retention/Store API/reporter fixes; schema v3 with
+  `schema_migrations`, bounded replay, restart recovery tests.
+
+## PR #126 — `[SUPER-AGENT][SECURITY] Threat model for A2A, mesh, and local UI`
+
+- **Reviewed head:** final docs head before `6db42b7`. **Merged:** `6db42b7`.
+- **Verdict:** APPROVE after status/citation corrections. Verified implemented
+  A2A and lifecycle citations against merged code; documented the then-planned
+  UI requirements. Superseded by the final SECURITY update for merged UI/mesh.
+
+## PR #128 — `[SUPER-AGENT][MODEL-SLOW-PATH] Opt-in model policy with rule fallback`
+
+- **Reviewed head:** `a482d34` after fixes. **Merged:** `788be60`.
+- **Verdict:** APPROVE. REQUEST_CHANGES first: model reason strings could inject
+  terminal/log control characters, and concurrent `ingestAsync` calls could
+  spill twice after the policy await. Fixed with `clampPolicyReason` stripping
+  `\p{Cc}\p{Cf}` and a post-await duplicate recheck; verified focused 77 and
+  full offline 545 passed/3 skipped. Sync `ingest` and A2A inbound stay
+  rules-only; `TriggerTrust.admission` cannot be supplied by trigger metadata.
+
+## PR #130 — `[SUPER-AGENT][MESH] Remote registry, heartbeat, and A2A dispatch`
+
+- **Reviewed head:** `fd18bde`. **Merged:** `d9ded0b`.
+- **Verdict:** APPROVE after two fix rounds. Findings: weak secrets accepted,
+  URL userinfo leak, unbounded nodes/addresses, future heartbeat pinning,
+  stale assignment capacity leak, loopback registration SSRF, and async
+  `onAssignment` thenable. Fixed with 32-byte secret enforcement, URL credential
+  rejection, `maxNodes`/`maxAddresses` bounds, future-skew rejection, stale
+  release, `allowLoopbackRegistration` default false, and a synchronous
+  callback type. No default listener.
+
+## PR #131 — `[SUPER-AGENT][OPS] WAL-safe backup/restore, release checks, runbooks`
+
+- **Reviewed head:** `decd33d` / `61128d7`. **Merged:** `d67731a`.
+- **Verdict:** APPROVE after fixes. Findings: restore could destroy an existing
+  store without force/pre-restore backup; WAL sidecars were removed before the
+  rename; no integrity checks; backup could delete a race-created output.
+  Fixed with force gating, pre-restore set + rollback, source/temp integrity
+  checks, SHA-256, unique temp + `linkSync` install that preserves a race-created
+  output, and directory fsync. Focused 30/30; full offline 629 passed/3 skipped.
+
+## PR #129 — `[SUPER-AGENT][LOCAL-UI] Read-only loopback UI`
+
+- **Reviewed head:** `ab73604`. **Merged:** `123ee40`.
+- **Verdict:** APPROVE after several rounds. Required token (≥16 chars,
+  constant-time digest compare), Host guard, auth-before-routing, GET-only,
+  outbox text omission, speculative-ticket filtering (tickets, outbox, events,
+  threads), lifecycle-event per-kind whitelist, `referrer-policy: no-referrer`,
+  per-request `readMetrics`, and bounded SSE drain/backpressure. CodeRabbit
+  findings on the thread subscription leak, stale metrics, and SSE were fixed
+  and threads resolved; final head CI green.
+
+## PR #133 — `[SUPER-AGENT][CHANNELS] Run Feishu and iMessage together`
+
+- **Reviewed head:** `ffef7d1`. **Merged:** `0cdea17`.
+- **Verdict:** APPROVE. Both configs validate before `Runtime.create`; loops have
+  independent abort controllers/cursors/outboxes over one store; both adapters
+  are passed to each `Outbox` so rows route by `channel` and `claimOutbox`
+  prevents double sends; TCC denial is terminal only for iMessage. Focused 22/22
+  and CI green; no live send.
+
+## PR #135 — `[SUPER-AGENT][MODEL-SLOW-PATH] Apply the slow path to channel loops`
+
+- **Reviewed head:** `096e83c`. **Merged:** `268809d`.
+- **Verdict:** APPROVE. Both loops now await `Runtime.ingestAsync`; cursor writes
+  still occur after the disposition, fallback does not reject or skip, and A2A
+  stays sync. The initial head broke two serve-test spies; the agent updated
+  them to `ingestAsync` without weakening assertions. CI-equivalent full suite
+  709 passed/15 skipped/0 failed.
+
+## PR #136 / #138 — `[SUPER-AGENT][CLI-WIRING] Expose ui, backup, restore`
+
+- **#136 merged:** `1e01862` (squash by another session before the final
+  accuracy commit). **#138:** usage accuracy follow-up, reviewed head `33b0941`.
+- **Verdict:** APPROVE for the wiring (token/loopback enforcement stays in
+  `runUi`; restore force gate untouched). #136's help/README showed `backup
+  --out` as optional and `restore --input` rather than positional; #138 fixes
+  the text and adds assertions.
+
+- **#138 merged:** `58c410a` after CI green on `33b0941` (run `41845978818`);
+  no unresolved threads. #132 remains owner-gated.
+
 ## Pending reviews
 
-- None. #112 is reviewed and merged. The cycle-9 checkpoint PR is reviewed
-  before merge. The memory-recall follow-up and the optional `--rotate-token`
-  flag are candidates, not open PRs.
+- #132 release workflow: owner-gated; no review approval for merge.
+- No other open implementation PRs. Live bake-off and real Feishu acceptance
+  are evidence tasks, not PRs.

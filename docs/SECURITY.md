@@ -1,17 +1,24 @@
 # Security threat model — A2A, mesh, and local UI
 
-- **Date:** 2026-11-04; **base:** `origin/main` at `e700730`.
+- **Date:** 2026-11-04; **base:** `origin/main` at `123ee40`.
 - **Scope:** W4 networked A2A/mesh surfaces and the W3 local UI, plus the
   worker/host boundary they depend on.
 - **Status:** *implemented* = on `main`; *planned* = design requirement, no
-  code on `main`. A2A HTTP is implemented on `main` (PR #123, merge `7a1d732`);
-  the local UI and the cross-host mesh transport remain planned.
+  code on `main`. A2A HTTP is implemented (PR #123, merge `7a1d732`), the
+  cross-host mesh registry and A2A transport are implemented (PR #130, merge
+  `d9ded0b`), and the read-only local UI is implemented (PR #129, merge
+  `123ee40`). Model-backed slow-path admission is implemented behind
+  `Runtime.ingestAsync` (PR #128, merge `788be60`) and used by the iMessage and
+  Feishu loops (PR #135, merge `268809d`); `ds-agent ui`, `backup`, and
+  `restore` are wired in `src/cli/main.ts` (PR #136, merge `1e01862`, plus
+  usage fix `58c410a`).
 
 Citations to `src/channels/a2a-auth.ts` and `src/channels/a2a-http.ts` follow
-the merged files at `7a1d732` (PR #123 final head `9130d4c`). The adapter is
-merged, but it opens no listener and wires no CLI surface, so exposing it remains
-an operator decision. The local UI still has no `src/ui/*` and no `ds-agent ui`
-command on `main`; its requirements come from `docs/PRODUCTION_PROGRAM.md:61`.
+the merged files at `7a1d732` (PR #123 final head `9130d4c`). The A2A HTTP
+adapter opens no listener by itself; exposing it remains an operator decision.
+The remote mesh (`src/harness/remote-node.ts`) uses that authenticated transport
+but also opens no Runtime listener. The local UI binds loopback only and
+requires a token; `ds-agent ui` is wired in `src/cli/main.ts` (PR #136).
 
 ## 1. Assets and trust boundaries
 
@@ -22,7 +29,7 @@ command on `main`; its requirements come from `docs/PRODUCTION_PROGRAM.md:61`.
 | A2A per-peer secrets | caller-supplied `resolveSecret` callback; no adapter storage | network peer (no default listener) | Secrets/signatures are excluded from errors and results, and secrets shorter than 32 bytes are refused (`a2a-auth.ts:4-13,38-42,66-75,268-278`). |
 | A2A envelopes | in-memory history plus SQLite `documents` kind `a2a` | untrusted wire ingress | 64 KiB UTF-8 body cap (`src/channels/a2a.ts:24,119-126`); identity/timestamps are re-assigned by `send` (`a2a.ts:64-79`). |
 | Memory spills and grants | SQLite `spills` + `spill_grants` | process / SQLite file | Grants are ticket/session scoped; a spill id alone is not a capability (`src/memory/acl.ts:22-41`). Reads are paged to 200 bytes (`acl.ts:4-5`). |
-| Lifecycle/UI read model | in-memory `LifecycleBus` plus durable SQLite `lifecycle_events` (schema v3) | process / SQLite file | Bounded keep-newest ring; restart replay hydrates from the durable log (`src/core/lifecycle.ts:8-27,78-84,119-121`; `src/store/schema.ts:97,138-148`; `src/store/sqlite.ts:128-163`). No UI consumes it yet on `main`. |
+| Lifecycle/UI read model | in-memory `LifecycleBus` plus durable SQLite `lifecycle_events` (schema v3) | process / SQLite file / loopback UI | Bounded keep-newest ring; restart replay hydrates from the durable log (`src/core/lifecycle.ts:8-27,78-84,119-121`; `src/store/schema.ts:97,138-148`; `src/store/sqlite.ts:128-163`). The UI reads through `buildSnapshot`, which whitelists event fields per kind and drops events for invisible tickets (`src/ui/server.ts`). |
 | Worker filesystem | per-worker directory under `<stateDir>/workspaces` | process → child shell | Path escapes are rejected (`src/env/local-env.ts:224-231`); writes are bounded by the sandbox policy (`src/env/seccomp.ts:86-110,112-131`). |
 | Outbound channel credentials | Feishu env (`FEISHU_APP_ID`, `FEISHU_APP_SECRET`); GitHub uses the host `gh` login | process → external channel | Feishu refuses a half-configured app (`src/channels/feishu.ts:12-20,38-52`); GitHub writes use the machine login (`docs/safety.md:38`). Replies are queued durably in SQLite `outbox` (`src/store/sqlite.ts:192-212`; `src/channels/outbox-adapter.ts:30-72`). |
 
@@ -40,8 +47,8 @@ database encryption (`src/store/sqlite.ts:15-32,86-218,281-315,400-413`).
 
 Trust boundaries: process → worker shell; listener → network (gateway and A2A
 HTTP, but no A2A listener is wired by default); peer → authenticated peer id;
-process → model provider; local OS user → state directory; browser → planned UI
-loopback.
+process → model provider; local OS user → state directory; browser → local UI
+loopback (token-gated).
 
 ## 2. Adversaries and non-goals
 
@@ -147,33 +154,51 @@ listener or a reverse proxy for every non-loopback endpoint; sign responses or
 bind them to the request nonce if the caller acts on delivery status; keep
 replay tests and the deployment checks.
 
-## 4. Local UI (planned; not shipped)
+## 4. Local UI (implemented; loopback + required token)
 
-There is no UI implementation on `main`. The planned `ds-agent ui` must bind
-`127.0.0.1`, expose read-only ticket/thread/outbox/health views, accept an
-optional local token, and load no remote code (`docs/PRODUCTION_PROGRAM.md:61`).
+`src/ui/server.ts` and `src/cli/ui.ts` implement a read-only dashboard over
+persisted state (PR #129, merge `123ee40`), wired as `ds-agent ui` in
+`src/cli/main.ts` (PR #136). It is covered by `test/cli-ui.test.ts` and
+`test/cli-command-wiring.test.ts`, loads no remote code, and constructs no model
+or daemon.
 
-Planned requirements, so the eventual PR can be reviewed against them:
+- **Bind and Host.** The listener always binds `127.0.0.1` and refuses any
+  non-loopback `--host`. Requests must carry `Host: 127.0.0.1`, `localhost`, or
+  `[::1]` with an optional numeric port; anything else is 403 before routing.
+  This blocks DNS-rebinding probes; it is not authentication.
+- **Required token.** Startup fails closed without a token of at least 16
+  characters (`DS_AGENT_UI_TOKEN`, `--token`, or the explicit API value). The
+  token is compared as fixed-length SHA-256 digests with `timingSafeEqual`.
+  There is no token-less mode and no remote bind.
+- **Bootstrap cookie.** `GET /?token=...` validates the token, then 303-redirects
+  to `/` with `Set-Cookie: ds_ui_token=...; HttpOnly; SameSite=Strict; Path=/`
+  and `Referrer-Policy: no-referrer`. Every non-health route accepts either the
+  cookie or `Authorization: Bearer`. The token stays in browser history for
+  that one navigation; prefer the env var or a bearer client and rotate after
+  suspected exposure.
+- **Routes and methods.** `GET /health` is the only unauthenticated response and
+  returns no state. Auth is checked before routing, so unknown paths cannot be
+  probed without a token. All routes are `GET`; any other method is 405.
+- **Read model.** `buildSnapshot()` hides speculative tickets from `tickets`,
+  `outbox`, `events`, and thread subscriptions, and omits outbox text entirely.
+  Lifecycle events are rebuilt from a per-kind whitelist; unknown kinds, events
+  for invisible tickets, and speculative `ticket.created` records are dropped.
+  Metrics are re-read from `metrics.json` on every frame (the UI never calls
+  `flush()`), so another process's counters appear without a restart.
+- **Headers and streaming.** Responses set `Cache-Control: no-store`,
+  `X-Content-Type-Options: nosniff`, and a restrictive CSP with no remote
+  origins; state responses set `Referrer-Policy: no-referrer`. SSE pauses on
+  `res.write() === false`, resumes on `drain`, and destroys a client that stays
+  blocked for more than five interval ticks, so frames are never buffered
+  without bound.
+- **Timeouts.** `headersTimeout` 10 s, `requestTimeout` 30 s, and
+  `keepAliveTimeout` 5 s.
 
-- Loopback-only bind by default; remote binding is explicit opt-in with TLS and
-  a required credential, matching the network gate (`docs/PRODUCTION_PROGRAM.md:100`).
-- Optional bearer token validated in constant time, following the gateway
-  pattern (`src/gateway/server.ts:96-115`).
-- `GET`-only, no mutation endpoints; state comes from the lifecycle read model,
-  whose in-memory snapshot is bounded (`src/core/lifecycle.ts:119-121`). The
-  durable `lifecycle_events` log now backfills that snapshot after restart
-  (`src/core/lifecycle.ts:78-84`; `src/store/sqlite.ts:128-163`), so the UI must
-  treat persisted payloads as data to redact, not as a trusted display model.
-- Response headers: `Content-Security-Policy` with no remote origins,
-  `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. The gateway
-  already sets the last two for authenticated responses (`src/gateway/server.ts:566,616-618`),
-  but the UI is a separate listener and must set them itself.
-- The snapshot must omit message bodies, spill bodies, outbox text, tokens,
-  API keys, and peer secrets. The lifecycle bus is not an authorization
-  boundary; it publishes whatever payload a caller supplies (`src/runtime.ts:714-716`).
-
-Until that PR lands, no UI control above is shipped. The UI token being absent
-by default is a residual risk, not a current implementation detail.
+Residual exposure: any same-uid local process can read the state directory and
+the environment that holds the token, and can connect to loopback (it still
+needs the token). Plain HTTP is used on loopback, so there is no transport
+confidentiality or per-user authorization. `/health` reveals only liveness.
+The UI is not a substitute for OS file permissions or full-disk encryption.
 
 ## 5. Worker/host isolation and credentials
 
@@ -229,23 +254,34 @@ decision to make read isolation the default (`docs/safety.md:32`;
   and `send` returns `unroutable` when no handler exists (`src/channels/a2a.ts:54-59,80-85`).
   An authenticated inbound A2A body becomes a non-human Trigger and passes the
   same ingress filter (`src/runtime.ts:506-515,857-876`).
-- **Cross-host transport is not implemented.** The mesh comment states remote
-  transport is outside this repo (`mesh.ts:8-12`), and the A2A transport contract
-  leaves authentication to the HTTP adapter (`src/channels/a2a-transport.ts:1-45`).
-  Cross-host mesh therefore depends on the now-merged A2A primitive but has no
-  transport or listener of its own; do not advertise or expose it yet.
+- **Cross-host transport is implemented, but no listener is started.** PR #130
+  (merge `d9ded0b`) adds `RemoteMeshRegistry` and `MeshInbox` in
+  `src/harness/remote-node.ts`. Registration requires a peer secret of at least
+  32 bytes, rejects URL userinfo, and rejects loopback endpoints unless
+  `allowLoopbackRegistration` is explicitly enabled. Node and address maps are
+  bounded (`maxNodes` default 256, `maxAddresses` default 64), heartbeats in the
+  future are rejected beyond the allowed skew, and `pick`/`dispatch` release
+  stale or offline assignments instead of leaking capacity.
+  `createRemoteMeshHandler` dispatches over the authenticated A2A HTTP
+  transport, but nothing in `Runtime` or the CLI mounts a listener; exposing it
+  is an operator decision and requires TLS plus unique per-peer secrets.
+- **Remote mesh trusts peer identity, not payload.** An authenticated A2A body
+  becomes a non-human Trigger and still passes the same ingress filter
+  (`src/runtime.ts`); dispatch does not grant authorization beyond the
+  registered peer's assignment.
 
 ## 7. Residual risk register
 
-Critical: none exposed by default. A2A HTTP is merged but no default listener is
-wired, so exposure is operator-gated; the UI is not on `main`. Severity reflects
-the risk once a listener or UI is enabled.
+Critical: none exposed by default. A2A HTTP and the remote mesh handler are
+merged but no default listener is wired, so exposure is operator-gated. The UI
+binds loopback and requires a token. Severity reflects the risk once a listener
+is enabled.
 
 | Severity | Surface | Risk | Current mitigation | Owner/deployment action | Type |
 |---|---|---|---|---|---|
 | High | A2A HTTP | Cross-node replay when a peer secret is shared by verifier nodes | HMAC + ±60 s + per-process nonce cache; documented requirement to use unique per-node secrets or a shared cache (`a2a-auth.ts:15-25`) | Unique secret per verifier node and/or a shared durable replay store; never share one peer secret across nodes | Code + deployment |
 | Medium | A2A HTTP | Unsigned response status/body; the peer is authenticated but the response is not bound to the request | Client requires TLS off-loopback, checks status, strict delivery shape, and envelope `from`/`to` (`a2a-http.ts:123-142,411-433,588-605`) | Keep TLS; sign responses or bind them to the request nonce if delivery status drives side effects | Code + deployment |
-| High | Ingress/model | Prompt injection; deterministic fast/slow filters do not model malice, and model-backed slow-path admission is not shipped | Deterministic admission (`src/ingress/filter.ts:27-89`), non-human A2A identity (`src/runtime.ts:874`), redaction, sandbox, executor tool scope | Treat all trigger text as untrusted; design injection handling in the slow-path ADR before model admission; owner review | Code + operator |
+| High | Ingress/model | Prompt injection; deterministic fast-path rules do not model malice, and a model-backed slow path can be steered by trigger text | Deterministic fast path (`src/ingress/filter.ts:27-89`), rule fallback on policy timeout/error/invalid output, sanitized one-line policy reasons, redaction before the policy call, non-human A2A identity, sandbox, executor tool scope (`src/ingress/policy.ts`; `src/runtime.ts` `ingestAsync`) | Treat all trigger text as untrusted; keep the slow path opt-in (`DS_AGENT_SLOW_PATH=model`); review prompt/response handling before enabling it on a hostile channel | Code + operator |
 | High | Model provider | Prompts and tool results leave the host; the provider may inspect or retain them | Best-effort redaction; optional gateway masking plugin (`src/gateway/server.ts:8,256-257`) | Choose a trusted provider and terms, minimize context, keep secrets out of prompts | Operator |
 | Medium | Local state at rest | Same-uid/disk reader can read SQLite, journals, spills, outbox text, and durable lifecycle payloads; no DB encryption | `gateway.token`/vault `0600`; ACLs are in-process only (`src/gateway/token.ts:44-46`; `src/env/vault.ts:63-72`; `src/memory/acl.ts:22-41`) | `0700` state directory, full-disk encryption, separate OS user | Operator |
 | Medium | A2A HTTP | Cache eviction or restart forgets a nonce inside the window | Bounded 10,000-entry cache with pruning | Shared/durable replay store; rate-limit unauthenticated traffic | Code |
@@ -253,7 +289,7 @@ the risk once a listener or UI is enabled.
 | Medium | Gateway | `/health` and dashboard are unauthenticated; non-loopback binding only warns | Loopback default and explicit warning (`src/cli/gateway.ts:13-27,39-40`; `src/gateway/server.ts:550-560`) | Bind loopback, firewall the port, never expose it directly | Operator |
 | Medium | Gateway (plain HTTP loopback) | Bearer token and payloads cross plain HTTP if bound beyond loopback | Loopback default; no TLS in the server (`src/gateway/server.ts:616-627`) | TLS reverse proxy for any non-loopback bind | Operator |
 | Medium | Worker | Read isolation is off by default, so a worker can read host files and the state DB | Write/network sandbox; opt-in strict reads (`src/env/seccomp.ts:133-144`; `docs/safety.md:30`) | Enable strict reads or a container profile; make the default flip a separate reviewed change | Operator + code |
-| Medium | Planned UI | Token absent by default; read-only state is visible to local users/processes | Planned loopback-only, read-only, token-optional design (`docs/PRODUCTION_PROGRAM.md:61`) | Require a token when state is sensitive; loopback + OS permissions; review before merge | Code (UI PR) |
+| Medium | Local UI | Same-uid processes can read `DS_AGENT_UI_TOKEN`/the cookie, connect to loopback, and see read-only ticket/thread/outbox metadata; the token appears once in browser history during bootstrap | Loopback-only bind, required ≥16-char token (constant-time digest compare), Host guard, auth-before-routing, GET-only, sanitized read model, CSP/no-store/nosniff/no-referrer (`src/ui/server.ts`; `src/cli/ui.ts`) | Keep the state directory at `0700`, run the UI as the same trusted user only, rotate the token after exposure, never expose the port through a proxy | Code + operator |
 | Low | Redaction | Unknown secret shapes or values under 8 characters reach tool text/model context | Exact env values ≥8 chars plus known credential patterns (`src/env/sanitize.ts:4,43-76`) | Prefer vault injection, avoid pasting secrets, rotate on suspected exposure | Operator |
 | Low | A2A HTTP | Secret lookup runs before signature verification, so arbitrary peer ids can trigger resolver calls | Shape/skew checked first; absolute deadline bounds a hanging lookup (`a2a-http.ts:256-263,293-321`) | Rate-limit at the reverse proxy | Operator |
 | Low | A2A rotation | No key id means no dual-secret grace period | Small v1 protocol | Add `kid`/key version before fleet use | Code |
@@ -286,9 +322,11 @@ the gateway and clients, inspect the file and metadata, deliberately remove it
 verify the old token gets 401 (`src/gateway/server.ts:561-563`). Never script an
 unconditional "if empty, delete" recovery.
 
-**Planned UI token.** The UI is not shipped. When it lands, rotate its bearer
-independently of the gateway token, keep the bind on loopback, and re-issue
-rather than reuse a token copied into shell history or logs.
+**Rotate the UI token.** Stop `ds-agent ui`, generate a new value of at least 16
+characters, set `DS_AGENT_UI_TOKEN` (preferred) or pass `--token`, and restart.
+Rotate independently of the gateway token. Re-issue rather than reuse a token
+copied into shell history or logs; the bootstrap URL remains in browser history
+for the prior value. Keep the bind on loopback and never proxy the port.
 
 **Evidence to preserve.** Redacted logs (A2A delivery, ingress verdicts, outbox
 failures), SQLite `events`, `documents`, `spills`/`spill_grants`, `messages`,

@@ -58,13 +58,13 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
 - [x] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team`/`team_status`/`complete_team` → member job → `TEAM_MEMBER_DONE` → 汇总报告；team 行持久化到 SQLite，`ds-agent team`/`teams` 可离线查看。Router 只见父 Assignment 报告（T14；unit + harness + live e2e）
-- [~] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；`LifecycleBus` 常驻提供读取模型（T15/T49），暂无默认 UI
+- [x] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；`LifecycleBus` 常驻提供读取模型，`ds-agent ui` 提供只读、必需 token 的 loopback 面板（T15/T49）
 
 ### §3 事件驱动
 
 - [x] **环境半结构化事件 = Trigger** — IM / GitHub 风格 Source
 - [x] **Fast Path 程序过滤** — source/噪声等确定性规则（`ingress/filter`）
-- [x] **Slow Path 语义/策略过滤** — 当前实现是确定性 `ruleClassify`，`MockModel` 与 `HttpOpenAI` 均如此；模型策略分类器尚未接线，规则代替。`test/slow-path-policy.test.ts` 固定这一行为，并证明分类不访问网络
+- [x] **Slow Path 语义/策略过滤** — Fast Path 先过，之后是可选模型策略（`DS_AGENT_SLOW_PATH=model`），超时/异常/非法输出回退确定性 `ruleClassify`（`ingress/policy.ts`）。默认仅规则；真实频道循环走 `Runtime.ingestAsync`，同步 `ingest` 与 A2A 入站保持仅规则。离线测试固定回退行为并证明默认路径不访问网络
 - [x] **Thread = 同一话题/PR 下的事件流** — Thread key
 - [x] **已订阅 → 直通 Worker（bypass Router Eval）** — 日志 `bypass=subscription` + `ticketId`
 - [x] **未订阅 → Router/Eval 冷启动分派** — Intake → Eval → Ticket
@@ -110,9 +110,9 @@ LofiSu × Grokbot（CoderBot）。
 
 ### §8 未决问题（明确不做进 M11）
 
-- [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime（放置是逻辑的，远端传输外置）；等待启动的 Worker 进入有界 FIFO 队列（`DS_AGENT_MESH_QUEUE`，默认 100），非队列启动失败会释放已预留节点并泵送队列
+- [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime；#130 增加 A2A HMAC 的 `RemoteMeshRegistry`/`MeshInbox`（心跳、上限、loopback 默认拒绝），但默认不监听、远端 dispatch 尚未接入本地放置队列；等待启动的 Worker 进入有界 FIFO 队列（`DS_AGENT_MESH_QUEUE`，默认 100）
 - [~] 跨 Ticket 长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime（尚未到跨月）
-- [~] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；暂无默认 UI
+- [x] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；`ds-agent ui` 只读 loopback 面板（必需 token、GET-only、生命周期事件白名单、speculative 隐藏、SSE 背压）
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— `A2ARouter` 常驻 Runtime（进程内；`runtime.sendA2A`）
 - [~] **凭据值不进 bash 输出、文件读取、工具结果或 prompt** — LocalEnv 白名单 + `[redacted]` 只覆盖名字像密钥、且至少 8 个字符的环境变量（更短的值、以及其他名字，会原样留下）+ FileVault `describe()`（仅名字）。每个 Worker bash 都包沙箱：macOS 用 `sandbox-exec`，Linux 用 `bwrap`；wrapper 不存在就直接报错，不会退回普通 bash；默认拒绝网络，除非策略放行。沙箱只限制写入和网络，不限制读取：两个平台仍允许大范围读取，进程级读隔离（包括 SQLite DB）仍要靠外部容器边界（§8.4 T51）；宿主级 vault/seccomp 策略仍外置
