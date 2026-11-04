@@ -1,16 +1,18 @@
 /**
  * `ds-agent backup` / `ds-agent restore` command bodies.
  *
- * This module is intentionally not wired into `src/cli/main.ts` here: the CLI
- * integration PR owns that file. The standalone entry at the bottom lets an
- * operator use the commands today:
+ * `src/cli/main.ts` wires them as:
+ *
+ *   ds-agent backup --out <file.db>
+ *   ds-agent restore <file.db> [--force]
+ *
+ * The standalone entry at the bottom remains available for operators:
  *
  *   npx tsx src/cli/backup.ts --home .ds-agent --out ~/ds-agent-backup.db
  *   npx tsx src/cli/backup.ts --home .ds-agent --input ~/ds-agent-backup.db
  *
- * Once wired, main.ts passes the resolved state home and lets a thrown
- * UserError reach its top-level handler, which prints the message and sets a
- * non-zero exit code.
+ * main.ts passes the resolved state home and lets a thrown UserError reach its
+ * top-level handler, which prints the message and sets a non-zero exit code.
  */
 
 import fs from 'node:fs'
@@ -77,7 +79,10 @@ export function backupUsage(): string {
   return [
     'Usage:',
     '  ds-agent backup --out <file.db> [--home <state-dir>] [--allow-any-extension]',
-    '  ds-agent restore --input <file.db> [--home <state-dir>] [--force]',
+    '  ds-agent restore <file.db> [--home <state-dir>] [--force]',
+    '',
+    'The standalone entry (npx tsx src/cli/backup.ts) also accepts',
+    'restore --input <file.db> for compatibility.',
     '',
     'Restore replaces an existing store only with --force. It first moves the',
     'old database and WAL sidecars to <state-dir>/backups/pre-restore-<timestamp>.db*.',
