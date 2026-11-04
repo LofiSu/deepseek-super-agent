@@ -180,6 +180,13 @@ export class Harness {
    * must resolve instead of rejecting. The same holds when the turn rejects
    * asynchronously: `.finally` in `startWorkerTurn` already cleared the active
    * marker and pumped, so only the reserved mesh slot is left to return.
+   *
+   * Both failure paths release the node and then pump: `startWorkerTurn`'s own
+   * pump runs while the failed turn still owns the slot, so a queued Worker
+   * would stay parked on a node that is free by the time this handler returns.
+   * Pumping is safe here, not a double start: the synchronous path threw before
+   * a turn was enqueued, and the asynchronous path only runs after the failed
+   * turn has settled, so no Worker overlap is possible.
    */
   private startNow(ticket: Ticket, node?: string): Promise<void> {
     let work: Promise<void>
@@ -189,11 +196,13 @@ export class Harness {
       this.activeWorkers.delete(ticket.id)
       if (node) this.opts.releaseNode?.(ticket.id)
       this.opts.log(`[harness] worker failed ticketId=${ticket.id} error=${String(error)}`)
+      if (node) this.pump()
       return Promise.resolve()
     }
     return work.catch(error => {
       if (node) this.opts.releaseNode?.(ticket.id)
       this.opts.log(`[harness] worker failed ticketId=${ticket.id} error=${String(error)}`)
+      if (node) this.pump()
     })
   }
 
