@@ -221,6 +221,24 @@ export interface ResumeRecord {
 }
 
 /**
+ * One action a Worker paused to ask the owner about. The owner decides through
+ * the CLI; the model can request, never decide.
+ */
+export interface ApprovalRequest {
+  id: string
+  at: string
+  /** The exact action the Worker will perform if approved. One line. */
+  action: string
+  reason?: string
+  /** Session id that asked. */
+  requestedBy: string
+  status: 'pending' | 'approved' | 'denied'
+  decidedAt?: string
+  decidedBy?: string
+  note?: string
+}
+
+/**
  * Mid-task collaboration state for one Ticket. Persisted with the Ticket document
  * in SQLite, so pause/guidance/resume survive a process restart.
  */
@@ -228,6 +246,8 @@ export interface Collaboration {
   paused?: PauseState
   guidance: Guidance[]
   resumes: ResumeRecord[]
+  /** Approval requests in order. A pending entry stops Worker turns. */
+  approvals?: ApprovalRequest[]
 }
 
 export interface TicketEnd {

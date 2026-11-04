@@ -11,12 +11,14 @@ export type ExecutionState =
   | 'waiting-for-trigger'
   | 'awaiting-answer'
   | 'awaiting-review'
+  | 'awaiting-approval'
   | 'blocked'
   | 'ended'
 
 export function executionState(ticket: Ticket): ExecutionState {
   if (ticket.ended) return 'ended'
   if (ticket.collab?.paused) return 'blocked'
+  if (ticket.collab?.approvals?.some(item => item.status === 'pending')) return 'awaiting-approval'
   const assignment = ticket.assignments.at(-1)
   if (!assignment) return 'open'
   if (assignment.report?.kind === 'failed' || assignment.report?.kind === 'blocked') return 'blocked'
@@ -35,6 +37,7 @@ export function executionState(ticket: Ticket): ExecutionState {
 export function ticketStage(ticket: Ticket): string {
   if (ticket.ended) return `ended/${ticket.ended.outcome}`
   if (ticket.collab?.paused) return 'person/paused'
+  if (ticket.collab?.approvals?.some(item => item.status === 'pending')) return 'person/approval'
   const state = executionState(ticket)
   if (state === 'blocked') return 'person/blocked'
   if (state === 'awaiting-review') return 'person/review'

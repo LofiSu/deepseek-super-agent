@@ -399,6 +399,39 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
       }),
     },
     {
+      name: 'request_approval',
+      description: 'Ask the owner to approve one exact outward, destructive, or expensive action. Stops this ticket until the owner decides.',
+      parameters: schema({
+        action: { type: 'string', description: 'The exact action you will perform if approved, one line.' },
+        reason: { type: 'string', description: 'Why it needs the owner, one short line.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'request_approval', async (args, ctx) => {
+        if (!ctx.ticketId) throw new UserError('request_approval needs a ticket')
+        const action = String(args.action ?? '').trim()
+        if (!action) throw new UserError('request_approval needs the exact action')
+        const reason = args.reason == null ? undefined : String(args.reason).trim()
+        const result = ctx.ports.requestApproval(ctx.ticketId, {
+          action,
+          ...(reason ? { reason } : {}),
+        })
+        const prompt = [
+          'APPROVAL',
+          `ticketId=${ctx.ticketId}`,
+          `approvalId=${result.approvalId}`,
+          `action=${action}`,
+          ...(reason ? [`reason=${reason}`] : []),
+          'The Worker stopped. Tell the owner the exact action in one short message and wait. You cannot approve it yourself; the owner decides with ds-agent approve or ds-agent deny.',
+        ].join('\n')
+        await deps.routerTurn(prompt)
+        return {
+          approvalId: result.approvalId,
+          status: result.status,
+          note: 'The ticket is waiting for the owner. Do not perform the action; stop this turn.',
+        }
+      }),
+    },
+    {
       name: 'subscribe_thread',
       description: 'Subscribe this ticket to another thread. contextOnly means read but do not wake.',
       parameters: schema({

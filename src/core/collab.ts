@@ -1,5 +1,5 @@
 import { UserError } from '../shared/errors.ts'
-import type { Collaboration, Guidance, Ticket } from '../shared/types.ts'
+import type { ApprovalRequest, Collaboration, Guidance, Ticket } from '../shared/types.ts'
 import type { Host } from './host.ts'
 
 export interface PauseInput {
@@ -38,6 +38,32 @@ export interface CollaborationView {
   ticket: Ticket
   collaboration: Collaboration
 }
+
+export interface RequestApprovalInput {
+  action: string
+  reason?: string
+  /** Session id that asked. Derived from the assignment when omitted. */
+  requestedBy?: string
+}
+
+export interface RequestApprovalOutcome {
+  ticket: Ticket
+  approval: ApprovalRequest
+}
+
+export interface DecideApprovalInput {
+  by?: string
+  note?: string
+}
+
+export interface DecideApprovalOutcome {
+  ticket: Ticket
+  approval: ApprovalRequest
+  guidance: Guidance
+}
+
+/** Longest action description a Worker may put in front of the owner. */
+export const MAX_APPROVAL_ACTION_CHARS = 300
 
 /**
  * Mid-task collaboration rules. Engine commands wrap each call in one transaction.
@@ -142,6 +168,114 @@ export class Collaborations {
   }
 
   /**
+   * Record one action the Worker will not perform without the owner. This is a
+   * hold, not a pause: replies stay allowed so the Router can ask the owner,
+   * while Worker turns stop on the pending entry. A ticket can have one pending
+   * request at a time.
+   */
+  requestApproval(ticketId: string, input: RequestApprovalInput): RequestApprovalOutcome {
+    const ticket = this.mustLive(ticketId, 'request approval on')
+    const collaboration = ensureCollaboration(ticket)
+    if (collaboration.paused) {
+      throw new UserError(`ticket ${ticketId} is paused; resume it before requesting approval`)
+    }
+    const approvals = collaboration.approvals ?? (collaboration.approvals = [])
+    if (pendingApproval(ticket)) {
+      throw new UserError(`ticket ${ticketId} is already waiting for approval`)
+    }
+    const action = input.action.replace(/\s+/g, ' ').trim()
+    if (!action) throw new UserError('approval needs the exact action')
+    if (action.length > MAX_APPROVAL_ACTION_CHARS) {
+      throw new UserError(`approval action is longer than ${MAX_APPROVAL_ACTION_CHARS} characters`)
+    }
+    const approval: ApprovalRequest = {
+      id: this.host.repo.nextId('appr'),
+      at: this.host.now(),
+      action,
+      ...(input.reason?.trim() ? { reason: input.reason.replace(/\s+/g, ' ').trim().slice(0, 300) } : {}),
+      requestedBy: input.requestedBy
+        || ticket.assignments.at(-1)?.workerSessionId
+        || 'worker',
+      status: 'pending',
+    }
+    approvals.push(approval)
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    this.host.repo.addEvent('approval.requested', {
+      ticketId: ticket.id,
+      approvalId: approval.id,
+      action: approval.action,
+      requestedBy: approval.requestedBy,
+    })
+    this.host.log(
+      `[approval] requested ticketId=${ticket.id} approvalId=${approval.id} action=${approval.action}`,
+    )
+    return { ticket, approval }
+  }
+
+  /**
+   * Owner decision. Records the decision, adds guidance for the Worker, and
+   * appends a resume record so a later Harness resume includes follow-ups that
+   * arrived while the approval was pending. The Harness starts the RESUME turns.
+   */
+  decideApproval(
+    ticketId: string,
+    approvalId: string,
+    decision: 'approved' | 'denied',
+    input: DecideApprovalInput = {},
+  ): DecideApprovalOutcome {
+    const ticket = this.mustLive(ticketId, 'decide approval on')
+    const collaboration = ensureCollaboration(ticket)
+    const approvals = collaboration.approvals ?? (collaboration.approvals = [])
+    const approval = approvals.find(item => item.id === approvalId)
+    if (!approval) throw new UserError(`unknown approval ${approvalId} on ticket ${ticketId}`)
+    if (approval.status !== 'pending') {
+      throw new UserError(`approval ${approvalId} already decided (${approval.status})`)
+    }
+    const at = this.host.now()
+    const by = input.by ?? 'human'
+    const note = input.note?.replace(/\s+/g, ' ').trim()
+    approval.status = decision
+    approval.decidedAt = at
+    approval.decidedBy = by
+    if (note) approval.note = note
+    const text = decision === 'approved'
+      ? `Approval ${approval.id} approved: ${approval.action}.${note ? ` Note: ${note}.` : ''} Proceed with exactly that action.`
+      : `Approval ${approval.id} denied: ${approval.action}. Do not perform it; report what you did instead and what you need.`
+    const guidance: Guidance = {
+      id: this.host.repo.nextId('guide'),
+      at,
+      actor: by,
+      text,
+    }
+    collaboration.guidance.push(guidance)
+    collaboration.resumes.push({
+      at,
+      by,
+      reason: `approval ${approval.id} ${decision}`,
+      pausedAt: approval.at,
+    })
+    this.host.repo.putDoc('ticket', ticket.id, ticket)
+    this.host.repo.addEvent('approval.decided', {
+      ticketId: ticket.id,
+      approvalId: approval.id,
+      decision,
+      by,
+      note,
+      action: approval.action,
+    })
+    this.host.repo.addEvent('collab.guidance', {
+      ticketId: ticket.id,
+      guidanceId: guidance.id,
+      actor: by,
+      text,
+    })
+    this.host.log(
+      `[approval] ${decision} ticketId=${ticket.id} approvalId=${approval.id} by=${by}`,
+    )
+    return { ticket, approval, guidance }
+  }
+
+  /**
    * Unseen guidance for one audience. The injection is recorded so a later turn
    * does not repeat it. Called by the Harness before building a Router/Worker prompt.
    */
@@ -191,5 +325,11 @@ export function ensureCollaboration(ticket: Ticket): Collaboration {
   if (!ticket.collab) ticket.collab = { guidance: [], resumes: [] }
   if (!Array.isArray(ticket.collab.guidance)) ticket.collab.guidance = []
   if (!Array.isArray(ticket.collab.resumes)) ticket.collab.resumes = []
+  if (!Array.isArray(ticket.collab.approvals)) ticket.collab.approvals = []
   return ticket.collab
+}
+
+/** The approval blocking this ticket, if any. */
+export function pendingApproval(ticket: Ticket): ApprovalRequest | undefined {
+  return ticket.collab?.approvals?.find(item => item.status === 'pending')
 }

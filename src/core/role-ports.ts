@@ -46,6 +46,14 @@ export function bindRolePorts(engine: Engine): RolePorts {
     handback: (ticketId: string, triggerId: string, reason: string): boolean => (
       engine.handback(ticketId, triggerId, reason)
     ),
+    requestApproval: (ticketId: string, input: { action: string; reason?: string }) => {
+      const { approval } = engine.requestApproval(ticketId, {
+        action: input.action,
+        ...(input.reason ? { reason: input.reason } : {}),
+        requestedBy: '',
+      })
+      return { approvalId: approval.id, status: 'pending' as const }
+    },
   }
   const watchdogMethods: Omit<WatchdogPorts, typeof rolePortBrand> = {
     fail: (ticketId: string, reason: string) => engine.watchdogFail(ticketId, reason),
