@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { OutboundAdapter } from './outbox-adapter.ts'
+import { PermanentDeliveryError, type OutboundAdapter } from './outbox-adapter.ts'
 import type { OutboxRow, Trigger } from '../shared/types.ts'
 
 /**
@@ -603,7 +603,7 @@ export class ImessageOutboxAdapter implements OutboundAdapter {
     // Sending its sender `handle` would use buddy (1:1) mode and leak group
     // content into a direct conversation, so refuse instead of falling back.
     if (group && !chatGuid) {
-      throw new Error(
+      throw new PermanentDeliveryError(
         `imessage outbox row ${row.id} targets group ${group} without a chatGuid; `
         + 'refusing to fall back to a buddy (1:1) send',
       )

@@ -22,6 +22,7 @@ import {
   type ImessageInbound,
   type ImessagePullOptions,
 } from '../src/channels/imessage.ts'
+import { PermanentDeliveryError } from '../src/channels/outbox-adapter.ts'
 import { resolveImessageHandle, runImessageCommand } from '../src/cli/imessage.ts'
 import type { OutboxRow } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
@@ -938,6 +939,17 @@ describe('iMessage outbound', () => {
     await expect(adapter.send(outboxRow({
       target: { provider: 'imessage', handle: '+8613800000000', group: 'chat123' },
     }))).rejects.toThrow(/targets group chat123 without a chatGuid/)
+    expect(api.sent).toHaveLength(0)
+  })
+
+  it('rejects a group row without a chatGuid as a permanent delivery failure', async () => {
+    const api = new FakeImessage()
+    const adapter = new ImessageOutboxAdapter(api)
+    const error = await adapter.send(outboxRow({
+      target: { provider: 'imessage', handle: '+8613800000000', group: 'iMessage;+;chat123' },
+    })).catch(caught => caught)
+    expect(error).toBeInstanceOf(PermanentDeliveryError)
+    expect((error as Error).message).toMatch(/targets group iMessage;\+;chat123 without a chatGuid/)
     expect(api.sent).toHaveLength(0)
   })
 
