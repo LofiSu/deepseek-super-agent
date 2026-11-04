@@ -35,13 +35,13 @@ describe('router prompt', () => {
     }))
     expect(prompt).toContain('direct-chat=true')
     expect(prompt).toContain('tone=warm, playful, cute')
-    expect(prompt).toContain('😺')
+    expect(prompt).toContain('Follow their latest style instruction')
     expect(systemPrompt('router')).toContain('direct-chat=true')
     expect(systemPrompt('router')).toContain('reply_user')
     expect(systemPrompt('router')).toContain('do not tell the other party to stop replying')
     expect(systemPrompt('router')).toContain('Keep the conversation going')
     expect(systemPrompt('router')).toContain('Be proactive')
-    expect(systemPrompt('router')).toContain('😺')
+    expect(systemPrompt('router')).toContain('their preference wins')
   })
 
   it('does not mark a GitHub issue as a direct chat', () => {
