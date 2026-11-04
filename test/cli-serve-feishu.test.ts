@@ -406,7 +406,7 @@ describe('serve --feishu refusal', () => {
     expect(fs.existsSync(path.join(dir, 'ds-agent'))).toBe(false)
   }, 30_000)
 
-  it('rejects combining --imessage and --feishu before creating SQLite', async () => {
+  it('fails closed before creating SQLite when a combined serve channel is unconfigured', async () => {
     const dir = tempDir('ds-agent-serve-both-')
     const stateHome = path.join(dir, 'state')
 
@@ -424,7 +424,32 @@ describe('serve --feishu refusal', () => {
       20_000,
     )
     expect(code).toBe(1)
-    expect(stderr).toContain('cannot be combined')
+    expect(stderr).toContain('cannot start both inbound channels')
+    expect(stderr).toContain('iMessage:')
+    expect(stderr).toContain('Feishu:')
+    expect(fs.existsSync(stateHome)).toBe(false)
+  }, 30_000)
+
+  it('reports missing Feishu config before SQLite even when iMessage is valid', async () => {
+    const dir = tempDir('ds-agent-serve-both-feishu-missing-')
+    const stateHome = path.join(dir, 'state')
+
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx', 'src/cli/main.ts', 'serve', '--imessage', '--feishu', '--handle', '+15550000000'],
+      { cwd: process.cwd(), env: cliEnv(stateHome), stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+    children.push(child)
+    let stderr = ''
+    child.stderr?.on('data', chunk => { stderr += String(chunk) })
+
+    const [code] = await withTimeout(
+      once(child, 'exit') as Promise<[number | null, NodeJS.Signals | null]>,
+      20_000,
+    )
+    expect(code).toBe(1)
+    expect(stderr).toContain('cannot start both inbound channels')
+    expect(stderr).toContain('FEISHU_APP_ID and FEISHU_APP_SECRET')
     expect(fs.existsSync(stateHome)).toBe(false)
   }, 30_000)
 })

@@ -273,7 +273,8 @@ pnpm ds-agent panel
 pnpm ds-agent retry <ticketId>
 pnpm ds-agent status
 pnpm ds-agent metrics
-pnpm ds-agent serve [--imessage|--feishu]  # daemon/watchdog timer over persisted state; optional single inbound poll loop
+pnpm ds-agent serve [--imessage] [--feishu]  # daemon/watchdog timer; one or both inbound poll loops
+pnpm ds-agent channels check [--imessage] [--feishu] [--network]  # no-send preflight, no model
 pnpm ds-agent health
 pnpm ds-agent memory --limit 10
 pnpm ds-agent emit im --thread bug-login --text "login still 500"
@@ -357,11 +358,34 @@ Use a small model for the Router and Watchdog. Use a stronger one for the Worker
 
 `ds-agent setup --write` discovers local OpenAI-compatible products (Magpie, Ollama, LM Studio, llama.cpp, vLLM) and scaffolds `gateway.config.json`. Fill `apiKey` for any provider that needs auth; the gateway never reads a product's stored credentials.
 
-`ds-agent imessage` is a two-way iMessage channel for a dedicated Apple ID: inbound from `~/Library/Messages/chat.db` (read-only, `is_from_me = 0` only), outbound through Messages.app via `osascript` with the text passed in the environment. It needs macOS Full Disk Access plus Automation permission. `serve --imessage` runs the same inbound poll loop alongside the daemon (default `serve` has no inbound loop); it uses the same default-deny sender admission, cursor, and outbox, and refuses to start if `chat.db` cannot be opened. See [docs/IMESSAGE.md](./docs/IMESSAGE.md).
+`ds-agent imessage` is a two-way iMessage channel for a dedicated Apple ID: inbound from `~/Library/Messages/chat.db` (read-only, `is_from_me = 0` only), outbound through Messages.app via `osascript` with the text passed in the environment. It needs macOS Full Disk Access for the terminal/app that launches `node` (System Settings → Privacy & Security → Full Disk Access, then quit and reopen the app) plus Automation permission for Messages (System Settings → Privacy & Security → Automation). A TCC denial is reported with that exact guidance and is not retried forever. `serve --imessage` runs the same inbound poll loop alongside the daemon (default `serve` has no inbound loop); it uses the same default-deny sender admission, cursor, and outbox. See [docs/IMESSAGE.md](./docs/IMESSAGE.md).
 
 Thread keys are separate for groups and 1:1: group precedence is `chat:<guid>` > `group:<identifier>` > `group-rowid:<rowid>` > `group-unknown:<handle>`, while a 1:1 thread is always `handle:<handle>`. `group-rowid` is a per-database SQLite identity used only for thread identity and never for outbound.
 
-`serve --feishu` polls one Feishu chat with `FEISHU_APP_ID`/`FEISHU_APP_SECRET` and `FEISHU_CHAT_ID` or `--chat <id>`, stores its cursor in SQLite, and cannot be combined with `--imessage` in one process.
+`serve --feishu` polls exactly one Feishu chat with `FEISHU_APP_ID`/`FEISHU_APP_SECRET` and `FEISHU_CHAT_ID` or `--chat <id>`, stores its cursor in SQLite, and never sends from preflight. Create a Feishu custom app with the bot capability, add `im:message`, `im:message:send_as_bot`, `im:message:readonly`, and `im:message.group_msg` (for group history), publish the app version, then add the bot to the target chat and copy its `oc_...` chat id. Inbound CLI delivery is polling only: one chat per process. Inbound webhooks and Feishu long-connection/WebSocket delivery are not implemented. Full setup is in [docs/REAL_CHANNELS.md](./docs/REAL_CHANNELS.md).
+
+`--imessage` and `--feishu` may run together. `serve --imessage --feishu` resolves and validates both configurations before `Runtime.create`, then runs both inbound loops over one Runtime/SQLite store with independent abort controllers, cursors, and outboxes. If either configuration is missing or invalid, it fails before opening SQLite, `chat.db`, or the Feishu network and lists every missing item. A loop failure is logged without stopping the other loop or the daemon.
+
+Run the preflight first; it needs no model, opens no SQLite, and sends no message:
+
+```bash
+pnpm ds-agent channels check                  # both, offline
+pnpm ds-agent channels check --imessage       # iMessage only
+pnpm ds-agent channels check --feishu         # Feishu config only
+pnpm ds-agent channels check --feishu --network  # one real tenant_access_token call
+```
+
+iMessage preflight opens `chat.db` read-only, checks the required schema, prints count/latest ROWID (never message text), admission, and whether `osascript` exists. It prints the manual Automation command (`osascript -e 'tell application "Messages" to get name'`) but does not run it, so the default check cannot prompt or send. Feishu preflight prints paired-credential presence, chat presence, base URL, and required scopes with values hidden. Exit 0 means every selected channel is ready.
+
+Safe no-send smoke: run `channels check` (and optionally `--network`), then confirm the manual iMessage Automation command in docs/IMESSAGE.md. Do not start `serve` to test send permissions; the first real reply is the first send.
+
+```bash
+# one process, both primary channels (requires both configurations)
+DS_AGENT_IMESSAGE_HANDLE="+8613800000000" \
+FEISHU_APP_ID=cli_xxx FEISHU_APP_SECRET=xxx FEISHU_CHAT_ID=oc_xxx \
+pnpm ds-agent serve --imessage --feishu
+```
+
 
 ## Credits
 

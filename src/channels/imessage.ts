@@ -76,6 +76,20 @@ export const IMESSAGE_GROUP_CHAT_STYLE = 43
 /** chat.db `chat.style` value for a known 1:1 chat. */
 export const IMESSAGE_DIRECT_CHAT_STYLE = 45
 
+/** Actionable guidance for the macOS TCC failure that blocks `chat.db`. */
+export const IMESSAGE_FULL_DISK_ACCESS_HINT =
+  'Grant Full Disk Access to your terminal (or whichever app launches ds-agent): '
+  + 'System Settings > Privacy & Security > Full Disk Access, enable that app, '
+  + 'then quit and reopen it.'
+
+/** Manual, read-only Automation check. Preflight only prints it; it never runs it. */
+export const IMESSAGE_AUTOMATION_COMMAND =
+  `osascript -e 'tell application "Messages" to get name'`
+
+export const IMESSAGE_AUTOMATION_HINT =
+  'If macOS prompts, allow that app to control Messages in '
+  + 'System Settings > Privacy & Security > Automation.'
+
 /**
  * Raised when chat.db lacks the `chat.style` / `chat.room_name` columns this
  * channel needs to tell 1:1 messages from group messages. It is cached and
@@ -86,6 +100,43 @@ export class ImessageSchemaError extends Error {
     super(message)
     this.name = 'ImessageSchemaError'
   }
+}
+
+/**
+ * A Full Disk Access / TCC denial. It is not transient: retrying cannot grant
+ * the permission, and the operator must change System Settings (then restart
+ * the host app), so poll loops surface it instead of backing off forever.
+ */
+export class ImessagePermissionError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'ImessagePermissionError'
+  }
+}
+
+/** Detect the sqlite/Node errors macOS emits when TCC denies chat.db access. */
+export function isImessagePermissionError(error: unknown): boolean {
+  if (error instanceof ImessagePermissionError) return true
+  const name = error instanceof Error ? error.name : ''
+  const message = error instanceof Error ? error.message : String(error)
+  return /authorization denied|operation not permitted|not authorized|permission denied|\bEACCES\b|\bEPERM\b/i
+    .test(`${name} ${message}`)
+}
+
+/** Build the actionable startup/preflight error for a failed chat.db open. */
+export function imessageOpenError(dbPath: string, error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error)
+  if (isImessagePermissionError(error)) {
+    return new ImessagePermissionError(
+      `cannot open iMessage database ${dbPath}: ${message}. ${IMESSAGE_FULL_DISK_ACCESS_HINT}`,
+      { cause: error },
+    )
+  }
+  return new Error(
+    `cannot open iMessage database ${dbPath}: ${message}. `
+    + 'Check the path (DS_AGENT_IMESSAGE_DB or --db) and file permissions.',
+    { cause: error },
+  )
 }
 
 function nonEmptyText(value: unknown): string | undefined {
@@ -414,11 +465,7 @@ export class ChatDbImessageApi implements ImessageApi {
     try {
       this.db = new DatabaseSync(this.dbPath, { readOnly: true })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      throw new Error(
-        `cannot open iMessage database ${this.dbPath}: ${message}. Grant Full Disk Access to the app `
-        + 'running this process (System Settings > Privacy & Security > Full Disk Access), then retry.',
-      )
+      throw imessageOpenError(this.dbPath, error)
     }
     return this.db
   }

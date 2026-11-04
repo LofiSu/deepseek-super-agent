@@ -27,6 +27,38 @@ ImessageOutboxAdapter.send()  ── osascript → Messages.app → same convers
   (`DS_AGENT_IMSG_TEXT`), never by string interpolation, so quotes/`$`/newlines
   cannot inject AppleScript.
 
+## Preflight (no model, no send)
+
+Run this before `serve` or `imessage`:
+
+```bash
+ds-agent channels check --imessage
+# or, on macOS, the same check under pnpm in this checkout:
+pnpm ds-agent channels check --imessage
+```
+
+It opens `chat.db` read-only, reports whether the required tables/columns exist,
+prints `COUNT(*)` and `MAX(ROWID)` only (never message text), reports the
+admission decision (`handle`, allow-any, allow-groups), and checks that
+`osascript` is on `PATH`. It exits 0 only when the channel is ready.
+
+The check does **not** run AppleScript, because that can raise the macOS
+Automation prompt. It prints the exact manual, read-only command instead:
+
+```bash
+osascript -e 'tell application "Messages" to get name'
+```
+
+If macOS asks whether your terminal may control Messages, choose Allow. This
+command does not send a message. A denied Automation permission only affects
+outbound; it is separate from Full Disk Access.
+
+If opening `chat.db` fails with `authorization denied` / `Operation not
+permitted`, the preflight says to grant Full Disk Access and names the exact
+path: **System Settings → Privacy & Security → Full Disk Access**. Enable the
+terminal (or whichever app launches `ds-agent`), then **quit and reopen that
+app**; changing the setting does not apply to a running process.
+
 ## Safety defaults
 
 Admission is **closed by default**. `ds-agent imessage` and
@@ -95,10 +127,15 @@ opened (and, for `serve`, before SQLite is opened).
    into that account on this Mac (Messages allows one iMessage account at a
    time, so use a separate macOS user if you also read your own iMessage here).
 2. **Full Disk Access** for the app that runs `node` (Terminal / iTerm / the
-   app hosting this process): System Settings → Privacy & Security → Full Disk
-   Access. Without it, opening `chat.db` fails with `Operation not permitted`.
+   app hosting this process): **System Settings → Privacy & Security → Full
+   Disk Access**, enable that app, then quit and reopen it. Without it, opening
+   `chat.db` fails with `authorization denied` or `Operation not permitted`.
+   The CLI maps that to an explicit Full Disk Access message and does not retry
+   the permission denial forever.
 3. **Automation** permission for Messages: the first `osascript` send shows a
-   prompt ("… wants to control Messages") → Allow.
+   prompt ("… wants to control Messages") → Allow. You can check this without
+   sending by running the manual command in [Preflight](#preflight-no-model-no-send);
+   **System Settings → Privacy & Security → Automation** shows or repairs it.
 4. **A live model**: set `DS_AGENT_API_BASE` + `DS_AGENT_API_KEY` (+ optional
    `DS_AGENT_API_MODEL`), or one provider key. MockModel is refused.
 
@@ -157,7 +194,19 @@ pnpm ds-agent serve --imessage --allow-any
 
 # include group messages (never marked direct)
 pnpm ds-agent serve --imessage --handle "+8613800000000" --allow-groups
+
+# both primary channels over one Runtime/SQLite store
+DS_AGENT_IMESSAGE_HANDLE="+8613800000000" \
+FEISHU_APP_ID=cli_xxx FEISHU_APP_SECRET=xxx FEISHU_CHAT_ID=oc_xxx \
+pnpm ds-agent serve --imessage --feishu
 ```
+
+`serve --imessage --feishu` resolves and validates both configurations before
+`Runtime.create`. If the iMessage allowlist or Feishu credentials/chat are
+missing, it fails before opening SQLite, `chat.db`, or the Feishu network and
+lists every missing item. Both loops then run over the same Runtime/SQLite
+store with independent abort controllers, cursors, and outboxes. A loop failure
+is logged and does not kill the other loop or the daemon.
 
 `serve --imessage` accepts the same admission flags and environment variables as
 `ds-agent imessage`: `--handle`, `--allow-any`, `--allow-groups`, `--interval`,
@@ -171,7 +220,10 @@ The first SIGINT/SIGTERM aborts polling, drains the loop and Runtime, and exits
 0; a second signal force-exits 1 if the drain hangs. Pull errors are logged and
 retried with bounded backoff; ingest errors are logged and skipped (the cursor
 still advances), so a transient `chat.db`/io failure does not kill the loop or
-the daemon.
+the daemon. A **permission denial is terminal**, not retried forever: the loop
+stops and the log/error names Full Disk Access and the exact System Settings
+path. In a combined `serve`, that stops only the iMessage loop; Feishu and the
+daemon keep running.
 
 ## Limitations (MVP)
 
@@ -192,3 +244,22 @@ the daemon.
 - Opening a WAL `chat.db` read-only can require the `-wal`/`-shm` sidecars to be
   readable; Full Disk Access covers this. If a read-only open still fails, grant
   access and retry.
+
+## Safe no-send smoke
+
+This sequence exercises permissions and configuration without sending any
+iMessage and without a model:
+
+```bash
+# 1. read-only database/schema/admission/osascript report
+pnpm ds-agent channels check --imessage
+
+# 2. check the Automation prompt/decision; this command only reads the app name
+osascript -e 'tell application "Messages" to get name'
+
+# 3. inspect the exact serve command without starting it
+pnpm ds-agent --help
+```
+
+There is no fake send path. The first real reply is the first actual send; use
+a dedicated Apple ID and keep the default-deny admission while testing.

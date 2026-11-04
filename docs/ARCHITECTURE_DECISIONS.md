@@ -481,3 +481,161 @@ rewrite `PLAN.md`; link to the contract instead.
   - **Treat a memory id or a hop link as authorization.** It would turn a
     reference into a capability and bypass the reader-ticket grant; rejected
     on security grounds regardless of recall.
+
+## ADR-011 — The model Slow Path is opt-in, fallback-first, and never bypasses the fast path
+
+- **Date:** 2026-11-04
+- **Status:** accepted; default remains deterministic ingress
+- **Context:** T17 shipped a Slow Path that was only `ruleClassify`. A model
+  could classify ambiguous triggers better, but a network call on every ingress
+  would make the default path nondeterministic, slow, and dependent on a live
+  credential. Offline CI must never call a provider.
+- **Decision:**
+  - Add an async `SemanticPolicy` port in `src/ingress/policy.ts`.
+    `MockModel` delegates to `ruleClassify`; `HttpOpenAI` makes one
+    tool-free `chat/completions` call with `temperature: 0`, a small
+    `max_tokens`, an `AbortSignal.timeout` bound, and only the already-redacted
+    source/addressed/text. Output is parsed strictly as exactly one JSON object
+    (`pass`, `strength`, `reason`); a surrounding code fence is the only
+    tolerated decoration.
+  - `PolicyClassifier` races the policy against a timer, clears it, and maps a
+    timeout, throw, or invalid hit to `ruleClassify(trigger)` with a
+    `fallback:<timeout|error|invalid>` reason. It never rejects to ingress.
+  - `filterTriggerWithPolicy` runs `fastPath` first. A fast drop returns before
+    the policy is called and cannot be overridden. Only a fast pass reaches the
+    model, and the combined verdict keeps the existing `FilterVerdict` labels.
+  - `Runtime` defaults to `rules`. `DS_AGENT_SLOW_PATH=model` (or
+    `RuntimeOptions.slowPath.mode`) opts in; `DS_AGENT_SLOW_PATH_TIMEOUT_MS`
+    defaults to 3000 and is valid only from 100 to 30000. An invalid mode,
+    timeout, or a model without `classifyPolicy` falls back to rules with one
+    reason-only log line (fail closed).
+  - `Runtime.ingestAsync` is additive. Sync `Runtime.ingest` keeps its signature
+    and remains rules-only, so existing callers and A2A inbound do not change
+    behavior. This PR delivers the additive entrypoint and the policy/trust
+    path; the CLI `chat`, `emit`, and iMessage inbound call sites are wired to
+    `ingestAsync` in a follow-up after the concurrent LOCAL-UI change to
+    `src/cli/main.ts` lands, so they currently remain sync and rules-only. A2A
+    inbound remains synchronous and rules-only until a separate review.
+  - A model verdict is handed to `Intake` in the ingress-owned
+    `TriggerTrust.admission` sidecar (`{listened, reason}`), never in
+    `trigger.meta`. Intake uses that verdict instead of re-running
+    `host.scope.admit`, so a model drop is durable (a `filtered` disposition)
+    and a model pass is effective even when the deterministic rules would have
+    said no. A fast-path denial still wins. Callers that supply no sidecar keep
+    the existing re-filter behavior.
+- **Consequences:** default ingress behavior, offline CI, and the sync
+  `ingest` contract are unchanged. Operators can opt into a bounded,
+  fail-closed model check. A policy can only narrow or widen admission after
+  the fast path has passed; it cannot override an admission/source/mention/
+  noise denial. Logs contain the mode, timeout, fallback cause, and sanitized
+  policy reason — never the API key, request body, or raw model output.
+- **Alternatives rejected:**
+  - **Make the model the default Slow Path.** It would add latency, cost,
+    nondeterminism, and an offline-CI network dependency to every trigger.
+  - **Re-filter after the model verdict in Intake.** Rules would undo a model
+    drop or reject a model-only pass; the ingress verdict must be authoritative
+    once computed.
+  - **Read admission from `trigger.meta`.** `meta` is adapter-controlled data;
+    treating it as a decision recreates the C1 bypass.
+  - **Let the model override a fast-path denial.** Admission, source, and noise
+    denial are security/shape decisions, not semantic ones; a remote model must
+    not widen them.
+  - **Call the model without a hard timeout or tools disabled.** A hung or
+    tool-using classification call would block ingress and could act beyond the
+    policy contract.
+
+## ADR-012 — Remote mesh registration, heartbeat, and dispatch are fail-closed and listener-free
+
+- **Date:** 2026-11-04
+- **Status:** accepted; implements the T47 transport half. The Runtime/CLI
+  listener remains owner-gated and is not part of this decision. ADR-011
+  (model slow path) merged as #128 (`788be60`); ADR-012 follows it in numeric
+  order.
+- **Context:** T47 placement was logical: `WorkerMeshRegistry` accounted for
+  capacity, but no peer could be registered over the network and no assignment
+  could leave the process. The authenticated A2A HTTP primitive (`a2a-auth.ts`,
+  `a2a-http.ts`) is now merged, so the transport half can be built without
+  inventing a second wire protocol or weakening the auth boundary. A peer that
+  registers an endpoint is also choosing a future outbound target, which turns
+  inbound registration into an SSRF-adjacent decision.
+- **Decision:** add `src/harness/remote-node.ts` with two halves.
+  - `RemoteMeshRegistry` registers `{ id, url, peerId, secret, capacity? }`,
+    validates id/peer/url non-emptiness, the A2A minimum secret length
+    (`A2A_MIN_SECRET_BYTES`), absence of URL userinfo, positive integer
+    capacity, duplicate ids, and a node-count bound (default 256), and reuses
+    `A2AHttpTransport`'s constructor for the https-or-loopback-http URL guard.
+    It tracks heartbeat, online/offline, in-flight assignments, and a
+    configurable stale window (default 60 s). `pick` is least-loaded,
+    capacity-bounded, and sticky for an eligible existing assignment; a
+    stale/offline/unknown assignment is released before `undefined` is
+    returned so its capacity is not leaked. `dispatch` requires a prior
+    `pick`/assignment, signs `{ kind: 'assignment', ticketId, assignment }` as
+    the local peer with a lazily constructed per-node `A2AHttpTransport`, keeps
+    the slot on `delivered`, and releases it on
+    `unroutable`/`failed`/transport error or a stale/offline/unknown refusal.
+    `list()` returns secret-free copies; returned deliveries never contain the
+    secret or peer-supplied error text.
+  - `MeshInbox`/`createRemoteMeshHandler` wraps `createA2AHttpHandler` with an
+    `A2ARouter` and accepts only `register`, `heartbeat`, and `assignment`
+    bodies. The A2A-verified `envelope.from` is the authoritative peer id; a
+    body `from` is ignored and an outer `from` that conflicts with auth is
+    rejected by the HTTP layer. `register`/`heartbeat` update the registry;
+    remote-driven growth is bounded by `maxNodes` (default 256) and
+    `maxAddresses` (default 64), with the same node bound applied to the
+    handler's default registry. Inbound `register` rejects loopback endpoint
+    hostnames by default; an operator must set
+    `allowLoopbackRegistration: true` for local process tests or a deliberate
+    loopback deployment. Private-network hosts remain operator policy: this
+    module neither allowlists nor implicitly trusts them. Heartbeats more than
+    `maxSkewMs` in the future are rejected so a peer cannot pin itself online,
+    while past timestamps remain accepted. `assignment` invokes `onAssignment`
+    exactly once and maps callback failures to a non-leaking 502. The callback
+    is typed to return `undefined`, so TypeScript rejects an async callback;
+    `AsyncFunction` and any returned thenable are also rejected before a
+    delivery is reported. Unknown or malformed kinds fail closed before the
+    callback. The module never constructs a Trigger and never starts a
+    listener; the caller creates the `node:http` server.
+- **Trust boundary:** the A2A v1 canonical string binds the peer and body, not
+  the target host/path/method, and the default replay cache is process-local.
+  Every verifier sharing a secret MUST either use a unique per-verifier secret
+  or pass a shared replay cache (preferably both). This module stores outbound
+  secrets in memory only; it does not distribute, rotate, persist, or log them.
+  `list()` and dispatch results are secret-free. The inbound mesh endpoint is
+  authenticated but not authorized for anything beyond the three body kinds.
+  Authentication does not make a peer-supplied outbound URL safe: loopback
+  targets are rejected unless the operator opts in, and private-network
+  reachability remains an operator policy decision rather than an implicit
+  capability.
+- **Deliberate non-goals:** no Runtime or CLI listener, no scheduling/queue
+  integration, no remote Worker execution claim, no key storage/distribution,
+  no persistence of registry state, no Trigger construction, no general
+  network egress allowlist, and no new dependency. A later owner-gated wiring
+  change owns mounting the handler and connecting `onAssignment`.
+- **Consequences:** the tested client/registry and receiver callback seam exist
+  without changing default Runtime behaviour. A remote assignment is only a
+  delivery result; it never proves the peer executed anything. Losing the
+  process loses the registry and ticket stickiness. Capacity is local to each
+  registry, so two routers can over-book the same peer unless an operator
+  partitions tickets or capacity. Remote-driven node/address growth is bounded,
+  and short secrets, credential-bearing URLs, loopback registrations, and
+  future heartbeats fail at the boundary instead of degrading into generic
+  dispatch failures. Operators who opt into loopback registration own that
+  egress decision.
+- **Alternatives rejected:**
+  - **Add an unauthenticated JSON POST endpoint.** Bypasses the merged A2A
+    signature, timestamp, and replay checks.
+  - **Start the listener in `Runtime.create`.** Changes default process
+    behaviour and network exposure; the owner gate is explicit.
+  - **Reuse one secret for every verifier with the process-local cache.** A
+    captured request can replay to another verifier inside ±60 s; the shared
+    secret/shared cache requirement above is mandatory.
+  - **Allow peer-registered loopback URLs by default.** Any authenticated peer
+    could make this process POST to unrelated local services; the A2A guard
+    cannot express that policy.
+  - **Retry or throw peer error text from `dispatch`.** Leaks peer-controlled
+    strings and can duplicate assignments; failure releases the slot instead.
+  - **Auto-pick inside `dispatch`.** Hides placement from the caller and
+    bypasses the explicit `pick`/capacity contract.
+  - **Await an async `onAssignment`.** The A2A HTTP router seam is synchronous;
+    an async callback could keep working after the sender was told the delivery
+    failed. The contract is synchronous and the type rejects `Promise` returns.
