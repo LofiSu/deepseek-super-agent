@@ -4,55 +4,103 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
-## 2026-11-04 — Cycle 6 (serve inbound loop + outbox permanent failure)
+## 2026-11-04 — Cycle 6 (serve loop, outbox permanent failure, pump follow-up; checkpoint)
 
 ### Observed
 
-- The cycle-5 checkpoint PR (#98) merged at `ab8e4bf`. A peer session merged
-  #99 (MESH-FAILURE-PUMP) at `6184a27` while this session was dispatching.
-- Residual gaps from the cycle-5 review: fail-closed group replies retried to
-  `failed`, and `serve` had no inbound channel loop.
-- Two implementers were dispatched from `origin/main` in isolated worktrees:
-  SERVE-CHANNEL-LOOP and OUTBOX-PERMANENT-FAILURE.
+- Cycle 6 dispatched two disjoint tasks after the cycle-5 reconciliation:
+  SERVE-CHANNEL-LOOP (P1) and OUTBOX-PERMANENT-FAILURE (P2). MESH-FAILURE-PUMP
+  was merged by a peer session as #99 (`6184a27`) while those ran.
+- #100 (`55f0d09`) merged the permanent/transient outbox split; #101
+  (`2ae9740`) merged the inbound iMessage loop for `serve` after a docs
+  correction (pull/ingest error wording and the chat retry-cadence
+  compatibility note). Peer session sulin-5f merged #103 (`5e5a28b`, test-only
+  subscription fan-out determinism).
+- A peer session's cycle-5 docs follow-up (#102) was refreshed onto `5e5a28b`
+  and merged at `55f3e7b`, adding ADR-008, the cycle-5 audit figures, and the
+  #96/#97 review corrections.
+- The earlier `docs/cycle-6-checkpoint` head could not be merged directly
+  because #102 rewrote the same five docs files; the resolution was to take
+  #102's merged docs as the base and re-apply the cycle-6 record on top.
 
 ### Decided
 
-- Keep `chat` admission, flags, cursor semantics, and fail-fast schema behavior
-  identical while extracting the loop; allow the retry cadence to become the
-  shared bounded backoff and record that compatibility note in the PR.
-- Classify unroutable outbound rows as permanent failures rather than raising
-  `MAX_ATTEMPTS`; keep transient retry/backoff unchanged.
-- Accept #99's review as part of this cycle and record the peer session's
-  post-merge CI evidence.
-
-### Executed
-
-- #100: `PermanentDeliveryError` in the outbox contract; the iMessage adapter
-  throws it for a group row without a chatGuid; `flushOnce` fails the row on
-  the first attempt with no retry. Tests cover permanent, transient, and
-  second-flush behavior; fail-without-change verified by the implementer.
-- #101: extracted `src/cli/channel-loop.ts`; `chat` and `serve --imessage`
-  share it; serve validates admission before `Runtime.create`, aborts polling
-  on the first signal, drains the loop, closes the API, then finishes the
-  runtime. Offline fake-source tests cover ingest/cursor, retry, abort, and
-  refusal before opening `chat.db`/SQLite.
-- Review corrections on #101: accurate pull-vs-ingest retry wording in
-  `docs/IMESSAGE.md`, plus a compatibility note for `chat`'s retry cadence.
+- Keep one cycle-6 checkpoint after #102 rather than merging two overlapping
+  docs PRs. Do not reopen or rewrite merged entries; record corrections as
+  review-log entries.
+- Next-session queue: SEMANTIC-LTM evaluation, the stale-gateway-token ADR,
+  FEISHU-SERVE-LOOP on the shared channel-loop seam, and the ambiguous-group
+  identity boundary.
 
 ### Verified
 
-- Local `2ae9740`: `tsc --noEmit`, `pnpm lint` (229 files),
-  `pnpm format:check` clean; offline suite 452 passed / 54 files.
-- #99 post-merge CI run `41791336153`: 456 passed / 15 skipped (471);
-  82.42% lines, 81.03% branches, 90.11% functions.
-- #100 CI run `41791499699` and #101 CI run `41792159144` green on their
-  reviewed heads; zero unresolved threads on all three PRs.
-- No live model, real-channel, or iMessage permission run was performed.
+- Local gate on `5e5a28b`: `tsc --noEmit` clean, `pnpm lint` ok (229 tracked
+  files), `pnpm format:check` clean, offline suite 452 passed / 54 files.
+- `main` `5e5a28b` CI (run `41792700396`, job `126449544790`) succeeded: 464
+  passed / 15 skipped (479 tests), 59 files (56 passed, 3 fully skipped);
+  coverage 463 passed, 55 files, 82.82% statements/lines (7993/9651), 81.09%
+  branches (2878/3549), 90.96% functions (705/775).
+- #102 docs CI green on `e736af4` (run `41793547258`); zero unresolved threads.
+- Peer session sulin-5f ran the full live suite on `5e5a28b`
+  (`DS_AGENT_API_MODEL=auto/deepseek-v4.1-flash`): 476 passed / 3 skipped (479
+  tests), 58 files passed, 567.76s, exit 0; log
+  `/tmp/ds-agent-live-e2e-logs/full-2026-11-04.log`. This session made no live
+  run.
+- No real-channel run. Branch protection was not bypassed.
 
 ### Pending
 
-- Next cycle: semantic long-term memory evaluation or the stale-gateway-token
-  ADR; a Feishu inbound loop is now feasible on the shared channel-loop seam.
+- Land this cycle-6 checkpoint (#104) after CI.
+- Owner has not chosen between SEMANTIC-LTM and the stale-gateway-token ADR for
+  the next cycle.
+
+## 2026-11-04 — Cycle 5 checkpoint follow-up (ADR-008 and audit evidence)
+
+### Observed
+
+- The cycle-5 checkpoint merged as #98 at `ab8e4bf` with five docs files. It
+  did not add ADR-008 or update `docs/PROJECT_AUDIT.md`, and its
+  `docs/DEVELOPMENT_STATUS.md` stated that both #96 gateway-token tests fail on
+  the base.
+- The #96 premise was corrected during review: the EEXIST winner-reuse test
+  does not fail on pre-#87 `10e9f3c`, because the `if (raced) return raced`
+  branch pre-dates #87 and behaves identically. It is mutation-verified
+  (`return token` mutation fails). The create-path ELOOP test does fail on
+  `10e9f3c` with the raw `ELOOP` error.
+- The #97 review also found that after a failed non-queued Worker releases its
+  node the Harness does not `pump()`, so a queued Worker can stay parked with a
+  free node. That work was dispatched as MESH-FAILURE-PUMP and merged as #99
+  (`6184a27`) while this follow-up was being prepared. #100
+  (OUTBOX-PERMANENT-FAILURE) merged at `55f0d09`, #101 (SERVE-CHANNEL-LOOP) at
+  `2ae9740`, and #103 `[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST] Script the
+  many-to-many workers so fan-out no longer waits on a live model` at
+  `5e5a28b` (test-only `test/subscription.test.ts`, +4/−1).
+- The #99 review (heads `b2b0e4f`/`48aa718`) returned APPROVE: release-then-
+  `pump()` in both `startNow` failure paths, gated on a picked node, with a
+  deterministic queued-Worker regression test. CI was green on `48aa718`
+  (run `41791142621`).
+
+### Decided
+
+- Correct the #96 statement in place in the living status/plan docs and add the
+  non-vacuity correction to the review log rather than rewriting the merged #98
+  entry.
+- Add ADR-008 for #97's release-and-resolve behavior and record the cycle-5
+  merges and exact `9a0def3` CI figures in the audit conclusion.
+
+### Verified
+
+- `main` `9a0def3` CI (run `41615496540`) succeeded: 455 passed / 15 skipped
+  (470 tests, 58 files); coverage 454 passed across 54 files, 82.42%
+  statements/lines (7844/9517), 81.01% branches (2817/3477), 90.11% functions
+  (693/769).
+- Docs-only follow-up; `pnpm typecheck`, `pnpm lint`, and `pnpm format:check`
+  pass. No live model or real-channel run.
+- No GitHub review threads remained on #95–#97.
+
+### Pending
+
+- Write the cycle-6 checkpoint; do not reopen merged PRs.
 
 ## 2026-11-04 — Cycle 5 (post-cap follow-ups merged; checkpoint)
 

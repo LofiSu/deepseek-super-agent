@@ -441,10 +441,43 @@ head so a later reader can separate the reviewed tree from the merged tree.
   log, with the no-start assertions backstopped by the `startQueued` re-read.
 - **Merged:** `60bb9ae`. CI green on the exact head (run `41604489526`).
 
+## PR #103 — `[SUPER-AGENT][SUBSCRIPTION-FANOUT-TEST] Script the many-to-many workers so fan-out no longer waits on a live model`
+
+- **Author:** LofiSu (peer session sulin-5f); test-only.
+- **State at review:** MERGED at `5e5a28b`; reviewed from the merged diff. Head
+  `47342dd`; file `test/subscription.test.ts` (+4/−1).
+- **Independent review:** **APPROVE**. The assertion is unchanged — which
+  Tickets receive `trg_recent` and which one stops after it ends. The diff only
+  gives that runtime a `silentModel()`, so the incidental Worker turns no
+  longer call the default live model; fan-out behavior is model-independent and
+  the file already mixes scripted and live runtimes. No source or fixture
+  changes.
+- **Evidence:** PR CI `typecheck and test` green on head `47342dd` (run
+  `41792560150`). Post-merge `main` CI run `41792700396`: 464 passed / 15
+  skipped (479), 82.82% lines. Peer session's full live suite on `5e5a28b`:
+  476 passed / 3 skipped, exit 0. Zero unresolved threads.
+
+## PR #99 — `[SUPER-AGENT][MESH-FAILURE-PUMP] Pump queued Workers after a failed non-queued Worker releases its node`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; reviewed heads `b2b0e4f` and refreshed `48aa718`.
+  Files: `src/harness/loop.ts` (+9/−0), `test/worker-mesh.test.ts` (+53/−0).
+- **Independent review:** **APPROVE**. Both `startNow` failure paths — the
+  synchronous throw and the asynchronous rejection — now release the picked
+  node and then `pump()`, gated on a node having been picked. An ordering
+  comment documents why the release-then-pump sequence cannot double-start.
+  The regression test is deterministic: a gated A model call, B queued, and a
+  targeted `upsertSession` idle rejection for `worker_A`; the base fails with
+  `settlesWithin` false, and the test passed 10/10 repeats.
+- **Merged:** `6184a27`; CI green on refreshed head `48aa718` (run
+  `41791142621`). Post-merge `main` CI run `41791336153`: 456 passed / 15
+  skipped (471 tests), statements/lines 82.42% (7846/9519), branches 81.03%
+  (2820/3480), functions 90.11%. Zero unresolved threads.
+
 ## PR #97 — `[SUPER-AGENT][MESH-ASYNC-RELEASE] Release the mesh node when a non-queued Worker turn rejects`
 
 - **State at review:** OPEN; head `f18e16f` after the cycle-5 follow-up.
-  Files: `src/harness/loop.ts` (+17/−6), `test/worker-mesh.test.ts` (+24/−1).
+  Files: `src/harness/loop.ts` (+9/−2), `test/worker-mesh.test.ts` (+32).
 - **Independent review:** **APPROVE**. `startNow()` now attaches a `.catch`
   to the turn promise returned by `startWorkerTurn`, so an asynchronous
   rejection returns the node reserved by `pickNode` and logs
@@ -458,6 +491,10 @@ head so a later reader can separate the reviewed tree from the merged tree.
   `Harness.launch` from rejecting to resolving for asynchronous Worker
   failures; the failure is logged, and the queued path already resolved on
   error. Callers that awaited rejection must read the log or ticket state.
+- **Follow-up finding:** after a failed non-queued Worker releases its node,
+  the Harness does not `pump()`, so an already-queued Worker can stay parked
+  with a free node until a later event. Dispatched as MESH-FAILURE-PUMP and
+  later merged as #99 (`6184a27`); it is not part of this review.
 - **Merged:** `9a0def3`. CI `typecheck and test` green on the reviewed head;
   zero unresolved threads.
 
@@ -472,7 +509,13 @@ head so a later reader can separate the reviewed tree from the merged tree.
   asserts `GatewayTokenFileError` plus no file and no token. Both mock
   `fs.openSync` only for `O_EXCL` and restore it.
 - **Residual non-blocking:** none beyond the existing POSIX-mode caveat.
-- **Merged:** `ac1fd79`; CI green on the reviewed head.
+- **Non-vacuity correction:** the contract expected this EEXIST test to fail on
+  pre-#87 `10e9f3c`, but the `if (raced) return raced` branch pre-dates #87 and
+  behaves identically, so the test passes on the old base by design. It is
+  mutation-verified instead (`return token` mutation fails). The create-path
+  ELOOP test does fail on `10e9f3c` with the raw `ELOOP` error.
+- **Merged:** `ac1fd79`; CI green on the reviewed head. Zero unresolved
+  threads.
 
 ## PR #95 — `[SUPER-AGENT][METRICS-ASSERTIONS] Make the live-relaxed counter assertions meaningful offline`
 
@@ -485,77 +528,14 @@ head so a later reader can separate the reviewed tree from the merged tree.
   tautology recorded in the #91 review under the offline fixture.
 - **Residual non-blocking:** the live branch remains inherently
   nondeterministic; it is not exercised by CI without credentials.
-- **Merged:** `f8554cc`; CI green on the reviewed head.
-
-## PR #101 — `[SUPER-AGENT][SERVE-CHANNEL-LOOP] Run an inbound iMessage loop from serve`
-
-- **Author:** LofiSu (implementer agent)
-- **State at review:** OPEN; reviewed head `2675331` (feature `fac711c`, merges of
-  `ab8e4bf`/`55f0d09`, docs correction `2675331`). Files:
-  `src/cli/channel-loop.ts` (new, 175 lines), `src/cli/imessage.ts`,
-  `src/cli/main.ts`, `docs/IMESSAGE.md`, `test/cli-serve-imessage.test.ts`
-  (+650/−111). `src/channels/imessage.ts` and `docs/MODULES.md` untouched.
-- **Independent review:** **APPROVE** after one documentation correction.
-  - Admission is resolved by the shared `resolveImessageCliConfig` and checked
-    before `Runtime.create`, so a missing allowlist leaves SQLite and `chat.db`
-    unopened; the child-process test asserts neither path is created.
-  - `chat` keeps its flags, cursor seeding/persistence, ingest-skip semantics,
-    and fail-fast `ImessageSchemaError`; `ImessageSource` is stateless, so
-    constructing it once per loop instead of per poll is safe.
-  - Shutdown aborts polling first, awaits `loopDone`, closes the API, then runs
-    `Runtime.finish()`; the loop promise cannot reject.
-  - Requested correction: the docs claimed ingest errors are retried. They are
-    logged and skipped and the cursor still advances; fixed in `2675331`, and
-    the PR body now records that `chat`'s non-schema retry cadence moved to the
-    shared bounded backoff.
-- **Non-vacuity:** the five new tests fail without the loop/serve wiring and are
-  offline only (fake API/source, MockModel, child process for refusal).
-- **Residual non-blocking:** an in-flight pull is not cancellable, so a hung
-  `chat.db` read needs the second-signal force exit; `serve --imessage` retries
-  schema errors forever by design and does not start the embedded gateway;
-  `--once` leaves the daemon running.
-- **Merged:** `2ae9740`; CI `typecheck and test` green on `2675331` (run
-  `41792159144`); zero unresolved threads.
-
-## PR #100 — `[SUPER-AGENT][OUTBOX-PERMANENT-FAILURE] Fail unroutable outbound rows immediately`
-
-- **Author:** LofiSu (implementer agent)
-- **State at review:** OPEN; head `b250541` after merging `main`; files:
-  `src/channels/outbox-adapter.ts`, `src/channels/imessage.ts` (adapter error
-  only), `test/outbox.test.ts`, `test/channels-imessage.test.ts`,
-  `docs/MODULES.md`.
-- **Independent review:** **APPROVE**. `PermanentDeliveryError` is a narrow
-  exported contract; `flushOnce` checks it before the retry branch and calls
-  `markOutboxFailed` with no retry scheduling. The iMessage adapter throws it
-  only for the existing group-without-chatGuid refusal, with the same message.
-  Transient errors and the attempt limit are unchanged, and the missing-adapter
-  path is untouched. Tests assert status/attempts/nextAttemptAt and that a
-  second flush does not resend; the implementer also verified the two new tests
-  fail on the pre-change behavior.
-- **Residual non-blocking:** `instanceof` detection would not match a duplicate
-  module copy (no such adapter in-repo); a terminal permanent failure still
-  leaves the reply `pending`, matching the pre-existing failure path.
-- **Merged:** `55f0d09`; CI green on `b250541` (run `41791499699`); zero
-  unresolved threads.
-
-## PR #99 — `[SUPER-AGENT][MESH-FAILURE-PUMP] Pump queued Workers after a failed non-queued Worker releases its node`
-
-- **Author:** LofiSu (peer orchestration session)
-- **State at review:** merged by the peer session as `6184a27`; this session
-  reviewed the diff and the post-merge CI afterwards.
-- **Independent review:** **APPROVE**. `startNow()` calls `pump()` after
-  releasing the reserved node on both the synchronous-throw and asynchronous
-  rejection paths. This is safe: the synchronous path threw before a turn was
-  enqueued, and the asynchronous path runs after the failed turn settled. The
-  test ends a Worker turn as plain text (no report), then makes the session
-  write throw, so neither a Ticket nor Assignment release can free the slot;
-  only the failure handler can, and the parked Worker still runs.
-- **Verification:** post-merge CI run `41791336153` on `6184a27` is green
-  (456 passed / 15 skipped, 471 tests; 82.42% lines, 81.03% branches, 90.11%
-  functions).
-- **Residual non-blocking:** none found.
+- **Merged:** `f8554cc`; CI green on the reviewed head. Zero unresolved
+  threads.
 
 ## Pending reviews
 
-- None at this checkpoint. The cycle-6 checkpoint PR is the only open PR and is
-  reviewed before merge.
+- None at this checkpoint. #102 (cycle-5 docs follow-up) merged at `55f3e7b`
+  after review; #100 OUTBOX-PERMANENT-FAILURE, #101 SERVE-CHANNEL-LOOP, and
+  #103 SUBSCRIPTION-FANOUT-TEST are recorded above. This cycle-6 checkpoint
+  (#104) is reviewed before merge. PR #98 (cycle-5 checkpoint) was merged
+  docs-only at `ab8e4bf`; #102 records the missing ADR-008 and audit evidence
+  and corrects the #96 non-vacuity statement.
