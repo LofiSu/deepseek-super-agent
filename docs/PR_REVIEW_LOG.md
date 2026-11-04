@@ -457,6 +457,83 @@ head so a later reader can separate the reviewed tree from the merged tree.
   skipped (479), 82.82% lines. Peer session's full live suite on `5e5a28b`:
   476 passed / 3 skipped, exit 0. Zero unresolved threads.
 
+## PR #107 — `[SUPER-AGENT][IMESSAGE-GROUP-UNKNOWN] Disambiguate legacy group chats by chat.ROWID`
+
+- **Author:** LofiSu (peer session sulin-3a).
+- **State at review:** MERGED at `00665d2`; reviewed head `74c627e` (refreshed
+  onto `69b6d3d`). Files: `src/channels/imessage.ts`,
+  `test/channels-imessage.test.ts`, `docs/IMESSAGE.md`.
+- **Independent review:** **APPROVE**. Thread-key precedence is strict and
+  tested: `chat:<guid>` > `group:<identifier>` > `group-rowid:<rowid>` >
+  `group-unknown:<handle>`, while 1:1 stays `handle:<handle>`. The ROWID comes
+  only from a positive group row (`style = 43` or `room_name`), never from a
+  joined 1:1 or ambiguous row, and passes `safeChatRowId` (positive safe
+  integer; bigint converted; 0/negatives/fractions/NaN rejected). Outbound is
+  unchanged: the group address still derives only from guid/identifier and
+  fails closed without one, so a rowid key is thread-only. Tests include a
+  real-SQLite two-distinct-groups regression (same sender, no guid/identifier)
+  and a joined-1:1 case where the 1:1 row sorts first; both fail against the
+  old collapse to `group-unknown:<handle>`. Docs record the per-database
+  instability and the `group-unknown` → `group-rowid` upgrade thread split.
+- **Merged:** `00665d2`; CI green on `74c627e` (run `41795794639`); zero
+  unresolved threads.
+
+## PR #106 — `[SUPER-AGENT][FEISHU-SERVE-LOOP] Run an inbound Feishu poll loop from serve`
+
+- **Author:** LofiSu (implementer agent).
+- **State at review:** MERGED at `e9a1978`; head `6c2f1da`. Files:
+  `src/cli/feishu.ts` (new), `src/cli/main.ts`, `src/channels/feishu.ts`
+  (read-only cursor accessor), `test/cli-serve-feishu.test.ts` (new, 11 tests),
+  `docs/REAL_CHANNELS.md`, `docs/MODULES.md`.
+- **Independent review:** **APPROVE**. Config is resolved before
+  `Runtime.create`, so missing app credentials or a missing `--chat`/
+  `FEISHU_CHAT_ID` leaves SQLite and state directories untouched; `--imessage`
+  + `--feishu` is rejected before any resource opens. The loop mirrors the
+  #101 shape: pull → ingest → persist → `jobsSettled` → outbox flush →
+  abortable sleep, with bounded exponential backoff on pull errors. Cursor
+  `feishu_cursor/cursor = { chatId, lastCreateTimeMs }` uses precedence
+  `--since` > stored-for-this-chat > FeishuSource's now-5min, and is written
+  only after ingest and only when advancing. Cross-restart no-replay is proven
+  with a fresh Runtime over the same SQLite (stored cursor seeds the source);
+  overlap from the source's 1s lookback is deduped by Trigger id in
+  `Runtime.ingest`. Admission is not weakened: `addressed='mention'` only on a
+  real mention, nothing marked direct, and `channel.address.group = chat_id`
+  feeds the normal filter.
+- **Residual non-blocking:** an in-flight Feishu pull is not cancellable
+  (same class as the iMessage API); a run with no messages does not persist the
+  now-5min default, so a restart re-pulls that window (deduped, not
+  reprocessed); the 20×50 list page limit under a very large burst is not
+  live-exercised; live Feishu acceptance was not performed.
+- **Merged:** `e9a1978`; CI green on `6c2f1da` (run `41795247006`); local
+  `test/cli-serve-feishu.test.ts` + `test/channels-feishu.test.ts` 28/28; zero
+  unresolved threads.
+
+## PR #105 — `[SUPER-AGENT][STALE-GATEWAY-TOKEN] Add ADR-009 for stale empty token recovery`
+
+- **Author:** LofiSu (implementer agent); docs-only.
+- **State at review:** MERGED at `69b6d3d`; reviewed heads `eff86fd` →
+  `1e0405e` (accuracy fix) → `42d313a` (refreshed). Files:
+  `docs/ARCHITECTURE_DECISIONS.md` (+115), `docs/GATEWAY.md` (+68/−1).
+- **Independent review:** **APPROVE after correction**. The ADR diagnoses the
+  current path accurately: an empty/whitespace token is read as missing, the
+  exclusive create hits `EEXIST`, and the re-read throws the misleading
+  "was created concurrently and is empty" error before binding; the client
+  path silently falls back. The recommended policy — keep fail-closed, never
+  auto-regenerate, recover only by explicit operator action, preserve content
+  and inode — is the right security call, with the rotate-flag and
+  rename-aside options rejected for the stated reasons. The initial draft
+  claimed the failing path never chmods; that was wrong because
+  `ensurePrivateMode` tightens a loosened mode to 0600 on every read. The
+  author confirmed it empirically (0644 → error → 0600, same inode, empty
+  content) and the ADR/docs now state mode repair is the standing invariant,
+  not recovery, and the follow-up tests assert content/inode unchanged plus
+  mode exactly 0600 on POSIX.
+- **Residual:** documentation only; the implementation follow-up (distinct
+  stale-empty error, fail-closed client read) is not done and remains a
+  candidate cycle.
+- **Merged:** `69b6d3d`; CI green on `42d313a` (run `41795531295`); zero
+  unresolved threads.
+
 ## PR #99 — `[SUPER-AGENT][MESH-FAILURE-PUMP] Pump queued Workers after a failed non-queued Worker releases its node`
 
 - **Author:** LofiSu (implementer agent)
@@ -533,9 +610,7 @@ head so a later reader can separate the reviewed tree from the merged tree.
 
 ## Pending reviews
 
-- None at this checkpoint. #102 (cycle-5 docs follow-up) merged at `55f3e7b`
-  after review; #100 OUTBOX-PERMANENT-FAILURE, #101 SERVE-CHANNEL-LOOP, and
-  #103 SUBSCRIPTION-FANOUT-TEST are recorded above. This cycle-6 checkpoint
-  (#104) is reviewed before merge. PR #98 (cycle-5 checkpoint) was merged
-  docs-only at `ab8e4bf`; #102 records the missing ADR-008 and audit evidence
-  and corrects the #96 non-vacuity statement.
+- None at this checkpoint. Cycle 7's #105, #106, and #107 are recorded above
+  and merged with green `typecheck and test` and zero unresolved threads. The
+  cycle-7 checkpoint PR is reviewed before merge. The ADR-009 implementation
+  follow-up is a candidate, not an open PR.
