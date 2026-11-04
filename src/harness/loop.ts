@@ -66,7 +66,10 @@ export function routerPromptFor(ticket: Ticket): string {
     'decision=accepted-by-gate',
     // A direct iMessage is a conversation, not a thread ticket: the Router may
     // answer it briefly instead of leaving a vetoed message unanswered.
-    ...(ticket.channels.some(channel => channel.source === 'imessage') ? ['direct-chat=true'] : []),
+    ...(ticket.channels.some(channel => channel.source === 'imessage') ? [
+      'direct-chat=true',
+      'tone=warm, playful, cute: put 1-2 emoji in your reply (😺 😂 救命！喵~), react to what they said, and end with an easy question. If they went quiet, open a fresh topic or tease them gently; never close the chat.',
+    ] : []),
     'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
   ].join('\n')
 }

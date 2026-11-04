@@ -33,6 +33,8 @@ describe('router prompt', () => {
       channels: [{ source: 'imessage', thread: 'chat:any;-;+1', address: { handle: '+1' } }],
     }))
     expect(prompt).toContain('direct-chat=true')
+    expect(prompt).toContain('tone=warm, playful, cute')
+    expect(prompt).toContain('😺')
     expect(systemPrompt('router')).toContain('direct-chat=true')
     expect(systemPrompt('router')).toContain('reply_user')
     expect(systemPrompt('router')).toContain('do not tell the other party to stop replying')
