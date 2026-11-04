@@ -481,3 +481,65 @@ rewrite `PLAN.md`; link to the contract instead.
   - **Treat a memory id or a hop link as authorization.** It would turn a
     reference into a capability and bypass the reader-ticket grant; rejected
     on security grounds regardless of recall.
+
+## ADR-011 — The model Slow Path is opt-in, fallback-first, and never bypasses the fast path
+
+- **Date:** 2026-11-04
+- **Status:** accepted; default remains deterministic ingress
+- **Context:** T17 shipped a Slow Path that was only `ruleClassify`. A model
+  could classify ambiguous triggers better, but a network call on every ingress
+  would make the default path nondeterministic, slow, and dependent on a live
+  credential. Offline CI must never call a provider.
+- **Decision:**
+  - Add an async `SemanticPolicy` port in `src/ingress/policy.ts`.
+    `MockModel` delegates to `ruleClassify`; `HttpOpenAI` makes one
+    tool-free `chat/completions` call with `temperature: 0`, a small
+    `max_tokens`, an `AbortSignal.timeout` bound, and only the already-redacted
+    source/addressed/text. Output is parsed strictly as exactly one JSON object
+    (`pass`, `strength`, `reason`); a surrounding code fence is the only
+    tolerated decoration.
+  - `PolicyClassifier` races the policy against a timer, clears it, and maps a
+    timeout, throw, or invalid hit to `ruleClassify(trigger)` with a
+    `fallback:<timeout|error|invalid>` reason. It never rejects to ingress.
+  - `filterTriggerWithPolicy` runs `fastPath` first. A fast drop returns before
+    the policy is called and cannot be overridden. Only a fast pass reaches the
+    model, and the combined verdict keeps the existing `FilterVerdict` labels.
+  - `Runtime` defaults to `rules`. `DS_AGENT_SLOW_PATH=model` (or
+    `RuntimeOptions.slowPath.mode`) opts in; `DS_AGENT_SLOW_PATH_TIMEOUT_MS`
+    defaults to 3000 and is valid only from 100 to 30000. An invalid mode,
+    timeout, or a model without `classifyPolicy` falls back to rules with one
+    reason-only log line (fail closed).
+  - `Runtime.ingestAsync` is additive. Sync `Runtime.ingest` keeps its signature
+    and remains rules-only, so existing callers and A2A inbound do not change
+    behavior. This PR delivers the additive entrypoint and the policy/trust
+    path; the CLI `chat`, `emit`, and iMessage inbound call sites are wired to
+    `ingestAsync` in a follow-up after the concurrent LOCAL-UI change to
+    `src/cli/main.ts` lands, so they currently remain sync and rules-only. A2A
+    inbound remains synchronous and rules-only until a separate review.
+  - A model verdict is handed to `Intake` in the ingress-owned
+    `TriggerTrust.admission` sidecar (`{listened, reason}`), never in
+    `trigger.meta`. Intake uses that verdict instead of re-running
+    `host.scope.admit`, so a model drop is durable (a `filtered` disposition)
+    and a model pass is effective even when the deterministic rules would have
+    said no. A fast-path denial still wins. Callers that supply no sidecar keep
+    the existing re-filter behavior.
+- **Consequences:** default ingress behavior, offline CI, and the sync
+  `ingest` contract are unchanged. Operators can opt into a bounded,
+  fail-closed model check. A policy can only narrow or widen admission after
+  the fast path has passed; it cannot override an admission/source/mention/
+  noise denial. Logs contain the mode, timeout, fallback cause, and sanitized
+  policy reason — never the API key, request body, or raw model output.
+- **Alternatives rejected:**
+  - **Make the model the default Slow Path.** It would add latency, cost,
+    nondeterminism, and an offline-CI network dependency to every trigger.
+  - **Re-filter after the model verdict in Intake.** Rules would undo a model
+    drop or reject a model-only pass; the ingress verdict must be authoritative
+    once computed.
+  - **Read admission from `trigger.meta`.** `meta` is adapter-controlled data;
+    treating it as a decision recreates the C1 bypass.
+  - **Let the model override a fast-path denial.** Admission, source, and noise
+    denial are security/shape decisions, not semantic ones; a remote model must
+    not widen them.
+  - **Call the model without a hard timeout or tools disabled.** A hung or
+    tool-using classification call would block ingress and could act beyond the
+    policy contract.

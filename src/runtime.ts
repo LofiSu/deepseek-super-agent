@@ -19,10 +19,17 @@ import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
-import { createModelFromEnv, roleModelsFromEnv, type Model } from './harness/model.ts'
+import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
 import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
-import { filterTrigger, type AdmissionRules } from './ingress/filter.ts'
+import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
+import {
+  DEFAULT_POLICY_TIMEOUT_MS,
+  filterTriggerWithPolicy,
+  isSemanticPolicy,
+  PolicyClassifier,
+  type SemanticPolicy,
+} from './ingress/policy.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
 import { inlineOrSpill } from './memory/recall.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
@@ -72,6 +79,12 @@ export interface RuntimeOptions {
    */
   admission?: AdmissionRules
   /**
+   * Opt-in model Slow Path (T17). Default is deterministic rules; `model` makes
+   * `ingestAsync` consult an injected policy or a model implementing
+   * `classifyPolicy`. Sync `ingest` always stays on rules.
+   */
+  slowPath?: SlowPathOptions
+  /**
    * Long-term memory retention. Overrides `DS_AGENT_MEMORY_MAX_ENTRIES` /
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
    */
@@ -93,6 +106,78 @@ export interface RuntimeOptions {
 export interface MemoryRetention {
   maxEntries?: number
   maxAgeDays?: number
+}
+
+export interface SlowPathOptions {
+  /** `rules` (default) keeps deterministic ingress; `model` opts into the policy. */
+  mode?: 'rules' | 'model'
+  /** Hard bound per policy call. Valid range is 100..30000 ms. */
+  timeoutMs?: number
+  /** Injected policy; otherwise a model implementing `classifyPolicy` is used. */
+  policy?: SemanticPolicy
+}
+
+export type SlowPathMode = 'rules' | 'model'
+
+/** Lower/upper bound for `DS_AGENT_SLOW_PATH_TIMEOUT_MS`; outside is invalid. */
+export const MIN_SLOW_PATH_TIMEOUT_MS = 100
+export const MAX_SLOW_PATH_TIMEOUT_MS = 30_000
+
+interface ResolvedSlowPath {
+  mode: SlowPathMode
+  timeoutMs: number
+  classifier?: PolicyClassifier
+}
+
+/**
+ * Resolve the opt-in Slow Path. Fail closed: an unknown mode, an out-of-range
+ * timeout, or `model` without a policy-capable model all fall back to rules
+ * with one reason-only log line (config values are never echoed).
+ */
+function resolveSlowPath(
+  env: NodeJS.ProcessEnv,
+  override: SlowPathOptions | undefined,
+  model: Model,
+  log: Logger,
+): ResolvedSlowPath {
+  const configuredMode = override?.mode ?? env.DS_AGENT_SLOW_PATH?.trim()
+  let mode: SlowPathMode = 'rules'
+  if (configuredMode === 'rules') {
+    mode = 'rules'
+  } else if (configuredMode === 'model') {
+    mode = 'model'
+  } else if (configuredMode) {
+    log.info('[ingress] slow-path ignored reason=invalid-mode using=rules')
+  }
+  if (mode === 'rules') {
+    return { mode, timeoutMs: DEFAULT_POLICY_TIMEOUT_MS }
+  }
+
+  const rawTimeout = override?.timeoutMs ?? env.DS_AGENT_SLOW_PATH_TIMEOUT_MS?.trim()
+  let timeoutMs = DEFAULT_POLICY_TIMEOUT_MS
+  if (rawTimeout !== undefined && rawTimeout !== '') {
+    const parsed = typeof rawTimeout === 'number' ? rawTimeout : Number(rawTimeout)
+    if (
+      !Number.isFinite(parsed)
+      || !Number.isInteger(parsed)
+      || parsed < MIN_SLOW_PATH_TIMEOUT_MS
+      || parsed > MAX_SLOW_PATH_TIMEOUT_MS
+    ) {
+      log.info('[ingress] slow-path ignored reason=invalid-timeout using=rules')
+      return { mode: 'rules', timeoutMs: DEFAULT_POLICY_TIMEOUT_MS }
+    }
+    timeoutMs = parsed
+  }
+
+  const policy = override?.policy ?? (isSemanticPolicy(model) ? model : undefined)
+  if (!policy) {
+    log.info('[ingress] slow-path model unavailable using=rules')
+    return { mode: 'rules', timeoutMs: DEFAULT_POLICY_TIMEOUT_MS }
+  }
+  // The HTTP implementation carries its own abort bound; keep it aligned with
+  // the configured budget so the outer classifier race is not the only limit.
+  if (policy instanceof HttpOpenAI) policy.setPolicyTimeout(timeoutMs)
+  return { mode, timeoutMs, classifier: new PolicyClassifier(policy, timeoutMs) }
 }
 
 /** Conservative defaults: bound index growth without dropping recent history. */
@@ -197,6 +282,10 @@ export class Runtime {
   /** Read-model lifecycle events for panels and CLI views. */
   readonly lifecycle: LifecycleBus
   readonly a2aRouter: A2ARouter
+  /** Effective Slow Path mode after env/config validation. Defaults to `rules`. */
+  readonly slowPathMode: SlowPathMode
+  /** Classifier used by `ingestAsync`; absent in rules mode. */
+  readonly slowPathPolicy?: PolicyClassifier
 
   private readonly redact: (text: string) => string
   private readonly batchWindowMs: number
@@ -222,6 +311,8 @@ export class Runtime {
     longTermMemory: SpillBackedLongTermMemory
     lifecycle: LifecycleBus
     a2aRouter: A2ARouter
+    slowPathMode: SlowPathMode
+    slowPathPolicy?: PolicyClassifier
     redact: (text: string) => string
     batchWindowMs: number
     admission: AdmissionRules
@@ -242,6 +333,8 @@ export class Runtime {
     this.longTermMemory = parts.longTermMemory
     this.lifecycle = parts.lifecycle
     this.a2aRouter = parts.a2aRouter
+    this.slowPathMode = parts.slowPathMode
+    this.slowPathPolicy = parts.slowPathPolicy
     this.redact = parts.redact
     this.batchWindowMs = parts.batchWindowMs
     this.admission = parts.admission
@@ -309,8 +402,19 @@ export class Runtime {
     const a2aRouter = new A2ARouter(store)
     // T16 admission is deterministic and runs before mention/keyword. Ids only.
     const admission = admissionRulesFromEnv(baseEnv, opts.admission)
+    // T17 Slow Path: rules by default. Model mode is explicit and fail-closed.
+    const slowPath = resolveSlowPath(baseEnv, opts.slowPath, model, log)
     log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} meshQueue=${meshQueue} shards=${routerShards.list().length}`)
     log.info(`[runtime] model=${model.name}`)
+    log.info(
+      `[ingress] slow-path mode=${slowPath.mode} timeoutMs=${slowPath.timeoutMs}`
+      + (slowPath.classifier ? ` policy=${slowPath.classifier.name}` : ''),
+    )
+    if (slowPath.mode === 'model') {
+      // Sync ingest is intentionally unchanged; call this out so an operator
+      // does not believe the model policy applies to A2A or legacy callers.
+      log.info('[ingress] slow-path sync ingest uses rules; only ingestAsync applies the policy')
+    }
     // An explicitly empty list disables that rule; do not log a misleading allowlist.
     if (admission.actors?.length || admission.groups?.length || admission.dropSelf?.length) {
       log.info(
@@ -495,6 +599,8 @@ export class Runtime {
       longTermMemory,
       lifecycle,
       a2aRouter,
+      slowPathMode: slowPath.mode,
+      ...(slowPath.classifier ? { slowPathPolicy: slowPath.classifier } : {}),
       redact,
       batchWindowMs: opts.batchWindowMs ?? 0,
       admission,
@@ -511,6 +617,8 @@ export class Runtime {
       }
       metrics.increment('a2a.delivery')
       log.info(`[a2a] received id=${envelope.id ?? '-'} from=${envelope.from} triggerId=${trigger.id}`)
+      // A2A inbound stays synchronous and rules-only in this change (ADR-011);
+      // remote peers do not get the opt-in model Slow Path until it is audited.
       runtime.ingest(trigger)
     })
     return runtime
@@ -646,25 +754,59 @@ export class Runtime {
   }
 
   /**
-   * Ingress, then Engine.receive, then Eval for anything that was not a subscription bypass.
-   * Text is redacted before it is spilled or persisted. Admission and spill grants
-   * travel in `trust`, an ingress-owned sidecar — never in `trigger.meta`.
+   * Synchronous ingress. Always rules-only: existing callers (A2A inbound,
+   * demos, tests, gate-adjacent paths) keep their behavior. Use
+   * `ingestAsync` where the opt-in model Slow Path is desired.
    */
   ingest(trigger: Trigger): ReceiveResult {
-    if (this.store.getDoc<Trigger>('trigger', trigger.id)) {
-      const result = this.engine.receive(trigger)
-      this.log.info(`[engine] Intake.receive id=${trigger.id} result=${result}`)
-      return result
-    }
+    const duplicate = this.duplicate(trigger)
+    if (duplicate) return duplicate
     const safe: Trigger = { ...trigger, text: this.redact(trigger.text) }
-    const verdict = filterTrigger(safe, this.model, this.admission)
+    return this.commitIngress(safe, filterTrigger(safe, this.model, this.admission))
+  }
+
+  /**
+   * Ingress with the configured Slow Path. In rules mode this is exactly the
+   * sync path; in model mode it awaits the policy (which never rejects and
+   * falls back to `ruleClassify` on timeout, throw, or invalid output).
+   */
+  async ingestAsync(trigger: Trigger): Promise<ReceiveResult> {
+    const duplicate = this.duplicate(trigger)
+    if (duplicate) return duplicate
+    const safe: Trigger = { ...trigger, text: this.redact(trigger.text) }
+    const verdict = this.slowPathPolicy
+      ? await filterTriggerWithPolicy(safe, this.model, this.admission, this.slowPathPolicy)
+      : filterTrigger(safe, this.model, this.admission)
+    return this.commitIngress(safe, verdict)
+  }
+
+  /** A persisted trigger id is a duplicate; re-receive so the Engine stays authoritative. */
+  private duplicate(trigger: Trigger): ReceiveResult | undefined {
+    if (!this.store.getDoc<Trigger>('trigger', trigger.id)) return undefined
+    const result = this.engine.receive(trigger)
+    this.log.info(`[engine] Intake.receive id=${trigger.id} result=${result}`)
+    return result
+  }
+
+  /**
+   * Shared post-verdict path for sync and async ingress: metrics/log, the
+   * admission sidecar, inline/spill, shards, Engine.receive, filtered/disposition
+   * logging, fan-out delivery, and Eval scheduling.
+   */
+  private commitIngress(safe: Trigger, verdict: FilterVerdict): ReceiveResult {
     if (verdict.action === 'pass') this.metrics.increment('ingress.admit')
     else this.metrics.increment('ingress.drop')
     this.log.info(
       `[ingress] two-level fast=${verdict.fast} semantic=${verdict.semantic} model=${this.model.name} action=${verdict.action} layer=${verdict.layer}`,
     )
+    // The Runtime already classified this trigger (possibly with the model
+    // policy). Pin that verdict so Intake cannot re-run rules and undo a model
+    // drop or a model-only pass.
+    const admission = verdict.action === 'pass'
+      ? { listened: true, reason: verdict.reason }
+      : { listened: false, reason: `${verdict.layer}:${verdict.reason}` }
     let incoming: Trigger = { ...safe, meta: {} }
-    let trust: TriggerTrust = {}
+    let trust: TriggerTrust = { admission }
     if (verdict.action === 'pass') {
       const recall = inlineOrSpill(safe.text, body => this.store.putSpill(body))
       if (recall.spillId) {
@@ -675,8 +817,9 @@ export class Runtime {
       this.metrics.increment('router.shard', shards.length)
       this.log.info(`[routing] shards=${shards.join(',')} triggerId=${safe.id}`)
       trust = {
+        admission,
         spillId: recall.spillId,
-        strength: trigger.speculate === true ? 'maybe' : verdict.strength,
+        strength: safe.speculate === true ? 'maybe' : verdict.strength,
         filterText: safe.text,
         shards,
       }

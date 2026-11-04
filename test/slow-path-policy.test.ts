@@ -1,13 +1,18 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
 import { HttpOpenAI, MockModel } from '../src/harness/model.ts'
 import { ruleClassify } from '../src/ingress/filter.ts'
+import { Runtime } from '../src/runtime.ts'
 import type { Trigger } from '../src/shared/types.ts'
 
 /**
- * P2-4: the shipped Slow Path is the deterministic rule classifier. This test
- * pins that both model implementations delegate to `ruleClassify`, synchronously
- * and without touching the network. No model-backed policy classifier is wired.
+ * P2-4/T17: the shipped default Slow Path is the deterministic rule classifier.
+ * This test pins that both model implementations delegate to `ruleClassify`,
+ * synchronously and without touching the network, and that the opt-in model
+ * Slow Path is off unless `DS_AGENT_SLOW_PATH=model` is configured.
  */
 
 /** Representative triggers: action+mention, action only, mention only, noise, short text, speculate hint. */
@@ -92,5 +97,38 @@ describe('slow-path policy classifier (P2-4)', () => {
       expect(hit.strength).toMatch(/^(explicit|inferred|maybe)$/)
     }
     expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('MockModel.classifyPolicy delegates to ruleClassify asynchronously without fetch', async () => {
+    const model = new MockModel()
+    for (const { label, trigger } of cases()) {
+      await expect(model.classifyPolicy(trigger), label).resolves.toEqual(ruleClassify(trigger))
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('defaults Runtime to rules mode and ingestAsync never fetches', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-slow-default-'))
+    const runtime = Runtime.create({
+      home,
+      model: new HttpOpenAI('http://127.0.0.1:1/v1', 'fake-key', 'fake-model', 1000),
+      env: {},
+      jobDelayMs: 0,
+      watchdogIntervalMs: 60_000,
+      batchWindowMs: 60_000,
+    })
+    try {
+      expect(runtime.slowPathMode).toBe('rules')
+      expect(runtime.slowPathPolicy).toBeUndefined()
+      await expect(runtime.ingestAsync(imTrigger({
+        id: 'trg_default_rules',
+        thread: 'topic/slow-path',
+        text: '@ds-agent please fix the login timeout',
+      }))).resolves.toBe('stored')
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      runtime.daemon.stop()
+      if (runtime.store.isOpen) runtime.store.close()
+    }
   })
 })
