@@ -1,6 +1,6 @@
 # Security threat model — A2A, mesh, and local UI
 
-- **Date:** 2026-11-04; **base:** `origin/main` at `7a1d732`.
+- **Date:** 2026-11-04; **base:** `origin/main` at `e700730`.
 - **Scope:** W4 networked A2A/mesh surfaces and the W3 local UI, plus the
   worker/host boundary they depend on.
 - **Status:** *implemented* = on `main`; *planned* = design requirement, no
