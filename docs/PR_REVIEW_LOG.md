@@ -441,7 +441,53 @@ head so a later reader can separate the reviewed tree from the merged tree.
   log, with the no-start assertions backstopped by the `startQueued` re-read.
 - **Merged:** `60bb9ae`. CI green on the exact head (run `41604489526`).
 
+## PR #97 — `[SUPER-AGENT][MESH-ASYNC-RELEASE] Release the mesh node when a non-queued Worker turn rejects`
+
+- **State at review:** OPEN; head `f18e16f` after the cycle-5 follow-up.
+  Files: `src/harness/loop.ts` (+17/−6), `test/worker-mesh.test.ts` (+24/−1).
+- **Independent review:** **APPROVE**. `startNow()` now attaches a `.catch`
+  to the turn promise returned by `startWorkerTurn`, so an asynchronous
+  rejection returns the node reserved by `pickNode` and logs
+  `[harness] worker failed ticketId=... error=...`; the synchronous path and
+  the queued path retain their existing cleanup. `startWorkerTurn`'s
+  `.finally` already clears the active marker and pumps, so the catch only
+  needs the mesh reservation. The new test throws inside the memory-recall
+  callback (inside the scheduled Worker turn) and proves the launch resolves,
+  `workerMesh.inFlight` returns to 0, and a later Worker still runs.
+- **Residual non-blocking:** swallowing the turn rejection changes
+  `Harness.launch` from rejecting to resolving for asynchronous Worker
+  failures; the failure is logged, and the queued path already resolved on
+  error. Callers that awaited rejection must read the log or ticket state.
+- **Merged:** `9a0def3`. CI `typecheck and test` green on the reviewed head;
+  zero unresolved threads.
+
+## PR #96 — `[SUPER-AGENT][GATEWAY-TOKEN-TESTS] Cover the EEXIST winner-reuse and create-path ELOOP branches`
+
+- **State at review:** OPEN; head `b19e490`; test-only, +58/−0 in
+  `test/gateway-token.test.ts`.
+- **Independent review:** **APPROVE**. The first test simulates another
+  process winning the `O_EXCL` create after the initial read missed, forces
+  `EEXIST`, and asserts the returned token is the winner's bytes and the file
+  is left untouched. The second forces `ELOOP` from the create itself and
+  asserts `GatewayTokenFileError` plus no file and no token. Both mock
+  `fs.openSync` only for `O_EXCL` and restore it.
+- **Residual non-blocking:** none beyond the existing POSIX-mode caveat.
+- **Merged:** `ac1fd79`; CI green on the reviewed head.
+
+## PR #95 — `[SUPER-AGENT][METRICS-ASSERTIONS] Make the live-relaxed counter assertions meaningful offline`
+
+- **State at review:** OPEN; head `11313cd`; test-only, +16/−4 in
+  `test/metrics.test.ts`.
+- **Independent review:** **APPROVE**. The test now branches on
+  `runtime.model.name === 'MockModel'`: offline asserts exact counts for
+  `speculate.deliver`, `watchdog.idle`, and `watchdog.nudge`; the live branch
+  keeps the prior presence/`>= 1` assertions. This closes the residual
+  tautology recorded in the #91 review under the offline fixture.
+- **Residual non-blocking:** the live branch remains inherently
+  nondeterministic; it is not exercised by CI without credentials.
+- **Merged:** `f8554cc`; CI green on the reviewed head.
+
 ## Pending reviews
 
-- None at this checkpoint. The cycle-4 checkpoint PR is the only open PR and is
+- None at this checkpoint. The cycle-5 checkpoint PR is the only open PR and is
   reviewed before merge.
