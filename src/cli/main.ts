@@ -145,6 +145,7 @@ function help(): void {
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
+  pnpm ds-agent stop <ticketId> [--reason "no longer needed"]
   pnpm ds-agent intervene <ticketId> "use the staging db" [--no-pause]
   pnpm ds-agent resume <ticketId> [--reason "human verified"]
   pnpm ds-agent collab <ticketId>          # pause state + guidance audit
@@ -156,6 +157,7 @@ Worker-internal teams (persisted in SQLite, offline reads):
   <teamId> accepts an exact id or a unique prefix.
 
 pause freezes Router/Worker turns, reports, and outbound replies.
+stop ends a ticket for good (an operator veto); pause is for a resumable hold.
 intervene records guidance and pauses by default, so the note lands before more work.
 resume clears the pause and continues with the unseen guidance in the next turn.
 demo/retry/resume need a live model; chat may use MockModel.
@@ -584,6 +586,17 @@ async function main(): Promise<void> {
       }
       console.log(`  stage: ${ticketStage(outcome.ticket)}`)
       console.log(`  next:  pnpm ds-agent resume ${ticket.id}`)
+    }, { verbose: process.argv.includes('--verbose') })
+    return
+  }
+  if (cmd === 'stop') {
+    const rest = bare(3, ['reason'])
+    const ticketRef = rest[0]
+    const reason = (option('reason') ?? rest.slice(1).join(' ')) || 'operator-stop'
+    withEngine((engine, store) => {
+      const ticket = resolveTicket(store, ticketRef)
+      engine.stop(ticket.id, reason)
+      console.log(`stopped ${ticket.id} "${ticket.title}" — ${reason}`)
     }, { verbose: process.argv.includes('--verbose') })
     return
   }
