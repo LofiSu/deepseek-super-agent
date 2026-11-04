@@ -7,6 +7,18 @@ export interface OutboundAdapter {
   send(row: OutboxRow): Promise<{ externalId: string }>
 }
 
+/**
+ * A send failure that retrying cannot fix: the row is unroutable as written
+ * (for example, group content with no group chat guid). The dispatcher marks
+ * it `failed` on the first attempt instead of burning the retry budget.
+ */
+export class PermanentDeliveryError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PermanentDeliveryError'
+  }
+}
+
 export interface OutboxResult {
   sent: number
   failed: number
@@ -94,6 +106,14 @@ export class Outbox {
         this.log(`[outbox] sent outboxId=${row.id} channel=${row.channel} externalId=${result.externalId}`)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
+        if (error instanceof PermanentDeliveryError) {
+          this.store.markOutboxFailed(row.id, message)
+          failed += 1
+          this.log(
+            `[outbox] failed outboxId=${row.id} channel=${row.channel} permanent=true error=${message}`,
+          )
+          continue
+        }
         const attempts = (row.attempts ?? 0) + 1
         if (attempts >= MAX_ATTEMPTS) {
           this.store.markOutboxFailed(row.id, message)
