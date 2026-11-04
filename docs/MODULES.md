@@ -296,7 +296,7 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
 `serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
-`resume`, `collab`, `team`, and `teams`. `src/cli/demos/run.ts` drives the
+`resume`, `collab`, `team`, `teams`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
 acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the
@@ -323,9 +323,16 @@ The read-only local UI is a self-contained module: `src/ui/server.ts`
 Host/method guards, SSE), `src/ui/render.ts` (server-rendered HTML and escaping),
 and `src/cli/ui.ts` (`runUi`, `registerUi`). It reads visible tickets, threads,
 outbox metadata for visible tickets (never message bodies), health, metrics, and
-whitelisted lifecycle-event fields without a Session, model, or daemon. `ds-agent ui` command registration in
-`main.ts` is a follow-up wiring PR after the MODEL-SLOW-PATH branch merges; see
-`docs/UI.md` for the endpoints and security model.
+whitelisted lifecycle-event fields without a Session, model, or daemon.
+`ds-agent ui` is wired through `main.ts` and stays fail-closed: it needs
+`DS_AGENT_UI_TOKEN` or `--token` (at least 16 characters) and binds loopback
+only; see `docs/UI.md` for the endpoints and security model.
+
+`ds-agent backup --out <file.db>` and `ds-agent restore <file.db> [--force]`
+call `src/cli/backup.ts` over `src/store/backup.ts`: backup is a WAL-safe
+`VACUUM INTO` snapshot, and restore refuses to replace an existing store
+without `--force`, keeping the old database and WAL sidecars under
+`<state-dir>/backups/pre-restore-<timestamp>.db*`.
 
 ## T45 — metrics and bake-off
 

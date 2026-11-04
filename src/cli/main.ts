@@ -20,6 +20,8 @@ import { defaultHome, runDemo } from './demo.ts'
 import { runGatewayCommand } from './gateway.ts'
 import { runImessageCommand } from './imessage.ts'
 import { resolveServeChannelConfigs, runChannelsCheck, startServeChannels } from './channels.ts'
+import { backupUsage, runBackupCli } from './backup.ts'
+import { runUi } from './ui.ts'
 import { runProfileCommand, runWireCommand } from './wiring.ts'
 import { runSetupCommand } from './setup.ts'
 
@@ -124,6 +126,13 @@ function help(): void {
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
   pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLMs, write gateway.config.json
+  pnpm ds-agent ui [--host 127.0.0.1] [--port <n>] [--token <token>]
+                            # read-only loopback dashboard over persisted state; requires
+                            # DS_AGENT_UI_TOKEN or --token (at least 16 characters)
+  pnpm ds-agent backup [--out <file.db>]  # WAL-safe snapshot of the SQLite store
+  pnpm ds-agent restore <file.db> [--force]
+                            # replace the store from a snapshot; --force is required
+                            # when a store already exists (the old one is kept aside)
   pnpm ds-agent imessage [--handle <id>] [--allow-any] [--allow-groups] [--once] [--interval 2000]
                             # two-way iMessage channel; sender admission is default-deny
   pnpm ds-agent wire <file> --set KEY=VALUE [--env]  # merge gateway settings into an agent config
@@ -680,6 +689,49 @@ async function main(): Promise<void> {
   }
   if (cmd === 'profile') {
     runProfileCommand(home)
+    return
+  }
+  if (cmd === 'ui') {
+    // Token enforcement (>=16 chars, --token or DS_AGENT_UI_TOKEN) and the
+    // loopback-only bind stay in runUi; this dispatch only forwards options.
+    const rawPort = option('port')
+    const port = rawPort === undefined ? undefined : Number(rawPort)
+    if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) {
+      throw new Error(`invalid ui port: ${rawPort}`)
+    }
+    await runUi(home, {
+      host: option('host'),
+      port,
+      token: option('token'),
+    })
+    return
+  }
+  if (cmd === 'backup' || cmd === 'restore') {
+    if (process.argv.includes('--help') || process.argv.includes('-h')) {
+      console.log(backupUsage())
+      return
+    }
+    if (cmd === 'backup') {
+      const out = option('out')
+      if (out === undefined) {
+        console.error(backupUsage())
+        process.exitCode = 1
+        return
+      }
+      process.exitCode = runBackupCli(['--home', home, '--out', out])
+      return
+    }
+    const backupPath = bare(3, ['home', 'input'])[0]
+    if (backupPath === undefined) {
+      console.error(backupUsage())
+      process.exitCode = 1
+      return
+    }
+    process.exitCode = runBackupCli([
+      '--home', home,
+      '--input', backupPath,
+      ...(process.argv.includes('--force') ? ['--force'] : []),
+    ])
     return
   }
   if (cmd === 'emit' && sub === 'im') {
