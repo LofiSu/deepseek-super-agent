@@ -4,6 +4,42 @@ Append-only record of execution cycles. Each entry states what was observed,
 decided, dispatched, verified, and merged. Do not rewrite history; correct it
 with a new entry.
 
+## 2026-11-04 — Cycle 5 (post-cap follow-ups merged; checkpoint)
+
+### Observed
+
+- The previous orchestrator process ended after merging #95–#97 without a
+  checkpoint: `.super-agent/state.json` still said `next_action: integrate`
+  with PR #97 "awaiting refreshed CI", and the docs still described `8fa3a79`.
+  The two peer sessions were idle for more than 20 hours.
+- `main` is `9a0def3`: #94 (owner, docs-only live reference run), #95, #96,
+  and #97 merged. #97 merged at 09:59:34Z with `typecheck and test` green and
+  zero unresolved review threads.
+- Local `9a0def3` gate: `tsc --noEmit`, `pnpm lint` (227 files),
+  `pnpm format:check` clean; offline suite 443 passed / 53 files.
+
+### Decided
+
+- Resume the loop in this session under the owner's explicit continuation past
+  the four-cycle cap; record the override rather than silently reset it.
+- Checkpoint cycle 5 before dispatching cycle 6, so `main` documents the state
+  the next PRs branch from.
+- Cycle 6 scope: SERVE-CHANNEL-LOOP (P1) and OUTBOX-PERMANENT-FAILURE (P2),
+  the two highest-value residuals that do not share files.
+
+### Verified
+
+- #95 (metrics assertions) and #96 (gateway token EEXIST/ELOOP tests) are
+  test-only; #97 releases the reserved mesh node when a non-queued Worker turn
+  rejects asynchronously and records `[harness] worker failed ...`.
+- Reviewed heads: #95 `11313cd`, #96 `b19e490`, #97 `f18e16f`; merged as
+  `f8554cc`, `ac1fd79`, `9a0def3`.
+- Branch protection was not bypassed; no live model or real-channel run.
+
+### Pending
+
+- Review the two cycle-6 PRs; write the cycle-6 checkpoint.
+
 ## 2026-11-03 — Cycle 4 checkpoint (follow-ups merged; session at cycle cap)
 
 ### Observed
