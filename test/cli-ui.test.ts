@@ -48,6 +48,7 @@ function request(
 
 interface SseFrame {
   req: http.ClientRequest
+  res: http.IncomingMessage
   headers: http.IncomingHttpHeaders
   frame: string
 }
@@ -62,7 +63,7 @@ function openSse(url: string): Promise<SseFrame> {
         const end = buffer.indexOf('\n\n')
         if (end >= 0) {
           res.off('data', onData)
-          resolve({ req, headers: res.headers, frame: buffer.slice(0, end) })
+          resolve({ req, res, headers: res.headers, frame: buffer.slice(0, end) })
         }
       }
       res.on('data', onData)
@@ -262,6 +263,33 @@ describe('local UI server', () => {
     // Client close must not leave the timer or response behind.
     sse.req.destroy()
     await new Promise(resolve => setTimeout(resolve, 25))
+  })
+
+  it('closes the SSE stream when the read model throws', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    const metrics = new Metrics(home)
+    const server = await startUiServer({ home, store, metrics, port: 0, eventIntervalMs: 20 })
+    cleanup.push(async () => {
+      await server.close()
+      if (store.isOpen) store.close()
+      fs.rmSync(home, { recursive: true, force: true })
+    })
+
+    const sse = await openSse(`${server.url}/api/events`)
+    const closed = new Promise<void>((resolve, reject) => {
+      sse.res.once('end', () => resolve())
+      sse.res.once('error', reject)
+      sse.res.resume()
+    })
+    // A closed Store makes buildSnapshot() throw on the next interval tick.
+    store.close()
+    await expect(Promise.race([
+      closed,
+      new Promise<void>((_, reject) => {
+        setTimeout(() => reject(new Error('SSE stream stayed open')), 2_000)
+      }),
+    ])).resolves.toBeUndefined()
   })
 
   it('refuses to bind anything but loopback', async () => {

@@ -20,12 +20,14 @@ behavior is available through `runUi()` directly and is fully covered by
 `test/cli-ui.test.ts`. The intended command is:
 
 ```text
-ds-agent ui [--port 4318] [--home <dir>]
+ds-agent ui [--port 4318]
 ```
 
-`runUi` reads `--port` from the process arguments when no explicit port is
-passed, and the caller supplies the state home. The follow-up PR only needs to
-dispatch `ui` to `runUi(home)` (or call `registerUi`) and add a help line.
+The state home is resolved by the CLI from `DS_AGENT_HOME`, falling back to
+`./.ds-agent`; there is no `--home` flag. `runUi` reads `--port` from the process
+arguments when no explicit port is passed, and the caller supplies the resolved
+home. The follow-up PR only needs to dispatch `ui` to `runUi(home)` (or call
+`registerUi`) and add a help line.
 
 ## Read model
 
@@ -55,11 +57,13 @@ the canonical `ticketStage()` derivation, not a stale display field.
 ## Lifecycle
 
 `runUi()` opens exactly one `Store` and one `Metrics`, starts the HTTP server,
-and stays alive until `SIGINT` or `SIGTERM`. On a signal it closes the server and
-the Store; a second signal force-exits 1 if the graceful close is stuck. A
-Store that cannot be opened produces a clear error and exit status 1 through the
-CLI error path. The UI never constructs a model, never starts the daemon, and
-never writes ticket/thread/outbox domain documents.
+and stays alive until `SIGINT` or `SIGTERM`. On the first signal it closes the
+server and the Store. The signal handler is removed before shutdown, so a second
+`SIGINT`/`SIGTERM` uses the process default termination (exit 130 for `SIGINT`,
+143 for `SIGTERM`), not a forced exit 1. A Store that cannot be opened produces a
+clear error and exit status 1 through the CLI error path. The UI never constructs
+a model, never starts the daemon, and never writes ticket/thread/outbox domain
+documents.
 
 ## Security model
 

@@ -306,7 +306,14 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
       try {
         res.write(`data: ${JSON.stringify(snapshot())}\n\n`)
       } catch {
+        // A broken read model must close the stream, not leave the client
+        // waiting for the next frame forever.
         cleanup()
+        try {
+          res.end()
+        } catch {
+          // The client may already be gone.
+        }
       }
     }
     // One immediate frame so a client sees state without waiting 2 s.
