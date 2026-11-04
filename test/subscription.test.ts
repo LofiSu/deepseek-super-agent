@@ -280,7 +280,10 @@ describe('subscription bypass', () => {
 
   it('many-to-many: every live subscriber receives the same human follow-up', async () => {
     let clock = Date.parse('2026-10-31T00:00:00.000Z')
-    runtime = freshRuntime({ now: () => new Date(clock += 1000).toISOString() })
+    // Fan-out is the subject here; the Worker turns are incidental. A live
+    // model explores the checkout bug for minutes, so script them instead of
+    // letting model latency decide whether this assertion fits a timeout.
+    runtime = freshRuntime({ model: silentModel(), now: () => new Date(clock += 1000).toISOString() })
     expect(runtime.ingest(imTrigger({
       id: 'trg_a',
       thread: 'topic/shared',
