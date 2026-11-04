@@ -174,16 +174,43 @@ bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
   in the Worker task.
 - Recall requires the reader ticket id; an `ltm` id alone is not a capability.
 
-Recall is lexical-first. ADR-010 records the measured baseline on the fixed
-corpus in `test/memory-recall-eval.test.ts`: macro recall@3 is 4/11 = 0.364
-(exact 2/2, word order 2/2, paraphrase 0/3, tag-only 0/2, multi-hop 0/2), and
-both negative controls return no results. The chosen next step is lexical
-normalization plus a small in-repo synonym/morphology map, tag-only retrieval,
-and one-hop tag expansion; ADR-010 holds the acceptance criteria. Embeddings
-are **not implemented**: any future semantic index must sit behind an
-`EmbeddingPort` with a deterministic offline mock and no provider call in CI.
-Retention defaults (1000 entries / 90 days) bound the month-scale cost; ADR-010
-records the full evaluation and security constraints.
+Recall is lexical-first and deterministic (ADR-010, implemented in
+`src/memory/long-term.ts`). `query()`:
+
+- Normalizes query and body tokens with NFKC, lower-casing, and
+  punctuation/whitespace collapse, maps them through a small explicit in-repo
+  synonym/morphology table, and removes stop words from queries. There is no
+  model, provider, learned vocabulary, or new dependency.
+- Treats any query token found in a readable spill body or in an entry's tags
+  as a direct candidate, so tag-only queries retrieve. Requested `tags` remain
+  an exact AND filter (trimmed, case-sensitive) and are never relaxed.
+- Builds a per-query tag index over the same retention-bounded entry set and
+  expands exactly one hop from direct candidates across shared tags; entries
+  reached by the hop do not seed another hop. `remember()` already stores
+  ticket thread keys as tags, so those existing links participate in the same
+  hop without a new link table. Entries without a readable spill are never
+  eligible.
+- Orders by `tagHits` desc, then `textHits` desc (each query token capped at
+  5), then `hopScore` desc, then `createdAt` desc, then `id` desc. There is no
+  randomness, provider call, or wall-clock-dependent ranking.
+
+Security and storage are unchanged: `query()` throws without a reader ticket
+id; every ranked hit, including an expanded one, grants that ticket access to
+the exact spill; an `ltm` id alone is never a capability; redaction still runs
+before storage; and there is no lookup-by-id API. `remember()`, dedupe,
+retention/prune, `forget`, and the store schema are untouched.
+
+Evidence: `test/memory-recall-eval.test.ts` measures the shipped `query()` on
+the original 11 ADR-010 queries (macro recall@3 11/11 = 1.000; exact 2/2, word
+order 2/2, paraphrase 3/3, tag-only 2/2, multi-hop 2/2), 15 additional
+held-out-style queries authored in the same follow-up PR (regression coverage,
+not independent generalization evidence), and four negative controls (0
+results). It also checks deterministic
+ids across repeated runs and a reopened store and a 1000-entry fixture bounded
+to one body read per entry. ADR-010 records the pre-implementation baseline of
+4/11 = 0.364. Embeddings are **not implemented**: any future semantic index
+must sit behind an `EmbeddingPort` with a deterministic offline mock and no
+provider call in CI.
 
 ## M7 — speculate
 
@@ -299,7 +326,8 @@ host-level seccomp stay external as PLAN §9 says.
 npx vitest run test/runtime-integration.test.ts   8 tests: shards, mesh, memory, lifecycle, A2A, bake-off
 npx vitest run test/router-shards.test.ts          route/priority/filter contracts
 npx vitest run test/worker-mesh.test.ts            capacity/least-loaded/release
-npx vitest run test/long-term-memory.test.ts       persistence, ACL, redaction
+npx vitest run test/long-term-memory.test.ts       persistence, normalization, tag/hop recall, ACL, redaction
+npx vitest run test/memory-recall-eval.test.ts     offline recall@3, held-out, determinism, 1000-entry bound
 npx vitest run test/lifecycle-a2a.test.ts          lifecycle bus + envelope delivery
 npx vitest run test/runtime-wiring.test.ts         default-path service construction
 npx vitest run test/cli-memory-a2a.test.ts         offline operator views

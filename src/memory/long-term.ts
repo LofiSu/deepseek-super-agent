@@ -41,6 +41,15 @@ export interface LongTermMemoryEntry {
   tags?: string[]
 }
 
+interface QueryCandidate {
+  entry: LongTermMemoryEntry
+  tags: ReadonlySet<string>
+  tagHits: number
+  textHits: number
+  hopScore: number
+  direct: boolean
+}
+
 const SUMMARY_CHARS = 160
 
 /**
@@ -145,48 +154,99 @@ export class SpillBackedLongTermMemory {
   }
 
   /**
-   * Recall formula (also documented in docs/MODULES.md M6):
+   * Lexical recall (ADR-010; also documented in docs/MODULES.md M6).
    *
-   *   tagHits  = number of entry tags whose trimmed, lower-cased form equals
-   *              a distinct query word or a requested tag (trimmed, lower-cased)
-   *   textHits = sum over each distinct query word of its occurrences in the
-   *              lower-cased spill body, with each word capped at 5
-   *   order    = tagHits desc, then textHits desc, then createdAt desc,
-   *              then id desc
+   * Query and body tokens are NFKC-normalized, lower-cased, split on
+   * punctuation/whitespace, and mapped to canonical synonyms/morphology.
+   * Query stop words are removed. Unlike the pre-ADR behavior, candidates are
+   * partial-overlap matches: any query token in the tagged body or in the
+   * entry's tags makes an entry a direct candidate. Requested `tags` remain an
+   * exact AND filter and are not relaxed.
    *
-   * Matching is unchanged: every query word must appear in the body and
-   * requested tags remain an AND filter, compared exactly (trimmed,
-   * case-sensitive). The final `id` key is a lexicographic string comparison,
-   * not numeric recency; it makes the order total and stable when timestamps
-   * collide.
+   * Scoring (deterministic, no model/provider):
+   *
+   *   tagHits  = number of canonical tag tokens that match a distinct query
+   *              token or a requested tag
+   *   textHits = sum over each distinct query token of its occurrences in the
+   *              canonical body tokens, with each token capped at 5
+   *   hopScore = one-hop contribution from direct candidates that share a tag
+   *
+   *   order    = tagHits desc, textHits desc, hopScore desc, createdAt desc,
+   *              id desc
+   *
+   * One hop only: seeds are the direct candidates. The tag index is built from
+   * the same retention-bounded entry set, so the walk is bounded and there is
+   * no unbounded graph traversal. Only entries with a readable spill body are
+   * eligible; every returned hit still grants the reader ticket access to that
+   * exact spill, so a memory id alone remains a reference, not a capability.
    */
   query(query: LongTermMemoryQuery): LongTermMemoryEntry[] {
     if (!query.ticketId?.trim()) throw new Error('ticketId is required to query memory')
-    const words = [...new Set(query.text.toLowerCase().trim().split(/\s+/).filter(Boolean))]
+    const words = queryTokens(query.text)
     if (words.length === 0) return []
     const wanted = normalizeTags(query.tags)
-    const tagNeedles = new Set([...words, ...wanted.map(tag => tag.toLowerCase())])
+    const needles = new Set([...words, ...wanted.flatMap(tag => canonicalTokens(tag))])
     const limit = Math.max(0, Math.floor(query.limit ?? 10))
     return this.store.atomic(() => {
-      const scored: { entry: LongTermMemoryEntry; tagHits: number; textHits: number }[] = []
+      const candidates: QueryCandidate[] = []
+      const tagIndex = new Map<string, number[]>()
       for (const entry of this.store.listDocs<LongTermMemoryEntry>('ltm')) {
         if (wanted.length && !wanted.every(tag => entry.tags?.includes(tag))) continue
-        const body = this.store.getSpill(entry.spillId)?.toLowerCase() ?? ''
-        if (!words.every(word => body.includes(word))) continue
-        const tagHits = (entry.tags ?? [])
-          .filter(tag => tagNeedles.has(tag.trim().toLowerCase()))
-          .length
+        const body = this.store.getSpill(entry.spillId)
+        if (body == null) continue
+        const counts = canonicalTokenCounts(body)
+        const tags = new Set(canonicalTokens((entry.tags ?? []).join(' ')))
+        const tagHits = [...tags].filter(tag => needles.has(tag)).length
+        const wordTagHits = words.filter(word => tags.has(word)).length
         let textHits = 0
-        for (const word of words) textHits += Math.min(5, countOccurrences(body, word))
-        scored.push({ entry, tagHits, textHits })
+        for (const word of words) textHits += Math.min(5, counts.get(word) ?? 0)
+        const index = candidates.length
+        candidates.push({
+          entry,
+          tags,
+          tagHits,
+          textHits,
+          hopScore: 0,
+          direct: textHits > 0 || wordTagHits > 0,
+        })
+        for (const tag of tags) {
+          const bucket = tagIndex.get(tag)
+          if (bucket) bucket.push(index)
+          else tagIndex.set(tag, [index])
+        }
       }
-      const matches = scored
+      // One hop, seeded only by direct candidates. The per-query tag index maps
+      // each canonical tag to its retention-bounded bucket. Sum seed weight per
+      // tag once, then read it back once per bucket entry; this stays linear in
+      // the number of entry/tag pairs instead of walking a seed/neighbor
+      // cross-product. Newly reached entries never seed another hop.
+      for (const bucket of tagIndex.values()) {
+        let seedWeight = 0
+        for (const index of bucket) {
+          const candidate = candidates[index]
+          if (candidate?.direct) seedWeight += 1 + candidate.tagHits + candidate.textHits
+        }
+        if (seedWeight === 0) continue
+        for (const index of bucket) {
+          const candidate = candidates[index]
+          if (candidate) candidate.hopScore += seedWeight
+        }
+      }
+      for (const candidate of candidates) {
+        if (!candidate.direct) continue
+        // A direct candidate is not its own neighbor.
+        const weight = 1 + candidate.tagHits + candidate.textHits
+        candidate.hopScore -= weight * candidate.tags.size
+      }
+      const matches = candidates
+        .filter(candidate => candidate.direct || candidate.hopScore > 0)
         .sort((a, b) => b.tagHits - a.tagHits
           || b.textHits - a.textHits
+          || b.hopScore - a.hopScore
           || b.entry.createdAt.localeCompare(a.entry.createdAt)
           || b.entry.id.localeCompare(a.entry.id))
         .slice(0, limit)
-        .map(hit => hit.entry)
+        .map(candidate => candidate.entry)
       for (const entry of matches) grantTicketSpill(this.store, entry.spillId, query.ticketId!)
       return matches
     })
@@ -282,13 +342,95 @@ function dedupeKeyOf(store: Store, entry: LongTermMemoryEntry): string | undefin
   return body == null ? undefined : normalizeForDedupe(body)
 }
 
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0
-  let count = 0
-  let from = haystack.indexOf(needle)
-  while (from !== -1) {
-    count += 1
-    from = haystack.indexOf(needle, from + needle.length)
+/**
+ * Small, explicit, in-repo synonym/morphology map. The first word in each
+ * group is canonical. It is deliberately tiny and deterministic: no learned
+ * vocabulary, no model, no external dependency.
+ */
+const SYNONYM_GROUPS: readonly (readonly string[])[] = [
+  ['token', 'tokens', 'credential', 'credentials'],
+  ['rotate', 'rotated', 'rotates', 'rotating', 'rotation', 'rotations'],
+  ['prune', 'prunes', 'pruned', 'pruning', 'remove', 'removes', 'removed', 'removal'],
+  ['old', 'older', 'oldest'],
+  ['entry', 'entries'],
+  ['fail', 'failed', 'failing', 'failure', 'failures'],
+  ['expand', 'expanded', 'expands', 'expansion'],
+  ['synonym', 'synonyms'],
+  ['paraphrase', 'paraphrases'],
+  ['own', 'owns', 'owned', 'owner', 'ownership'],
+  ['restore', 'restored', 'restores', 'restoring'],
+  ['deploy', 'deploys', 'deployed', 'deployment', 'deployments'],
+  ['release', 'releases', 'released'],
+  ['incident', 'incidents'],
+  ['auth', 'authentication', 'authenticate', 'authenticated'],
+  ['memory', 'memories'],
+  ['retention', 'retain', 'retains', 'retained'],
+  ['measure', 'measures', 'measured', 'measuring'],
+  ['evaluate', 'evaluation', 'evaluates', 'evaluated'],
+  ['embed', 'embedding', 'embeddings'],
+  ['expire', 'expired', 'expires', 'expiration', 'expiring'],
+  ['retry', 'retries', 'retried', 'retrying'],
+  ['reject', 'rejects', 'rejected', 'rejection', 'invalid'],
+  ['queue', 'queued', 'queues'],
+  ['delay', 'delays', 'delayed', 'latency', 'latencies'],
+  ['missing', 'absent'],
+  ['reply', 'replies', 'replied', 'replying'],
+  ['deliver', 'delivers', 'delivered', 'delivery'],
+  ['configure', 'configures', 'configured', 'configuration'],
+  ['allow', 'allows', 'allowed', 'allowlist'],
+  ['deny', 'denies', 'denied'],
+  ['install', 'installs', 'installed', 'installation'],
+  ['origin', 'originating', 'originates', 'original'],
+  ['approve', 'approves', 'approved', 'approval', 'approvals'],
+  ['permanent', 'permanently'],
+  ['transient', 'transiently'],
+  ['performance', 'perf'],
+  ['group', 'groups'],
+  ['error', 'errors'],
+  ['message', 'messages'],
+  ['command', 'commands'],
+  ['row', 'rows'],
+]
+
+const CANONICAL = new Map<string, string>()
+for (const group of SYNONYM_GROUPS) {
+  const canonical = group[0]!
+  for (const word of group) CANONICAL.set(word, canonical)
+}
+
+/** Query-only stop words. Body tokens are kept so phrase statistics stay intact. */
+const STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'before', 'but', 'by',
+  'did', 'do', 'does', 'for', 'from', 'how', 'if', 'in', 'into', 'is', 'it',
+  'its', 'no', 'nor', 'not', 'of', 'on', 'or', 'over', 'so', 'such', 'than',
+  'that', 'the', 'their', 'then', 'there', 'these', 'this', 'to', 'was',
+  'were', 'what', 'when', 'where', 'which', 'who', 'whose', 'why', 'will',
+  'with', 'without',
+])
+
+/** NFKC, lower-case, and collapse punctuation/whitespace into single spaces. */
+function tokenize(text: string): string[] {
+  return text
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function canonicalTokens(text: string): string[] {
+  return tokenize(text).map(token => CANONICAL.get(token) ?? token)
+}
+
+function queryTokens(text: string): string[] {
+  return [...new Set(canonicalTokens(text).filter(token => !STOPWORDS.has(token)))]
+}
+
+function canonicalTokenCounts(text: string): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const token of canonicalTokens(text)) {
+    counts.set(token, (counts.get(token) ?? 0) + 1)
   }
-  return count
+  return counts
 }
