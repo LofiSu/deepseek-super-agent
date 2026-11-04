@@ -76,6 +76,18 @@ export interface RuntimeOptions {
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
    */
   memoryRetention?: MemoryRetention
+  /**
+   * Bounded in-memory lifecycle history and the restart-replay cap.
+   * Defaults to 1000 and keeps the newest events.
+   */
+  lifecycleMaxEvents?: number
+  /**
+   * Durable lifecycle-log retention. Defaults to `lifecycleMaxEvents`; larger
+   * values keep a longer audit history, while smaller values are raised to the
+   * in-memory cap so restart replay can always refill the ring. The oldest
+   * rows are pruned on startup and after every append.
+   */
+  lifecycleRetention?: number
 }
 
 export interface MemoryRetention {
@@ -273,7 +285,27 @@ export class Runtime {
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
     const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
-    const lifecycle = new LifecycleBus()
+    const lifecycle = new LifecycleBus(opts.lifecycleMaxEvents)
+    const lifecycleRetention = lifecycleRetentionFor(opts.lifecycleRetention, lifecycle.maxEvents)
+    // Restart replay: first bound any existing durable log, then fill the ring
+    // from the newest persisted events before this Runtime publishes anything
+    // new. A broken sink leaves the in-memory bus fully usable and is
+    // reported once by the bus.
+    try {
+      store.pruneLifecycleEvents(lifecycleRetention)
+    } catch (error) {
+      log.info(`[lifecycle] retention prune failed; continuing: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    lifecycle.attachSink({
+      // Lifecycle payloads are existing metadata only; the Store writes the
+      // event as given plus a write-time `at`. Retention keeps the table
+      // bounded after every append.
+      append: event => store.appendLifecycleEvent(event, lifecycleRetention),
+      recent: limit => store.recentLifecycleEvents(limit),
+    }, (error, operation) => {
+      log.info(`[lifecycle] persistence ${operation} failed; continuing in memory: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    lifecycle.hydrateFromSink()
     const a2aRouter = new A2ARouter(store)
     // T16 admission is deterministic and runs before mention/keyword. Ids only.
     const admission = admissionRulesFromEnv(baseEnv, opts.admission)
@@ -845,4 +877,18 @@ function a2aTrigger(envelope: A2AEnvelope, store: Store, at: string): Trigger | 
     text,
     meta: {},
   }
+}
+
+/**
+ * Durable lifecycle-log retention. The default is the in-memory replay window
+ * so a restart can refill the ring completely. A larger explicit value keeps a
+ * longer audit history without changing the bounded in-memory view; a smaller
+ * value is raised to `maxEvents` for the same reason.
+ */
+function lifecycleRetentionFor(requested: number | undefined, maxEvents: number): number {
+  if (requested === undefined) return maxEvents
+  if (!Number.isSafeInteger(requested) || requested < 1) {
+    throw new Error('lifecycleRetention must be a positive integer')
+  }
+  return Math.max(maxEvents, requested)
 }

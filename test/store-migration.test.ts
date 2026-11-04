@@ -241,7 +241,9 @@ describe('store schema migrations', () => {
     expect(store.getSpill('spill_1')).toBe('post-migration spill')
     store.close()
 
-    expect(migrationRows(home).map(row => row.version)).toEqual([1, LATEST_SCHEMA_VERSION])
+    expect(migrationRows(home).map(row => row.version)).toEqual(
+      Array.from({ length: LATEST_SCHEMA_VERSION }, (_, index) => index + 1),
+    )
     const columns = outboxColumns(home)
     for (const column of ['idempotency_key', 'attempts', 'next_attempt_at']) {
       expect(columns).toContain(column)
@@ -301,7 +303,9 @@ describe('store schema migrations', () => {
     for (const result of results) {
       expect(String(result.stdout).trim()).toBe(String(LATEST_SCHEMA_VERSION))
     }
-    expect(migrationRows(home).map(row => row.version)).toEqual([1, LATEST_SCHEMA_VERSION])
+    expect(migrationRows(home).map(row => row.version)).toEqual(
+      Array.from({ length: LATEST_SCHEMA_VERSION }, (_, index) => index + 1),
+    )
     const reopened = new Store(home)
     expect(reopened.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
     reopened.close()
