@@ -1,31 +1,31 @@
 # Master engineering plan
 
 > Status: living coordination document · Owner: LofiSu · Created: 2026-11-03
-> Baseline: `main` at `064ab06` (`Distinguish stale empty gateway token files
-> and fail the client path closed (#109)`)
+> Baseline: `main` at `f6e5972` (`[SUPER-AGENT][SEMANTIC-LTM] Evaluate
+> semantic and multi-hop long-term memory recall (#112)`)
 > Authority: `PLAN.md` is the architectural contract. `docs/ROADMAP.md` is the
 > living evidence/priority board. This document coordinates the next execution
 > cycles; it does not replace either.
 
 ## 0. Verified baseline (2026-11-04)
 
-The gate evidence below is from post-merge `main` CI at `064ab06` (run
-`41797671287`). The cycle-8 local gate on `064ab06` produced: `tsc --noEmit`
-clean, `pnpm lint` ok (231 tracked files), `pnpm format:check` clean, and the
-offline suite 477 passed / 55 files with live test files excluded; that local
+The gate evidence below is from post-merge `main` CI at `f6e5972` (run
+`41800320615`). The cycle-9 local gate on `f6e5972` produced: `tsc --noEmit`
+clean, `pnpm lint` ok (232 tracked files), `pnpm format:check` clean, and the
+offline suite 481 passed / 56 files with live test files excluded; that local
 figure is not the CI baseline. Peer session sulin-5f ran the last full live
 suite on `5e5a28b`: 476 passed / 3 skipped (479), 58 files passed, 567.76s,
 exit 0; it is a live-model run, not real-channel acceptance, and no live suite
-was run on `064ab06`.
+was run on `f6e5972`.
 
 ```text
-pnpm lint                                              lint ok (231 tracked files)
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   489 passed, 15 skipped (504)
-                                                      60 files: 57 with passing tests,
+pnpm lint                                              lint ok (232 tracked files)
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 npx vitest run   493 passed, 15 skipped (508)
+                                                      61 files: 58 with passing tests,
                                                       3 fully skipped
-pnpm test:coverage                                     488 passed; statements/lines
+pnpm test:coverage                                     492 passed; statements/lines
                                                        82.80% (8168/9864), branches
-                                                       81.56% (2968/3639), functions
+                                                       81.54% (2969/3641), functions
                                                        90.98% (717/788)
 ```
 
@@ -55,7 +55,11 @@ Cycle 7 added the Feishu serve loop and its offline tests (#106), the
 82.81% lines, 81.37% branches, and 90.97% functions. Cycle 8 implemented
 ADR-009 (#109): a present-but-empty token now names itself distinctly and the
 client path fails closed; `064ab06` CI (run `41797671287`) recorded 489 passed /
-15 skipped (504), 82.80% lines, 81.56% branches, and 90.98% functions.
+15 skipped (504), 82.80% lines, 81.56% branches, and 90.98% functions. The
+cycle-8 checkpoint #110 merged at `5141e29` without changing the suite. Cycle 9
+added the offline recall evaluation and ADR-010 (#112); `f6e5972` CI (run
+`41800320615`) recorded 493 passed / 15 skipped (508), 82.80% lines, 81.54%
+branches, and 90.98% functions.
 
 Repository facts:
 
@@ -83,9 +87,12 @@ Repository facts:
   audit evidence. `#106` (`e9a1978`, Feishu serve loop), `#105` (`69b6d3d`,
   ADR-009 stale-token policy), and `#107` (`00665d2`, group thread-key
   disambiguation) closed the cycle-7 queue; `#109` (`064ab06`, ADR-009
-  implementation) closed the stale-token follow-up. The baseline for this
-  record is `064ab06`; later merges are not reflected.
-- Open PRs at this checkpoint: the cycle-8 checkpoint PR only. PR #86 was
+  implementation) closed the stale-token follow-up; `#110` (`5141e29`) was the
+  cycle-8 checkpoint. `#111` (`648eec9`, README refresh, peer session) and
+  `#112` (`f6e5972`, ADR-010 memory recall evaluation) closed the cycle-9
+  window. The baseline for this record is `f6e5972`; later merges are not
+  reflected.
+- Open PRs at this checkpoint: the cycle-9 checkpoint PR only. PR #86 was
   closed as superseded by #91.
 - Branch protection: required check `typecheck and test`, strict, admins
   enforced, conversation resolution required.
@@ -104,13 +111,14 @@ Repository facts:
 | P1-6 | P1 | An in-flight turn is not reconstructed after a restart; unfinished assignments are left `running` until the watchdog. | `src/core/assignments.ts`; `src/runtime.ts`; `test/restart-recovery.test.ts` | fixed by #85 (`10e9f3c`); APPROVE |
 | GATEWAY-HARDENING | P1 | Non-constant-time compare, empty token, unwarned non-loopback bind, no re-chmod, and symlink-following reads were fixed in #76/#82. #87 fixed the concurrent first-create race and ELOOP fallback; #96 covered the EEXIST winner-reuse and create-path ELOOP branches. Residual: POSIX-only mode caveat; a stale empty file still blocks startup by design. | `src/gateway/token.ts`; `docs/GATEWAY.md` | #76/#82/#87/#96 merged; APPROVE |
 | GATEWAY-TOKEN-SYMLINK | P1 | Token file reads/chmods followed symlinks; a writable `DS_AGENT_HOME` could redirect the credential. | Review of PR #76; `src/gateway/token.ts:25-63` | fixed by #82; APPROVE |
-| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107/#109 reviewed; #77 corrected |
+| GATEWAY-REVIEW | P2 | `#64` gateway/iMessage code had no independent review record; coverage remains below the historical 82.40% line baseline. | `docs/ROADMAP.md`; coverage run above | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107/#109/#112 reviewed; #77 corrected |
 | AUDIT-REFRESH | P2 | `docs/final-audit` (#74) was stale against `34aef25`; the roadmap audit did not include `#64`, `#75`-`#84`. | PR #74 merged `299b908` | fixed; APPROVE |
 | SERVE-CHANNEL-LOOP | P1 | `serve` starts no inbound channel loop, so external triggers are not consumed by the long-running process. This is documented, but it limits the daemon's production usefulness. | `src/cli/main.ts:228-277`; `docs/ROADMAP.md` | fixed by #101 (`2ae9740`) |
 | FEISHU-SERVE-LOOP | P2 | `serve --feishu` did not exist, so a Feishu chat could only be polled by a separate process; the daemon had no visible durable cursor for it. | `src/cli/feishu.ts`; `src/cli/main.ts`; `docs/REAL_CHANNELS.md` | fixed by #106 (`e9a1978`); APPROVE |
 | STALE-GATEWAY-TOKEN | P1 | A stale empty `gateway.token` aborted startup with a misleading concurrent-create error, and the client read path silently fell back instead of failing closed. | `src/gateway/token.ts`; `test/gateway-token.test.ts`; `docs/ARCHITECTURE_DECISIONS.md` ADR-009 | fixed by #109 (`064ab06`); ADR-009 merged as #105; APPROVE |
 | IMESSAGE-GROUP-UNKNOWN | P2 | Legacy group chats with no guid or identifier collapsed into `group-unknown:<handle>`, so distinct chats from one sender shared a thread. | `src/channels/imessage.ts`; `test/channels-imessage.test.ts`; `docs/IMESSAGE.md` | fixed by #107 (`00665d2`); APPROVE |
 | OUTBOX-PERMANENT-FAILURE | P2 | A fail-closed group reply is still written to the outbox and retried with backoff until `failed`, even though the adapter refuses it deterministically. | `src/core/replies.ts:45-66`; `src/channels/outbox-adapter.ts:88-111`; `src/channels/imessage.ts:590-610` | fixed by #100 (`55f0d09`); APPROVE |
+| SEMANTIC-LTM | P2 | M6 recall was word-AND substring matching with no measured semantic/multi-hop baseline, so the next step was open-ended. | `src/memory/long-term.ts`; `test/memory-recall-eval.test.ts`; `docs/ARCHITECTURE_DECISIONS.md` ADR-010 | evaluated by #112 (`f6e5972`): baseline macro recall@3 4/11; lexical+hop reaches 11/11; embeddings stay behind an unimplemented `EmbeddingPort`; follow-up open |
 
 ## 2. Workstream ordering
 
@@ -179,8 +187,16 @@ Cycle 8 (completed)
                        concurrent-create message — merged #109
   (cycle-8 checkpoint is a record, not a development task)
 
+Cycle 9 (completed)
+  SEMANTIC-LTM         Offline recall evaluation and ADR-010; lexical-first
+                       decision with tag-hop next step and embeddings behind
+                       an unimplemented port — merged #112
+  (cycle-9 checkpoint is a record, not a development task)
+
 Next sessions (not started)
-  SEMANTIC-LTM         Evaluate semantic/multi-hop long-term memory recall
+  MEMORY-RECALL-FOLLOWUP  Implement ADR-010's normalization, tag-only
+                       retrieval, and one-hop tag expansion; at least 10
+                       held-out queries and a 1000-entry fixture
   ROTATE-TOKEN         Optional explicit `--rotate-token` operator flag,
                        only if the owner asks for it
 ```

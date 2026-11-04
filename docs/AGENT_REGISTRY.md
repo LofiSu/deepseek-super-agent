@@ -51,8 +51,10 @@
 | STALE-GATEWAY-TOKEN-FOLLOWUP | Infrastructure/Security | `agent/stale-gateway-token-followup` | 2026-11-04 | merged `064ab06`, APPROVE | #109 | integrated |
 | IMESSAGE-GROUP-UNKNOWN | Infrastructure/Security (peer) | `agent/imessage-group-unknown` | 2026-11-04 | merged `00665d2`, reviewed APPROVE | #107 | integrated |
 | CYCLE-7-CHECKPOINT | Chief Engineer | `docs/cycle-7-checkpoint` | 2026-11-04 | merged `6e19bca`, docs APPROVE | #108 | integrated |
-| CYCLE-8-CHECKPOINT | Chief Engineer | `docs/cycle-8-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
-| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107/#109 APPROVE; #77 corrected | — | continuing |
+| CYCLE-8-CHECKPOINT | Chief Engineer | `docs/cycle-8-checkpoint` | 2026-11-04 | merged `5141e29`, docs APPROVE | #110 | integrated |
+| SEMANTIC-LTM | Model/Intelligence | `agent/semantic-ltm-evaluation` | 2026-11-04 | merged `f6e5972`, APPROVE | #112 | integrated; follow-up implementation open |
+| CYCLE-9-CHECKPOINT | Chief Engineer | `docs/cycle-9-checkpoint` | 2026-11-04 | docs update; PR under review | — | in progress |
+| GATEWAY-REVIEW | QA/Review | review only | — | #76/#81/#82/#84/#85/#87/#90/#95/#96/#97/#99/#100/#101/#103/#105/#106/#107/#109/#112 APPROVE; #77 corrected | — | continuing |
 
 ## Ownership boundaries
 
@@ -94,6 +96,10 @@
 - STALE-GATEWAY-TOKEN-FOLLOWUP: `src/gateway/token.ts`,
   `test/gateway-token.test.ts`, `docs/GATEWAY.md`,
   `docs/ARCHITECTURE_DECISIONS.md` (merged #109).
+- SEMANTIC-LTM: `docs/ARCHITECTURE_DECISIONS.md` (ADR-010),
+  `docs/MODULES.md` M6, `docs/ROADMAP.md` M6/T48,
+  `test/memory-recall-eval.test.ts` (new; merged #112). No product source.
+  The follow-up owns `src/memory/long-term.ts` and its memory tests.
 - IMESSAGE-GROUP-UNKNOWN: `src/channels/imessage.ts`,
   `test/channels-imessage.test.ts`, `docs/IMESSAGE.md` (merged #107).
 - The cycle-7 tasks are disjoint; only the shared `docs/MODULES.md` would have

@@ -637,8 +637,38 @@ head so a later reader can separate the reviewed tree from the merged tree.
   `41797671287`: 489 passed / 15 skipped (504), 82.80% statements/lines,
   81.56% branches, 90.98% functions.
 
+## PR #112 — `[SUPER-AGENT][SEMANTIC-LTM] Evaluate semantic and multi-hop long-term memory recall`
+
+- **Author:** LofiSu (implementer agent)
+- **State at review:** OPEN; reviewed head `15f7de1`, then updated onto `main`
+  (`648eec9`) producing head `c7761ff`. Files:
+  `docs/ARCHITECTURE_DECISIONS.md` (+163), `docs/MODULES.md` (+11),
+  `docs/ROADMAP.md` (+2/−2), `test/memory-recall-eval.test.ts` (+554).
+  Squash-merged as `f6e5972`.
+- **Independent review:** **APPROVE**, no blocking findings. ADR-010 is
+  evidence-first: it pins an offline corpus (14 redacted entries), 11 labelled
+  positive queries across exact, word-order, paraphrase, tag-only, and
+  multi-hop, and two negative controls, and it runs the real `query()` path on
+  a temp SQLite store with a fixed clock. I reproduced the targeted suites
+  locally (20 passed / 2 files) and re-derived the reported baseline from the
+  test: macro recall@3 4/11, exact 2/2, word order 2/2, paraphrase 0/3,
+  tag-only 0/2, multi-hop 0/2; negative controls empty. Candidate strategies
+  are evaluation-only over the same corpus: normalization + synonym map 7/11,
+  plus tag-aware one-hop expansion 11/11, mock embedding and hybrid also 11/11
+  with zero incremental recall, which justifies keeping embeddings
+  unimplemented behind a port boundary. The ADR keeps the security invariants
+  explicit (reader ticket required, per-hit spill grant, redaction before
+  storage, no id-as-capability) and states the corpus/synthetic and
+  month-scale limitations.
+- **Non-blocking observations:** the ROADMAP M6 evidence cell names the new
+  test in prose but does not add `test/memory-recall-eval.test.ts` to its file
+  list; the corpus is small and synthetic, so ADR-010 requires at least 10
+  held-out queries and a 1000-entry fixture before the follow-up ships.
+- **Merged:** `f6e5972`. CI `typecheck and test` green on the updated head
+  `c7761ff` (run `41800074122`); zero unresolved threads.
+
 ## Pending reviews
 
-- None. #109 is reviewed and merged. The cycle-8 checkpoint PR is reviewed
-  before merge. SEMANTIC-LTM and the optional `--rotate-token` flag are
-  candidates, not open PRs.
+- None. #112 is reviewed and merged. The cycle-9 checkpoint PR is reviewed
+  before merge. The memory-recall follow-up and the optional `--rotate-token`
+  flag are candidates, not open PRs.
