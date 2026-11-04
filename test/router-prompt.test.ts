@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { routerPromptFor } from '../src/harness/loop.ts'
-import { directChatRouterShard, routerSessionId, sharesDirectChatThread } from '../src/harness/session.ts'
+import { directChatRouterShard, routerOwnerShard, routerSessionId, sharesDirectChatThread } from '../src/harness/session.ts'
 import { systemPrompt } from '../src/harness/model.ts'
 import type { Ticket } from '../src/shared/types.ts'
 
@@ -70,5 +70,14 @@ describe('router prompt', () => {
     expect(sharesDirectChatThread(instinct, 'chat:any;-;+1')).toBe(true)
     expect(sharesDirectChatThread(chen, 'chat:any;-;+1')).toBe(false)
     expect(sharesDirectChatThread(chen, 'chat:any;-;+2')).toBe(true)
+  })
+
+  it('lets the thread Router session own reply_user and assess_trigger', () => {
+    const direct = ticket({
+      threadKeys: ['imessage:chat:any;-;+1'],
+      channels: [{ source: 'imessage', thread: 'chat:any;-;+1', address: { handle: '+1' } }],
+    })
+    expect(routerOwnerShard(direct, 'default')).toBe('thread:chat:any;-;+1')
+    expect(routerOwnerShard(ticket(), 'deploy')).toBe('deploy')
   })
 })

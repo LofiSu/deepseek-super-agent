@@ -7,7 +7,7 @@ import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/p
 import type { Disposition, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
-import { routerSessionId, workerSessionId } from './session.ts'
+import { routerOwnerShard, routerSessionId, workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 import { MAX_TEAM_MEMBERS, type TeamRegistry } from './team.ts'
 
@@ -162,8 +162,11 @@ function assertShardOwner(
   if (!disposition) {
     throw new UserError(`no disposition for trigger ${dispositionKey}; cannot resolve shard owner`)
   }
-  const shard = disposition.shards?.[0] ?? 'default'
-  const owner = routerSessionId(shard)
+  // A direct chat runs in its own thread Router session, not the disposition
+  // shard, so ownership must follow the same rule the Harness used to run it.
+  const owner = routerSessionId(
+    ticket ? routerOwnerShard(ticket, disposition.shards?.[0]) : disposition.shards?.[0],
+  )
   if (sessionId !== owner) {
     throw new UserError(
       `router shard session ${sessionId} does not own ticket ${call.ticketId ?? '-'} (owner=${owner}); `
