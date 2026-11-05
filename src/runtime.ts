@@ -22,10 +22,10 @@ import { loadRoutines, RoutineScheduler, type RoutineSpec } from './harness/rout
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
+import { directChatRouterShard, directChatThread, SessionJournal, sharesDirectChatThread, workerSessionId } from './harness/session.ts'
 import { loadPromptFiles, type PromptFiles } from './harness/prompts.ts'
 import { LocalAgentRegistry, loadLocalAgents, type LocalAgentSpec } from './env/local-agents.ts'
 import { SkillRegistry } from './env/skills.ts'
-import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
 import {
@@ -672,6 +672,10 @@ export class Runtime {
       takeGuidance: (ticketId, audience) => engine.takeGuidance(ticketId, audience),
       singleSession: opts.singleSession === true,
       routerSessions: ticket => {
+        // One Router session per direct iMessage thread: two conversations at
+        // once must not share history or bleed into each other's replies.
+        const direct = directChatRouterShard(ticket)
+        if (direct) return [direct]
         const disposition = store.getDoc<Disposition>('disposition', ticket.originTriggerId)
         return disposition?.shards?.length ? disposition.shards : ['default']
       },
@@ -684,17 +688,32 @@ export class Runtime {
       releaseNode: ticketId => {
         workerMesh.release(ticketId)
       },
+      repliedTo: ticketId => store.listReplies().some(
+        reply => reply.ticketId === ticketId && reply.channel === 'imessage',
+      ),
+      stopAnsweredDirectChat: (ticket, reason) => {
+        engine.decide(ticket.originTriggerId, { kind: 'stop', ticketId: ticket.id, reason })
+      },
       memory: ticket => {
+        // Direct chats are private threads: recall only memories that belong to
+        // the same conversation. Cross-ticket recall stays for repository work.
+        const thread = directChatThread(ticket)
         const lexical = longTermMemory.query({
           ticketId: ticket.id,
           text: ticket.title,
-          limit: 3,
+          limit: thread ? 50 : 3,
         })
-        // Router global memory: same-Thread decisions and cold digests are
-        // injected even when the new title shares no lexical token.
+        const scoped = thread
+          ? lexical.filter(entry => {
+            const source = store.getDoc<Ticket>('ticket', entry.ticketId)
+            return source ? sharesDirectChatThread(source, thread) : false
+          }).slice(0, 3)
+          : lexical
+        // Same-Thread decisions and cold digests are injected even when the
+        // new title shares no lexical token.
         const threaded = longTermMemory.forThreads(ticket.threadKeys, 3, ticket.id)
         const seen = new Set<string>()
-        const entries = [...threaded, ...lexical].filter(entry => {
+        const entries = [...threaded, ...scoped].filter(entry => {
           if (seen.has(entry.id)) return false
           seen.add(entry.id)
           return true
@@ -708,11 +727,14 @@ export class Runtime {
         }))
       },
       routerMemory: ticket => {
+        // A direct chat must never inherit another conversation's decisions:
+        // global decision recall is for repository work, not a private thread.
+        const direct = directChatThread(ticket) !== undefined
         const seen = new Set<string>()
         return [
-          ...longTermMemory.recentDecisions(3, ticket.id),
+          ...(direct ? [] : [longTermMemory.recentDecisions(3, ticket.id)]),
           ...longTermMemory.forThreads(ticket.threadKeys, 3, ticket.id),
-        ].filter(entry => {
+        ].flat().filter(entry => {
           if (seen.has(entry.id)) return false
           seen.add(entry.id)
           return true

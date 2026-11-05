@@ -486,6 +486,13 @@ describe('subscription bypass rules', () => {
     expect(bypassEligible(live, followUp({ human: false, actor: { source: 'github', id: 'ci-bot' } }))).toBe(false)
   })
 
+  it('reject-direct-chat', () => {
+    const live = sampleTicket('ticket_chat', {
+      channels: [{ source: 'imessage', thread: 'chat:any;-;+1', address: { handle: '+1' } }],
+    })
+    expect(bypassEligible(live, follow)).toBe(false)
+  })
+
   it('reject-ended-mandate', () => {
     const live = sampleTicket('ticket_1')
     expect(bypassEligible({

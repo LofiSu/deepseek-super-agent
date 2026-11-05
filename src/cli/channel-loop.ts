@@ -67,6 +67,33 @@ export interface ImessageLoopOptions {
 
 export type ImessageLoopStopReason = 'once' | 'aborted'
 
+/**
+ * People text in bursts ("你猜怎么着" / "算了" / "不过..."). Feeding each line
+ * to the Router separately produces several half-answers and makes replies look
+ * out of order. Merge consecutive 1:1 messages from one sender into a single
+ * trigger so the conversation gets one coherent turn.
+ */
+export function coalesceTriggers(triggers: readonly Trigger[]): Trigger[] {
+  const merged: Trigger[] = []
+  for (const trigger of triggers) {
+    const previous = merged.at(-1)
+    if (
+      previous
+      && trigger.addressed === 'direct'
+      && previous.addressed === 'direct'
+      && trigger.actor.id === previous.actor.id
+      && trigger.channel?.thread === previous.channel?.thread
+      && trigger.channel?.address?.group == null
+    ) {
+      previous.text = `${previous.text}\n${trigger.text}`
+      previous.at = trigger.at
+      continue
+    }
+    merged.push({ ...trigger })
+  }
+  return merged
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -135,7 +162,7 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
         }
         const from = cursor
         const pulled = await source.pull(from)
-        for (const trigger of pulled.triggers) {
+        for (const trigger of coalesceTriggers(pulled.triggers)) {
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[imessage] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
