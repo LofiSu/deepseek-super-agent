@@ -18,7 +18,7 @@ that make a personal agent worth talking to and worth delegating work to.
 | **Owner model** | Principal tiers: owner, staff, partner, family, friend, contact, stranger | Single owner; other people are not principals | One owner | Single owner; ingress trust separates owner from group/other | **Behind** on tiers; ahead on a strict default-deny ingress |
 | **Local specialist agents** | Skills and subagents; MCP tools | Subagents and tools | Skills, routines, integrations | `delegate_agent` to owner-configured local CLIs; Workers only; no shell; bounded | **Newly at parity**, with a narrower trust surface than Muse/Instinct connectors |
 | **Subagents / team** | Subagent prompts get the shared frame plus a role | Subagents | Routines and skills | Router/Worker split, Worker-internal teams, persisted jobs, aggregate report | **Parity** for execution topology |
-| **Memory** | `MEMORY.md` + daily journal; bounded digest every turn | `MEMORY.md` + memory search/explain tools; strict write rules | Bot memory | Typed refs, `read_object` chain of recall, lexical recall, hot/cold retention, cold Thread digests, per-hop ACL | **Ahead on safety and provenance**, **behind on semantic recall and an owner-editable daily journal** |
+| **Memory** | `MEMORY.md` + daily journal; bounded digest every turn | `MEMORY.md` + memory search/explain tools; strict write rules | Bot memory | Typed refs, `read_object` chain of recall, hybrid lexical + embedding recall, hot/cold retention, cold Thread digests, per-hop ACL | **Ahead on safety and provenance**; **behind on learned semantic recall and an owner-editable daily journal** |
 | **Skills** | `skills/` with `SKILL.md`; loaded on demand | Tools and workspace files | Skills | `skills/<id>/SKILL.md` index in the prompt; `read_skill` loads the body | **Parity on the core loop**; no bundled starter set yet |
 | **Proactivity / routines** | Scheduled etiquette and routines | `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, scheduling | Routines | `routines.json`: interval prompt, channel/thread, persisted last-run, daemon tick | **Parity on intervals**; no cron/daily-at scheduling or owner editor yet |
 | **Channels** | Texting, email, A2A, chat | App / channel surfaces | Bot connectors | CLI, iMessage, Feishu, GitHub, A2A, OpenAI-compatible gateway, loopback UI | **Ahead in one runtime**, **behind on email, browser, calendar, payments** |
@@ -65,9 +65,12 @@ implementation.
    must decide through the CLI. A channel reply cannot approve yet: that needs
    an authenticated owner identity and a signed decision, not text the model
    read. There is also no structured action id; the action is a description.
-4. **Semantic memory.** Recall is lexical plus one tag hop. Instinct and Muse
-   have richer memory surfaces. An `EmbeddingPort` with a deterministic mock
-   keeps CI offline while allowing a provider at runtime.
+4. **Semantic memory.** Recall is now hybrid: lexical plus one tag hop plus an
+   optional embedding score. The shipped `HashedEmbedding` is deterministic and
+   offline, so it catches morphology and shared stems but not true synonyms
+   ("invoice" vs "billing"). Instinct and Muse use learned embeddings for that.
+   The `EmbeddingPort` is where a local or hosted model plugs in; selecting and
+   evaluating one is still open. There is also no owner-editable daily journal.
 5. **Principal tiers.** ds-agent is owner-only by design. Group participants are
    not principals. Instinct's tier model is the reference if ds-agent ever
    supports staff or family.
@@ -85,7 +88,7 @@ implementation.
 | ~~P0~~ | ~~Skills loader and `read_skill`~~ — shipped in #149 | ✅ index injection, size caps, symlink/path rejection, role guards, `ds-agent skills`, docs |
 | ~~P0~~ | ~~Owner-defined routines / heartbeat~~ — shipped in #150 | ✅ fake-clock tests, persisted last-run, first-sight arming, gap fires once, ingress admission, `ds-agent routines`, docs |
 | ~~P1~~ | ~~Interactive approval flow~~ — shipped in #151 | ✅ worker tool, approval hold, Router question, CLI approve/deny, guidance + audit, watchdog idle, tests |
-| P1 | Semantic memory behind `EmbeddingPort` | Deterministic mock, hybrid ranking, recall eval stays green, no CI provider call |
+| ~~P1~~ | ~~Semantic memory behind `EmbeddingPort`~~ — shipped in #152 | ✅ offline hashed port, hybrid ranking, lazy backfill, ACL unchanged, lexical recall eval stays green, no CI provider call |
 | P2 | Email and browser connectors | Adapter contract, approval gate, offline fakes, real-channel acceptance remains operator-gated |
 | P2 | Principal tiers | Trigger trust tiers, prompt `principal` layer, tests that a group member cannot become the owner |
 | P3 | Reflection loop | A scheduled review that reads recent tickets/decisions, proposes lessons, and updates a bounded memory/lesson file with owner approval |
