@@ -9,6 +9,7 @@ import {
   routineTrigger,
   type RoutineSpec,
 } from '../src/harness/routines.ts'
+import { Daemon } from '../src/harness/daemon.ts'
 import { Runtime } from '../src/runtime.ts'
 import { ScriptedModel } from './scripted-model.ts'
 
@@ -64,6 +65,11 @@ describe('routine configuration', () => {
 
   it('returns nothing when the file is absent or blank', () => {
     expect(loadRoutines(tempHome())).toEqual([])
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'routines.json'), '  \n')
+    const env = { DS_AGENT_ROUTINES: JSON.stringify([{ id: 'seeded', everyMinutes: 30, prompt: 'Seed.' }]) }
+    // A blank owner file wins over the env seed instead of throwing.
+    expect(loadRoutines(home, env)).toEqual([])
   })
 
   it('reads the environment seed when no file exists, and the file wins', () => {
@@ -173,6 +179,22 @@ describe('routine scheduling', () => {
     expect(fired).toEqual([])
   })
 
+  it('re-arms instead of stalling after a large backward clock jump', () => {
+    const lastRun = new Map([['deploy-check', 10_000_000_000]])
+    const { scheduler: runner, fired } = makeScheduler({ lastRun })
+    expect(runner.tick(1_000_000)).toEqual([])
+    expect(fired).toEqual([])
+    expect(lastRun.get('deploy-check')).toBe(1_000_000)
+  })
+
+  it('re-arms a corrupt persisted last-run instead of throwing', () => {
+    const lastRun = new Map([['deploy-check', Number.NaN]])
+    const { scheduler: runner, fired } = makeScheduler({ lastRun })
+    expect(() => runner.tick(1_000_000)).not.toThrow()
+    expect(fired).toEqual([])
+    expect(lastRun.get('deploy-check')).toBe(1_000_000)
+  })
+
   it('keeps one bad routine from blocking the others', () => {
     const broken: RoutineSpec = spec({ id: 'broken' })
     const working: RoutineSpec = spec({ id: 'working' })
@@ -214,6 +236,11 @@ describe('routine trigger', () => {
     const second = routineTrigger(spec(), '2026-11-05T08:00:00.000Z')
     expect(second.id).toBe(first.id)
   })
+
+  it('carries an owner-configured group into the channel address', () => {
+    const trigger = routineTrigger(spec({ group: 'group_42' }), '2026-11-05T08:00:00.000Z')
+    expect(trigger.channel).toEqual({ source: 'cli', thread: 'local', address: { group: 'group_42' } })
+  })
 })
 
 describe('runtime routine wiring', () => {
@@ -247,5 +274,59 @@ describe('runtime routine wiring', () => {
     expect(triggers[0]?.text).toContain('Check production health')
     expect(runtime.store.getDoc<{ lastRunAt: number }>('routine', 'deploy-check')?.lastRunAt)
       .toBe(clock)
+  })
+
+  it('does not tick routines on a one-shot start, only on the serving pulse', () => {
+    const home = tempHome()
+    writeRoutines(home, [{
+      id: 'deploy-check',
+      everyMinutes: 5,
+      prompt: 'Check production health and report only failures.',
+    }])
+    const clock = Date.parse('2026-11-05T08:00:00.000Z')
+    const runtime = Runtime.create({
+      home,
+      model: new ScriptedModel(() => ({ text: 'green' })),
+      jobDelayMs: 0,
+      watchdogIntervalMs: 60_000,
+      now: () => new Date(clock).toISOString(),
+    })
+    runtimes.push(runtime)
+    // Already armed one interval ago: a routine tick now would fire it.
+    runtime.store.putDoc('routine', 'deploy-check', { id: 'deploy-check', lastRunAt: clock - 5 * 60_000 })
+
+    runtime.start({ assessPending: false })
+    expect(runtime.store.listDocs('trigger')).toHaveLength(0)
+
+    runtime.daemon.tick(clock)
+    expect(runtime.store.listDocs('trigger')).toHaveLength(1)
+  })
+
+  it('validates programmatic routine specs', () => {
+    expect(() => Runtime.create({
+      home: tempHome(),
+      model: new ScriptedModel(() => ({ text: 'green' })),
+      jobDelayMs: 0,
+      routines: [{ ...spec(), everyMinutes: 0 }],
+    })).toThrow(/everyMinutes/)
+  })
+
+  it('catches scheduler and watchdog exceptions in the daemon pulse', () => {
+    const lines: string[] = []
+    let routineTicks = 0
+    const daemon = new Daemon(
+      { tick: () => { throw new Error('watchdog boom') }, intervalMs: 60_000 },
+      line => lines.push(line),
+      undefined,
+      undefined,
+      { tick: () => { routineTicks += 1; throw new Error('routine boom') } },
+    )
+    try {
+      expect(() => daemon.start({ routines: true })).not.toThrow()
+      expect(routineTicks).toBe(1)
+      expect(lines.filter(line => line.includes('tick failed'))).toHaveLength(2)
+    } finally {
+      daemon.stop()
+    }
   })
 })

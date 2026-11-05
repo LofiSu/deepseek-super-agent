@@ -13,10 +13,15 @@ export class Daemon {
     private readonly routines?: { tick: (now: number) => unknown },
   ) {}
 
-  start(): void {
+  /**
+   * Long-lived processes pass `routines: true`. One-shot CLI commands must
+   * leave it false: firing a routine from a short-lived `approve`/`retry`
+   * process starts owner-level work whose channel loop is not running.
+   */
+  start(options: { routines?: boolean } = {}): void {
     this.log('[daemon] start')
-    this.watchdog.tick()
-    this.routines?.tick(Date.now())
+    this.safeTick(() => this.watchdog.tick())
+    if (options.routines !== false) this.safeTick(() => this.routines?.tick(Date.now()))
     this.timer = setInterval(() => this.tick(), this.watchdog.intervalMs)
   }
 
@@ -34,8 +39,21 @@ export class Daemon {
         this.log(`[daemon] hands offline machine=${m.id}; Store resume when heartbeat returns`)
       }
     }
-    this.watchdog.tick()
-    this.routines?.tick(now)
+    this.safeTick(() => this.watchdog.tick())
+    this.safeTick(() => this.routines?.tick(now))
+  }
+
+  /**
+   * An exception in an interval callback terminates the process. A store
+   * hiccup or a corrupt job must be logged and retried on the next pulse, not
+   * turn a serving daemon into a crash loop.
+   */
+  private safeTick(run: () => unknown): void {
+    try {
+      run()
+    } catch (error) {
+      this.log(`[daemon] tick failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** Call after a machine heartbeat to resume hands without loading Session into the daemon. */

@@ -18,7 +18,7 @@ import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
-import { loadRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
+import { loadRoutines, normalizeRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
@@ -416,7 +416,11 @@ export class Runtime {
     // into Runtime.ingest once construction finishes, so routines take the
     // normal filter, spill, dedupe, and Engine path.
     let fireRoutine: (trigger: Trigger) => void = () => {}
-    const routineSpecs = opts.routines ?? loadRoutines(opts.home, baseEnv)
+    // Programmatic specs follow the same bounds as file/env specs; skipping
+    // normalization lets everyMinutes=0 create a fire-on-every-tick loop.
+    const routineSpecs = opts.routines === undefined
+      ? loadRoutines(opts.home, baseEnv)
+      : normalizeRoutines(opts.routines)
     const routines = routineSpecs.length
       ? new RoutineScheduler(routineSpecs, {
         now: () => Date.parse(now()),
@@ -787,7 +791,6 @@ export class Runtime {
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
-    fireRoutine = trigger => runtime.ingest(trigger)
     host.onAssessmentNeeded = () => runtime.assessPending()
     // Local A2A endpoint: an envelope addressed to this instance becomes a normal,
     // untrusted Trigger and goes through the same ingress filter.
@@ -896,14 +899,16 @@ export class Runtime {
    * Start the daemon timer. `assessPending: false` also disables every later
    * assessment path (including `onAssessmentNeeded` from flushEvals), so a
    * MockModel process leaves Gate-deferred work queued instead of consuming it.
+   * `routines: true` is only for long-lived serving processes: a one-shot CLI
+   * command must not fire owner-level work whose channel loop is not running.
    */
-  start(options: { assessPending?: boolean } = {}): void {
+  start(options: { assessPending?: boolean; routines?: boolean } = {}): void {
     this.assessmentsEnabled = options.assessPending !== false
     // The Router layer is resident: every configured shard gets its Session
     // before recovery, assessment, or the first Trigger.
     this.armResidentRouters()
     this.recoverInterrupted()
-    this.daemon.start()
+    this.daemon.start({ routines: options.routines === true })
     if (this.assessmentsEnabled) {
       // Resume Gate-deferred work left in SQLite by a previous process.
       this.assessPending()
