@@ -166,6 +166,13 @@ describe('durable outbox', () => {
     expect(splitChatText('一句话。')).toEqual(['一句话。'])
   })
 
+  it('keeps the spaces between English sentences when it splits', () => {
+    const parts = splitChatText('Hello there. '.repeat(40))
+    expect(parts.length).toBe(2)
+    expect(parts.some(part => /\.\s+Hello/.test(part))).toBe(true)
+    expect(parts.every(part => !/\.Hello/.test(part))).toBe(true)
+  })
+
   it('flushes through the matching adapter and records the provider id', async () => {
     const store = tempStore()
     store.addReply({

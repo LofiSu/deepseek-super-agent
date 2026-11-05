@@ -675,17 +675,6 @@ async function main(): Promise<void> {
     }, { verbose: process.argv.includes('--verbose') })
     return
   }
-  if (cmd === 'stop') {
-    const rest = bare(3, ['reason'])
-    const ticketRef = rest[0]
-    const reason = (option('reason') ?? rest.slice(1).join(' ')) || 'operator-stop'
-    withEngine((engine, store) => {
-      const ticket = resolveTicket(store, ticketRef)
-      engine.stop(ticket.id, reason)
-      console.log(`stopped ${ticket.id} "${ticket.title}" — ${reason}`)
-    }, { verbose: process.argv.includes('--verbose') })
-    return
-  }
   if (cmd === 'intervene') {
     const rest = bare(3, ['text', 'reason'])
     const ticketRef = rest[0]

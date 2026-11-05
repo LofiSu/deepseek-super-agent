@@ -37,7 +37,10 @@ export function directChatThread(ticket: Ticket): string | undefined {
   return ticket.channels.find(channel =>
     channel.source === 'imessage'
     && channel.thread
-    // A group address carries `group`; group threads are not direct chats.
+    // A 1:1 address always carries the sender handle. A group address carries
+    // `group` when the chat row is known, and otherwise has neither: a
+    // group-rowid or unknown-group thread must never take the direct-chat path.
+    && Boolean(channel.address?.handle)
     && !channel.address?.group)?.thread
 }
 

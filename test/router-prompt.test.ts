@@ -69,6 +69,19 @@ describe('router prompt', () => {
     expect(directChatThread(group)).toBeUndefined()
   })
 
+  it('does not treat a group thread without a chat address as direct', () => {
+    const unknownGroup = ticket({
+      threadKeys: ['imessage:group-rowid:9'],
+      channels: [{
+        source: 'imessage',
+        thread: 'group-rowid:9',
+        address: { provider: 'imessage' },
+      }],
+    })
+    expect(directChatThread(unknownGroup)).toBeUndefined()
+    expect(routerPromptFor(unknownGroup)).not.toContain('direct-chat=true')
+  })
+
   it('keeps one Router session per direct iMessage thread', () => {
     const shard = directChatRouterShard(ticket({
       threadKeys: ['imessage:chat:any;-;+1'],

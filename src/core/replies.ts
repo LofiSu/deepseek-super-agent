@@ -98,14 +98,16 @@ export function splitChatText(text: string, maxParts = MAX_CHAT_PARTS): string[]
       continue
     }
     let chunk = ''
-    for (const sentence of paragraph.split(/(?<=[。！？!?；;])\s*/u).filter(Boolean)) {
+    // Split after the punctuation but keep the whitespace: consuming it would
+    // glue English sentences together ("Hello.World") inside one bubble.
+    for (const sentence of paragraph.split(/(?<=[。！？.!?；;]\s*)(?=\S)/u).filter(Boolean)) {
       if (chunk && chunk.length + sentence.length > CHAT_PART_CHARS) {
-        parts.push(chunk)
+        parts.push(chunk.trim())
         chunk = ''
       }
       chunk += sentence
     }
-    if (chunk) parts.push(chunk)
+    if (chunk.trim()) parts.push(chunk.trim())
   }
   if (parts.length <= maxParts) return parts
   const head = parts.slice(0, maxParts - 1)

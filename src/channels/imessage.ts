@@ -693,9 +693,12 @@ export class ChatDbImessageApi implements ImessageApi {
       // ROWID is a group-only fallback identity: a 1:1 row never contributes
       // one, so 1:1 threads stay keyed by `handle:`.
       const chatRowId = isGroup ? aggregate.groupChatRowId : undefined
-      const decoded = row.text != null && String(row.text).length > 0
+      // Attachment slots are stored as an object replacement character, which
+      // trim() does not remove. Strip it so an attachment-only bubble reaches
+      // the placeholder branch instead of sending an invisible character.
+      const decoded = (row.text != null && String(row.text).length > 0
         ? String(row.text)
-        : decodeAttributedBody(row.attributedBody)
+        : decodeAttributedBody(row.attributedBody)).replace(/\uFFFC/g, '')
       // An attachment-only bubble has no text but is still a message the
       // conversation should see. A short placeholder lets the Router answer
       // instead of silently dropping the image or sticker.
