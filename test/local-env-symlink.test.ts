@@ -57,6 +57,26 @@ describe('LocalEnv path containment', () => {
     expect(fs.existsSync(missing)).toBe(false)
   })
 
+  it('applies the same no-symlink rule to links that resolve inside the workspace', async () => {
+    const { env } = setup()
+    const dir = env.workspace('w1')
+    fs.writeFileSync(path.join(dir, 'real.txt'), 'hello')
+    fs.symlinkSync(path.join(dir, 'real.txt'), path.join(dir, 'inner-link.txt'))
+
+    await expect(env.readFile('w1', 'inner-link.txt')).rejects.toThrow(/symlink/)
+    await expect(env.writeFile('w1', 'inner-link.txt', 'pwned')).rejects.toThrow(/symlink/)
+    expect(fs.readFileSync(path.join(dir, 'real.txt'), 'utf8')).toBe('hello')
+  })
+
+  it('maps a self-referential link to a workspace error instead of a raw ELOOP', async () => {
+    const { env } = setup()
+    const dir = env.workspace('w1')
+    fs.symlinkSync(path.join(dir, 'self.txt'), path.join(dir, 'self.txt'))
+
+    await expect(env.readFile('w1', 'self.txt')).rejects.toThrow(/symlink/)
+    await expect(env.writeFile('w1', 'self.txt', 'x')).rejects.toThrow(/symlink/)
+  })
+
   it('still writes and reads ordinary nested workspace files', async () => {
     const { env } = setup()
     await env.writeFile('w1', 'notes/today.txt', 'hello')

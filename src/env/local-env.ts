@@ -187,17 +187,22 @@ export class LocalEnv implements EnvPort {
 
   async writeFile(workerId: string, relativePath: string, body: string, opts?: EnvRunOptions): Promise<string> {
     const { cwd, full } = this.safe(workerId, relativePath, opts?.isolated === true)
-    // mkdirSync(recursive) follows symlinks, so a link planted inside the
-    // workspace could create directories anywhere on the host before the
-    // containment check ran. Refuse every existing link first.
+    // Refuse a static link before mkdir: mkdir follows links, so an existing
+    // link could create directories outside the workspace.
     this.assertNoSymlink(cwd, full)
-    fs.mkdirSync(path.dirname(full), { recursive: true })
-    const target = this.assertContained(cwd, full)
-    const fd = fs.openSync(
-      target,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | NO_FOLLOW,
-    )
+    this.ensureDir(cwd, path.dirname(full))
+    let fd: number
     try {
+      fd = fs.openSync(full, fs.constants.O_WRONLY | fs.constants.O_CREAT | NO_FOLLOW)
+    } catch (error) {
+      throw mapPathError(error)
+    }
+    try {
+      // Verify the descriptor, not just the pathname: a concurrent process can
+      // swap a directory for a link between the check and the open.
+      this.assertFdContained(fd, cwd, full)
+      // Truncate only after verification so a raced target is never clobbered.
+      fs.ftruncateSync(fd, 0)
       fs.writeFileSync(fd, body)
     } finally {
       fs.closeSync(fd)
@@ -207,15 +212,15 @@ export class LocalEnv implements EnvPort {
 
   async readFile(workerId: string, relativePath: string, opts?: EnvRunOptions): Promise<string> {
     const { cwd, full } = this.safe(workerId, relativePath, opts?.isolated === true)
-    const target = this.assertContained(cwd, full)
+    this.assertNoSymlink(cwd, full)
     let fd: number
     try {
-      fd = fs.openSync(target, fs.constants.O_RDONLY | NO_FOLLOW)
+      fd = fs.openSync(full, fs.constants.O_RDONLY | NO_FOLLOW)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw symlinkEscape()
-      throw error
+      throw mapPathError(error)
     }
     try {
+      this.assertFdContained(fd, cwd, full)
       return redactSecrets(fs.readFileSync(fd, 'utf8'), this.secrets)
     } finally {
       fs.closeSync(fd)
@@ -277,19 +282,48 @@ export class LocalEnv implements EnvPort {
     }
   }
 
-  /** Resolve the real target and verify it is still under the workspace root. */
-  private assertContained(cwd: string, full: string): string {
-    const root = fs.realpathSync(cwd)
+  /**
+   * Create missing directories one component at a time from the resolved
+   * workspace root. `mkdirSync(recursive)` would traverse any link swapped in
+   * after the lstat sweep; stepping and re-checking narrows that window.
+   */
+  private ensureDir(cwd: string, dir: string): void {
+    let current = fs.realpathSync(cwd)
+    for (const part of path.relative(cwd, dir).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part)
+      try {
+        fs.mkdirSync(current)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+      // A link swapped in before this check is refused; the side effect of a
+      // path race inside this window is a documented limitation (a true
+      // boundary needs openat/O_NOFOLLOW per component).
+      if (fs.lstatSync(current).isSymbolicLink()) throw symlinkEscape()
+    }
+  }
+
+  /**
+   * Verify the open descriptor, not the pathname: realpath the path again,
+   * confirm it is still inside the workspace, and require the resolved target
+   * to be the same inode that was opened. A concurrent swap either resolves
+   * outside (refused) or to a different inode (refused), and writes after this
+   * check go to the already-open descriptor, not the mutable path.
+   */
+  private assertFdContained(fd: number, cwd: string, full: string): void {
     let target: string
     try {
       target = fs.realpathSync(full)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      // A new file: its parent was just created and must resolve inside.
-      target = path.join(fs.realpathSync(path.dirname(full)), path.basename(full))
+      throw mapPathError(error)
     }
+    const root = fs.realpathSync(cwd)
     if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw symlinkEscape()
-    return target
+    const opened = fs.fstatSync(fd)
+    const resolved = fs.statSync(target)
+    if (opened.dev !== resolved.dev || opened.ino !== resolved.ino) {
+      throw new UserError('path changed during access; refusing to use it')
+    }
   }
 }
 
@@ -297,6 +331,11 @@ const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
 
 function symlinkEscape(): UserError {
   return new UserError('path escapes workspace: symlinks are not allowed')
+}
+
+/** ELOOP means a link where the policy allows none; never echo the host path. */
+function mapPathError(error: unknown): unknown {
+  return (error as NodeJS.ErrnoException).code === 'ELOOP' ? symlinkEscape() : error
 }
 
 /**
