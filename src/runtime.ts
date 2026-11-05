@@ -1319,6 +1319,10 @@ export class Runtime {
       failure = error
     }
     try {
+      // Local specialists run detached in their own process group, so they
+      // would outlive this process. Kill them before draining: shutdown must
+      // not block on a slow agent, and no child may survive finish().
+      this.localAgents?.killAll()
       await this.assessmentsSettled()
       this.flushEvals()
       await this.harness.jobsSettled()

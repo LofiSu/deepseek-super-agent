@@ -81,14 +81,26 @@ export function loadLocalAgents(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): LocalAgentSpec[] {
   const file = path.join(home, LOCAL_AGENTS_FILE)
-  let raw: unknown
+  let content: string | undefined
   try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    content = fs.readFileSync(file, 'utf8')
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
     if (code !== 'ENOENT') {
+      throw new UserError(`${LOCAL_AGENTS_FILE} could not be read: ${messageOf(error)}`)
+    }
+  }
+  let raw: unknown
+  if (content !== undefined) {
+    // An empty file is "no local agents", and it also suppresses the
+    // environment seed: the file wins, including when the owner blanks it.
+    if (!content.trim()) return []
+    try {
+      raw = JSON.parse(content)
+    } catch (error) {
       throw new UserError(`${LOCAL_AGENTS_FILE} is not valid JSON: ${messageOf(error)}`)
     }
+  } else {
     const seed = env[LOCAL_AGENTS_ENV]?.trim()
     if (!seed) return []
     try {
@@ -128,9 +140,11 @@ export function normalizeLocalAgents(list: readonly unknown[]): LocalAgentSpec[]
     if (!command || command.includes('\0') || command.includes('\n') || command.includes('\r')) {
       throw new UserError(`local agent ${id} needs a command`)
     }
-    if (!path.isAbsolute(command) && !COMMAND.test(command)) {
+    const expanded = command.startsWith('~/') ? path.join(os.homedir(), command.slice(2)) : command
+    const bareName = !expanded.startsWith('-') && COMMAND.test(expanded)
+    if (!path.isAbsolute(expanded) && !bareName) {
       throw new UserError(
-        `local agent ${id} command must be an absolute path or a bare executable name, not a shell string`,
+        `local agent ${id} command must be an absolute path, a ~/ path, or a bare executable name, not a shell string`,
       )
     }
 
@@ -154,7 +168,7 @@ export function normalizeLocalAgents(list: readonly unknown[]): LocalAgentSpec[]
 
     return {
       id,
-      command: command.startsWith('~/') ? path.join(os.homedir(), command.slice(2)) : command,
+      command: expanded,
       ...(args.length ? { args: [...args] as string[] } : {}),
       ...(description ? { description } : {}),
       ...(raw.timeoutMs === undefined ? {} : {
@@ -176,6 +190,8 @@ export class LocalAgentRegistry {
   private readonly defaultMaxOutputBytes: number
   private readonly maxConcurrent: number
   private running = 0
+  private closed = false
+  private readonly active = new Set<ReturnType<typeof spawn>>()
 
   constructor(agents: readonly LocalAgentSpec[], options: LocalAgentRegistryOptions) {
     for (const spec of normalizeLocalAgents(agents)) this.specs.set(spec.id, spec)
@@ -197,7 +213,25 @@ export class LocalAgentRegistry {
     return this.specs.get(id)
   }
 
+  /** Number of children currently running; exposed for diagnostics and tests. */
+  get activeCount(): number {
+    return this.active.size
+  }
+
+  /**
+   * Kill every child and its process group, and refuse any later run. Shutdown
+   * calls this so a detached specialist cannot outlive the daemon that spawned
+   * it: draining queued Workers must not be able to start a fresh child.
+   */
+  killAll(): void {
+    this.closed = true
+    const children = [...this.active]
+    this.active.clear()
+    for (const child of children) killGroup(child.pid, child)
+  }
+
   async run(id: string, task: string, workerId: string): Promise<LocalAgentRunResult> {
+    if (this.closed) throw new UserError('local agents are shut down; delegation is unavailable')
     const spec = this.specs.get(id)
     if (!spec) {
       const configured = [...this.specs.keys()].join(', ') || 'none'
@@ -205,6 +239,11 @@ export class LocalAgentRegistry {
     }
     const body = task.trim()
     if (!body) throw new UserError(`delegate_agent needs a task for ${id}`)
+    // The task becomes one argv entry. A leading dash would let the specialist
+    // CLI parse model-authored text as its own options.
+    if (body.startsWith('-')) {
+      throw new UserError('delegate_agent task must not start with "-" (it would be read as an option)')
+    }
     if (body.length > MAX_LOCAL_AGENT_TASK_CHARS) {
       throw new UserError(`delegate_agent task is too long (max ${MAX_LOCAL_AGENT_TASK_CHARS} characters)`)
     }
@@ -213,8 +252,12 @@ export class LocalAgentRegistry {
     }
     const cwd = this.workspace(workerId)
     fs.mkdirSync(cwd, { recursive: true })
+    // Substitute the workspace first: a task that literally contains
+    // `{workspace}` must reach the agent unchanged, not be rewritten by us.
+    // Function replacers keep `$&`, "$\`", `$'` and `$$` in the task literal:
+    // a replacement string would interpret those patterns and corrupt it.
     const args = (spec.args ?? []).map(arg =>
-      arg.replaceAll('{task}', body).replaceAll('{workspace}', cwd))
+      arg.replaceAll('{workspace}', () => cwd).replaceAll('{task}', () => body))
     if (!(spec.args ?? []).some(arg => arg.includes('{task}'))) args.push(body)
     const timeoutMs = Math.min(
       MAX_LOCAL_AGENT_TIMEOUT_MS,
@@ -233,6 +276,8 @@ export class LocalAgentRegistry {
         env: agentEnv(this.env, spec.env ?? []),
         timeoutMs,
         maxOutputBytes,
+        onSpawn: child => this.active.add(child),
+        onDone: child => this.active.delete(child),
       })
     } finally {
       this.running -= 1
@@ -257,6 +302,8 @@ function spawnAgent(input: {
   env: NodeJS.ProcessEnv
   timeoutMs: number
   maxOutputBytes: number
+  onSpawn?: (child: ReturnType<typeof spawn>) => void
+  onDone?: (child: ReturnType<typeof spawn>) => void
 }): Promise<LocalAgentRunResult> {
   const { spec, args, cwd, env, timeoutMs, maxOutputBytes } = input
   return new Promise((resolve, reject) => {
@@ -273,6 +320,7 @@ function spawnAgent(input: {
       reject(new UserError(`could not start local agent ${spec.id}: ${messageOf(error)}`))
       return
     }
+    input.onSpawn?.(child)
     let stdout = ''
     let stderr = ''
     let truncated = false
@@ -298,12 +346,14 @@ function spawnAgent(input: {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      input.onDone?.(child)
       resolve(result)
     }
     child.on('error', error => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      input.onDone?.(child)
       reject(new UserError(`could not start local agent ${spec.id}: ${messageOf(error)}`))
     })
     child.on('close', (code, signal) => {

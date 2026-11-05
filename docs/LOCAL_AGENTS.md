@@ -88,6 +88,14 @@ The task must be self-contained: the specialist does not see the Worker's
 conversation, memory, or ticket. Put the relevant context, constraints, and
 expected output in the task string.
 
+The task is one literal argv entry (`{task}` substitution does not reinterpret
+`$&` or other replacement patterns). A task whose first character is `-` is
+refused, because the specialist CLI would parse model-authored text as its own
+options; start such a payload with a word (for example `Task: - step one`).
+Delegation is also refused once the ticket has ended and for speculative
+tickets: a local specialist runs outside the Worker sandbox, so it cannot be
+isolated or discarded.
+
 ## Security model
 
 | Boundary | Behavior |
