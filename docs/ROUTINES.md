@@ -2,8 +2,15 @@
 
 A routine is owner-defined recurring work: a prompt the agent receives every
 N minutes, or once per day at a UTC time on days you choose, on a channel you
-choose. The owner writes the schedule; the model cannot create, edit, or
-delete one.
+choose. The owner writes the schedule; the model has no tool to create, edit,
+or delete one.
+
+The file is owner-controlled, not a sandbox boundary. A Worker that runs
+outside the normal write sandbox — a configured local specialist agent, an
+embedding with the sandbox disabled, or `bash` with `DS_AGENT_HOME` under a
+writable root such as `/tmp` — can modify it. Keep such agents trusted, or
+turn on strict read isolation. Symlinked writes from `write_file` are refused
+by `LocalEnv`, so the ordinary workspace cannot reach the file through a link.
 
 This is the product shape behind Muse's `HEARTBEAT.md` and Grok Bot's routines,
 implemented as an owner file plus the normal ingress path rather than a second
@@ -12,7 +19,8 @@ execution loop.
 ## Configuration
 
 `routines.json` in the agent home, or `DS_AGENT_ROUTINES` as a JSON seed. A
-file wins over the seed.
+file wins over the seed; a blank file means "no routines" and also suppresses
+the seed.
 
 ```json
 [
@@ -43,6 +51,7 @@ file wins over the seed.
 | `source` | no | Channel source: `cli` (default), `im`, `imessage`, `github`, or `a2a`. |
 | `thread` | no | Thread id in that source. Default `local`. |
 | `actor` | no | Actor id on the trigger. Default `you`. Use your allowlisted owner id when `DS_AGENT_ACTOR_ALLOWLIST` is set. |
+| `group` | no | Group id set as `channel.address.group`. Required for admission when `DS_AGENT_GROUP_ALLOWLIST` is active. |
 
 A routine has exactly one schedule: `everyMinutes` or `at`. Times are UTC, so
 the schedule does not depend on the host's local zone or DST rules.
@@ -68,7 +77,11 @@ Up to 32 routines. A malformed entry fails loudly at startup and in
   (`trg_routine_<id>_<epochMs>`), so a crash between firing and saving is
   deduplicated by ingress on retry.
 - A routine that throws while ingesting is logged and retried on the next tick;
-  it does not block the other routines.
+  it does not block the other routines, and a scheduler exception is caught by
+  the daemon pulse instead of terminating the process.
+- A large backward clock jump (bad RTC, restored snapshot) re-arms the routine
+  at the corrected time instead of stalling it until wall time catches up. A
+  small NTP-sized step keeps the existing schedule.
 
 ## Delivery and safety
 
@@ -84,9 +97,11 @@ A routine enters through `Runtime.ingest`, exactly like a message:
   turn.
 
 The process must be running (`ds-agent serve`, plus `--imessage` or `--feishu`
-when the routine targets that channel). A routine does not wake a stopped
-process, and `cli` routines are visible in the runtime and the UI but are not
-pushed to a terminal.
+when the routine targets that channel, or the long-lived `ds-agent imessage`
+loop). One-shot commands (`approve`, `retry`, `resume`, `chat`, `emit`) never
+tick routines. A routine does not wake a
+stopped process, and `cli` routines are visible in the runtime and the UI but
+are not pushed to a terminal.
 
 ## CLI
 

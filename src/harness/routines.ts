@@ -24,6 +24,11 @@ interface RoutineBase {
   thread: string
   /** Actor id the trigger carries. Default `you` (the CLI owner). */
   actor: string
+  /**
+   * Group id for `channel.address.group`. Needed when a group allowlist is
+   * active, because admission rejects triggers without an address group.
+   */
+  group?: string
 }
 
 /** Fire every N minutes. Bounded: at least 5 minutes, at most 7 days. */
@@ -64,7 +69,7 @@ export const MAX_ROUTINE_PROMPT_CHARS = 4_000
 /** Sources the ingress fast path admits. A routine cannot target anything else. */
 const SOURCES = new Set(['im', 'github', 'cli', 'a2a', 'imessage'])
 const ID = /^[a-z][a-z0-9_-]{0,31}$/
-const SPEC_KEYS = new Set(['id', 'everyMinutes', 'at', 'days', 'prompt', 'source', 'thread', 'actor'])
+const SPEC_KEYS = new Set(['id', 'everyMinutes', 'at', 'days', 'prompt', 'source', 'thread', 'actor', 'group'])
 const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/
 const DAY_MS = 86_400_000
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
@@ -79,14 +84,26 @@ export function loadRoutines(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): RoutineSpec[] {
   const file = path.join(home, ROUTINES_FILE)
-  let raw: unknown
+  let content: string | undefined
   try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    content = fs.readFileSync(file, 'utf8')
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
     if (code !== 'ENOENT') {
+      throw new UserError(`${ROUTINES_FILE} could not be read: ${messageOf(error)}`)
+    }
+  }
+  let raw: unknown
+  if (content !== undefined) {
+    // A blank file means "no routines", and it suppresses the environment
+    // seed: the file wins, including when the owner blanks it.
+    if (!content.trim()) return []
+    try {
+      raw = JSON.parse(content)
+    } catch (error) {
       throw new UserError(`${ROUTINES_FILE} is not valid JSON: ${messageOf(error)}`)
     }
+  } else {
     const seed = env[ROUTINES_ENV]?.trim()
     if (!seed) return []
     try {
@@ -163,7 +180,8 @@ export function normalizeRoutines(list: readonly unknown[]): RoutineSpec[] {
     }
     const thread = oneLine(raw.thread, id, 'thread', 'local')
     const actor = oneLine(raw.actor, id, 'actor', 'you')
-    const base = { id, prompt, source, thread, actor }
+    const group = raw.group === undefined ? undefined : oneLine(raw.group, id, 'group', '')
+    const base = { id, prompt, source, thread, actor, ...(group ? { group } : {}) }
     return everyMinutes !== undefined
       ? { ...base, everyMinutes }
       : { ...base, at: at!, days: days! }
@@ -220,37 +238,59 @@ export class RoutineScheduler {
     return [...this.specs]
   }
 
-  /** Check every routine once. Returns the ids whose prompt was injected. */
+  /** Check every routine once. Returns the ids whose ingestion was attempted. */
   tick(at = this.opts.now()): string[] {
     const fired: string[] = []
     for (const spec of this.specs) {
-      const last = this.opts.lastRun(spec.id)
-      const daily = isDaily(spec)
-      if (last === undefined) {
-        // Arm at the latest due slot, so a first tick after 08:00 does not
-        // fire immediately and a first tick before it still catches 08:00.
-        const arm = daily ? latestDailySlot(at, spec) ?? at : at
-        this.opts.saveLastRun(spec.id, arm)
-        this.opts.log?.(`[routine] armed id=${spec.id} ${scheduleLabel(spec)}`)
-        continue
-      }
-      if (at < last) {
-        this.opts.log?.(`[routine] clock moved backwards id=${spec.id}; skipping`)
-        continue
-      }
-      let due: number
-      if (daily) {
-        const slot = latestDailySlot(at, spec)
-        if (slot === undefined || slot <= last) continue
-        due = slot
-      } else {
-        const dueSlot = last + spec.everyMinutes * 60_000
-        if (at < dueSlot) continue
-        due = dueSlot
-      }
-      const trigger = routineTrigger(spec, new Date(due).toISOString())
-      fired.push(spec.id)
+      // One corrupt last-run row, a clock anomaly, or a store error must not
+      // escape this loop: an exception in the daemon timer would kill the
+      // process, and skipping the try would also stop later routines.
       try {
+        const last = this.opts.lastRun(spec.id)
+        const daily = isDaily(spec)
+        const arm = (): number => daily ? latestDailySlot(at, spec) ?? at : at
+        if (last === undefined) {
+          // Arm at the latest due slot, so a first tick after 08:00 does not
+          // fire immediately and a first tick before it still catches 08:00.
+          this.opts.saveLastRun(spec.id, arm())
+          this.opts.log?.(`[routine] armed id=${spec.id} ${scheduleLabel(spec)}`)
+          continue
+        }
+        if (typeof last !== 'number' || !Number.isFinite(last)) {
+          this.opts.saveLastRun(spec.id, arm())
+          this.opts.log?.(`[routine] invalid lastRun id=${spec.id}; re-armed`)
+          continue
+        }
+        if (at < last) {
+          // A small backward step is usually NTP settling; keep the schedule.
+          // A large one (bad RTC, restored snapshot) would otherwise stall the
+          // routine until wall time re-reached the bogus value.
+          const interval = daily ? DAY_MS : spec.everyMinutes * 60_000
+          if (last - at > Math.max(2 * interval, 10 * 60_000)) {
+            this.opts.saveLastRun(spec.id, arm())
+            this.opts.log?.(`[routine] clock moved backwards id=${spec.id} by=${last - at}ms; re-armed`)
+          } else {
+            this.opts.log?.(`[routine] clock moved backwards id=${spec.id}; skipping`)
+          }
+          continue
+        }
+        let due: number
+        if (daily) {
+          const slot = latestDailySlot(at, spec)
+          if (slot === undefined || slot <= last) continue
+          due = slot
+        } else {
+          const interval = spec.everyMinutes * 60_000
+          if (at - last < interval) continue
+          due = last + interval
+        }
+        if (!Number.isFinite(due)) {
+          this.opts.saveLastRun(spec.id, at)
+          this.opts.log?.(`[routine] invalid due slot id=${spec.id}; re-armed`)
+          continue
+        }
+        const trigger = routineTrigger(spec, new Date(due).toISOString())
+        fired.push(spec.id)
         this.opts.fire(trigger)
         // Interval routines save the tick time so missed slots are not
         // replayed; daily routines save the slot so a late tick fires once.
@@ -302,7 +342,11 @@ export function routineTrigger(spec: RoutineSpec, at: string): Trigger {
     addressed: 'direct',
     at,
     text: spec.prompt,
-    channel: { source: spec.source, thread: spec.thread },
+    channel: {
+      source: spec.source,
+      thread: spec.thread,
+      ...(spec.group ? { address: { group: spec.group } } : {}),
+    },
     meta: { routine: spec.id },
   }
 }
