@@ -97,8 +97,9 @@ A routine enters through `Runtime.ingest`, exactly like a message:
   turn.
 
 The process must be running (`ds-agent serve`, plus `--imessage` or `--feishu`
-when the routine targets that channel). One-shot commands (`approve`, `retry`,
-`resume`, `chat`, `emit`) never tick routines. A routine does not wake a
+when the routine targets that channel, or the long-lived `ds-agent imessage`
+loop). One-shot commands (`approve`, `retry`, `resume`, `chat`, `emit`) never
+tick routines. A routine does not wake a
 stopped process, and `cli` routines are visible in the runtime and the UI but
 are not pushed to a terminal.
 
