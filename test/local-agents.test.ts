@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bindRolePorts } from '../src/core/role-ports.ts'
@@ -12,7 +13,7 @@ import { LocalEnv } from '../src/env/local-env.ts'
 import type { Completion, Model } from '../src/harness/model.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import { Runtime } from '../src/runtime.ts'
-import type { Trigger } from '../src/shared/types.ts'
+import type { Ticket, Trigger } from '../src/shared/types.ts'
 import { ruleClassify } from '../src/ingress/filter.ts'
 import { shutdown, tempHome } from './fixtures.ts'
 
@@ -47,6 +48,45 @@ function registry(agents: LocalAgentSpec[], opts: { env?: NodeJS.ProcessEnv; cwd
   return new LocalAgentRegistry(agents, {
     env: opts.env ?? { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
     workspace: () => root,
+  })
+}
+
+function putTicket(runtime: Runtime, id: string, overrides: Partial<Ticket> = {}): Ticket {
+  const ticket: Ticket = {
+    id,
+    title: 'delegate',
+    brief: 'delegate work to a specialist',
+    mandate: {
+      strength: 'explicit',
+      policyVersion: 'test',
+      scope: 'test',
+      actor: { source: 'cli', id: 'tester' },
+      basis: 'addressed',
+    },
+    threadKeys: [],
+    channels: [],
+    inputs: [],
+    assignments: [],
+    speculative: false,
+    originTriggerId: 'trigger_test',
+    createdAt: '2026-11-05T00:00:00.000Z',
+    ...overrides,
+  }
+  runtime.store.putDoc('ticket', id, ticket)
+  return ticket
+}
+
+function toolsFor(runtime: Runtime): ToolRegistry {
+  return new ToolRegistry({
+    store: runtime.store,
+    ports: bindRolePorts(runtime.engine),
+    env: new LocalEnv(path.join(runtime.home, 'workspaces')),
+    metrics: runtime.metrics,
+    redact: text => text,
+    log: () => {},
+    scheduleJob: () => {},
+    routerTurn: async () => {},
+    localAgents: runtime.localAgents,
   })
 }
 
@@ -97,6 +137,28 @@ describe('local agent configuration', () => {
     expect(() => loadLocalAgents(tempHome(), {
       DS_AGENT_LOCAL_AGENTS: JSON.stringify([{ id: 'bad', command: process.execPath, shell: true }]),
     })).toThrow(/unknown/)
+  })
+
+  it('treats a blank file as no agents instead of invalid JSON', () => {
+    const home = tempHome()
+    cleanups.push(() => fs.rmSync(home, { recursive: true, force: true }))
+    fs.writeFileSync(path.join(home, 'local-agents.json'), '  \n')
+    const env = { DS_AGENT_LOCAL_AGENTS: JSON.stringify([{ id: 'env-agent', command: process.execPath }]) }
+    // The file wins, so a deliberately blank file also disables env agents.
+    expect(loadLocalAgents(home, env)).toEqual([])
+  })
+
+  it('accepts ~/ commands and rejects option-shaped bare names', () => {
+    const home = tempHome()
+    cleanups.push(() => fs.rmSync(home, { recursive: true, force: true }))
+    fs.writeFileSync(path.join(home, 'local-agents.json'), JSON.stringify({
+      agents: [{ id: 'home-agent', command: '~/bin/agent' }],
+    }))
+    expect(loadLocalAgents(home, {})[0]?.command).toBe(path.join(os.homedir(), 'bin', 'agent'))
+
+    expect(() => loadLocalAgents(tempHome(), {
+      DS_AGENT_LOCAL_AGENTS: JSON.stringify([{ id: 'opt', command: '-rf' }]),
+    })).toThrow(/command/)
   })
 })
 
@@ -158,6 +220,33 @@ describe('local agent execution', () => {
     const registryUnderTest = registry([echoAgent({ command: 'definitely-not-a-real-agent-binary' })])
     await expect(registryUnderTest.run('echo', 'task', 'worker_1')).rejects.toThrow(/could not start/)
   })
+
+  it('refuses a task that starts with a dash instead of passing it as an option', async () => {
+    await expect(
+      registry([echoAgent()]).run('echo', '  --dangerously-skip-permissions', 'worker_1'),
+    ).rejects.toThrow(/option/)
+  })
+
+  it('does not rewrite a task that contains a workspace placeholder', async () => {
+    const cwd = workspace()
+    const result = await registry([echoAgent()], { cwd }).run('echo', 'literal {workspace} text', 'worker_1')
+    const parsed = JSON.parse(result.stdout) as { args: string[] }
+    expect(parsed.args).toEqual(['echo', 'literal {workspace} text'])
+  })
+
+  it('kills running children on shutdown', async () => {
+    const registryUnderTest = registry([echoAgent({ args: [fixture, 'slow'], timeoutMs: 60_000 })])
+    const pending = registryUnderTest.run('echo', 'wait', 'worker_1')
+    for (let i = 0; i < 100 && registryUnderTest.activeCount === 0; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(registryUnderTest.activeCount).toBe(1)
+    registryUnderTest.killAll()
+    const result = await pending
+    expect(result.timedOut).toBe(false)
+    expect(result.code).not.toBe(0)
+    expect(registryUnderTest.activeCount).toBe(0)
+  })
 })
 
 describe('local agent tools', () => {
@@ -209,17 +298,8 @@ describe('local agent tools', () => {
       localAgents: [echoAgent()],
     })
     runtimes.push(runtime)
-    const tools = new ToolRegistry({
-      store: runtime.store,
-      ports: bindRolePorts(runtime.engine),
-      env: new LocalEnv(path.join(runtime.home, 'workspaces')),
-      metrics: runtime.metrics,
-      redact: text => text,
-      log: () => {},
-      scheduleJob: () => {},
-      routerTurn: async () => {},
-      localAgents: runtime.localAgents,
-    })
+    putTicket(runtime, 'ticket_9')
+    const tools = toolsFor(runtime)
     const result = await tools.invoke(
       { id: 'd2', name: 'delegate_agent', args: { agent: 'echo', task: 'do the thing' } },
       { sessionId: 'worker_ticket_9', role: 'worker', ticketId: 'ticket_9' },
@@ -227,5 +307,32 @@ describe('local agent tools', () => {
     expect(result.agent).toBe('echo')
     expect(result.code).toBe(0)
     expect(JSON.parse(result.stdout).args).toEqual(['echo', 'do the thing'])
+  })
+
+  it('refuses delegation without an active, non-speculative ticket', async () => {
+    const runtime = Runtime.create({
+      home: tempHome(),
+      model: scriptedModel,
+      jobDelayMs: 0,
+      watchdogIntervalMs: 60_000,
+      localAgents: [echoAgent()],
+    })
+    runtimes.push(runtime)
+    const tools = toolsFor(runtime)
+    const call = (ticketId?: string) => tools.invoke(
+      { id: 'd3', name: 'delegate_agent', args: { agent: 'echo', task: 'do the thing' } },
+      { sessionId: 'worker_any', role: 'worker', ...(ticketId ? { ticketId } : {}) },
+    )
+
+    await expect(call()).rejects.toThrow(/active ticket/)
+    await expect(call('ticket_missing')).rejects.toThrow(/active ticket/)
+
+    putTicket(runtime, 'ticket_ended', {
+      ended: { at: '2026-11-05T00:00:01.000Z', outcome: 'done', by: 'executor' },
+    })
+    await expect(call('ticket_ended')).rejects.toThrow(/has ended/)
+
+    putTicket(runtime, 'ticket_spec', { speculative: true })
+    await expect(call('ticket_spec')).rejects.toThrow(/speculative/)
   })
 })
