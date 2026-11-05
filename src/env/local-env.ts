@@ -186,15 +186,40 @@ export class LocalEnv implements EnvPort {
   }
 
   async writeFile(workerId: string, relativePath: string, body: string, opts?: EnvRunOptions): Promise<string> {
-    const full = this.safe(workerId, relativePath, opts?.isolated === true)
+    const { cwd, full } = this.safe(workerId, relativePath, opts?.isolated === true)
+    // mkdirSync(recursive) follows symlinks, so a link planted inside the
+    // workspace could create directories anywhere on the host before the
+    // containment check ran. Refuse every existing link first.
+    this.assertNoSymlink(cwd, full)
     fs.mkdirSync(path.dirname(full), { recursive: true })
-    fs.writeFileSync(full, body)
+    const target = this.assertContained(cwd, full)
+    const fd = fs.openSync(
+      target,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | NO_FOLLOW,
+    )
+    try {
+      fs.writeFileSync(fd, body)
+    } finally {
+      fs.closeSync(fd)
+    }
     return full
   }
 
   async readFile(workerId: string, relativePath: string, opts?: EnvRunOptions): Promise<string> {
-    const text = fs.readFileSync(this.safe(workerId, relativePath, opts?.isolated === true), 'utf8')
-    return redactSecrets(text, this.secrets)
+    const { cwd, full } = this.safe(workerId, relativePath, opts?.isolated === true)
+    const target = this.assertContained(cwd, full)
+    let fd: number
+    try {
+      fd = fs.openSync(target, fs.constants.O_RDONLY | NO_FOLLOW)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw symlinkEscape()
+      throw error
+    }
+    try {
+      return redactSecrets(fs.readFileSync(fd, 'utf8'), this.secrets)
+    } finally {
+      fs.closeSync(fd)
+    }
   }
 
   private shellEnv(cwd: string, isolated: boolean): NodeJS.ProcessEnv {
@@ -221,15 +246,57 @@ export class LocalEnv implements EnvPort {
     return workerId
   }
 
-  private safe(workerId: string, relativePath: string, isolated: boolean): string {
+  private safe(workerId: string, relativePath: string, isolated: boolean): { cwd: string; full: string } {
     if (path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes('..')) {
       throw new UserError('path escapes workspace')
     }
     const cwd = path.resolve(isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId))
     const full = path.resolve(cwd, relativePath)
     if (full !== cwd && !full.startsWith(`${cwd}${path.sep}`)) throw new UserError('path escapes workspace')
-    return full
+    return { cwd, full }
   }
+
+  /**
+   * A lexical containment check is not enough: a symlink inside the workspace
+   * resolves elsewhere, and fs.writeFileSync/readFileSync follow it. Reject
+   * any existing component of the relative path that is a link, including a
+   * broken link; the OS-level O_NOFOLLOW guard covers the final component.
+   */
+  private assertNoSymlink(cwd: string, full: string): void {
+    let current = cwd
+    for (const part of path.relative(cwd, full).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part)
+      let stat: fs.Stats
+      try {
+        stat = fs.lstatSync(current)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw error
+      }
+      if (stat.isSymbolicLink()) throw symlinkEscape()
+    }
+  }
+
+  /** Resolve the real target and verify it is still under the workspace root. */
+  private assertContained(cwd: string, full: string): string {
+    const root = fs.realpathSync(cwd)
+    let target: string
+    try {
+      target = fs.realpathSync(full)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      // A new file: its parent was just created and must resolve inside.
+      target = path.join(fs.realpathSync(path.dirname(full)), path.basename(full))
+    }
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw symlinkEscape()
+    return target
+  }
+}
+
+const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
+
+function symlinkEscape(): UserError {
+  return new UserError('path escapes workspace: symlinks are not allowed')
 }
 
 /**
