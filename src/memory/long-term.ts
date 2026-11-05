@@ -130,12 +130,16 @@ export class SpillBackedLongTermMemory {
 
   /**
    * Persisted vector and port id, or nothing when semantic recall is off.
+   * Redaction runs before the port: like a spill, the provider is an egress
+   * boundary and must never receive unredacted text. An empty result is not
+   * cached, so a provider that transiently returns nothing can recover.
    * A provider failure degrades to lexical-only instead of aborting the write.
    */
   private vectorOf(text: string): { vector: number[]; id: string } | undefined {
     if (!this.embedding) return undefined
     try {
-      const vector = [...this.embedding.embed(semanticHead(text))]
+      const vector = [...this.embedding.embed(semanticHead(this.redact(text)))]
+      if (vector.length === 0) return undefined
       return { vector, id: `${this.embedding.id}:${vector.length}` }
     } catch {
       return undefined
@@ -357,7 +361,7 @@ export class SpillBackedLongTermMemory {
     let queryVector: number[] | undefined
     if (this.embedding) {
       try {
-        queryVector = [...this.embedding.embed(semanticHead(query.text))]
+        queryVector = [...this.embedding.embed(semanticHead(this.redact(query.text)))]
       } catch {
         queryVector = undefined
       }
@@ -366,7 +370,10 @@ export class SpillBackedLongTermMemory {
     const embeddingId = queryVector && this.embedding
       ? `${this.embedding.id}:${queryVector.length}`
       : undefined
-    let backfilled = 0
+    // Bound provider calls as well as writes. A hosted provider must not turn
+    // one recall over a legacy index into thousands of calls inside a
+    // transaction; uncached entries join over successive queries.
+    let embeddingCalls = 0
     return this.store.atomic(() => {
       const candidates: QueryCandidate[] = []
       const tagIndex = new Map<string, number[]>()
@@ -386,21 +393,20 @@ export class SpillBackedLongTermMemory {
         let similarity = 0
         if (this.embedding && queryVector && embeddingId) {
           let vector = entry.embedding
-          const emptyId = `${this.embedding.id}:0`
-          const knownEmpty = entry.embeddingId === emptyId && vector?.length === 0
-          if (!knownEmpty && (!vector || entry.embeddingId !== embeddingId || vector.length !== queryVector.length)) {
+          const stale = !vector || entry.embeddingId !== embeddingId || vector.length !== queryVector.length
+          if (stale && embeddingCalls < MAX_EMBEDDING_BACKFILL) {
+            embeddingCalls += 1
             try {
-              vector = [...this.embedding.embed(semanticHead(body))]
+              vector = [...this.embedding.embed(semanticHead(this.redact(body)))]
             } catch {
               vector = undefined
             }
-            // Persist at most a bounded number per read. The rest still score
-            // in memory and join the cache on a later read or write.
-            if (vector && backfilled < MAX_EMBEDDING_BACKFILL) {
+            if (vector && vector.length > 0) {
               entry.embedding = vector
               entry.embeddingId = `${this.embedding.id}:${vector.length}`
               this.store.putDoc('ltm', entry.id, entry)
-              backfilled += 1
+            } else {
+              vector = undefined
             }
           }
           if (vector && vector.length === queryVector.length) similarity = cosine(queryVector, vector)

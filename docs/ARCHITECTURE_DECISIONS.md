@@ -825,12 +825,17 @@ rewrite `PLAN.md`; link to the contract instead.
      during a query disables the semantic branch for that query; lexical and
      tag-hop results are still returned.
   6. **Bounded backfill.** Vectors carry a port id that includes their
-     dimensions and are recomputed when it changes. A read persists at most
-     `MAX_EMBEDDING_BACKFILL` (32) new vectors, so upgrading a 1000-entry
-     index cannot turn one recall into a 1000-document write transaction.
-  7. **Security is unchanged.** Only redacted text reaches the port. Every
-     returned hit, semantic or lexical, still grants the reader ticket access
-     to that exact spill. No new lookup-by-id path is added.
+     dimensions and are recomputed when it changes. A read calls the port for
+     at most `MAX_EMBEDDING_BACKFILL` (32) uncached entries and persists the
+     results; entries beyond the budget are scored on a later read once the
+     earlier ones are cached. Upgrading a 1000-entry index therefore cannot
+     turn one recall into 1000 sequential provider calls or an unbounded write
+     transaction. An empty provider result is not cached, so a transient empty
+     response cannot permanently disable an entry.
+  7. **Security is unchanged.** Redaction runs before every port call, on
+     writes and on the query text. Every returned hit, semantic or lexical,
+     still grants the reader ticket access to that exact spill. No new
+     lookup-by-id path is added.
 - **Consequences:** the shipped hashing catches morphology, shared stems,
   word-order variation, and typos for words outside the synonym table. It does
   **not** catch true synonyms ("invoice" vs "billing"); that remains a reason

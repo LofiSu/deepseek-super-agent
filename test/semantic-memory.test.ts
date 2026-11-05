@@ -4,6 +4,7 @@ import { SpillBackedLongTermMemory } from '../src/memory/long-term.ts'
 import { readSpillFor } from '../src/memory/acl.ts'
 import { Store } from '../src/store/sqlite.ts'
 import { embeddingFloorFromEnv, semanticRecallEnabled } from '../src/runtime.ts'
+import type { Decision } from '../src/shared/types.ts'
 import { freshRuntime, shutdown, tempHome } from './fixtures.ts'
 
 /**
@@ -164,6 +165,66 @@ describe('semantic recall', () => {
     expect(memory.query({ ticketId: 'reader', text: 'idempotent keys' })
       .map(entry => entry.id)).toEqual([saved.id])
     store.close()
+  })
+
+  it('redacts before the embedding port on every path', () => {
+    const store = new Store(tempHome())
+    const seen: string[] = []
+    const recording: EmbeddingPort = {
+      id: 'recording',
+      embed: text => { seen.push(text); return [1, 0] },
+    }
+    const redact = (text: string): string => text.replace(/sk-[A-Za-z0-9]+/g, '[redacted]')
+    const memory = new SpillBackedLongTermMemory(store, redact, { embedding: recording })
+    const secret = 'rotate sk-live-ABC123 now'
+
+    memory.put('ticket_a', secret)
+    memory.query({ ticketId: 'reader', text: secret })
+    const decision: Decision = {
+      id: 'dec_1',
+      evalId: 'eval_1',
+      threadKey: 'cli:local',
+      triggerIds: ['trg_1'],
+      kind: 'accept',
+      at: '2026-01-01T00:00:00.000Z',
+      reason: secret,
+      strength: 'explicit',
+    }
+    memory.rememberDecision(decision)
+
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.some(text => text.includes('[redacted]'))).toBe(true)
+    expect(seen.every(text => !text.includes('sk-live'))).toBe(true)
+    store.close()
+  })
+
+  it('bounds provider calls per query and fills a legacy index over reads', () => {
+    const home = tempHome()
+    const first = new Store(home)
+    const lexical = new SpillBackedLongTermMemory(first)
+    for (let index = 0; index < 40; index += 1) lexical.put('ticket_a', `note ${index}`)
+    first.close()
+
+    let calls = 0
+    const counting: EmbeddingPort = {
+      id: 'counting',
+      embed: () => { calls += 1; return [1, 0] },
+    }
+    const second = new Store(home)
+    const memory = new SpillBackedLongTermMemory(second, { embedding: counting })
+    memory.query({ ticketId: 'reader', text: 'note' })
+    // One query vector plus at most the backfill budget.
+    expect(calls).toBeLessThanOrEqual(1 + 32)
+    memory.query({ ticketId: 'reader', text: 'note' })
+    // The 32 cached entries cost no provider call; only the remaining 8 plus
+    // the query vector.
+    expect(calls).toBeLessThanOrEqual(1 + 32 + 1 + 8)
+    memory.query({ ticketId: 'reader', text: 'note' })
+    // Everything is cached now, so only the query vector is embedded.
+    expect(calls).toBeLessThanOrEqual(1 + 32 + 1 + 8 + 1)
+    expect(second.listDocs<{ embedding?: number[] }>('ltm')
+      .every(entry => (entry.embedding?.length ?? 0) > 0)).toBe(true)
+    second.close()
   })
 
   it('degrades to lexical recall when the embedding provider throws', () => {

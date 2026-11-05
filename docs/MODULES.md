@@ -269,8 +269,9 @@ ticket title, the decision reason, or the newest archived digest summary.
 Indexing the whole body would dilute a short title query below any useful
 cosine. Vectors are stored on the entry (`embedding`, `embeddingId`) and
 recomputed lazily when the port id or dimensions change, including for entries
-written before a port existed; a read persists at most 32 new vectors so an
-upgrade cannot turn one recall into an unbounded write. `query()` embeds the
+written before a port existed. A read calls the port and persists vectors for
+at most 32 uncached entries, so an upgrade cannot turn one recall into
+thousands of provider calls or an unbounded write. `query()` embeds the
 query once and marks an entry as a semantic candidate when
 `cosine >= embeddingFloor` (default 0.35, clamped to 0..1;
 `RuntimeOptions.embeddingFloor` or `DS_AGENT_EMBEDDING_FLOOR`). Semantic
@@ -278,9 +279,10 @@ candidates do not seed the one-hop tag walk; an entry is eligible when it is a
 lexical direct candidate, is reached by the hop, or clears the floor.
 
 A provider throw degrades to lexical-only: writes still succeed without a
-vector, and a query skips the semantic branch. Every returned hit still
-receives the same reader-ticket spill grant, so semantic recall does not widen
-access. Empty or punctuation-only text maps to a zero vector and cannot match.
+vector, and a query skips the semantic branch. Redaction runs before every port
+call, including the query text, so a hosted provider never receives a secret.
+Every returned hit still receives the same reader-ticket spill grant, so
+semantic recall does not widen access. Empty or punctuation-only text maps to a zero vector and cannot match.
 Evidence: `test/semantic-memory.test.ts`; design record: ADR-016.
 
 Retention is two-tier. Hot ticket/decision entries default to 1000 entries /

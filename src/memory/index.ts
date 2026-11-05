@@ -20,6 +20,13 @@ export {
 } from './graph.ts'
 export { INLINE_LIMIT, inlineOrSpill, type Recall } from './recall.ts'
 export {
+  cosine,
+  DEFAULT_EMBEDDING_FLOOR,
+  EMBEDDING_DIMS,
+  HashedEmbedding,
+  type EmbeddingPort,
+} from './embedding.ts'
+export {
   SpillBackedLongTermMemory,
   type LongTermMemoryEntry,
   type LongTermMemoryKind,
