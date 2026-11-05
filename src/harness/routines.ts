@@ -14,11 +14,9 @@ import type { Trigger } from '../shared/types.ts'
  * rules, sandbox, and approval boundaries. A route that cannot be delivered
  * (an unknown source) is rejected at load time rather than silently dropped.
  */
-export interface RoutineSpec {
+interface RoutineBase {
   /** Stable id, also the persisted last-run key. */
   id: string
-  /** Interval in minutes. Bounded: at least 5 minutes, at most 7 days. */
-  everyMinutes: number
   prompt: string
   /** Channel source the routine fires on. Default `cli`. */
   source: string
@@ -27,6 +25,24 @@ export interface RoutineSpec {
   /** Actor id the trigger carries. Default `you` (the CLI owner). */
   actor: string
 }
+
+/** Fire every N minutes. Bounded: at least 5 minutes, at most 7 days. */
+export interface IntervalRoutine extends RoutineBase {
+  everyMinutes: number
+}
+
+/**
+ * Fire once per selected UTC day at `at` (`HH:MM`). `days` uses
+ * 0=Sunday..6=Saturday and defaults to every day. Times are UTC because the
+ * scheduler must not depend on the host's local zone or DST rules.
+ */
+export interface DailyRoutine extends RoutineBase {
+  at: string
+  days: number[]
+}
+
+/** Exactly one schedule: an interval or a daily time. */
+export type RoutineSpec = IntervalRoutine | DailyRoutine
 
 export interface RoutineSchedulerOptions {
   now: () => number
@@ -48,7 +64,10 @@ export const MAX_ROUTINE_PROMPT_CHARS = 4_000
 /** Sources the ingress fast path admits. A routine cannot target anything else. */
 const SOURCES = new Set(['im', 'github', 'cli', 'a2a', 'imessage'])
 const ID = /^[a-z][a-z0-9_-]{0,31}$/
-const SPEC_KEYS = new Set(['id', 'everyMinutes', 'prompt', 'source', 'thread', 'actor'])
+const SPEC_KEYS = new Set(['id', 'everyMinutes', 'at', 'days', 'prompt', 'source', 'thread', 'actor'])
+const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/
+const DAY_MS = 86_400_000
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
 
 /**
  * Read the owner's routines. A missing or blank config means none. A malformed
@@ -103,16 +122,33 @@ export function normalizeRoutines(list: readonly unknown[]): RoutineSpec[] {
     if (seen.has(id)) throw new UserError(`duplicate routine id ${id}`)
     seen.add(id)
 
-    const everyMinutes = raw.everyMinutes
-    if (
-      typeof everyMinutes !== 'number'
-      || !Number.isInteger(everyMinutes)
-      || everyMinutes < MIN_ROUTINE_MINUTES
-      || everyMinutes > MAX_ROUTINE_MINUTES
-    ) {
-      throw new UserError(
-        `routine ${id} everyMinutes must be an integer between ${MIN_ROUTINE_MINUTES} and ${MAX_ROUTINE_MINUTES}`,
-      )
+    const hasInterval = raw.everyMinutes !== undefined
+    const hasDaily = raw.at !== undefined
+    if (hasInterval === hasDaily) {
+      throw new UserError(`routine ${id} needs exactly one of everyMinutes or at`)
+    }
+    let everyMinutes: number | undefined
+    let at: string | undefined
+    let days: number[] | undefined
+    if (hasInterval) {
+      const value = raw.everyMinutes
+      if (
+        typeof value !== 'number'
+        || !Number.isInteger(value)
+        || value < MIN_ROUTINE_MINUTES
+        || value > MAX_ROUTINE_MINUTES
+      ) {
+        throw new UserError(
+          `routine ${id} everyMinutes must be an integer between ${MIN_ROUTINE_MINUTES} and ${MAX_ROUTINE_MINUTES}`,
+        )
+      }
+      if (raw.days !== undefined) {
+        throw new UserError(`routine ${id} days only applies to an at schedule`)
+      }
+      everyMinutes = value
+    } else {
+      at = parseTime(raw.at, id)
+      days = parseDays(raw.days, id)
     }
 
     const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : ''
@@ -127,8 +163,34 @@ export function normalizeRoutines(list: readonly unknown[]): RoutineSpec[] {
     }
     const thread = oneLine(raw.thread, id, 'thread', 'local')
     const actor = oneLine(raw.actor, id, 'actor', 'you')
-    return { id, everyMinutes, prompt, source, thread, actor }
+    const base = { id, prompt, source, thread, actor }
+    return everyMinutes !== undefined
+      ? { ...base, everyMinutes }
+      : { ...base, at: at!, days: days! }
   })
+}
+
+function parseTime(value: unknown, id: string): string {
+  if (typeof value !== 'string' || !TIME.test(value)) {
+    throw new UserError(`routine ${id} at must be a UTC HH:MM time`)
+  }
+  return value
+}
+
+function parseDays(value: unknown, id: string): number[] {
+  if (value === undefined) return [...ALL_DAYS]
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new UserError(`routine ${id} days must be a non-empty array of 0..6`)
+  }
+  const days: number[] = []
+  for (const day of value) {
+    if (!Number.isInteger(day) || day < 0 || day > 6) {
+      throw new UserError(`routine ${id} days must contain integers 0..6`)
+    }
+    if (days.includes(day)) throw new UserError(`routine ${id} days has a duplicate`)
+    days.push(day)
+  }
+  return days.sort((a, b) => a - b)
 }
 
 function oneLine(value: unknown, id: string, field: string, fallback: string): string {
@@ -163,23 +225,36 @@ export class RoutineScheduler {
     const fired: string[] = []
     for (const spec of this.specs) {
       const last = this.opts.lastRun(spec.id)
+      const daily = isDaily(spec)
       if (last === undefined) {
-        this.opts.saveLastRun(spec.id, at)
-        this.opts.log?.(`[routine] armed id=${spec.id} everyMinutes=${spec.everyMinutes}`)
+        // Arm at the latest due slot, so a first tick after 08:00 does not
+        // fire immediately and a first tick before it still catches 08:00.
+        const arm = daily ? latestDailySlot(at, spec) ?? at : at
+        this.opts.saveLastRun(spec.id, arm)
+        this.opts.log?.(`[routine] armed id=${spec.id} ${scheduleLabel(spec)}`)
         continue
       }
       if (at < last) {
         this.opts.log?.(`[routine] clock moved backwards id=${spec.id}; skipping`)
         continue
       }
-      const interval = spec.everyMinutes * 60_000
-      if (at - last < interval) continue
-      const due = last + interval
+      let due: number
+      if (daily) {
+        const slot = latestDailySlot(at, spec)
+        if (slot === undefined || slot <= last) continue
+        due = slot
+      } else {
+        const dueSlot = last + spec.everyMinutes * 60_000
+        if (at < dueSlot) continue
+        due = dueSlot
+      }
       const trigger = routineTrigger(spec, new Date(due).toISOString())
       fired.push(spec.id)
       try {
         this.opts.fire(trigger)
-        this.opts.saveLastRun(spec.id, at)
+        // Interval routines save the tick time so missed slots are not
+        // replayed; daily routines save the slot so a late tick fires once.
+        this.opts.saveLastRun(spec.id, daily ? due : at)
         this.opts.log?.(`[routine] fired id=${spec.id} at=${trigger.at} source=${spec.source}`)
       } catch (error) {
         this.opts.log?.(`[routine] failed id=${spec.id}: ${messageOf(error)}`)
@@ -187,6 +262,32 @@ export class RoutineScheduler {
     }
     return fired
   }
+}
+
+function isDaily(spec: RoutineSpec): spec is DailyRoutine {
+  return 'at' in spec
+}
+
+function scheduleLabel(spec: RoutineSpec): string {
+  return isDaily(spec)
+    ? `at=${spec.at} days=${spec.days.join(',')}`
+    : `everyMinutes=${spec.everyMinutes}`
+}
+
+/**
+ * Most recent UTC slot at or before `now`, walking back up to a week so a
+ * selected weekday is always found. Pure: no local timezone, no DST.
+ */
+export function latestDailySlot(now: number, spec: DailyRoutine): number | undefined {
+  const [hours, minutes] = spec.at.split(':').map(Number) as [number, number]
+  const sinceMidnight = ((now % DAY_MS) + DAY_MS) % DAY_MS
+  let candidate = now - sinceMidnight + hours * 3_600_000 + minutes * 60_000
+  if (candidate > now) candidate -= DAY_MS
+  for (let back = 0; back <= 7; back += 1) {
+    if (spec.days.includes(new Date(candidate).getUTCDay())) return candidate
+    candidate -= DAY_MS
+  }
+  return undefined
 }
 
 /** The owner-authored trigger one due slot produces. */

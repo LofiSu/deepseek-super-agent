@@ -1,8 +1,9 @@
 # Routines
 
 A routine is owner-defined recurring work: a prompt the agent receives every
-N minutes on a channel you choose. The owner writes the schedule; the model
-cannot create, edit, or delete one.
+N minutes, or once per day at a UTC time on days you choose, on a channel you
+choose. The owner writes the schedule; the model cannot create, edit, or
+delete one.
 
 This is the product shape behind Muse's `HEARTBEAT.md` and Grok Bot's routines,
 implemented as an owner file plus the normal ingress path rather than a second
@@ -25,7 +26,8 @@ file wins over the seed.
   },
   {
     "id": "morning-brief",
-    "everyMinutes": 1440,
+    "at": "08:00",
+    "days": [1, 2, 3, 4, 5],
     "prompt": "Summarize what changed in the repo since yesterday. Skip it if nothing changed."
   }
 ]
@@ -34,11 +36,16 @@ file wins over the seed.
 | Field | Required | Meaning |
 |---|---|---|
 | `id` | yes | Stable id (`^[a-z][a-z0-9_-]{0,31}$`). Also the persisted last-run key. |
-| `everyMinutes` | yes | Integer from 5 to 10080 (7 days). |
+| `everyMinutes` | one of | Integer from 5 to 10080 (7 days). Mutually exclusive with `at`. |
+| `at` | one of | UTC `HH:MM`. Mutually exclusive with `everyMinutes`. |
+| `days` | no | Days for `at`: `0` Sunday through `6` Saturday. Default every day. |
 | `prompt` | yes | What the owner wants done. Up to 4000 characters. |
 | `source` | no | Channel source: `cli` (default), `im`, `imessage`, `github`, or `a2a`. |
 | `thread` | no | Thread id in that source. Default `local`. |
 | `actor` | no | Actor id on the trigger. Default `you`. Use your allowlisted owner id when `DS_AGENT_ACTOR_ALLOWLIST` is set. |
+
+A routine has exactly one schedule: `everyMinutes` or `at`. Times are UTC, so
+the schedule does not depend on the host's local zone or DST rules.
 
 Up to 32 routines. A malformed entry fails loudly at startup and in
 `ds-agent routines`; a typo must not silently mean the work never runs.
@@ -47,12 +54,16 @@ Up to 32 routines. A malformed entry fails loudly at startup and in
 
 - The daemon checks routines on its normal tick, in the same process as the
   watchdog. There is no separate scheduler and no second timer.
-- The first sight of a routine arms it at the current time; it does not fire
-  immediately. A newly added routine starts one full interval from then.
-- After that, a due routine fires once. If the process was down for hours, it
-  fires once, not once per missed slot. Missed work is not replayed as a burst.
+- The first sight of a routine arms it without firing. An interval routine
+  starts one full interval from then; a daily routine arms at the most recent
+  due slot, so a first tick just after 08:00 waits until the next selected day
+  and a first tick just before 08:00 still fires at 08:00.
+- After that, a due routine fires once. If the process was down for hours or
+  days, it fires once at the latest due slot, not once per missed slot. Missed
+  work is not replayed as a burst.
 - `lastRunAt` is persisted in SQLite (`routine` documents), so a restart does
-  not refire the same slot.
+  not refire the same slot. Interval routines save the tick time (so a long gap
+  is not replayed); daily routines save the slot time.
 - The trigger id is derived from the due slot
   (`trg_routine_<id>_<epochMs>`), so a crash between firing and saving is
   deduplicated by ingress on retry.
@@ -86,8 +97,9 @@ ds-agent routines --json
 
 ## Current limits
 
-- Interval only. There is no cron expression or "every weekday at 08:00" yet;
-  a daily routine is `everyMinutes: 1440`, which drifts with restarts.
+- Daily schedules are a UTC time plus weekdays, not a cron expression. Multiple
+  times per day need multiple routines. There is no per-routine timezone yet;
+  a UTC time is deliberate so the host zone cannot change the schedule.
 - No per-routine tool allowlist. A routine is framed by the normal rules and
   the Worker sandbox, not by a narrower capability set.
 - No catch-up policy choice. Firing once for a long gap is fixed behavior.
