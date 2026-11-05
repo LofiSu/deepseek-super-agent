@@ -20,7 +20,7 @@ that make a personal agent worth talking to and worth delegating work to.
 | **Subagents / team** | Subagent prompts get the shared frame plus a role | Subagents | Routines and skills | Router/Worker split, Worker-internal teams, persisted jobs, aggregate report | **Parity** for execution topology |
 | **Memory** | `MEMORY.md` + daily journal; bounded digest every turn | `MEMORY.md` + memory search/explain tools; strict write rules | Bot memory | Typed refs, `read_object` chain of recall, hybrid lexical + embedding recall, hot/cold retention, cold Thread digests, per-hop ACL | **Ahead on safety and provenance**; **behind on learned semantic recall and an owner-editable daily journal** |
 | **Skills** | `skills/` with `SKILL.md`; loaded on demand | Tools and workspace files | Skills | `skills/<id>/SKILL.md` index in the prompt; `read_skill` loads the body | **Parity on the core loop**; no bundled starter set yet |
-| **Proactivity / routines** | Scheduled etiquette and routines | `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, scheduling | Routines | `routines.json`: interval prompt, channel/thread, persisted last-run, daemon tick | **Parity on intervals**; no cron/daily-at scheduling or owner editor yet |
+| **Proactivity / routines** | Scheduled etiquette and routines | `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, scheduling | Routines | `routines.json`: interval or UTC daily-time prompt, weekdays, channel/thread, persisted last-run, daemon tick | **Parity on intervals and daily times**; no cron expressions, per-routine timezone, or owner editor yet |
 | **Channels** | Texting, email, A2A, chat | App / channel surfaces | Bot connectors | CLI, iMessage, Feishu, GitHub, A2A, OpenAI-compatible gateway, loopback UI | **Ahead in one runtime**, **behind on email, browser, calendar, payments** |
 | **Approvals** | Dedicated approvals layer | Safety policy | Approval before send, publish, delete, spend | Worker `request_approval` → hold → Router asks → CLI approve/deny → audited RESUME | **Parity on the state machine**; decisions are CLI-only, no channel approval or approval token |
 | **Observability** | Layer inspection, logs | Workspace files are visible | Bot editor | Lifecycle bus, read-only token-gated UI, metrics, health, session journals, offline CLI inspection | **Ahead** |
@@ -58,9 +58,10 @@ implementation.
    loads the body. What is still missing is a bundled starter set, an
    owner-facing editor, and any way for a skill to declare which existing tool
    it expects. A skill still cannot grant a tool.
-2. **Routine scheduling depth.** Owner routines now exist for intervals. The
-   canonical "every weekday at 8" still needs cron or a time-of-day field, and
-   there is no owner-facing editor. Restart drift is documented, not solved.
+2. **Routine scheduling depth.** Owner routines now support intervals and the
+   canonical "every weekday at 08:00" (`at` + `days`, UTC). What is still
+   missing is a cron expression, a per-routine timezone, and an owner-facing
+   editor. Restart drift is documented, not solved.
 3. **Approval reach.** The request/hold/decide/resume flow exists, but the owner
    must decide through the CLI. A channel reply cannot approve yet: that needs
    an authenticated owner identity and a signed decision, not text the model

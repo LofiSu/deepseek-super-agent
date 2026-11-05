@@ -895,8 +895,11 @@ async function main(): Promise<void> {
       return
     }
     for (const routine of routines) {
+      const schedule = 'at' in routine
+        ? `${routine.at} UTC days ${routine.days.join(',')}`
+        : `every ${routine.everyMinutes}m`
       console.log(
-        `${routine.id.padEnd(24)}every ${routine.everyMinutes}m  ${routine.source}:${routine.thread}  ${routine.prompt}`,
+        `${routine.id.padEnd(24)}${schedule}  ${routine.source}:${routine.thread}  ${routine.prompt}`,
       )
     }
     return
