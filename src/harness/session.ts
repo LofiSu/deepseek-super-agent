@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { ToolCall } from './model.ts'
 import type { Store } from '../store/sqlite.ts'
+import type { Ticket } from '../shared/types.ts'
 
 export interface JournalEntry {
   role?: string
@@ -17,8 +18,44 @@ export function workerSessionId(ticketId: string): string {
 }
 
 /** Router shards get their own session; the default shard keeps the legacy id. */
-export function routerSessionId(shard: string): string {
+export function routerSessionId(shard?: string): string {
   return !shard || shard === 'default' || shard === 'router' ? 'router' : `router:${shard}`
+}
+
+/**
+ * A direct iMessage thread gets its own Router shard. Without this every
+ * conversation shares one Router session (and its history), so two people
+ * chatting at once can bleed into each other's replies.
+ */
+export function directChatRouterShard(ticket: Ticket): string | undefined {
+  const thread = directChatThread(ticket)
+  return thread ? `thread:${thread}` : undefined
+}
+
+/** The iMessage thread a ticket belongs to, when it is a 1:1 direct chat. */
+export function directChatThread(ticket: Ticket): string | undefined {
+  return ticket.channels.find(channel =>
+    channel.source === 'imessage'
+    && channel.thread
+    // A 1:1 address always carries the sender handle. A group address carries
+    // `group` when the chat row is known, and otherwise has neither: a
+    // group-rowid or unknown-group thread must never take the direct-chat path.
+    && Boolean(channel.address?.handle)
+    && !channel.address?.group)?.thread
+}
+
+/** True when both tickets belong to the same direct iMessage thread. */
+export function sharesDirectChatThread(ticket: Ticket, thread: string): boolean {
+  return ticket.channels.some(channel => channel.source === 'imessage' && channel.thread === thread)
+}
+
+/**
+ * The shard that owns Router tools for a ticket. A direct chat always uses its
+ * thread shard, matching the session the Harness actually ran; otherwise the
+ * disposition shard applies.
+ */
+export function routerOwnerShard(ticket: Ticket, dispositionShard?: string): string {
+  return directChatRouterShard(ticket) ?? dispositionShard ?? 'default'
 }
 
 /** Append-only JSONL plus a SQLite copy so a restart can still read the session. */

@@ -32,44 +32,87 @@ export class Replies {
     const thread = ref?.thread ?? 'local'
     const target = ref?.address ?? {}
     const rendered = renderOutbound(channel, text, ticket.id)
-    const createdAt = this.host.now()
-    const row = {
-      id: this.host.repo.nextId('reply'),
-      ticketId: ticket.id,
-      channel,
-      purpose,
-      text: rendered,
-      status: 'pending' as const,
-      createdAt,
+    // A direct chat reads like texting: one long block feels like a letter.
+    // Split at paragraph/sentence boundaries into at most three bubbles.
+    const directChat = channel === 'imessage' && target.group == null
+    const parts = directChat ? splitChatText(rendered) : [rendered]
+    for (const [index, part] of parts.entries()) {
+      const label = parts.length > 1 ? `${purpose} part=${index + 1}/${parts.length}` : purpose
+      const createdAt = this.host.now()
+      const row = {
+        id: this.host.repo.nextId('reply'),
+        ticketId: ticket.id,
+        channel,
+        purpose: label,
+        text: part,
+        status: 'pending' as const,
+        createdAt,
+      }
+      this.host.repo.addReply(row)
+      // The CLI channel is local stdout; there is no remote hop to wait for.
+      if (channel === 'cli') {
+        this.host.repo.markReplySent(row.id)
+        this.host.log(`[channel] norm=${channel} ticketId=${ticket.id} purpose=${label} local-sent`)
+        this.host.log(`[reply] purpose=${label} ticketId=${ticket.id} channel=${channel} thread=${thread} text=${part.replace(/\s+/g, ' ')}`)
+        continue
+      }
+      // Remote outbound goes through the durable outbox. A channel adapter
+      // (Feishu/GitHub) marks the row sent only after the real API accepts it.
+      const outboxId = this.host.repo.nextId('outbox')
+      this.host.repo.enqueueOutbox({
+        id: outboxId,
+        replyId: row.id,
+        ticketId: ticket.id,
+        channel,
+        thread,
+        target,
+        text: part,
+        status: 'pending',
+        idempotencyKey: row.id,
+        attempts: 0,
+        createdAt,
+      })
+      this.host.log(`[channel] norm=${channel} ticketId=${ticket.id} purpose=${label}`)
+      this.host.log(`[reply] purpose=${label} ticketId=${ticket.id} channel=${channel} thread=${thread} text=${part.replace(/\s+/g, ' ')}`)
+      this.host.log(`[outbox] enqueue outboxId=${outboxId} replyId=${row.id} channel=${channel} thread=${thread} ticketId=${ticket.id}`)
     }
-    this.host.repo.addReply(row)
-    // The CLI channel is local stdout; there is no remote hop to wait for.
-    if (channel === 'cli') {
-      this.host.repo.markReplySent(row.id)
-      this.host.log(`[channel] norm=${channel} ticketId=${ticket.id} purpose=${purpose} local-sent`)
-      this.host.log(`[reply] purpose=${purpose} ticketId=${ticket.id} channel=${channel} thread=${thread} text=${rendered.replace(/\s+/g, ' ')}`)
-      return
-    }
-    // Remote outbound goes through the durable outbox. A channel adapter
-    // (Feishu/GitHub) marks the row sent only after the real API accepts it.
-    const outboxId = this.host.repo.nextId('outbox')
-    this.host.repo.enqueueOutbox({
-      id: outboxId,
-      replyId: row.id,
-      ticketId: ticket.id,
-      channel,
-      thread,
-      target,
-      text: rendered,
-      status: 'pending',
-      idempotencyKey: row.id,
-      attempts: 0,
-      createdAt,
-    })
-    this.host.log(`[channel] norm=${channel} ticketId=${ticket.id} purpose=${purpose}`)
-    this.host.log(`[reply] purpose=${purpose} ticketId=${ticket.id} channel=${channel} thread=${thread} text=${rendered.replace(/\s+/g, ' ')}`)
-    this.host.log(`[outbox] enqueue outboxId=${outboxId} replyId=${row.id} channel=${channel} thread=${thread} ticketId=${ticket.id}`)
   }
+}
+
+/** Bubbles per reply, not messages per turn: enough to feel like texting. */
+export const MAX_CHAT_PARTS = 3
+const CHAT_PART_CHARS = 280
+
+/**
+ * Split a conversational reply into texting-sized bubbles: paragraphs first,
+ * then long paragraphs at sentence boundaries. At most `maxParts` bubbles;
+ * the tail is merged into the last one so no content is dropped.
+ */
+export function splitChatText(text: string, maxParts = MAX_CHAT_PARTS): string[] {
+  const trimmed = text.trim()
+  if (!trimmed) return []
+  const parts: string[] = []
+  for (const paragraph of trimmed.split(/\n{2,}/).map(value => value.trim()).filter(Boolean)) {
+    if (paragraph.length <= CHAT_PART_CHARS) {
+      parts.push(paragraph)
+      continue
+    }
+    let chunk = ''
+    // Split after the punctuation but keep the whitespace: consuming it would
+    // glue English sentences together ("Hello.World") inside one bubble.
+    for (const sentence of paragraph.split(/(?<=[。！？.!?；;]\s*)(?=\S)/u).filter(Boolean)) {
+      if (chunk && chunk.length + sentence.length > CHAT_PART_CHARS) {
+        parts.push(chunk.trim())
+        chunk = ''
+      }
+      chunk += sentence
+    }
+    if (chunk.trim()) parts.push(chunk.trim())
+  }
+  if (parts.length <= maxParts) return parts
+  const head = parts.slice(0, maxParts - 1)
+  head.push(parts.slice(maxParts - 1).join('\n\n'))
+  return head
 }
 
 /**

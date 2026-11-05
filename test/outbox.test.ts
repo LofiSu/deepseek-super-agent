@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Outbox, PermanentDeliveryError, type OutboundAdapter } from '../src/channels/outbox-adapter.ts'
-import { Replies } from '../src/core/replies.ts'
+import { Replies, splitChatText } from '../src/core/replies.ts'
 import type { Host } from '../src/core/host.ts'
 import type { OutboxRow, Ticket } from '../src/shared/types.ts'
 import { Store } from '../src/store/sqlite.ts'
@@ -110,6 +110,67 @@ describe('durable outbox', () => {
     expect(store.listReplies()).toHaveLength(1)
     expect(store.listOutbox('pending')).toHaveLength(1)
     store.close()
+  })
+
+  it('sends a direct chat answer as a few short bubbles', () => {
+    const store = tempStore()
+    const host: Host = {
+      repo: store,
+      now: () => new Date().toISOString(),
+      log: () => undefined,
+      metrics: { increment: () => undefined } as unknown as Host['metrics'],
+      scope: { admit: () => ({ listened: true, reason: 'test' }) },
+    }
+    const imessageTicket = ticket({
+      threadKeys: ['imessage:chat:any;-;+1'],
+      channels: [{
+        source: 'imessage',
+        thread: 'chat:any;-;+1',
+        address: { handle: '+1', chatGuid: 'any;-;+1' },
+      }],
+    })
+    new Replies(host).answer(imessageTicket, '第一段。\n\n第二段，稍微长一点。\n\n第三段。\n\n第四段。')
+    const queued = store.listOutbox('pending')
+    expect(queued).toHaveLength(3)
+    expect(queued[2]!.text).toContain('第三段')
+    expect(queued[2]!.text).toContain('第四段')
+    store.close()
+  })
+
+  it('keeps a group chat answer in one bubble', () => {
+    const store = tempStore()
+    const host: Host = {
+      repo: store,
+      now: () => new Date().toISOString(),
+      log: () => undefined,
+      metrics: { increment: () => undefined } as unknown as Host['metrics'],
+      scope: { admit: () => ({ listened: true, reason: 'test' }) },
+    }
+    const groupTicket = ticket({
+      threadKeys: ['imessage:group:g1'],
+      channels: [{
+        source: 'imessage',
+        thread: 'group:g1',
+        address: { provider: 'imessage', group: 'g1' },
+      }],
+    })
+    new Replies(host).answer(groupTicket, '第一段。\n\n第二段。')
+    expect(store.listOutbox('pending')).toHaveLength(1)
+    store.close()
+  })
+
+  it('splits only on boundaries and never drops text', () => {
+    const parts = splitChatText('一二三四五六七八九十。'.repeat(40) + '\n\n尾巴。')
+    expect(parts.length).toBe(3)
+    expect(parts.join('')).toContain('尾巴。')
+    expect(splitChatText('一句话。')).toEqual(['一句话。'])
+  })
+
+  it('keeps the spaces between English sentences when it splits', () => {
+    const parts = splitChatText('Hello there. '.repeat(40))
+    expect(parts.length).toBe(2)
+    expect(parts.some(part => /\.\s+Hello/.test(part))).toBe(true)
+    expect(parts.every(part => !/\.Hello/.test(part))).toBe(true)
   })
 
   it('flushes through the matching adapter and records the provider id', async () => {

@@ -22,10 +22,10 @@ import { loadRoutines, RoutineScheduler, type RoutineSpec } from './harness/rout
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
+import { directChatRouterShard, directChatThread, SessionJournal, sharesDirectChatThread, workerSessionId } from './harness/session.ts'
 import { loadPromptFiles, type PromptFiles } from './harness/prompts.ts'
 import { LocalAgentRegistry, loadLocalAgents, type LocalAgentSpec } from './env/local-agents.ts'
 import { SkillRegistry } from './env/skills.ts'
-import { SessionJournal, workerSessionId } from './harness/session.ts'
 import { ToolRegistry } from './harness/tools.ts'
 import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
 import {
@@ -37,6 +37,7 @@ import {
 } from './ingress/policy.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
 import { inlineOrSpill } from './memory/recall.ts'
+import { DEFAULT_EMBEDDING_FLOOR, HashedEmbedding, type EmbeddingPort } from './memory/embedding.ts'
 import { refsForTrigger, triggerRef } from './memory/graph.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
 import { Metrics } from './metrics/metrics.ts'
@@ -112,6 +113,17 @@ export interface RuntimeOptions {
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
    */
   memoryRetention?: MemoryRetention
+  /**
+   * Optional semantic recall port. Defaults to the offline `HashedEmbedding`;
+   * `false` (or `DS_AGENT_SEMANTIC_RECALL=0`) keeps recall lexical-only.
+   * A configured port never makes a network or model call by itself.
+   */
+  embeddings?: EmbeddingPort | false
+  /**
+   * Cosine floor for a semantic-only hit. Overrides
+   * `DS_AGENT_EMBEDDING_FLOOR`; defaults to 0.35 and is clamped to 0..1.
+   */
+  embeddingFloor?: number
   /**
    * Bounded in-memory lifecycle history and the restart-replay cap.
    * Defaults to 1000 and keeps the newest events.
@@ -241,6 +253,30 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
   if (raw == null || raw.trim() === '') return fallback
   const value = Number(raw)
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback
+}
+
+/**
+ * Semantic recall is on unless explicitly disabled. An explicit
+ * `RuntimeOptions.embeddings` wins over the environment, including an explicit
+ * provider next to a stale kill switch.
+ */
+export function semanticRecallEnabled(
+  env: NodeJS.ProcessEnv,
+  override?: EmbeddingPort | false,
+): boolean {
+  if (override !== undefined) return override !== false
+  const value = env.DS_AGENT_SEMANTIC_RECALL?.trim().toLowerCase()
+  return !(value === '' || value === '0' || value === 'false' || value === 'off' || value === 'no')
+}
+
+/** `DS_AGENT_EMBEDDING_FLOOR` in [0,1]; invalid values use the default. */
+export function embeddingFloorFromEnv(
+  env: NodeJS.ProcessEnv,
+  override?: number,
+): number {
+  const raw = override ?? (env.DS_AGENT_EMBEDDING_FLOOR?.trim() || undefined)
+  const value = raw === undefined ? NaN : Number(raw)
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : DEFAULT_EMBEDDING_FLOOR
 }
 
 /** Comma-separated ids: trimmed, empty entries ignored, empty result is unset. */
@@ -459,7 +495,16 @@ export class Runtime {
     // Retention keeps the durable index bounded: 1000 entries / 90 days by
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
-    const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
+    const embeddings = semanticRecallEnabled(baseEnv, opts.embeddings)
+      ? opts.embeddings || new HashedEmbedding()
+      : undefined
+    const longTermMemory = new SpillBackedLongTermMemory(store, redact, {
+      ...retention,
+      ...(embeddings ? {
+        embedding: embeddings,
+        embeddingFloor: embeddingFloorFromEnv(baseEnv, opts.embeddingFloor),
+      } : {}),
+    })
     const lifecycle = new LifecycleBus(opts.lifecycleMaxEvents)
     const lifecycleRetention = lifecycleRetentionFor(opts.lifecycleRetention, lifecycle.maxEvents)
     // Restart replay: first bound any existing durable log, then fill the ring
@@ -672,6 +717,10 @@ export class Runtime {
       takeGuidance: (ticketId, audience) => engine.takeGuidance(ticketId, audience),
       singleSession: opts.singleSession === true,
       routerSessions: ticket => {
+        // One Router session per direct iMessage thread: two conversations at
+        // once must not share history or bleed into each other's replies.
+        const direct = directChatRouterShard(ticket)
+        if (direct) return [direct]
         const disposition = store.getDoc<Disposition>('disposition', ticket.originTriggerId)
         return disposition?.shards?.length ? disposition.shards : ['default']
       },
@@ -684,17 +733,32 @@ export class Runtime {
       releaseNode: ticketId => {
         workerMesh.release(ticketId)
       },
+      repliedTo: ticketId => store.listReplies().some(
+        reply => reply.ticketId === ticketId && reply.channel === 'imessage',
+      ),
+      stopAnsweredDirectChat: (ticket, reason) => {
+        engine.decide(ticket.originTriggerId, { kind: 'stop', ticketId: ticket.id, reason })
+      },
       memory: ticket => {
+        // Direct chats are private threads: recall only memories that belong to
+        // the same conversation. Cross-ticket recall stays for repository work.
+        const thread = directChatThread(ticket)
         const lexical = longTermMemory.query({
           ticketId: ticket.id,
           text: ticket.title,
-          limit: 3,
+          limit: thread ? 50 : 3,
         })
-        // Router global memory: same-Thread decisions and cold digests are
-        // injected even when the new title shares no lexical token.
+        const scoped = thread
+          ? lexical.filter(entry => {
+            const source = store.getDoc<Ticket>('ticket', entry.ticketId)
+            return source ? sharesDirectChatThread(source, thread) : false
+          }).slice(0, 3)
+          : lexical
+        // Same-Thread decisions and cold digests are injected even when the
+        // new title shares no lexical token.
         const threaded = longTermMemory.forThreads(ticket.threadKeys, 3, ticket.id)
         const seen = new Set<string>()
-        const entries = [...threaded, ...lexical].filter(entry => {
+        const entries = [...threaded, ...scoped].filter(entry => {
           if (seen.has(entry.id)) return false
           seen.add(entry.id)
           return true
@@ -708,11 +772,14 @@ export class Runtime {
         }))
       },
       routerMemory: ticket => {
+        // A direct chat must never inherit another conversation's decisions:
+        // global decision recall is for repository work, not a private thread.
+        const direct = directChatThread(ticket) !== undefined
         const seen = new Set<string>()
         return [
-          ...longTermMemory.recentDecisions(3, ticket.id),
+          ...(direct ? [] : [longTermMemory.recentDecisions(3, ticket.id)]),
           ...longTermMemory.forThreads(ticket.threadKeys, 3, ticket.id),
-        ].filter(entry => {
+        ].flat().filter(entry => {
           if (seen.has(entry.id)) return false
           seen.add(entry.id)
           return true

@@ -60,7 +60,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
 - [x] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team`/`team_status`/`complete_team` → member job → `TEAM_MEMBER_DONE` → 汇总报告；team 行持久化到 SQLite，`ds-agent team`/`teams` 可离线查看。Router 只见父 Assignment 报告（T14；unit + harness + live e2e）
 - [x] **主人编写的技能** — 在 agent home 的 `skills/<id>/SKILL.md` 添加一份操作手册，无需改代码。Prompt 只带 id 和一行描述（上限 2000 字符），`read_skill` 按需加载正文；技能不能授予工具或扩大角色权限。`ds-agent skills` 查看索引。详见 [docs/SKILLS.md](./docs/SKILLS.md)
-- [x] **主人定义 routines** — `routines.json` 按每 N 分钟在指定频道和线程投递一条 prompt。daemon 在原有 tick 上检查到期项，长时间停机后只补一次而不回放每个错过的时段，last-run 持久化在 SQLite；routine 走正常 ingress、规则和审批边界，模型不能创建或修改。`ds-agent routines` 查看配置。详见 [docs/ROUTINES.md](./docs/ROUTINES.md)
+- [x] **主人定义 routines** — `routines.json` 按每 N 分钟，或在指定 UTC 时间和星期几每天一次，在指定频道和线程投递一条 prompt。daemon 在原有 tick 上检查到期项，长时间停机后只补一次而不回放每个错过的时段，last-run 持久化在 SQLite；routine 走正常 ingress、规则和审批边界，模型不能创建或修改。`ds-agent routines` 查看配置。详见 [docs/ROUTINES.md](./docs/ROUTINES.md)
 - [x] **外发动作先审批** — Worker 可以用 `request_approval` 提交一个精确动作并暂停推进；Router 向主人提问，`ds-agent approve` / `ds-agent deny` 记录决定和备注，然后走正常 RESUME。模型只能申请、不能决定；聊天里的“可以”不构成批准。`ds-agent approvals` 查看待批项。详见 [docs/APPROVALS.md](./docs/APPROVALS.md)
 - [x] **Worker 调用本地专家 Agent** — 主人配置后，Worker 可用 `delegate_agent` 让本机 CLI Agent（Claude Code、Codex、OpenCode、Hermes 或自定义）执行一个自包含任务。不经过 shell，cwd 为 Worker 工作区，超时/输出有界，环境变量走白名单；`ds-agent agents` 查看配置。详见 [docs/LOCAL_AGENTS.md](./docs/LOCAL_AGENTS.md)
 - [x] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；`LifecycleBus` 常驻提供读取模型，`ds-agent ui` 提供只读、必需 token 的 loopback 面板（T15/T49）
@@ -116,7 +116,7 @@ LofiSu × Grokbot（CoderBot）。
 ### §8 未决问题（明确不做进 M11）
 
 - [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime；#130 增加 A2A HMAC 的 `RemoteMeshRegistry`/`MeshInbox`（心跳、上限、loopback 默认拒绝），但默认不监听、远端 dispatch 尚未接入本地放置队列；等待启动的 Worker 进入有界 FIFO 队列（`DS_AGENT_MESH_QUEUE`，默认 100）
-- [~] 跨 Ticket / 跨月长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime：hot Ticket/Decision（1000 条 / 90 天）+ cold Thread digest（200 条 / 3650 天）；真实跨月行为有界但未按自然月测量
+- [~] 跨 Ticket / 跨月长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime：hot Ticket/Decision（1000 条 / 90 天）+ cold Thread digest（200 条 / 3650 天）；召回为词法 + 一跳标签 + 可选向量混合（`EmbeddingPort`，默认离线 hashed embedding，`DS_AGENT_SEMANTIC_RECALL=0` 可关闭）；真实跨月行为有界但未按自然月测量
 - [x] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；`ds-agent ui` 只读 loopback 面板（必需 token、GET-only、生命周期事件白名单、speculative 隐藏、SSE 背压）
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— `A2ARouter` 常驻 Runtime，HMAC-SHA256 HTTP transport 已实现（`a2a-auth.ts`/`a2a-http.ts`）；默认不监听，跨主机暴露与远端 dispatch 仍需 operator 决策

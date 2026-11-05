@@ -192,6 +192,117 @@ describe('routine scheduling', () => {
   })
 })
 
+describe('daily routine scheduling', () => {
+  const THURSDAY_0800 = Date.UTC(2026, 10, 5, 8, 0)
+  const THURSDAY_1200 = Date.UTC(2026, 10, 5, 12, 0)
+  const FRIDAY_0800 = Date.UTC(2026, 10, 6, 8, 0)
+  const SATURDAY_1200 = Date.UTC(2026, 10, 7, 12, 0)
+  const MONDAY_0800 = Date.UTC(2026, 10, 9, 8, 0)
+
+  function daily(overrides: Record<string, unknown> = {}): RoutineSpec {
+    return {
+      id: 'morning',
+      at: '08:00',
+      days: [0, 1, 2, 3, 4, 5, 6],
+      prompt: 'Brief me.',
+      source: 'cli',
+      thread: 'local',
+      actor: 'you',
+      ...overrides,
+    } as RoutineSpec
+  }
+
+  function runnerFor(spec: RoutineSpec): {
+    runner: RoutineScheduler
+    fired: ReturnType<typeof routineTrigger>[]
+    lastRun: Map<string, number>
+  } {
+    const lastRun = new Map<string, number>()
+    const fired: ReturnType<typeof routineTrigger>[] = []
+    const runner = new RoutineScheduler([spec], {
+      now: () => 0,
+      lastRun: id => lastRun.get(id),
+      saveLastRun: (id, at) => { lastRun.set(id, at) },
+      fire: trigger => { fired.push(trigger) },
+    })
+    return { runner, fired, lastRun }
+  }
+
+  it('parses a daily routine, defaults to every day, and sorts days', () => {
+    const home = tempHome()
+    writeRoutines(home, [
+      { id: 'morning', at: '08:00', prompt: 'Brief me.' },
+      { id: 'weekday', at: '09:30', days: [5, 1, 3], prompt: 'Standup.' },
+    ])
+    expect(loadRoutines(home)).toEqual([
+      daily({ at: '08:00' }),
+      daily({ id: 'weekday', at: '09:30', days: [1, 3, 5], prompt: 'Standup.' }),
+    ])
+  })
+
+  it('rejects ambiguous, missing, or malformed daily schedules', () => {
+    const home = tempHome()
+    for (const bad of [
+      { id: 'both', everyMinutes: 60, at: '08:00', prompt: 'Ambiguous.' },
+      { id: 'neither', prompt: 'Nothing.' },
+      { id: 'bad-time', at: '8:00', prompt: 'Bad.' },
+      { id: 'bad-hour', at: '24:00', prompt: 'Bad.' },
+      { id: 'bad-minute', at: '08:60', prompt: 'Bad.' },
+      { id: 'empty-days', at: '08:00', days: [], prompt: 'Bad.' },
+      { id: 'bad-day', at: '08:00', days: [7], prompt: 'Bad.' },
+      { id: 'dup-days', at: '08:00', days: [1, 1], prompt: 'Bad.' },
+    ]) {
+      writeRoutines(home, [bad])
+      expect(() => loadRoutines(home), JSON.stringify(bad)).toThrow()
+    }
+  })
+
+  it('arms at the most recent due slot instead of firing on first sight', () => {
+    const { runner, fired, lastRun } = runnerFor(daily())
+    expect(runner.tick(THURSDAY_1200)).toEqual([])
+    expect(fired).toEqual([])
+    expect(lastRun.get('morning')).toBe(THURSDAY_0800)
+  })
+
+  it('fires once at the slot and not again until the next slot', () => {
+    const { runner, fired, lastRun } = runnerFor(daily())
+    runner.tick(THURSDAY_0800 - 60_000)
+    expect(runner.tick(THURSDAY_0800)).toEqual(['morning'])
+    expect(fired).toHaveLength(1)
+    expect(fired[0]?.at).toBe('2026-11-05T08:00:00.000Z')
+    expect(lastRun.get('morning')).toBe(THURSDAY_0800)
+    expect(runner.tick(THURSDAY_0800 + 60 * 60_000)).toEqual([])
+    expect(fired).toHaveLength(1)
+    expect(runner.tick(FRIDAY_0800 + 5 * 60_000)).toEqual(['morning'])
+    expect(fired).toHaveLength(2)
+  })
+
+  it('skips days that are not selected', () => {
+    const { runner, fired } = runnerFor(daily({ days: [1, 2, 3, 4, 5] }))
+    runner.tick(FRIDAY_0800 - 60_000)
+    expect(runner.tick(FRIDAY_0800)).toEqual(['morning'])
+    expect(runner.tick(SATURDAY_1200)).toEqual([])
+    expect(runner.tick(MONDAY_0800)).toEqual(['morning'])
+    expect(fired).toHaveLength(2)
+  })
+
+  it('fires once for a long gap and uses the latest slot as the trigger time', () => {
+    const { runner, fired } = runnerFor(daily())
+    runner.tick(THURSDAY_0800 - 60_000)
+    runner.tick(THURSDAY_0800)
+    expect(runner.tick(MONDAY_0800 + 30 * 60_000)).toEqual(['morning'])
+    expect(fired).toHaveLength(2)
+    expect(fired[1]?.at).toBe('2026-11-09T08:00:00.000Z')
+  })
+
+  it('ignores a clock that moves back before the last slot', () => {
+    const { runner, fired } = runnerFor(daily())
+    runner.tick(THURSDAY_1200)
+    expect(runner.tick(THURSDAY_0800 - 60_000)).toEqual([])
+    expect(fired).toEqual([])
+  })
+})
+
 describe('routine trigger', () => {
   it('is an owner-authored direct trigger on the configured channel', () => {
     const trigger = routineTrigger(spec({ source: 'imessage', thread: 'chat_42', actor: 'owner' }), '2026-11-05T08:00:00.000Z')

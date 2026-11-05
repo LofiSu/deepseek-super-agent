@@ -7,7 +7,7 @@ import type { Model, ModelMessage } from './model.ts'
 import type { SkillInfo } from '../env/skills.ts'
 import { systemPrompt, type PromptFiles } from './prompts.ts'
 import type { LocalAgentInfo } from '../env/local-agents.ts'
-import { routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
+import { directChatThread, routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
 import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
@@ -42,6 +42,10 @@ export interface HarnessOptions {
   queueLimit?: number
   /** Return a reserved mesh slot when a queued Worker fails before it starts. */
   releaseNode?: (ticketId: string) => void
+  /** True when the Router already queued a reply for this ticket. */
+  repliedTo?: (ticketId: string) => boolean
+  /** End a direct-chat ticket the Router already answered, before a Worker starts. */
+  stopAnsweredDirectChat?: (ticket: Ticket, reason: string) => void
   /** Cross-ticket recall lines injected into Router and Worker turns. */
   memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string; refs?: ObjectRef[] }[]
   /** Owner-editable persona, standing instructions, and owner context. */
@@ -76,6 +80,31 @@ export function normalizeQueueLimit(value: number | undefined): number {
 }
 
 /** Async ReAct loop plus the in-process daemon that launches workers. */
+export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = []): string {
+  const mode = ticket.speculative ? 'speculative' : 'normal'
+  const directChat = directChatThread(ticket)
+  return [
+    ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
+    `ticketId=${ticket.id}`,
+    `triggerId=${ticket.originTriggerId}`,
+    `title=${ticket.title}`,
+    // The title is capped at 80 characters; a direct chat needs the whole
+    // message because the Router answers it without a Worker reading the brief.
+    ...(directChat ? [`message=${ticket.brief}`] : []),
+    `mode=${mode}`,
+    'decision=accepted-by-gate',
+    ...extraLines,
+    // A direct iMessage is a conversation, not a thread ticket: the Router may
+    // answer it briefly instead of leaving a vetoed message unanswered. Group
+    // chats are excluded: only a 1:1 chat gets the conversational exception.
+    ...(directChat ? [
+      'direct-chat=true',
+      'tone=warm, playful, cute: when they are comfortable, put 1-2 emoji in your reply, react to what they said, and end with an easy question. Write one short paragraph by default; add a second or third bubble only for a genuinely separate thought (no headings or lists). When answering an earlier line rather than the newest message, start that bubble with a short "> quote" of the earlier line. Follow their latest style instruction (stop using a word, emoji, or tone when asked) over this default. If they went quiet, open a fresh topic or tease them gently; never close the chat.',
+    ] : []),
+    'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
+  ].join('\n')
+}
+
 export class Harness {
   private readonly chains = new Map<string, Promise<void>>()
   private inflight: Promise<void>[] = []
@@ -198,23 +227,29 @@ export class Harness {
       this.opts.log(`[harness] parallel workers=${this.running.size} sessions=${[...this.running].join(',')}`)
     }
     if (!ticket.assignments.at(-1)) throw new Error(`ticket ${ticket.id} has no assignment`)
-    const mode = ticket.speculative ? 'speculative' : 'normal'
     const refsLine = formatRefs(ticket.refs)
-    const routerPrompt = [
-      ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
-      `ticketId=${ticket.id}`,
-      `triggerId=${ticket.originTriggerId}`,
-      `title=${ticket.title}`,
-      `mode=${mode}`,
-      'decision=accepted-by-gate',
+    const routerPrompt = routerPromptFor(ticket, [
       ...(refsLine ? [refsLine] : []),
       ...this.memoryLines(ticket, 'router'),
-      'If this ticket should not run, call assess_trigger with kind=stop before the worker starts.',
-    ].join('\n')
+    ])
     // Sequence point (T06/T08): Router turn(s) complete first. A Router veto
     // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
     // Capacity is picked after the Routers so a veto never consumes a slot.
-    const startWorker = (): Promise<void> | undefined => this.startOrQueue(ticket.id)
+    const startWorker = (): Promise<void> | undefined => {
+      // A direct chat the Router already answered is finished. Give the
+      // conversation no Worker even when the Router forgot assess_trigger
+      // stop: a conversational reply is the whole deliverable.
+      const directChat = directChatThread(ticket) !== undefined
+      if (directChat && this.opts.repliedTo?.(ticket.id)) {
+        const latest = this.opts.store.getDoc<Ticket>('ticket', ticket.id)
+        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=answered-direct-chat`)
+        if (!latest?.ended) {
+          this.opts.stopAnsweredDirectChat?.(ticket, 'direct-chat answered by Router')
+        }
+        return undefined
+      }
+      return this.startOrQueue(ticket.id)
+    }
     let chain: Promise<void> = Promise.resolve()
     if (this.opts.singleSession) {
       this.opts.log(`[harness] single-session ticketId=${ticket.id}`)

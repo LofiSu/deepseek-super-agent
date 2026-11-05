@@ -5,8 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import {
   APPLE_EPOCH_OFFSET_SECONDS,
-  ChatDbImessageApi,
-  IMESSAGE_ADMISSION_ERROR,
+  ChatDbImessageApi,  IMESSAGE_ADMISSION_ERROR,
   IMESSAGE_GROUP_CHAT_STYLE,
   ImessageOutboxAdapter,
   ImessageSchemaError,
@@ -23,6 +22,7 @@ import {
   type ImessageInbound,
   type ImessagePullOptions,
 } from '../src/channels/imessage.ts'
+import { coalesceTriggers } from '../src/cli/channel-loop.ts'
 import { PermanentDeliveryError } from '../src/channels/outbox-adapter.ts'
 import { resolveImessageHandle, runImessageCommand } from '../src/cli/imessage.ts'
 import type { OutboxRow } from '../src/shared/types.ts'
@@ -534,6 +534,48 @@ describe('ChatDbImessageApi pull', () => {
       expect(pulled.triggers.map(trigger => trigger.id)).toEqual(['imessage_G1', 'imessage_G4'])
       expect(pulled.lastRowId).toBe(4)
       expect(await api.pull(pulled.lastRowId)).toEqual([])
+    } finally {
+      api.close()
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('turns an attachment-only bubble into a placeholder trigger', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-imessage-attachment-'))
+    const dbPath = path.join(dir, 'chat.db')
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, room_name TEXT);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
+        date INTEGER, service TEXT, handle_id INTEGER, is_from_me INTEGER
+      );
+      CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+      CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+      CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, mime_type TEXT, transfer_name TEXT, is_sticker INTEGER);
+    `)
+    db.exec(`
+      INSERT INTO handle (ROWID, id) VALUES (1, '+15550000000');
+      INSERT INTO chat (ROWID, guid, chat_identifier, style) VALUES (1, 'iMessage;-;+15550000000', '+15550000000', 45);
+      INSERT INTO message VALUES (1, 'G1', NULL, NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO message VALUES (2, 'G2', 'look', NULL, 0, 'iMessage', 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 1), (2, 1), (3, 1);
+      INSERT INTO message_attachment_join VALUES (1, 1), (3, 2);
+      INSERT INTO attachment VALUES (1, 'image/png', 'cat.png', 0);
+      INSERT INTO attachment VALUES (2, 'image/jpeg', 'dog.jpg', 0);
+    `)
+    // Some attachment bubbles store the object replacement character as text
+    // instead of NULL; it must not be sent to the Router as an invisible reply.
+    db.prepare('INSERT INTO message VALUES (3, ?, ?, NULL, 0, ?, 1, 0)')
+      .run('G3', '\uFFFC', 'iMessage')
+    const api = new ChatDbImessageApi(dbPath)
+    try {
+      const rows = await api.pull(0)
+      expect(rows.map(row => row.text)).toEqual(['[图片]', 'look', '[图片]'])
+      const pulled = await new ImessageSource(api).pull(0)
+      expect(pulled.triggers.map(trigger => trigger.id)).toEqual(['imessage_G1', 'imessage_G2', 'imessage_G3'])
     } finally {
       api.close()
       db.close()
@@ -1300,5 +1342,27 @@ describe('ChatDbImessageApi send', () => {
       DS_AGENT_IMSG_TEXT: 'hi',
     })
     expect(env).toEqual({ PATH: '/usr/bin:/bin', HOME: '/Users/test', DS_AGENT_IMSG_TEXT: 'hi' })
+  })
+
+  it('merges a burst from one direct chat into one trigger', () => {
+    const first = imessageTrigger(sample({ rowId: 1, guid: 'GUID-A', text: '第一句' }))
+    const second = imessageTrigger(sample({
+      rowId: 2,
+      guid: 'GUID-B',
+      text: '第二句',
+      at: '2026-11-02T08:00:01.000Z',
+    }))
+    const merged = coalesceTriggers([first, second])
+    expect(merged).toHaveLength(1)
+    expect(merged[0]!.text).toBe('第一句\n第二句')
+    expect(merged[0]!.at).toBe(second.at)
+  })
+
+  it('never merges groups or a different sender', () => {
+    const direct = imessageTrigger(sample({ rowId: 1, guid: 'GUID-A' }))
+    const other = imessageTrigger(sample({ rowId: 2, guid: 'GUID-B', handle: '+8613800000001' }))
+    const group = imessageTrigger(sample({ rowId: 3, guid: 'GUID-C', chatStyle: IMESSAGE_GROUP_CHAT_STYLE }))
+    expect(coalesceTriggers([direct, other])).toHaveLength(2)
+    expect(coalesceTriggers([direct, group])).toHaveLength(2)
   })
 })
