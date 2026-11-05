@@ -125,6 +125,23 @@ describe('semantic recall', () => {
     second.close()
   })
 
+  it('recalls morphologically related text with the shipped embedding', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store, { embedding: new HashedEmbedding() })
+    const saved = memory.put('ticket_a', 'deployment pipeline failed')
+    expect(memory.query({ ticketId: 'reader', text: 'deploying the pipeline broke' })
+      .map(entry => entry.id)).toEqual([saved.id])
+    store.close()
+  })
+
+  it('rejects an unrelated query with the shipped embedding and default floor', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store, { embedding: new HashedEmbedding() })
+    memory.put('ticket_a', 'invoice csv rejected blank rows')
+    expect(memory.query({ ticketId: 'reader', text: 'deployment pipeline failed' })).toEqual([])
+    store.close()
+  })
+
   it('is on by default in the Runtime and can be switched off', async () => {
     const on = freshRuntime({ jobDelayMs: 0, watchdogIntervalMs: 60_000 })
     try {
