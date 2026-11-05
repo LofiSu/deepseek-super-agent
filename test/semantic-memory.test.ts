@@ -213,17 +213,60 @@ describe('semantic recall', () => {
     const second = new Store(home)
     const memory = new SpillBackedLongTermMemory(second, { embedding: counting })
     memory.query({ ticketId: 'reader', text: 'note' })
-    // One query vector plus at most the backfill budget.
-    expect(calls).toBeLessThanOrEqual(1 + 32)
+    // One query vector plus exactly the backfill budget.
+    expect(calls).toBe(1 + 32)
     memory.query({ ticketId: 'reader', text: 'note' })
     // The 32 cached entries cost no provider call; only the remaining 8 plus
     // the query vector.
-    expect(calls).toBeLessThanOrEqual(1 + 32 + 1 + 8)
+    expect(calls).toBe(1 + 32 + 1 + 8)
     memory.query({ ticketId: 'reader', text: 'note' })
     // Everything is cached now, so only the query vector is embedded.
-    expect(calls).toBeLessThanOrEqual(1 + 32 + 1 + 8 + 1)
+    expect(calls).toBe(1 + 32 + 1 + 8 + 1)
     expect(second.listDocs<{ embedding?: number[] }>('ltm')
       .every(entry => (entry.embedding?.length ?? 0) > 0)).toBe(true)
+    second.close()
+  })
+
+  it('never scores a vector left by a different port', () => {
+    const home = tempHome()
+    const first = new Store(home)
+    const portA: EmbeddingPort = { id: 'port-a', embed: () => [1, 0] }
+    const old = new SpillBackedLongTermMemory(first, { embedding: portA })
+    for (let index = 0; index < 40; index += 1) old.put('ticket_a', `note ${index}`)
+    first.close()
+
+    // Same dimensions, incompatible space: stale port-a vectors would score 1.
+    const portB: EmbeddingPort = {
+      id: 'port-b',
+      embed: text => (text === 'probe' ? [1, 0] : [0, 1]),
+    }
+    const second = new Store(home)
+    const memory = new SpillBackedLongTermMemory(second, { embedding: portB })
+    expect(memory.query({ ticketId: 'reader', text: 'probe' })).toEqual([])
+    second.close()
+  })
+
+  it('does not let empty provider results starve later entries', () => {
+    const home = tempHome()
+    const first = new Store(home)
+    const legacy = new SpillBackedLongTermMemory(first)
+    for (let index = 0; index < 40; index += 1) legacy.put('ticket_a', `note ${index}`)
+    first.close()
+
+    let entryCalls = 0
+    const flaky: EmbeddingPort = {
+      id: 'flaky',
+      embed: text => {
+        if (text === 'probe') return [1, 0]
+        entryCalls += 1
+        return entryCalls <= 32 ? [] : [1, 0]
+      },
+    }
+    const second = new Store(home)
+    const memory = new SpillBackedLongTermMemory(second, { embedding: flaky })
+    // The first 32 entries return empty; the cache budget must not be consumed
+    // by them, so the last 8 are embedded and recalled in the same read.
+    expect(memory.query({ ticketId: 'reader', text: 'probe' })).toHaveLength(8)
     second.close()
   })
 

@@ -30,6 +30,7 @@ export {
   SpillBackedLongTermMemory,
   type LongTermMemoryEntry,
   type LongTermMemoryKind,
+  type LongTermMemoryOptions,
   type LongTermMemoryQuery,
   type LongTermMemoryTier,
 } from './long-term.ts'

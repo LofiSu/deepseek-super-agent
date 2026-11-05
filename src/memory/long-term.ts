@@ -87,6 +87,12 @@ const SUMMARY_CHARS = 160
 const SEMANTIC_HEAD_CHARS = 300
 /** Bound lazy write-back during a read so an upgrade cannot write 1200 docs. */
 const MAX_EMBEDDING_BACKFILL = 32
+/**
+ * Provider calls per read are bounded separately from persisted vectors. An
+ * empty or failed result does not consume the cache budget, so a bad prefix
+ * cannot starve later entries; the hard call cap still bounds provider work.
+ */
+const MAX_EMBEDDING_CALLS = MAX_EMBEDDING_BACKFILL * 2
 
 /**
  * Persistent cross-ticket memory index (T48). A body is stored as a spill;
@@ -110,7 +116,11 @@ export class SpillBackedLongTermMemory {
   constructor(store: Store, redact?: (text: string) => string, options?: LongTermMemoryOptions)
   constructor(
     private readonly store: Store,
-    /** Applied before anything is written, including caller-supplied `put` text. */
+    /**
+     * Applied before anything is written, including caller-supplied `put` text.
+     * It must be idempotent: the embedding boundary redacts again on paths that
+     * already pass a redacted body.
+     */
     redactOrOptions: ((text: string) => string) | LongTermMemoryOptions = text => text,
     options: LongTermMemoryOptions = {},
   ) {
@@ -374,6 +384,7 @@ export class SpillBackedLongTermMemory {
     // one recall over a legacy index into thousands of calls inside a
     // transaction; uncached entries join over successive queries.
     let embeddingCalls = 0
+    let embeddingWrites = 0
     return this.store.atomic(() => {
       const candidates: QueryCandidate[] = []
       const tagIndex = new Map<string, number[]>()
@@ -394,19 +405,27 @@ export class SpillBackedLongTermMemory {
         if (this.embedding && queryVector && embeddingId) {
           let vector = entry.embedding
           const stale = !vector || entry.embeddingId !== embeddingId || vector.length !== queryVector.length
-          if (stale && embeddingCalls < MAX_EMBEDDING_BACKFILL) {
-            embeddingCalls += 1
-            try {
-              vector = [...this.embedding.embed(semanticHead(this.redact(body)))]
-            } catch {
-              vector = undefined
-            }
-            if (vector && vector.length > 0) {
-              entry.embedding = vector
-              entry.embeddingId = `${this.embedding.id}:${vector.length}`
-              this.store.putDoc('ltm', entry.id, entry)
-            } else {
-              vector = undefined
+          if (stale) {
+            // Never score a vector from another port: vectors in different
+            // embedding spaces can share dimensions and produce false hits.
+            vector = undefined
+            if (embeddingCalls < MAX_EMBEDDING_CALLS && embeddingWrites < MAX_EMBEDDING_BACKFILL) {
+              embeddingCalls += 1
+              try {
+                vector = [...this.embedding.embed(semanticHead(this.redact(body)))]
+              } catch {
+                vector = undefined
+              }
+              if (vector && vector.length > 0) {
+                entry.embedding = vector
+                entry.embeddingId = `${this.embedding.id}:${vector.length}`
+                this.store.putDoc('ltm', entry.id, entry)
+                embeddingWrites += 1
+              } else {
+                // Empty or failed: retry on a later read without consuming the
+                // cache budget, so one bad prefix cannot starve the rest.
+                vector = undefined
+              }
             }
           }
           if (vector && vector.length === queryVector.length) similarity = cosine(queryVector, vector)

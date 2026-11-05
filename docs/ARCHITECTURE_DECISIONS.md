@@ -825,13 +825,19 @@ rewrite `PLAN.md`; link to the contract instead.
      during a query disables the semantic branch for that query; lexical and
      tag-hop results are still returned.
   6. **Bounded backfill.** Vectors carry a port id that includes their
-     dimensions and are recomputed when it changes. A read calls the port for
-     at most `MAX_EMBEDDING_BACKFILL` (32) uncached entries and persists the
-     results; entries beyond the budget are scored on a later read once the
-     earlier ones are cached. Upgrading a 1000-entry index therefore cannot
-     turn one recall into 1000 sequential provider calls or an unbounded write
-     transaction. An empty provider result is not cached, so a transient empty
-     response cannot permanently disable an entry.
+     dimensions and are recomputed when it changes. A read persists at most
+     `MAX_EMBEDDING_BACKFILL` (32) new vectors and makes at most
+     `MAX_EMBEDDING_CALLS` (64) entry-embedding calls plus one query vector;
+     entries beyond the budget join
+     on a later read once the earlier ones are cached. Empty or failed results
+     do not consume the 32-vector budget, so a bad prefix cannot starve later
+     entries, and an empty result is not cached, so a transient response cannot
+     permanently disable an entry. A vector whose `embeddingId` does not match
+     the active port is never scored, even when the call budget is exhausted;
+     different embedding spaces can share dimensions and would otherwise
+     produce false hits. Upgrading a 1000-entry index therefore cannot turn one
+     recall into 1000 sequential provider calls or an unbounded write
+     transaction.
   7. **Security is unchanged.** Redaction runs before every port call, on
      writes and on the query text. Every returned hit, semantic or lexical,
      still grants the reader ticket access to that exact spill. No new

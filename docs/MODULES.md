@@ -269,9 +269,12 @@ ticket title, the decision reason, or the newest archived digest summary.
 Indexing the whole body would dilute a short title query below any useful
 cosine. Vectors are stored on the entry (`embedding`, `embeddingId`) and
 recomputed lazily when the port id or dimensions change, including for entries
-written before a port existed. A read calls the port and persists vectors for
-at most 32 uncached entries, so an upgrade cannot turn one recall into
-thousands of provider calls or an unbounded write. `query()` embeds the
+written before a port existed. A read persists at most 32 new vectors and
+makes at most 64 entry-embedding calls plus one query vector; empty or failed
+results do not consume the
+vector budget, so a bad prefix cannot starve later entries, and a vector from a
+different port is never scored. An upgrade therefore cannot turn one recall
+into thousands of provider calls or an unbounded write. `query()` embeds the
 query once and marks an entry as a semantic candidate when
 `cosine >= embeddingFloor` (default 0.35, clamped to 0..1;
 `RuntimeOptions.embeddingFloor` or `DS_AGENT_EMBEDDING_FLOOR`). Semantic
