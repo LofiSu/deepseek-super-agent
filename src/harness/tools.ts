@@ -89,7 +89,7 @@ export class ToolRegistry {
         teams: deps.teams,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
-      ...(deps.localAgents ? localAgentTools(deps.localAgents, log) : []),
+      ...(deps.localAgents ? localAgentTools(deps.localAgents, store, log) : []),
       ...(deps.skills ? skillTools(deps.skills) : []),
     ]
   }
@@ -587,7 +587,11 @@ function skillTools(registry: SkillRegistry): ToolDef[] {
  * and supply a task; the command, argv, cwd, environment, and limits come from
  * the owner's configuration. Workers delegate; the Router may only list.
  */
-function localAgentTools(registry: LocalAgentRegistry, log: (line: string) => void): ToolDef[] {
+function localAgentTools(
+  registry: LocalAgentRegistry,
+  store: Store,
+  log: (line: string) => void,
+): ToolDef[] {
   return [
     {
       name: 'list_local_agents',
@@ -601,13 +605,26 @@ function localAgentTools(registry: LocalAgentRegistry, log: (line: string) => vo
       description: 'Run a configured local specialist agent on one self-contained task. Verify its output before reporting.',
       parameters: schema({
         agent: { type: 'string', description: 'Configured agent id; see list_local_agents.' },
-        task: { type: 'string', description: 'Complete task with all context the agent needs.' },
+        task: {
+          type: 'string',
+          description: 'Complete task with all context the agent needs. Must not start with "-": it is one argv entry and would be read as an option.',
+        },
       }),
       roles: ['worker'],
       run: guard('worker', 'delegate_agent', async (args, ctx) => {
         const agent = String(args.agent ?? '').trim()
         const task = String(args.task ?? '')
         if (!agent) throw new UserError('delegate_agent needs an agent id')
+        // A local agent runs outside the EnvPort sandbox, so it cannot be
+        // isolated for speculation, and an ended ticket must not start one.
+        // Like mutableMode, this is a start-time check: a run already in
+        // flight is bounded by its own timeout, not cancelled on ticket end.
+        const ticket = ticketOf(store, ctx)
+        if (!ticket) throw new UserError('delegate_agent needs an active ticket')
+        if (ticket.ended) throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome})`)
+        if (ticket.speculative) {
+          throw new UserError('delegate_agent is unavailable to speculative workers (local agents run unsandboxed)')
+        }
         const result = await registry.run(agent, task, ctx.sessionId)
         log(
           `[local-agent] agent=${agent} session=${ctx.sessionId} code=${result.code}`
