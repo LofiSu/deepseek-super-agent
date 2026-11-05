@@ -238,7 +238,7 @@ flowchart TB
 | T02 | Efficient：吞吐 vs 连续折中 | §2 | M1+M3 | Router 批处理窗口；Eval 同 Thread batch |
 | T03 | Proactive：静默试探 | §3.4 | M7 | silent Assignment + `DeliverGate` |
 | T04 | Persistent：状态可恢复 | §5 | M2+M1 | SQLite + `SessionJournal`；`Runtime.resume` 从 Store 续跑 |
-| T05 | Dual-layer Router/Worker | §2 | M1+M3 | `Role = 'router'\|'worker'\|'watchdog'`；分角色 tools/prompts/models |
+| T05 | Dual-layer Router/Worker | §2 | M1+M3 | `Role = 'router'\|'worker'\|'watchdog'`；分角色 tools/models；分层 prompt stack（identity→persona→instructions→owner→team→reach→rules→memory→style→long-tasks→role；`PERSONA.md`/`AGENTS.md`/`USER.md`） |
 | T06 | Router = Sequence Point | §2 | M1 | Router tools 默认无 bash（`tools.ts` 的 `roles` 白名单）；批 Triggers 进一轮 |
 | T07 | Router 轻模型 | §2 | M1 | `models.router`（`roleModelsFromEnv`）默认小模型 / Mock |
 | T08 | Trigger batching during LLM round | §2 | M3+M1 | `Evals.evaluateDue` 合并同 Thread 积压；Router turn 开始时 drain inbox |
@@ -255,10 +255,10 @@ flowchart TB
 | T19 | Subscribe Fast Path bypass Router | §3.2 | M5 | 人消息达 Ticket → `bypass=subscription`；日志含 ticketId |
 | T20 | 多对多 Worker↔Thread | §3.2 | M5 | Subscriptions on Thread；`followForContext` |
 | T21 | Worker unsubscribe / handback | §3.2 | M5 | `markUnrelated` / `handback` → 回 Eval |
-| T22 | Router 仍观察全局 | §3.2 | M3 | Intake 记 disposition；Router 可读全部 Trigger |
-| T23 | Inline & Spill 上下文缓存 | §3.3 | M6 | Inline `{summary,spillIds}`；`spill.put` |
-| T24 | Locality：ID+summary → neighbors → spill truncate+continue | §3.3 | M6 | `read_object` 分页；neighbor 查询 |
-| T25 | Chain of Recall（Trigger/Thread/Worker Session 对象图） | §3.3 | M6 | 对象 id 引用图；工具只按 id 拉 |
+| T22 | Router 仍观察全局 | §3.2 | M3 | Intake 记 disposition；`Runtime.start()` 常驻 Router Session，`observe.*` 事件入 journal，assessment 读取 `routerSession` |
+| T23 | Inline & Spill 上下文缓存 | §3.3 | M6 | `inlineOrSpill(text, put, refs)`：窗口内保留 text/summary + spill id；refs 作为独立字段注入 task 并随 spill 持久化 |
+| T24 | Locality：ID+summary → neighbors → spill truncate+continue | §3.3 | M6 | `read_object` 分页 + `refs`；对象句柄 `kind:id` 可继续展开 |
+| T25 | Chain of Recall（Trigger/Thread/Worker Session 对象图） | §3.3 | M6 | `graph.ts` 对象句柄 + spill `refs` 列；`readObjectFor` 逐跳解析并重新校验 ACL |
 | T26 | Speculative：静默 Assignment | §3.4 | M7 | `speculate:true` 创建 Assignment；对外不可见 |
 | T27 | Deliver only if valuable else discard | §3.4 | M7 | `deliverGate.evaluate(report)` → deliver \| discard |
 | T28 | 例：silent reproduce-and-fix | §3.4 | M7+M11 | demo 场景：静默跑测，有价值才 reply |
@@ -756,13 +756,16 @@ export interface RawEvent {
 | 项 | 内容 |
 |----|------|
 | Path | `src/memory/` |
-| Files | `acl.ts`, `recall.ts`, `long-term.ts`, `index.ts` |
-| Inline | `recall.ts` 的 `inlineOrSpill`：写入 Session 的只有 summary + spill id |
-| Locality | `read_object` 工具（`tools.ts`）+ `acl.ts` 的 `readSpillFor`/`SPILL_PAGE`：按 ID 读取、分页、截断续读 |
-| Chain of Recall | 无独立 graph 文件：对象以 ID 引用，读取受 `spill_grants`（`acl.ts`）约束；`long-term.ts` 实现 ADR-010 词法归一化、标签命中与一跳标签扩展召回；embedding 召回未实现 |
-| Tools | 注册 `read_object` 给 router+worker |
-| Tests | spill 链式召回；截断续读 |
-| Accept | demo Spill + read_object |
+| Files | `acl.ts`, `graph.ts`, `recall.ts`, `long-term.ts`, `index.ts` |
+| Inline | `recall.ts` 的 `inlineOrSpill`：窗口内保持 text/summary + spill id；`refs` 作为独立字段注入 Router/Worker task，并写入 spill |
+| Locality | `read_object`（`tools.ts`）+ `acl.ts`：`read_object` 接受 spill id 或 `kind:id` 句柄，分页 200 字符，返回 `refs` 供下一跳 |
+| Chain of Recall | `graph.ts` 为 Trigger/Thread/Ticket/Decision/Session/Channel/Actor 生成稳定句柄；`refsForTrigger`/`refsForTicket`/`refsForDecision` 写进对象和 spill；`readObjectFor` 逐跳解析并重新校验 reader ticket 的 Thread 关系 |
+| Router global memory | `long-term.ts` 的 `rememberDecision`：每个 accept/ignore/stop/unavailable Decision 一条 `kind=decision` 记忆；Router 注入 `recentDecisions` + `forThreads`，Worker 注入 `forThreads` + 词法召回 |
+| Resident Router Session | `Runtime.start()` 为每个 shard 建立常驻 Session；`armRouter` 持久化 `sessions` 行与 `session.started`/`session.resumed`；`routerObserve` 记录 Trigger/Decision/Ticket/assessment 事件；`routerExclusive` 串行化 assessment 与 Router turn；assessment 读取 `routerHistory` |
+| Long-range memory | Ticket/Decision 为 hot（默认 1000 条 / 90 天）；被 prune 的条目折叠为 Thread digest（cold，默认 200 条 / 3650 天），`query({tier:'cold'})` 可召回 |
+| Tools | 注册 `read_object` 给 router+worker；返回 `{text, truncated, nextOffset, refs}` |
+| Tests | `test/spill.test.ts`、`test/memory-graph.test.ts`、`test/long-term-memory.test.ts`、`test/memory-recall-eval.test.ts`、`test/router-resident.test.ts` |
+| Accept | demo Spill + read_object；trigger→thread→ticket 多跳可走通；常驻 Router 跨 Ticket 可见 |
 | Deps | M1, M2 |
 | Wave | C |
 
@@ -929,7 +932,7 @@ pnpm install && pnpm test && pnpm demo
 | T45 | 评测与指标 | §7 实验指标 | 计数 + optional latency curveSamples | `<stateDir>/metrics.json` · `ds-agent metrics` · `summarizeCurve` |
 | T46 | 扩展 | Router sharding / multi-filter | registry 常驻 Runtime；`DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在 | `RouterShardRegistry` |
 | T47 | 扩展 | Worker mesh | capacity registry 常驻 Runtime；`DS_AGENT_MESH_CAPACITY` / `RuntimeOptions.meshCapacity` | `WorkerMeshRegistry` |
-| T48 | 长期记忆 | Long-term memory | Spill-backed LTM 常驻 Runtime；终止 Ticket 写入；ADR-010 词法+标签一跳召回；embedding/跨月实测未实现 | `SpillBackedLongTermMemory` |
+| T48 | 长期记忆 | Long-term memory | Spill-backed LTM 常驻 Runtime；终态 Ticket + 每个 Decision 写一条；hot/cold 两层：hot 按标题/标签召回，cold 为 Thread digest 跨月保留 | `SpillBackedLongTermMemory` |
 | T49 | 产品层 | Product UX without Session | 无会话读取模型 `LifecycleBus` 常驻 Runtime；只读 loopback UI 在本仓（`src/ui/server.ts`、`ds-agent ui`）；远程面板/多用户外置 | `core/lifecycle.ts` |
 | T50 | 互操作 | A2A | envelope router 常驻 Runtime；`runtime.sendA2A`；HMAC-SHA256 HTTP transport 已实现（`a2a-auth.ts`/`a2a-http.ts`），默认不监听 | `A2ARouter` |
 | T51 | 安全与隐私 | Security/privacy 深化 | 凭据托管、沙箱 seccomp、审计 | allowlist + redact 已落地；vault / seccomp 仍外置 |
@@ -1003,6 +1006,7 @@ deepseek-super-agent/
       index.ts
     memory/                    # M6
       acl.ts
+      graph.ts
       recall.ts
       long-term.ts
       index.ts
@@ -1096,7 +1100,7 @@ deepseek-super-agent/
 | §2 双层 + Router 批处理 + Worker | T05–T15 | 有 | harness + core | T09 sharding 已接线；T14/T15 部分（多话题 UX 由只读 UI 覆盖） |
 | §3.1 Fast/Slow | T16–T17 | 有 | ingress | Fast Path 确定性；Slow Path 可选模型策略（`DS_AGENT_SLOW_PATH=model`），超时/异常回退确定性规则 |
 | §3.2 订阅直通 | T18–T22 | 有 | subscribe + demo | T21 handback 弱 |
-| §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object | 多跳图可再密 |
+| §3.3 Inline/Spill/链式召回 | T23–T25 | 有 | memory + spill + read_object + graph refs | 多跳对象图已落地（Trigger/Thread/Ticket/Decision） |
 | §3.4 投机 | T26–T28 | 有 | speculate + deliver | — |
 | §4.1 异步 ReAct | T29–T32 | 有 | loop/jobs | — |
 | §4.2 信道规范 | T33–T35 | 有 | channels/norms | 无 email 信道/来源，也未实现 `formatEmail`；email 不在范围内（适配器需扩展 ingress 与 norms） |

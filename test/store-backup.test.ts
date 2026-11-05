@@ -78,7 +78,7 @@ CREATE TABLE schema_migrations (
   version INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
 );
-INSERT INTO schema_migrations(version, applied_at) VALUES(3, 'test');
+INSERT INTO schema_migrations(version, applied_at) VALUES(${LATEST_SCHEMA_VERSION}, 'test');
 CREATE TABLE corrupt_me (id INTEGER PRIMARY KEY, body TEXT);
 `)
   const insert = db.prepare('INSERT INTO corrupt_me(body) VALUES(?)')

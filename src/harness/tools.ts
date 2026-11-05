@@ -1,6 +1,8 @@
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
-import { readSpillFor } from '../memory/acl.ts'
+import type { LocalAgentRegistry } from '../env/local-agents.ts'
+import type { SkillRegistry } from '../env/skills.ts'
+import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
@@ -39,6 +41,10 @@ export interface ToolDeps {
   /** Append a nudge to the worker session journal (same effect as Watchdog.nudge). */
   nudge?: (sessionId: string, ticketId: string) => void
   teams?: TeamRegistry
+  /** Owner-configured local specialist agents. Absent means delegation is unavailable. */
+  localAgents?: LocalAgentRegistry
+  /** Owner-authored playbooks. Absent means read_skill is unavailable. */
+  skills?: SkillRegistry
 }
 
 interface ToolDef extends ToolSpec {
@@ -83,6 +89,8 @@ export class ToolRegistry {
         teams: deps.teams,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
+      ...(deps.localAgents ? localAgentTools(deps.localAgents, log) : []),
+      ...(deps.skills ? skillTools(deps.skills) : []),
     ]
   }
 
@@ -340,7 +348,7 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
     },
     {
       name: 'read_object',
-      description: 'Recall one page of a spilled object. The caller ticket or session must be granted.',
+      description: 'Recall one page of a spilled object or follow a ref from Chain of Recall. The caller ticket or session must be granted.',
       parameters: schema({
         id: { type: 'string' },
         offset: { type: 'number' },
@@ -350,14 +358,14 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
       run: guard('worker', 'read_object', async (args, ctx) => {
         const offset = Number(args.offset ?? 0)
         const limit = args.limit == null ? undefined : Number(args.limit)
-        const page = readSpillFor(store, String(args.id ?? ''), {
+        const page = readObjectFor(store, String(args.id ?? ''), {
           ticketId: ctx.ticketId,
           sessionId: ctx.sessionId,
         }, {
           offset: Number.isFinite(offset) ? offset : 0,
           limit: limit != null && Number.isFinite(limit) ? limit : undefined,
         })
-        log(`[memory] read_object id=${page.id} bytes=${page.text.length} total=${page.total}`)
+        log(`[memory] read_object id=${page.id} bytes=${page.text.length} total=${page.total} refs=${page.refs.length}`)
         return page
       }),
     },
@@ -502,6 +510,66 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const jobId = String(args.jobId ?? '')
         if (jobId) store.completeJob(jobId, 'stopped')
         return { status: 'stopped', jobId }
+      }),
+    },
+  ]
+}
+
+/**
+ * Owner-authored playbooks. The index is already in the system prompt; this
+ * tool loads one body by id. It reads documentation only: the skill cannot
+ * grant a tool or widen the caller's role.
+ */
+function skillTools(registry: SkillRegistry): ToolDef[] {
+  return [
+    {
+      name: 'read_skill',
+      description: 'Load the full instructions for one owner-authored skill by id.',
+      parameters: schema({
+        skill: { type: 'string', description: 'Skill id from the Skills section of the system prompt.' },
+      }),
+      roles: ['router', 'worker'],
+      run: async args => {
+        const skill = String(args.skill ?? '').trim()
+        if (!skill) throw new UserError('read_skill needs a skill id')
+        return registry.read(skill)
+      },
+    },
+  ]
+}
+
+/**
+ * Owner-configured local specialist agents. The model can only name an agent
+ * and supply a task; the command, argv, cwd, environment, and limits come from
+ * the owner's configuration. Workers delegate; the Router may only list.
+ */
+function localAgentTools(registry: LocalAgentRegistry, log: (line: string) => void): ToolDef[] {
+  return [
+    {
+      name: 'list_local_agents',
+      description: 'List local specialist agents configured on this machine.',
+      parameters: schema(),
+      roles: ['router', 'worker'],
+      run: async () => ({ agents: registry.list() }),
+    },
+    {
+      name: 'delegate_agent',
+      description: 'Run a configured local specialist agent on one self-contained task. Verify its output before reporting.',
+      parameters: schema({
+        agent: { type: 'string', description: 'Configured agent id; see list_local_agents.' },
+        task: { type: 'string', description: 'Complete task with all context the agent needs.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'delegate_agent', async (args, ctx) => {
+        const agent = String(args.agent ?? '').trim()
+        const task = String(args.task ?? '')
+        if (!agent) throw new UserError('delegate_agent needs an agent id')
+        const result = await registry.run(agent, task, ctx.sessionId)
+        log(
+          `[local-agent] agent=${agent} session=${ctx.sessionId} code=${result.code}`
+          + ` timedOut=${result.timedOut} truncated=${result.truncated}`,
+        )
+        return result
       }),
     },
   ]

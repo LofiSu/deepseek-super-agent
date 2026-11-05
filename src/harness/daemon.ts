@@ -9,11 +9,14 @@ export class Daemon {
     private readonly log: (line: string) => void,
     private readonly machines?: MachineRegistry,
     private readonly onResume?: (machineId: string) => void,
+    /** Owner-defined routines, due-checked on the same pulse as the watchdog. */
+    private readonly routines?: { tick: (now: number) => unknown },
   ) {}
 
   start(): void {
     this.log('[daemon] start')
     this.watchdog.tick()
+    this.routines?.tick(Date.now())
     this.timer = setInterval(() => this.tick(), this.watchdog.intervalMs)
   }
 
@@ -32,6 +35,7 @@ export class Daemon {
       }
     }
     this.watchdog.tick()
+    this.routines?.tick(now)
   }
 
   /** Call after a machine heartbeat to resume hands without loading Session into the daemon. */

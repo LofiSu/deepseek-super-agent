@@ -1,5 +1,6 @@
 import { grantTicketSpill } from './acl.ts'
-import type { Ticket } from '../shared/types.ts'
+import { mergeRefs, refsForDecision, refsForTicket, threadRef } from './graph.ts'
+import type { Decision, ObjectRef, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 
 export interface LongTermMemoryQuery {
@@ -8,9 +9,14 @@ export interface LongTermMemoryQuery {
   text: string
   limit?: number
   tags?: string[]
+  /** Optional tier filter. Absent means hot and cold entries are both eligible. */
+  tier?: LongTermMemoryTier
 }
 
-export type LongTermMemoryKind = 'note' | 'ticket'
+export type LongTermMemoryKind = 'note' | 'ticket' | 'decision' | 'digest'
+
+/** Hot entries are ticket/decision memories; cold entries are archived thread digests. */
+export type LongTermMemoryTier = 'hot' | 'cold'
 
 /**
  * Retention for the durable index. Either dimension is disabled by 0 or by
@@ -18,10 +24,14 @@ export type LongTermMemoryKind = 'note' | 'ticket'
  * such as the Runtime, which supplies conservative defaults.
  */
 export interface LongTermMemoryRetention {
-  /** Keep at most this many entries (oldest pruned first). 0 disables. */
+  /** Keep at most this many hot entries (oldest pruned first). 0 disables. */
   maxEntries?: number
-  /** Delete entries older than this many days. 0 disables. */
+  /** Delete hot entries older than this many days. 0 disables. */
   maxAgeDays?: number
+  /** Keep at most this many cold digests. 0 disables. */
+  coldMaxEntries?: number
+  /** Delete cold digests older than this many days. 0 disables. */
+  coldMaxAgeDays?: number
 }
 
 export interface LongTermMemoryOptions extends LongTermMemoryRetention {
@@ -39,6 +49,9 @@ export interface LongTermMemoryEntry {
   createdAt: string
   kind?: LongTermMemoryKind
   tags?: string[]
+  tier?: LongTermMemoryTier
+  /** Next-hop refs inlined for Chain of Recall. */
+  refs?: ObjectRef[]
 }
 
 interface QueryCandidate {
@@ -59,7 +72,12 @@ const SUMMARY_CHARS = 160
  */
 export class SpillBackedLongTermMemory {
   /** Effective limits (0 means that dimension is disabled). */
-  readonly retention: Readonly<{ maxEntries: number; maxAgeDays: number }>
+  readonly retention: Readonly<{
+    maxEntries: number
+    maxAgeDays: number
+    coldMaxEntries: number
+    coldMaxAgeDays: number
+  }>
   private readonly redact: (text: string) => string
   private readonly clock: () => Date
 
@@ -76,6 +94,8 @@ export class SpillBackedLongTermMemory {
     this.retention = Object.freeze({
       maxEntries: normalizeLimit(retention.maxEntries),
       maxAgeDays: normalizeLimit(retention.maxAgeDays),
+      coldMaxEntries: normalizeLimit(retention.coldMaxEntries ?? 200),
+      coldMaxAgeDays: normalizeLimit(retention.coldMaxAgeDays ?? 3650),
     })
     this.clock = retention.now ?? (() => new Date())
   }
@@ -89,32 +109,49 @@ export class SpillBackedLongTermMemory {
    * truncated summary, so the write creates a fresh, recallable entry instead.
    * Different text (or the same text for another ticket) is stored as before.
    */
-  put(ticketId: string, text: string, opts: { tags?: string[] } = {}): LongTermMemoryEntry {
+  put(
+    ticketId: string,
+    text: string,
+    opts: {
+      tags?: string[]
+      refs?: readonly ObjectRef[]
+      kind?: LongTermMemoryKind
+      tier?: LongTermMemoryTier
+    } = {},
+  ): LongTermMemoryEntry {
     if (!ticketId.trim() || !text.trim()) throw new Error('ticketId and text are required')
     const safe = this.redact(text)
     const wanted = normalizeTags(opts.tags)
+    const refs = mergeRefs(opts.refs ?? [])
     const dedupeKey = normalizeForDedupe(safe)
     return this.store.atomic(() => {
       const existing = this.store.listDocs<LongTermMemoryEntry>('ltm')
         .find(entry => entry.ticketId === ticketId && dedupeKeyOf(this.store, entry) === dedupeKey)
       if (existing) {
+        const mergedRefs = mergeRefs(existing.refs ?? [], refs)
         const entry: LongTermMemoryEntry = {
           ...existing,
           tags: normalizeTags([...(existing.tags ?? []), ...wanted]),
+          refs: mergedRefs,
         }
+        // Dedupe never rewrites the body; only the ref graph may grow.
+        const body = this.store.getSpill(existing.spillId)
+        if (body != null) this.store.replaceSpill(existing.spillId, body, mergedRefs)
         this.store.putDoc('ltm', entry.id, entry)
         this.prune(entry.id)
         return entry
       }
-      const spillId = this.store.putSpill(safe)
+      const spillId = this.store.putSpill(safe, refs)
       const entry: LongTermMemoryEntry = {
         id: this.store.nextId('ltm'),
         ticketId,
         spillId,
         text: summarize(safe),
         createdAt: this.clock().toISOString(),
-        kind: 'note',
+        kind: opts.kind ?? 'note',
+        tier: opts.tier ?? 'hot',
         tags: wanted,
+        refs,
       }
       this.store.putDoc('ltm', entry.id, entry)
       grantTicketSpill(this.store, spillId, ticketId)
@@ -133,10 +170,11 @@ export class SpillBackedLongTermMemory {
       .filter((part): part is string => typeof part === 'string' && part.trim().length > 0))]
       .join('\n'))
     const id = `ltm_${ticket.id}`
+    const refs = mergeRefs(ticket.refs ?? refsForTicket(ticket))
     return this.store.atomic(() => {
       const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
       const spillId = existing?.spillId ?? `ltm_spill_${ticket.id}`
-      this.store.replaceSpill(spillId, text)
+      this.store.replaceSpill(spillId, text, refs)
       const entry: LongTermMemoryEntry = {
         id,
         ticketId: ticket.id,
@@ -144,13 +182,87 @@ export class SpillBackedLongTermMemory {
         text: summarize(text),
         createdAt: existing?.createdAt ?? this.clock().toISOString(),
         kind: 'ticket',
+        tier: 'hot',
         tags: normalizeTags([...ticket.threadKeys, ...ticket.channels.map(channel => channel.source)]),
+        refs,
       }
       this.store.putDoc('ltm', id, entry)
       grantTicketSpill(this.store, spillId, ticket.id)
       this.prune(entry.id)
       return entry
     })
+  }
+
+  /**
+   * Router global memory (§2.1): one durable entry per terminal Decision, so
+   * "we chose A here, then switched to B there" survives across Tickets and
+   * channels. Idempotent by decision id.
+   */
+  rememberDecision(decision: Decision): LongTermMemoryEntry {
+    const text = this.redact([
+      `decision ${decision.kind} on ${decision.threadKey}`,
+      decision.reason,
+      `triggers ${decision.triggerIds.join(' ')}`,
+      ...(decision.ticketId ? [`ticket ${decision.ticketId}`] : []),
+    ].join('\n'))
+    const id = `ltm_decision_${decision.id}`
+    const refs = mergeRefs(decision.refs ?? refsForDecision(decision))
+    return this.store.atomic(() => {
+      const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
+      const spillId = existing?.spillId ?? `ltm_decision_spill_${decision.id}`
+      this.store.replaceSpill(spillId, text, refs)
+      const entry: LongTermMemoryEntry = {
+        id,
+        ticketId: decision.ticketId ?? `decision:${decision.id}`,
+        spillId,
+        text: summarize(text),
+        createdAt: existing?.createdAt ?? this.clock().toISOString(),
+        kind: 'decision',
+        tier: 'hot',
+        tags: normalizeTags(['decision', decision.kind, decision.threadKey]),
+        refs,
+      }
+      this.store.putDoc('ltm', id, entry)
+      if (decision.ticketId) grantTicketSpill(this.store, spillId, decision.ticketId)
+      this.prune(entry.id)
+      return entry
+    })
+  }
+
+  /**
+   * Decisions, ticket memories, and archived digests for these Threads.
+   * This is how the Router sees cross-task context even when the next title
+   * does not lexically match the earlier one.
+   */
+  forThreads(threadKeys: readonly string[], limit = 5, readerTicketId?: string): LongTermMemoryEntry[] {
+    const wanted = new Set(threadKeys)
+    if (wanted.size === 0) return []
+    const entries = this.store.listDocs<LongTermMemoryEntry>('ltm')
+      .filter(entry => (entry.tags ?? []).some(tag => wanted.has(tag))
+        || (entry.refs ?? []).some(ref => ref.kind === 'thread' && wanted.has(ref.id.replace(/^thread:/, ''))))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      .slice(0, Math.max(0, Math.floor(limit)))
+    // Same rule as query(): the reader gets the exact spill of every hit.
+    if (readerTicketId) {
+      for (const entry of entries) grantTicketSpill(this.store, entry.spillId, readerTicketId)
+    }
+    return entries
+  }
+
+  /**
+   * Router global memory (§2.1): the newest Decisions across every Thread.
+   * The Router is the global sequence point, so a decision made in one channel
+   * can steer a Ticket opened in another. Worker injection stays Thread-local.
+   */
+  recentDecisions(limit = 5, readerTicketId?: string): LongTermMemoryEntry[] {
+    const entries = this.store.listDocs<LongTermMemoryEntry>('ltm')
+      .filter(entry => entry.kind === 'decision')
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      .slice(0, Math.max(0, Math.floor(limit)))
+    if (readerTicketId) {
+      for (const entry of entries) grantTicketSpill(this.store, entry.spillId, readerTicketId)
+    }
+    return entries
   }
 
   /**
@@ -191,6 +303,7 @@ export class SpillBackedLongTermMemory {
       const candidates: QueryCandidate[] = []
       const tagIndex = new Map<string, number[]>()
       for (const entry of this.store.listDocs<LongTermMemoryEntry>('ltm')) {
+        if (query.tier && (entry.tier ?? 'hot') !== query.tier) continue
         if (wanted.length && !wanted.every(tag => entry.tags?.includes(tag))) continue
         const body = this.store.getSpill(entry.spillId)
         if (body == null) continue
@@ -243,6 +356,7 @@ export class SpillBackedLongTermMemory {
         .sort((a, b) => b.tagHits - a.tagHits
           || b.textHits - a.textHits
           || b.hopScore - a.hopScore
+          || tierRank(a) - tierRank(b)
           || b.entry.createdAt.localeCompare(a.entry.createdAt)
           || b.entry.id.localeCompare(a.entry.id))
         .slice(0, limit)
@@ -270,36 +384,23 @@ export class SpillBackedLongTermMemory {
   }
 
   /**
-   * Runs inside the caller's `store.atomic()` transaction. The entry that was
-   * just written/upserted is never removed by its own retention pass, even
-   * when its preserved `createdAt` would otherwise age it out.
+   * Runs inside the caller's `store.atomic()` transaction. Hot ticket/decision
+   * entries follow `maxEntries`/`maxAgeDays`; cold thread digests follow their
+   * own limits. Before a hot entry is deleted, its summary is folded into the
+   * Thread digest so month-scale recall survives ticket pruning (§8.1).
    */
   private prune(protectedId: string): void {
-    const { maxEntries, maxAgeDays } = this.retention
-    if (maxEntries <= 0 && maxAgeDays <= 0) return
     const entries = this.store.listDocs<LongTermMemoryEntry>('ltm')
     if (entries.length <= 1) return
     const indexById = new Map(entries.map((entry, index) => [entry.id, index]))
-    const doomed = new Set<string>()
-    if (maxAgeDays > 0) {
-      const cutoff = this.clock().getTime() - maxAgeDays * 86_400_000
-      for (const entry of entries) {
-        if (entry.id === protectedId) continue
-        const createdAt = Date.parse(entry.createdAt)
-        if (Number.isFinite(createdAt) && createdAt < cutoff) doomed.add(entry.id)
-      }
-    }
-    if (maxEntries > 0) {
-      const survivors = entries.filter(entry => !doomed.has(entry.id))
-      const hasProtected = survivors.some(entry => entry.id === protectedId)
-      // Newest first; equal timestamps fall back to insertion order (rowid).
-      const ranked = survivors
-        .filter(entry => entry.id !== protectedId)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)
-          || (indexById.get(b.id) ?? 0) - (indexById.get(a.id) ?? 0))
-      const quota = Math.max(0, maxEntries - (hasProtected ? 1 : 0))
-      for (const entry of ranked.slice(quota)) doomed.add(entry.id)
-    }
+    const hot = entries.filter(entry => (entry.tier ?? 'hot') === 'hot')
+    const cold = entries.filter(entry => entry.tier === 'cold')
+    const doomed = new Set<string>([
+      ...selectDoomed(hot, this.retention.maxEntries, this.retention.maxAgeDays, protectedId, this.clock),
+      ...selectDoomed(cold, this.retention.coldMaxEntries, this.retention.coldMaxAgeDays, protectedId, this.clock),
+    ])
+    const archived = hot.filter(entry => doomed.has(entry.id) && entry.id !== protectedId && entry.kind !== 'digest')
+    if (archived.length) this.archive(archived)
     const oldestFirst = [...doomed].sort((a, b) => {
       const byTime = (entries[indexById.get(a)!]?.createdAt ?? '').localeCompare(
         entries[indexById.get(b)!]?.createdAt ?? '',
@@ -312,11 +413,105 @@ export class SpillBackedLongTermMemory {
       if (spillId) this.store.deleteSpill(spillId)
     }
   }
+
+  /**
+   * Fold pruned ticket/decision summaries into one bounded cold digest per
+   * Thread. The digest keeps handles, not grants: `query()` still grants the
+   * reader ticket on every hit.
+   */
+  private archive(entries: readonly LongTermMemoryEntry[]): void {
+    const byThread = new Map<string, LongTermMemoryEntry[]>()
+    for (const entry of entries) {
+      const threads = (entry.refs ?? [])
+        .filter(ref => ref.kind === 'thread')
+        .map(ref => ref.id.replace(/^thread:/, ''))
+      for (const key of threads) {
+        const bucket = byThread.get(key)
+        if (bucket) bucket.push(entry)
+        else byThread.set(key, [entry])
+      }
+    }
+    for (const [key, bucket] of byThread) {
+      const id = `ltm_digest_${encodeId(key)}`
+      const spillId = `ltm_digest_spill_${encodeId(key)}`
+      const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
+      const ordered = [...bucket].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      const block = [
+        `archived ${ordered.length} entries for ${key}`,
+        ...ordered.map(entry => `${entry.createdAt} ${entry.text}`),
+      ].join('\n')
+      const text = capDigest(existing ? `${block}\n${this.store.getSpill(existing.spillId) ?? existing.text}` : block)
+      const refs = mergeRefs(existing?.refs ?? [], [threadRef(key)])
+      this.store.replaceSpill(spillId, text, refs)
+      const digest: LongTermMemoryEntry = {
+        id,
+        ticketId: `thread:${key}`,
+        spillId,
+        text: summarize(text),
+        createdAt: existing?.createdAt ?? this.clock().toISOString(),
+        kind: 'digest',
+        tier: 'cold',
+        tags: normalizeTags([key, 'digest']),
+        refs,
+      }
+      this.store.putDoc('ltm', id, digest)
+    }
+  }
 }
 
 function normalizeLimit(value: number | undefined): number {
   const limit = Math.floor(value ?? 0)
   return Number.isFinite(limit) && limit > 0 ? limit : 0
+}
+
+function selectDoomed(
+  entries: readonly LongTermMemoryEntry[],
+  maxEntries: number,
+  maxAgeDays: number,
+  protectedId: string,
+  clock: () => Date,
+): Set<string> {
+  const doomed = new Set<string>()
+  if (maxEntries <= 0 && maxAgeDays <= 0) return doomed
+  const indexById = new Map(entries.map((entry, index) => [entry.id, index]))
+  if (maxAgeDays > 0) {
+    const cutoff = clock().getTime() - maxAgeDays * 86_400_000
+    for (const entry of entries) {
+      if (entry.id === protectedId) continue
+      const createdAt = Date.parse(entry.createdAt)
+      if (Number.isFinite(createdAt) && createdAt < cutoff) doomed.add(entry.id)
+    }
+  }
+  if (maxEntries > 0) {
+    const survivors = entries.filter(entry => !doomed.has(entry.id))
+    const hasProtected = survivors.some(entry => entry.id === protectedId)
+    const ranked = survivors
+      .filter(entry => entry.id !== protectedId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)
+        || (indexById.get(b.id) ?? 0) - (indexById.get(a.id) ?? 0))
+    const quota = Math.max(0, maxEntries - (hasProtected ? 1 : 0))
+    for (const entry of ranked.slice(quota)) doomed.add(entry.id)
+  }
+  return doomed
+}
+
+function tierRank(candidate: QueryCandidate): number {
+  return candidate.entry.tier === 'cold' ? 1 : 0
+}
+
+/**
+ * Injective, filesystem-safe encoding for a Thread key. Two distinct keys must
+ * never share one digest: base64url is one-to-one, while character
+ * substitution would merge e.g. `github:pr/7` and `github:pr_7`.
+ */
+function encodeId(key: string): string {
+  return Buffer.from(key, 'utf8').toString('base64url')
+}
+
+/** Cold digests stay bounded even after many pruning passes. */
+function capDigest(text: string): string {
+  const CLEAN = text.replace(/\r\n?/g, '\n')
+  return CLEAN.length <= 4000 ? CLEAN : `${CLEAN.slice(0, 3999)}…`
 }
 
 function summarize(text: string): string {

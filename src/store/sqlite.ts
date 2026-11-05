@@ -3,7 +3,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { LifecycleEvent } from '../core/lifecycle.ts'
 import type { DomainEventName } from '../shared/events.ts'
-import type { JobRow, OutboxRow, ReplyRow, SessionRow } from '../shared/types.ts'
+import type { JobRow, ObjectRef, OutboxRow, ReplyRow, SessionRow } from '../shared/types.ts'
 import { migrate } from './schema.ts'
 
 export class Store {
@@ -278,9 +278,10 @@ export class Store {
     return rows.map(row => ({ threadKey: row.thread_key, ticketId: row.ticket_id }))
   }
 
-  putSpill(body: string): string {
+  putSpill(body: string, refs: readonly ObjectRef[] = []): string {
     const id = this.nextId('spill')
-    this.db.prepare('INSERT INTO spills(id, body, created_at) VALUES(?, ?, ?)').run(id, body, new Date().toISOString())
+    this.db.prepare('INSERT INTO spills(id, body, refs, created_at) VALUES(?, ?, ?, ?)')
+      .run(id, body, JSON.stringify(refs), new Date().toISOString())
     return id
   }
 
@@ -289,12 +290,31 @@ export class Store {
     return row?.body
   }
 
+  /** Next-hop refs for a spilled object. An unknown ref column reads as `[]`. */
+  getSpillRefs(id: string): ObjectRef[] {
+    const row = this.db.prepare('SELECT refs FROM spills WHERE id = ?').get(id) as { refs?: string } | undefined
+    if (!row?.refs) return []
+    try {
+      const parsed: unknown = JSON.parse(row.refs)
+      return Array.isArray(parsed) ? parsed as ObjectRef[] : []
+    } catch {
+      return []
+    }
+  }
+
   /** Upsert a spill by id. Used by long-term memory so a ticket keeps one stable body. */
-  replaceSpill(id: string, body: string): void {
+  replaceSpill(id: string, body: string, refs?: readonly ObjectRef[]): void {
+    if (refs === undefined) {
+      this.db.prepare(
+        `INSERT INTO spills(id, body, refs, created_at) VALUES(?, ?, '[]', ?)
+         ON CONFLICT(id) DO UPDATE SET body = excluded.body`,
+      ).run(id, body, new Date().toISOString())
+      return
+    }
     this.db.prepare(
-      `INSERT INTO spills(id, body, created_at) VALUES(?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET body = excluded.body`,
-    ).run(id, body, new Date().toISOString())
+      `INSERT INTO spills(id, body, refs, created_at) VALUES(?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET body = excluded.body, refs = excluded.refs`,
+    ).run(id, body, JSON.stringify(refs), new Date().toISOString())
   }
 
   /** Delete a spill body and every grant that pointed at it, in one transaction. */

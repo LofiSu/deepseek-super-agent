@@ -324,23 +324,31 @@ describe('Long-term memory', () => {
   })
 
   it('parses retention env with conservative defaults and 0 as disabled', () => {
-    expect(memoryRetentionFromEnv({})).toEqual({ maxEntries: 1000, maxAgeDays: 90 })
+    const defaults = {
+      maxEntries: 1000,
+      maxAgeDays: 90,
+      coldMaxEntries: 200,
+      coldMaxAgeDays: 3650,
+    }
+    expect(memoryRetentionFromEnv({})).toEqual(defaults)
     expect(memoryRetentionFromEnv({
       DS_AGENT_MEMORY_MAX_ENTRIES: '',
       DS_AGENT_MEMORY_MAX_AGE_DAYS: '  ',
-    })).toEqual({ maxEntries: 1000, maxAgeDays: 90 })
+    })).toEqual(defaults)
     expect(memoryRetentionFromEnv({
       DS_AGENT_MEMORY_MAX_ENTRIES: 'not-a-number',
       DS_AGENT_MEMORY_MAX_AGE_DAYS: '-3',
-    })).toEqual({ maxEntries: 1000, maxAgeDays: 90 })
+    })).toEqual(defaults)
     expect(memoryRetentionFromEnv({ DS_AGENT_MEMORY_MAX_ENTRIES: '1.5' }))
-      .toEqual({ maxEntries: 1000, maxAgeDays: 90 })
+      .toEqual(defaults)
     expect(memoryRetentionFromEnv({
       DS_AGENT_MEMORY_MAX_ENTRIES: '0',
       DS_AGENT_MEMORY_MAX_AGE_DAYS: '0',
-    })).toEqual({ maxEntries: 0, maxAgeDays: 0 })
+      DS_AGENT_MEMORY_COLD_MAX_ENTRIES: '0',
+      DS_AGENT_MEMORY_COLD_MAX_AGE_DAYS: '0',
+    })).toEqual({ maxEntries: 0, maxAgeDays: 0, coldMaxEntries: 0, coldMaxAgeDays: 0 })
     expect(memoryRetentionFromEnv({}, { maxEntries: 7 }))
-      .toEqual({ maxEntries: 7, maxAgeDays: 90 })
+      .toEqual({ ...defaults, maxEntries: 7 })
   })
 })
 

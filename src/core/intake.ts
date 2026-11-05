@@ -1,4 +1,5 @@
 import { grantTicketSpill } from '../memory/acl.ts'
+import { refsForTrigger } from '../memory/graph.ts'
 import { UserError } from '../shared/errors.ts'
 import { commandOf } from './assessment.ts'
 import {
@@ -42,6 +43,7 @@ export class Intake {
         ...(trust.strength ? { strength: trust.strength } : {}),
         ...(trust.spillId ? { spillId: trust.spillId } : {}),
       },
+      refs: trust.refs ?? refsForTrigger(trigger, trust.spillId),
     }
     if (!gate.listened) {
       this.host.repo.putDoc('trigger', trigger.id, owned)

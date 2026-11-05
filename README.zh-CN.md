@@ -55,9 +55,13 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Trigger 批处理（拥堵时合并进下一轮）** — `batchWindowMs > 0` 时同 Thread 合并；由 `test/batching-bench.test.ts` 覆盖。真实信道 demo 用默认窗口 0，不验证合并
 - [~] **Router 水平切分 / 多层过滤** — `RouterShardRegistry` 常驻 Runtime（PLAN T09/T46）；用 `DS_AGENT_SHARDS` / `RuntimeOptions.routerShards` 配置，默认 shard 始终存在
 - [x] **Worker 上下文隔离 + 完整执行工具** — 独立 Worker Session
+- [x] **分层 Prompt Stack** — 身份、主人声音、常驻指令、主人资料、团队、技能、渠道、规则、记忆指引、表达风格、角色契约按依赖顺序装配；`PERSONA.md`、`AGENTS.md`、`USER.md` 由主人编辑，团队层只列已配置的本地专家；`ds-agent prompt --layers` 查看每层及来源。详见 [docs/PROMPTS.md](./docs/PROMPTS.md)
 - [x] **Worker 不直接对人回复** — 经 `report` → Router 再出站。Worker 会话只持有 `WorkerPorts`，不持有 Engine，不能 `reply` / `decide`
 - [x] **Worker ↔ Thread 订阅（可多对多）** — `subscribe` + fan-out
 - [x] **Worker 内 Subagent / Team 对 Router 透明** — async job + `spawn_team`/`team_status`/`complete_team` → member job → `TEAM_MEMBER_DONE` → 汇总报告；team 行持久化到 SQLite，`ds-agent team`/`teams` 可离线查看。Router 只见父 Assignment 报告（T14；unit + harness + live e2e）
+- [x] **主人编写的技能** — 在 agent home 的 `skills/<id>/SKILL.md` 添加一份操作手册，无需改代码。Prompt 只带 id 和一行描述（上限 2000 字符），`read_skill` 按需加载正文；技能不能授予工具或扩大角色权限。`ds-agent skills` 查看索引。详见 [docs/SKILLS.md](./docs/SKILLS.md)
+- [x] **主人定义 routines** — `routines.json` 按每 N 分钟在指定频道和线程投递一条 prompt。daemon 在原有 tick 上检查到期项，长时间停机后只补一次而不回放每个错过的时段，last-run 持久化在 SQLite；routine 走正常 ingress、规则和审批边界，模型不能创建或修改。`ds-agent routines` 查看配置。详见 [docs/ROUTINES.md](./docs/ROUTINES.md)
+- [x] **Worker 调用本地专家 Agent** — 主人配置后，Worker 可用 `delegate_agent` 让本机 CLI Agent（Claude Code、Codex、OpenCode、Hermes 或自定义）执行一个自包含任务。不经过 shell，cwd 为 Worker 工作区，超时/输出有界，环境变量走白名单；`ds-agent agents` 查看配置。详见 [docs/LOCAL_AGENTS.md](./docs/LOCAL_AGENTS.md)
 - [x] **单 UI 多话题 → 多 Worker** — 多 Ticket 可并存；`LifecycleBus` 常驻提供读取模型，`ds-agent ui` 提供只读、必需 token 的 loopback 面板（T15/T49）
 
 ### §3 事件驱动
@@ -73,7 +77,7 @@ LofiSu × Grokbot（CoderBot）。
 - [x] **Inline：摘要进上下文** — `memory/recall`
 - [x] **Spill：长内容外置 + id** — `store/spill`
 - [x] **局部性：先 ID/摘要，再按需展开** — `read_object`
-- [x] **链式召回 Chain of Recall** — spillId / 对象引用按需拉取（T25 最小实现）
+- [x] **链式召回 Chain of Recall** — 类型化 `kind:id` 句柄；`read_object` 返回下一跳（`memory/graph`）
 - [x] **投机执行：后台先跑** — speculative Assignment
 - [x] **有价值才交付，否则安静丢弃** — `deliver=true` gate；demo 验证
 
@@ -111,7 +115,7 @@ LofiSu × Grokbot（CoderBot）。
 ### §8 未决问题（明确不做进 M11）
 
 - [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime；#130 增加 A2A HMAC 的 `RemoteMeshRegistry`/`MeshInbox`（心跳、上限、loopback 默认拒绝），但默认不监听、远端 dispatch 尚未接入本地放置队列；等待启动的 Worker 进入有界 FIFO 队列（`DS_AGENT_MESH_QUEUE`，默认 100）
-- [~] 跨 Ticket 长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime（尚未到跨月）
+- [~] 跨 Ticket / 跨月长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime：hot Ticket/Decision（1000 条 / 90 天）+ cold Thread digest（200 条 / 3650 天）；真实跨月行为有界但未按自然月测量
 - [x] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；`ds-agent ui` 只读 loopback 面板（必需 token、GET-only、生命周期事件白名单、speculative 隐藏、SSE 背压）
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— `A2ARouter` 常驻 Runtime，HMAC-SHA256 HTTP transport 已实现（`a2a-auth.ts`/`a2a-http.ts`）；默认不监听，跨主机暴露与远端 dispatch 仍需 operator 决策

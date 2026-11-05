@@ -6,13 +6,17 @@ import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
+import { buildSystemPrompt, describePromptLayers, loadPromptFiles } from '../harness/prompts.ts'
+import { LOCAL_AGENTS_FILE, loadLocalAgents } from '../env/local-agents.ts'
+import { SKILLS_DIR, SKILL_FILE, SkillRegistry } from '../env/skills.ts'
+import { loadRoutines, ROUTINES_ENV, ROUTINES_FILE } from '../harness/routines.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import type { A2AEnvelope } from '../channels/a2a.ts'
 import type { LongTermMemoryEntry } from '../memory/long-term.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
-import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
+import type { JobRow, Role, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
 import { startEmbeddedGateway } from '../gateway/embedded.ts'
@@ -142,6 +146,11 @@ function help(): void {
   pnpm ds-agent metrics
   pnpm ds-agent memory [--limit 10]   # persisted cross-ticket memories
   pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
+  pnpm ds-agent prompt [--role router|worker|watchdog] [--layers] [--json]
+                            # the layered system prompt and where each layer comes from
+  pnpm ds-agent agents [--json]  # local specialist agents configured for delegation
+  pnpm ds-agent skills [--json]  # owner-authored playbooks the agent can load
+  pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -498,6 +507,9 @@ async function main(): Promise<void> {
           recent: memories.slice(-limit).map(entry => ({
             id: entry.id,
             ticketId: entry.ticketId,
+            kind: entry.kind ?? 'note',
+            tier: entry.tier ?? 'hot',
+            refs: entry.refs?.map(ref => ref.id) ?? [],
             text: entry.text,
           })),
         }, null, 2))
@@ -763,6 +775,83 @@ async function main(): Promise<void> {
     await withRuntime(runtime => {
       runtime.ingest(githubTrigger({ pr, text, speculate: option('speculate') === 'true' }))
     })
+    return
+  }
+  if (cmd === 'prompt') {
+    const role = option('role') ?? 'router'
+    if (role !== 'router' && role !== 'worker' && role !== 'watchdog') {
+      throw new Error('role must be router, worker, or watchdog')
+    }
+    const agents = loadLocalAgents(home, process.env).map(agent => ({
+      id: agent.id,
+      ...(agent.description ? { description: agent.description } : {}),
+    }))
+    const skills = SkillRegistry.fromHome(home)
+    const input = {
+      role: role as Role,
+      ...loadPromptFiles(home, process.env),
+      ...(agents.length ? { localAgents: agents } : {}),
+      ...(skills.size ? { skills: skills.list() } : {}),
+    }
+    const layers = describePromptLayers(input)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(layers, null, 2))
+      return
+    }
+    if (process.argv.includes('--layers')) {
+      for (const layer of layers) {
+        console.log(`${layer.id.padEnd(14)}${layer.text.length} chars  ${layer.source}`)
+      }
+      return
+    }
+    console.log(buildSystemPrompt(input))
+    return
+  }
+  if (cmd === 'routines') {
+    const routines = loadRoutines(home, process.env)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(routines, null, 2))
+      return
+    }
+    if (!routines.length) {
+      console.log(`no routines configured (${ROUTINES_FILE} or ${ROUTINES_ENV})`)
+      return
+    }
+    for (const routine of routines) {
+      console.log(
+        `${routine.id.padEnd(24)}every ${routine.everyMinutes}m  ${routine.source}:${routine.thread}  ${routine.prompt}`,
+      )
+    }
+    return
+  }
+  if (cmd === 'skills') {
+    const skills = SkillRegistry.fromHome(home, line => console.error(line))
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(skills.list(), null, 2))
+      return
+    }
+    const list = skills.list()
+    if (!list.length) {
+      console.log(`no skills configured (${SKILLS_DIR}/<id>/${SKILL_FILE} in ${home})`)
+      return
+    }
+    for (const skill of list) console.log(`${skill.id.padEnd(24)}${skill.description}`)
+    return
+  }
+  if (cmd === 'agents') {
+    const agents = loadLocalAgents(home, process.env)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(agents, null, 2))
+      return
+    }
+    if (!agents.length) {
+      console.log(`no local agents configured (${LOCAL_AGENTS_FILE} or DS_AGENT_LOCAL_AGENTS)`)
+      return
+    }
+    for (const agent of agents) {
+      const description = agent.description ? `  ${agent.description}` : ''
+      console.log(`${agent.id.padEnd(14)}${agent.command}${description}`)
+    }
     return
   }
   throw new Error(`unknown command ${cmd}`)

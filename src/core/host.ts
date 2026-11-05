@@ -1,6 +1,6 @@
 import type { Metrics } from '../metrics/metrics.ts'
 import type { SourceScope } from '../shared/ports.ts'
-import type { Ticket } from '../shared/types.ts'
+import type { Decision, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 
 export interface Host {
@@ -14,6 +14,11 @@ export interface Host {
   onTicketCreated?: (ticket: Ticket) => void
   /** Lifecycle hook for every terminal ticket path (deliver, discard, stop, fail). */
   onTicketEnded?: (ticket: Ticket) => void
+  /**
+   * Router global memory: every persisted Decision, including accept, ignore,
+   * stop, and unavailable. Must not throw into the Engine transaction.
+   */
+  onDecision?: (decision: Decision) => void
   /**
    * Lifecycle hook when an Assignment ends. A `blocked`/`failed`/`waiting`
    * report ends the Assignment but leaves the Ticket open; the host frees any
