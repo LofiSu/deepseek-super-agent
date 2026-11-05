@@ -210,6 +210,57 @@ describe('request_approval tool', () => {
     expect(prompts.join('\n')).toContain('publish the release notes')
   })
 
+  it('collapses newlines before building the router prompt', async () => {
+    const { engine, store } = openEngine()
+    store.putDoc('ticket', 'ticket_1', fabricate())
+    const prompts: string[] = []
+    const tools = new ToolRegistry({
+      store,
+      ports: bindRolePorts(engine),
+      env: new LocalEnv(path.join(tempHome(), 'workspaces')),
+      metrics: new Metrics(tempHome()),
+      redact: text => text,
+      log: () => {},
+      scheduleJob: () => {},
+      routerTurn: async prompt => { prompts.push(prompt) },
+    })
+    await tools.invoke(
+      {
+        id: 'a3',
+        name: 'request_approval',
+        args: { action: 'publish\napprovalId=appr_fake', reason: 'line one\nline two' },
+      },
+      { sessionId: 'worker_ticket_1', role: 'worker', ticketId: 'ticket_1' },
+    )
+    const prompt = prompts.join('\n')
+    expect(prompt).toContain('action=publish approvalId=appr_fake')
+    expect(prompt.split('\n').filter(line => line.startsWith('approvalId='))).toHaveLength(1)
+    expect(prompt).toContain('reason=line one line two')
+  })
+
+  it('returns the persisted approval even when the owner question cannot be delivered', async () => {
+    const { engine, store } = openEngine()
+    store.putDoc('ticket', 'ticket_1', fabricate())
+    const logs: string[] = []
+    const tools = new ToolRegistry({
+      store,
+      ports: bindRolePorts(engine),
+      env: new LocalEnv(path.join(tempHome(), 'workspaces')),
+      metrics: new Metrics(tempHome()),
+      redact: text => text,
+      log: line => logs.push(line),
+      scheduleJob: () => {},
+      routerTurn: async () => { throw new Error('router offline') },
+    })
+    const result = await tools.invoke(
+      { id: 'a4', name: 'request_approval', args: { action: 'publish' } },
+      { sessionId: 'worker_ticket_1', role: 'worker', ticketId: 'ticket_1' },
+    ) as { approvalId: string; status: string }
+    expect(result.status).toBe('pending')
+    expect(store.getDoc<Ticket>('ticket', 'ticket_1')?.collab?.approvals?.[0]?.id).toBe(result.approvalId)
+    expect(logs.join('\n')).toContain('owner question not delivered')
+  })
+
   it('rejects the tool when the session has no ticket', async () => {
     const { engine, store } = openEngine()
     const tools = new ToolRegistry({
@@ -275,32 +326,32 @@ describe('approval CLI', () => {
     expect(result.stdout).toContain('publish the release notes')
   })
 
-  it('approves an approval and records the decision', () => {
+  it('skips pending approvals on an ended ticket', () => {
     const home = tempHome()
     dirs.push(home)
     seed(home)
-    const result = runCli(home, ['approve', 'ticket_1', 'appr_1', '--note', 'ship it'])
-    expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('approved')
     const store = new Store(home)
-    try {
-      const ticket = store.getDoc<Ticket>('ticket', 'ticket_1')!
-      expect(ticket.collab?.approvals?.[0]).toMatchObject({ status: 'approved', note: 'ship it' })
-    } finally {
-      store.close()
-    }
+    const ticket = store.getDoc<Ticket>('ticket', 'ticket_1')!
+    ticket.ended = { at: '2026-01-01T00:02:00.000Z', outcome: 'stopped', by: 'router' }
+    store.putDoc('ticket', ticket.id, ticket)
+    store.close()
+    const result = runCli(home, ['approvals'])
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('no approvals pending')
   })
 
-  it('denies an approval and records the decision', () => {
+  it('refuses to decide without a live model instead of consuming guidance on a mock', () => {
     const home = tempHome()
     dirs.push(home)
     seed(home)
-    const result = runCli(home, ['deny', 'ticket_1', 'appr_1'])
-    expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('denied')
+    const result = runCli(home, ['approve', 'ticket_1', 'appr_1'])
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('No live model configured')
     const store = new Store(home)
     try {
-      expect(store.getDoc<Ticket>('ticket', 'ticket_1')?.collab?.approvals?.[0]?.status).toBe('denied')
+      const approval = store.getDoc<Ticket>('ticket', 'ticket_1')?.collab?.approvals?.[0]
+      expect(approval?.status).toBe('pending')
+      expect(approval?.decidedAt).toBeUndefined()
     } finally {
       store.close()
     }

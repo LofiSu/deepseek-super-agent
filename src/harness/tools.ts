@@ -408,9 +408,10 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
       roles: ['worker'],
       run: guard('worker', 'request_approval', async (args, ctx) => {
         if (!ctx.ticketId) throw new UserError('request_approval needs a ticket')
-        const action = String(args.action ?? '').trim()
+        const oneLine = (value: string): string => value.replace(/\s+/g, ' ').trim()
+        const action = oneLine(String(args.action ?? ''))
         if (!action) throw new UserError('request_approval needs the exact action')
-        const reason = args.reason == null ? undefined : String(args.reason).trim()
+        const reason = args.reason == null ? undefined : oneLine(String(args.reason)).slice(0, 300)
         const result = ctx.ports.requestApproval(ctx.ticketId, {
           action,
           ...(reason ? { reason } : {}),
@@ -423,7 +424,17 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
           ...(reason ? [`reason=${reason}`] : []),
           'The Worker stopped. Tell the owner the exact action in one short message and wait. You cannot approve it yourself; the owner decides with ds-agent approve or ds-agent deny.',
         ].join('\n')
-        await deps.routerTurn(prompt)
+        try {
+          await deps.routerTurn(prompt)
+        } catch (error) {
+          // The approval is already persisted, and the Worker stops on it. A
+          // failed question must not turn the tool result into an error; the
+          // owner can still find the request with `ds-agent approvals`.
+          deps.log(
+            `[approval] owner question not delivered approvalId=${result.approvalId}:`
+            + ` ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
         return {
           approvalId: result.approvalId,
           status: result.status,

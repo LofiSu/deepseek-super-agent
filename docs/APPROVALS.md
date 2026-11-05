@@ -69,7 +69,12 @@ ds-agent collab <ticketId>             # pending and decided requests on one tic
 - Decisions are CLI-only. A channel adapter cannot approve yet; wiring a
   channel reply to the command requires an authenticated owner identity and a
   signed approval, which is a later change.
-- Approving resumes the ticket. There is no "approve but keep paused" mode.
+- Approving resumes the ticket, which starts model turns. Like `ds-agent resume`,
+  `approve` and `deny` require a configured live model; without one the command
+  fails before deciding, so guidance is not consumed by a mock. There is no
+  "approve but keep paused" mode.
+- `ds-agent approvals` lists live tickets only. A pending request on an ended
+  ticket is stale and is not shown; `collab` still shows the history.
 - The action is a description, not a structured action id. The Worker is trusted
   to describe the action it will perform, and the rules layer still governs what
   tools can do.

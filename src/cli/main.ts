@@ -596,6 +596,7 @@ async function main(): Promise<void> {
     }[] = []
     try {
       for (const ticket of store.listDocs<Ticket>('ticket')) {
+        if (ticket.ended) continue
         for (const approval of ticket.collab?.approvals ?? []) {
           if (approval.status !== 'pending') continue
           pending.push({
@@ -650,10 +651,10 @@ async function main(): Promise<void> {
         cmd === 'approve' ? 'approved' : 'denied',
         note,
       )
-      console.log(`${cmd}d ${approvalId} on ${resolved.id} "${resolved.title}"`)
+      console.log(`${cmd === 'approve' ? 'approved' : 'denied'} ${approvalId} on ${resolved.id} "${resolved.title}"`)
       if (note) console.log(`  note: ${note}`)
       console.log(`  stage: ${ticketStage(outcome.ticket)}`)
-    })
+    }, requireLiveModelFromEnv())
     return
   }
   if (cmd === 'pause') {
