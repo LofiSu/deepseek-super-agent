@@ -93,6 +93,15 @@ export interface WorkerPorts {
    * cannot be requeued without a fresh admission decision.
    */
   handback(ticketId: string, triggerId: string, reason: string): boolean
+  /**
+   * Ask the owner to approve one action. This stops Worker turns on the ticket
+   * until the owner decides; the Router may still ask the question. A Worker
+   * can request, never decide.
+   */
+  requestApproval(ticketId: string, input: { action: string; reason?: string }): {
+    approvalId: string
+    status: 'pending'
+  }
 }
 
 /** Canonical name for the Executor's tool surface. */

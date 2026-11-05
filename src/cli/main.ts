@@ -585,6 +585,80 @@ async function main(): Promise<void> {
     }
     return
   }
+  if (cmd === 'approvals') {
+    const store = new Store(home)
+    const pending: {
+      ticketId: string
+      title: string
+      approvalId: string
+      action: string
+      reason?: string
+      requestedBy: string
+      at: string
+    }[] = []
+    try {
+      for (const ticket of store.listDocs<Ticket>('ticket')) {
+        if (ticket.ended) continue
+        for (const approval of ticket.collab?.approvals ?? []) {
+          if (approval.status !== 'pending') continue
+          pending.push({
+            ticketId: ticket.id,
+            title: ticket.title,
+            approvalId: approval.id,
+            action: approval.action,
+            requestedBy: approval.requestedBy,
+            at: approval.at,
+            ...(approval.reason ? { reason: approval.reason } : {}),
+          })
+        }
+      }
+    } finally {
+      store.close()
+    }
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(pending, null, 2))
+      return
+    }
+    if (!pending.length) {
+      console.log('no approvals pending')
+      return
+    }
+    for (const item of pending) {
+      console.log(`${item.ticketId}  ${item.approvalId}  ${item.action}`)
+      console.log(`  ${item.title}${item.reason ? ` — ${item.reason}` : ''}`)
+      console.log(`  requested by ${item.requestedBy} at ${item.at}`)
+    }
+    return
+  }
+  if (cmd === 'approve' || cmd === 'deny') {
+    const rest = bare(3, ['note'])
+    const ticketRef = rest[0]
+    const approvalId = rest[1]
+    if (!ticketRef || !approvalId) {
+      throw new Error(`usage: ds-agent ${cmd} <ticketId> <approvalId> [--note "..."]`)
+    }
+    const note = option('note')
+    const resolved = (() => {
+      const store = new Store(home)
+      try {
+        return resolveTicket(store, ticketRef)
+      } finally {
+        store.close()
+      }
+    })()
+    await withRuntime(async runtime => {
+      const outcome = await runtime.decideApproval(
+        resolved.id,
+        approvalId,
+        cmd === 'approve' ? 'approved' : 'denied',
+        note,
+      )
+      console.log(`${cmd === 'approve' ? 'approved' : 'denied'} ${approvalId} on ${resolved.id} "${resolved.title}"`)
+      if (note) console.log(`  note: ${note}`)
+      console.log(`  stage: ${ticketStage(outcome.ticket)}`)
+    }, requireLiveModelFromEnv())
+    return
+  }
   if (cmd === 'pause') {
     const ticketRef = bare(3, ['reason'])[0]
     const reason = option('reason')
@@ -670,6 +744,18 @@ async function main(): Promise<void> {
           ? `paused: ${paused.at} by ${paused.by}${paused.reason ? ` — ${paused.reason}` : ''}`
           : 'paused: no',
       )
+      const approvals = collaboration.approvals ?? []
+      if (approvals.length === 0) {
+        console.log('approvals: none')
+      } else {
+        console.log('approvals:')
+        for (const approval of approvals) {
+          console.log(
+            `  ${approval.status.padEnd(8)} ${approval.id}  ${approval.action}`
+            + `${approval.note ? ` — ${approval.note}` : ''}`,
+          )
+        }
+      }
       if (collaboration.guidance.length === 0) {
         console.log('guidance: none')
       } else {

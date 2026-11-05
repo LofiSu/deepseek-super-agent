@@ -775,9 +775,17 @@ export class Harness {
    */
   private pauseReason(ticketId?: string, prompt?: string): string | undefined {
     if (!this.opts.store.isOpen) return undefined
+    // Only a Worker call passes the ticket id explicitly. Router turns reach
+    // this method through the prompt regex; an approval wait must stop the
+    // Worker but not the Router's question to the owner.
+    const explicit = ticketId !== undefined
     const id = ticketId ?? /^ticketId=(\S+)$/m.exec(prompt ?? '')?.[1]
     if (!id) return undefined
     const ticket = this.opts.store.getDoc<Ticket>('ticket', id)
+    if (explicit) {
+      const approval = ticket?.collab?.approvals?.find(item => item.status === 'pending')
+      if (approval) return `approval=${approval.id} at=${approval.at}`
+    }
     const paused = ticket?.collab?.paused
     if (!paused) return undefined
     const reason = paused.reason ? ` reason=${paused.reason}` : ''
