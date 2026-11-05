@@ -29,7 +29,7 @@
 ### 目标
 
 - 合并 #142 的通用 MCP 客户端：stdio、工具命名空间、完整 JSON Schema、超时、脱敏、spill、子进程环境白名单、`Runtime.finish()` 关闭。
-- 新增 M9 插件包加载器：读取 `<home>/plugins/<id>/plugin.json`，校验并把组件并入现有 skill / MCP / local-agent / routine 注册表。
+- 新增 M11 Runtime 组合层的插件包加载器：读取 `<home>/plugins/<id>/plugin.json`，校验并把组件并入现有 skill / MCP / local-agent / routine 注册表。
 - 新增 M11 CLI：`ds-agent plugin list/add/enable/disable/remove/validate`。
 - MCP 媒体结果落到 **Worker 工作区**，让后续 `read_file` / `bash` 能直接使用；speculative 工单在 v1 不调用 MCP。
 - 插件可以为 MCP server 声明 `approval: "always"`，把"花钱/外向"的工具纳入现有的 owner approval 流程。
@@ -122,12 +122,12 @@
 | 能力 | 模块 | 文件 |
 |---|---|---|
 | MCP 客户端、配置、工具暴露 | M1 Harness | `src/harness/mcp.ts`、`mcp-config.ts`、`tools.ts`、`model.ts` |
-| 插件清单读取、校验、组件加载 | M9 Env | `src/env/plugins.ts`（新增） |
+| 插件清单读取、校验、组件加载 | M11 Runtime 组合层 | `src/plugins.ts`（新增） |
 | Skill / local agent / routine 现有加载器 | M9 / M10 | 复用，不重写 |
 | Runtime 组合与关闭 | M11 Runtime | `src/runtime.ts` |
 | `plugin` CLI | M11 CLI | `src/cli/main.ts` + `src/cli/plugins.ts` |
 
-不新增 M12：插件是 M9 的"owner 提供的本地资源"组合层，MCP 仍是 M1 的工具源。
+不新增 M12：插件是 M11 Runtime 的组合层，因为它同时读 M1 的 MCP 配置、M9 的 skill/agent、M10 的 routine；把它放在 M9 会造成 M9 → M1/M10 的反向依赖。MCP 仍是 M1 的工具源。
 
 ### 6.2 插件清单 `plugin.json`
 
@@ -427,7 +427,7 @@ ds-agent worker 收到任务
 
 1. **ds-agent / MCP 客户端**：rebase #142 到当前 `main`，解决冲突；补完整 JSON Schema、异步 `specsFor`、`close()`；保持 worker-only。合并后 `main` 有一条可用的 MCP 客户端。
 2. **ds-agent / MCP 媒体输出**：`EnvPort.workspaceFor`、工作区输出、`outputDir` 导入、approval 检查、指标和测试。
-3. **ds-agent / 插件包**：`src/env/plugins.ts`、Runtime 组合、`plugin` CLI、`docs/PLUGINS.md`、README、MODULES.md、测试。
+3. **ds-agent / 插件包**：`src/plugins.ts`、Runtime 组合、`plugin` CLI、`docs/PLUGINS.md`、README、MODULES.md、测试。
 4. **jimeng-mcp / 新仓库**：Seedance server、离线 fixture、README（Claude Code / Codex / ds-agent 三种挂载示例）。
 5. **ds-agent / 示例插件包**：`examples/plugins/video-jimeng`、`examples/plugins/image-krene` + skill；端到端验收。
 6. **krene-mcp / login + capture**：在现有 `feat/krene-mcp-server` 分支上收尾：确认 login / capture / sanitize / 测试通过，补 README 和 fixture 目录约定；生图协议留到 owner 完成真实抓包后的下一次设计更新。
