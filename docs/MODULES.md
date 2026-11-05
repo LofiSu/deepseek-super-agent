@@ -256,21 +256,32 @@ Recall is lexical-first and deterministic (ADR-010, implemented in
 Semantic recall is an optional hybrid layer (`src/memory/embedding.ts`).
 `EmbeddingPort` is a two-method contract (`id`, `embed`); the shipped
 `HashedEmbedding` is offline and deterministic: signed feature hashing over the
-character trigrams of `#word#`, 128 dimensions, L2-normalized. The Runtime
-enables it by default; `embeddings: false` or `DS_AGENT_SEMANTIC_RECALL=0`
-restores lexical-only behavior. A deployer can pass a local-model or hosted
-provider as the port; the memory store itself never calls the network.
+character trigrams of `#word#`, 128 dimensions, L2-normalized. It shares the
+normalizer and synonym map in `src/memory/text.ts` with the lexical path. The
+Runtime enables it by default. `embeddings: false` or
+`DS_AGENT_SEMANTIC_RECALL=0` (also `false`, `off`, `no`, or empty) restores
+lexical-only behavior; an explicit programmatic port wins over the environment.
+A deployer can pass a local-model or hosted provider as the port; the memory
+store itself never calls the network.
 
-Vectors are stored on the entry (`embedding`, `embeddingId`) and recomputed
-lazily when the port id or dimensions change, including for entries written
-before a port existed. `query()` embeds the query once and marks an entry as a
-semantic candidate when `cosine >= embeddingFloor` (default 0.35, clamped to
-0..1). Semantic candidates do not seed the one-hop tag walk; an entry is
-eligible when it is a lexical direct candidate, is reached by the hop, or
-clears the floor. Every returned hit still receives the same reader-ticket
-spill grant, so semantic recall does not widen access. Empty or punctuation-only
-text maps to a zero vector and cannot match. Evidence:
-`test/semantic-memory.test.ts`.
+The indexed text is the first non-empty line, capped at 300 characters: the
+ticket title, the decision reason, or the newest archived digest summary.
+Indexing the whole body would dilute a short title query below any useful
+cosine. Vectors are stored on the entry (`embedding`, `embeddingId`) and
+recomputed lazily when the port id or dimensions change, including for entries
+written before a port existed; a read persists at most 32 new vectors so an
+upgrade cannot turn one recall into an unbounded write. `query()` embeds the
+query once and marks an entry as a semantic candidate when
+`cosine >= embeddingFloor` (default 0.35, clamped to 0..1;
+`RuntimeOptions.embeddingFloor` or `DS_AGENT_EMBEDDING_FLOOR`). Semantic
+candidates do not seed the one-hop tag walk; an entry is eligible when it is a
+lexical direct candidate, is reached by the hop, or clears the floor.
+
+A provider throw degrades to lexical-only: writes still succeed without a
+vector, and a query skips the semantic branch. Every returned hit still
+receives the same reader-ticket spill grant, so semantic recall does not widen
+access. Empty or punctuation-only text maps to a zero vector and cannot match.
+Evidence: `test/semantic-memory.test.ts`; design record: ADR-016.
 
 Retention is two-tier. Hot ticket/decision entries default to 1000 entries /
 90 days (`DS_AGENT_MEMORY_MAX_ENTRIES`, `DS_AGENT_MEMORY_MAX_AGE_DAYS`).

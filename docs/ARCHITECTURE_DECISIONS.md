@@ -306,9 +306,9 @@ rewrite `PLAN.md`; link to the contract instead.
 ## ADR-010 — Long-term memory recall stays lexical-first with an offline evaluation harness; embeddings stay behind a port
 
 - **Date:** 2026-11-04
-- **Status:** accepted and implemented (2026-11-04). Recall remains
-  lexical-first; this ADR still does not implement semantic search or
-  embeddings.
+- **Status:** accepted and implemented (2026-11-04); partially superseded by
+  ADR-016 (2026-11-05), which ships an optional embedding layer. The lexical
+  path, evaluation harness, and ACL rules remain in force.
 - **Context:** `SpillBackedLongTermMemory.query`
   (`src/memory/long-term.ts`) is word-AND substring matching over the
   lower-cased redacted spill body. Requested tags are an exact AND filter, and
@@ -787,3 +787,66 @@ rewrite `PLAN.md`; link to the contract instead.
     "plan A then plan B" case) and makes the Router's global memory a fiction.
   - **Keeping pruned history forever.** It contradicts §8.1's cost concern;
     bounded cold digests preserve the summary without unbounded growth.
+
+## ADR-016 — Semantic recall ships as an optional, bounded hybrid layer behind `EmbeddingPort`
+
+- **Date:** 2026-11-05
+- **Status:** accepted and implemented (PR #152).
+- **Context:** ADR-010 deferred embeddings until evidence required them and
+  required any future attempt to sit behind an `EmbeddingPort`, use only
+  redacted text, and keep CI offline. The competitive gap analysis still lists
+  semantic recall as a P1 difference from Instinct and Muse. A learned
+  provider cannot be a CI dependency, and indexing a whole ticket body
+  (title + brief + report) against a short title query dilutes the cosine
+  below any useful floor.
+- **Decision:**
+  1. **Two-method port.** `EmbeddingPort` (`src/memory/embedding.ts`) is
+     `{ id, embed(text) }`. The shipped `HashedEmbedding` uses signed feature
+     hashing over the character trigrams of `#word#`, 128 dimensions, and
+     L2 normalization. It is deterministic, offline, and dependency-free.
+     `src/memory/text.ts` owns the normalizer and synonym map shared with the
+     lexical path, so the two candidate spaces cannot drift.
+  2. **Index the head, not the body.** The memory layer embeds the first
+     non-empty line, capped at 300 characters. For a ticket that is the title;
+     for a decision it is the reason; for a cold digest it is the newest
+     archived summary. This keeps a short query from being diluted by a long
+     report while storing one vector per entry.
+  3. **Hybrid ranking.** An entry is eligible when it is a lexical direct
+     candidate, is reached by the existing one-hop tag walk, or its cosine
+     clears `embeddingFloor` (default 0.35, clamped to 0..1,
+     `RuntimeOptions.embeddingFloor` or `DS_AGENT_EMBEDDING_FLOOR`). Semantic
+     candidates never seed a hop. Ordering adds `similarity` after `hopScore`.
+  4. **Default on, explicitly off.** The Runtime constructs `HashedEmbedding`
+     by default. `embeddings: false` or `DS_AGENT_SEMANTIC_RECALL` set to
+     `0`, `false`, `off`, `no`, or empty disables it. An explicit
+     programmatic port wins over the environment.
+  5. **Fail open to lexical-only.** A provider throw during a write leaves the
+     entry without a vector and does not abort the write. A provider throw
+     during a query disables the semantic branch for that query; lexical and
+     tag-hop results are still returned.
+  6. **Bounded backfill.** Vectors carry a port id that includes their
+     dimensions and are recomputed when it changes. A read persists at most
+     `MAX_EMBEDDING_BACKFILL` (32) new vectors, so upgrading a 1000-entry
+     index cannot turn one recall into a 1000-document write transaction.
+  7. **Security is unchanged.** Only redacted text reaches the port. Every
+     returned hit, semantic or lexical, still grants the reader ticket access
+     to that exact spill. No new lookup-by-id path is added.
+- **Consequences:** the shipped hashing catches morphology, shared stems,
+  word-order variation, and typos for words outside the synonym table. It does
+  **not** catch true synonyms ("invoice" vs "billing"); that remains a reason
+  to inject a learned provider. Stored vectors add roughly 1 KB per entry,
+  bounded by the existing 1000-hot / 200-cold retention defaults. The
+  lexical recall evaluation remains the regression floor; `test/semantic-
+  memory.test.ts` covers the vector path, the precision floor, provider
+  failure, lazy backfill, and Runtime configuration.
+- **Alternatives rejected:**
+  - **Embedding the whole body.** Measured cosine for a short title against a
+    30-sentence report stays near 0.14, so the feature would be inert for real
+    tickets.
+  - **A hosted embedding provider by default.** It adds network egress,
+    non-determinism, and an outage path to the default suite. The port is the
+    extension point.
+  - **Lowering the floor to force matches.** Unrelated hashed text scores
+    around 0.1-0.2; a lower floor turns recall into noise.
+  - **Writing every missing vector during a query.** It makes a read an
+    unbounded write and blocks recall behind the slowest provider call.

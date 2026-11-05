@@ -1,6 +1,7 @@
 import { grantTicketSpill } from './acl.ts'
 import { cosine, DEFAULT_EMBEDDING_FLOOR, type EmbeddingPort } from './embedding.ts'
 import { mergeRefs, refsForDecision, refsForTicket, threadRef } from './graph.ts'
+import { canonicalTokenCounts, canonicalTokens, queryTokens } from './text.ts'
 import type { Decision, ObjectRef, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -78,6 +79,14 @@ interface QueryCandidate {
 }
 
 const SUMMARY_CHARS = 160
+/**
+ * The semantic head is the first non-empty line, capped. Indexing a whole
+ * ticket body (title + brief + report) dilutes a short title query until the
+ * cosine can never clear the floor; the title line is the high-signal part.
+ */
+const SEMANTIC_HEAD_CHARS = 300
+/** Bound lazy write-back during a read so an upgrade cannot write 1200 docs. */
+const MAX_EMBEDDING_BACKFILL = 32
 
 /**
  * Persistent cross-ticket memory index (T48). A body is stored as a spill;
@@ -119,12 +128,18 @@ export class SpillBackedLongTermMemory {
     this.embeddingFloor = Number.isFinite(floor) ? Math.min(1, Math.max(0, floor)) : DEFAULT_EMBEDDING_FLOOR
   }
 
-  /** Persisted vector and port id, or nothing when semantic recall is off. */
+  /**
+   * Persisted vector and port id, or nothing when semantic recall is off.
+   * A provider failure degrades to lexical-only instead of aborting the write.
+   */
   private vectorOf(text: string): { vector: number[]; id: string } | undefined {
     if (!this.embedding) return undefined
-    const vector = [...this.embedding.embed(text)]
-    if (vector.length === 0) return undefined
-    return { vector, id: `${this.embedding.id}:${vector.length}` }
+    try {
+      const vector = [...this.embedding.embed(semanticHead(text))]
+      return { vector, id: `${this.embedding.id}:${vector.length}` }
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -245,7 +260,9 @@ export class SpillBackedLongTermMemory {
       const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
       const spillId = existing?.spillId ?? `ltm_decision_spill_${decision.id}`
       this.store.replaceSpill(spillId, text, refs)
-      const vector = this.vectorOf(text)
+      // The first line is the generic "decision <kind> on <thread>" header;
+      // embed the reason, which carries the searchable meaning.
+      const vector = this.vectorOf(decision.reason)
       const entry: LongTermMemoryEntry = {
         id,
         ticketId: decision.ticketId ?? `decision:${decision.id}`,
@@ -335,11 +352,21 @@ export class SpillBackedLongTermMemory {
     const wanted = normalizeTags(query.tags)
     const needles = new Set([...words, ...wanted.flatMap(tag => canonicalTokens(tag))])
     const limit = Math.max(0, Math.floor(query.limit ?? 10))
-    // One vector per query. An empty (zero) vector cannot produce a hit.
-    const queryVector = this.embedding ? [...this.embedding.embed(query.text)] : undefined
-    const embeddingId = queryVector && queryVector.length > 0 && this.embedding
+    // One vector per query. An empty (zero) vector cannot produce a hit, and a
+    // provider failure degrades to lexical-only instead of failing recall.
+    let queryVector: number[] | undefined
+    if (this.embedding) {
+      try {
+        queryVector = [...this.embedding.embed(semanticHead(query.text))]
+      } catch {
+        queryVector = undefined
+      }
+    }
+    if (queryVector?.length === 0) queryVector = undefined
+    const embeddingId = queryVector && this.embedding
       ? `${this.embedding.id}:${queryVector.length}`
       : undefined
+    let backfilled = 0
     return this.store.atomic(() => {
       const candidates: QueryCandidate[] = []
       const tagIndex = new Map<string, number[]>()
@@ -359,13 +386,24 @@ export class SpillBackedLongTermMemory {
         let similarity = 0
         if (this.embedding && queryVector && embeddingId) {
           let vector = entry.embedding
-          if (!vector || entry.embeddingId !== embeddingId || vector.length !== queryVector.length) {
-            vector = [...this.embedding.embed(body)]
-            entry.embedding = vector
-            entry.embeddingId = `${this.embedding.id}:${vector.length}`
-            this.store.putDoc('ltm', entry.id, entry)
+          const emptyId = `${this.embedding.id}:0`
+          const knownEmpty = entry.embeddingId === emptyId && vector?.length === 0
+          if (!knownEmpty && (!vector || entry.embeddingId !== embeddingId || vector.length !== queryVector.length)) {
+            try {
+              vector = [...this.embedding.embed(semanticHead(body))]
+            } catch {
+              vector = undefined
+            }
+            // Persist at most a bounded number per read. The rest still score
+            // in memory and join the cache on a later read or write.
+            if (vector && backfilled < MAX_EMBEDDING_BACKFILL) {
+              entry.embedding = vector
+              entry.embeddingId = `${this.embedding.id}:${vector.length}`
+              this.store.putDoc('ltm', entry.id, entry)
+              backfilled += 1
+            }
           }
-          if (vector.length === queryVector.length) similarity = cosine(queryVector, vector)
+          if (vector && vector.length === queryVector.length) similarity = cosine(queryVector, vector)
         }
         const index = candidates.length
         candidates.push({
@@ -501,7 +539,8 @@ export class SpillBackedLongTermMemory {
       const text = capDigest(existing ? `${block}\n${this.store.getSpill(existing.spillId) ?? existing.text}` : block)
       const refs = mergeRefs(existing?.refs ?? [], [threadRef(key)])
       this.store.replaceSpill(spillId, text, refs)
-      const vector = this.vectorOf(text)
+      // The digest's first line is a generic "archived N entries" header.
+      const vector = this.vectorOf(ordered[0]?.text ?? text)
       const digest: LongTermMemoryEntry = {
         id,
         ticketId: `thread:${key}`,
@@ -583,6 +622,12 @@ function normalizeTags(tags: readonly string[] | undefined): string[] {
   return [...new Set((tags ?? []).map(tag => tag.trim()).filter(Boolean))]
 }
 
+/** First non-empty line, capped; indexes the high-signal head of a body. */
+function semanticHead(text: string): string {
+  const line = text.split(/\r?\n/).map(part => part.trim()).find(Boolean)
+  return (line ?? text.trim()).slice(0, SEMANTIC_HEAD_CHARS)
+}
+
 /** Dedupe key: collapse whitespace, trim, and compare case-insensitively. */
 function normalizeForDedupe(text: string): string {
   return text.replace(/\s+/g, ' ').trim().toLowerCase()
@@ -597,95 +642,3 @@ function dedupeKeyOf(store: Store, entry: LongTermMemoryEntry): string | undefin
   return body == null ? undefined : normalizeForDedupe(body)
 }
 
-/**
- * Small, explicit, in-repo synonym/morphology map. The first word in each
- * group is canonical. It is deliberately tiny and deterministic: no learned
- * vocabulary, no model, no external dependency.
- */
-const SYNONYM_GROUPS: readonly (readonly string[])[] = [
-  ['token', 'tokens', 'credential', 'credentials'],
-  ['rotate', 'rotated', 'rotates', 'rotating', 'rotation', 'rotations'],
-  ['prune', 'prunes', 'pruned', 'pruning', 'remove', 'removes', 'removed', 'removal'],
-  ['old', 'older', 'oldest'],
-  ['entry', 'entries'],
-  ['fail', 'failed', 'failing', 'failure', 'failures'],
-  ['expand', 'expanded', 'expands', 'expansion'],
-  ['synonym', 'synonyms'],
-  ['paraphrase', 'paraphrases'],
-  ['own', 'owns', 'owned', 'owner', 'ownership'],
-  ['restore', 'restored', 'restores', 'restoring'],
-  ['deploy', 'deploys', 'deployed', 'deployment', 'deployments'],
-  ['release', 'releases', 'released'],
-  ['incident', 'incidents'],
-  ['auth', 'authentication', 'authenticate', 'authenticated'],
-  ['memory', 'memories'],
-  ['retention', 'retain', 'retains', 'retained'],
-  ['measure', 'measures', 'measured', 'measuring'],
-  ['evaluate', 'evaluation', 'evaluates', 'evaluated'],
-  ['embed', 'embedding', 'embeddings'],
-  ['expire', 'expired', 'expires', 'expiration', 'expiring'],
-  ['retry', 'retries', 'retried', 'retrying'],
-  ['reject', 'rejects', 'rejected', 'rejection', 'invalid'],
-  ['queue', 'queued', 'queues'],
-  ['delay', 'delays', 'delayed', 'latency', 'latencies'],
-  ['missing', 'absent'],
-  ['reply', 'replies', 'replied', 'replying'],
-  ['deliver', 'delivers', 'delivered', 'delivery'],
-  ['configure', 'configures', 'configured', 'configuration'],
-  ['allow', 'allows', 'allowed', 'allowlist'],
-  ['deny', 'denies', 'denied'],
-  ['install', 'installs', 'installed', 'installation'],
-  ['origin', 'originating', 'originates', 'original'],
-  ['approve', 'approves', 'approved', 'approval', 'approvals'],
-  ['permanent', 'permanently'],
-  ['transient', 'transiently'],
-  ['performance', 'perf'],
-  ['group', 'groups'],
-  ['error', 'errors'],
-  ['message', 'messages'],
-  ['command', 'commands'],
-  ['row', 'rows'],
-]
-
-const CANONICAL = new Map<string, string>()
-for (const group of SYNONYM_GROUPS) {
-  const canonical = group[0]!
-  for (const word of group) CANONICAL.set(word, canonical)
-}
-
-/** Query-only stop words. Body tokens are kept so phrase statistics stay intact. */
-const STOPWORDS = new Set([
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'before', 'but', 'by',
-  'did', 'do', 'does', 'for', 'from', 'how', 'if', 'in', 'into', 'is', 'it',
-  'its', 'no', 'nor', 'not', 'of', 'on', 'or', 'over', 'so', 'such', 'than',
-  'that', 'the', 'their', 'then', 'there', 'these', 'this', 'to', 'was',
-  'were', 'what', 'when', 'where', 'which', 'who', 'whose', 'why', 'will',
-  'with', 'without',
-])
-
-/** NFKC, lower-case, and collapse punctuation/whitespace into single spaces. */
-function tokenize(text: string): string[] {
-  return text
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-}
-
-function canonicalTokens(text: string): string[] {
-  return tokenize(text).map(token => CANONICAL.get(token) ?? token)
-}
-
-function queryTokens(text: string): string[] {
-  return [...new Set(canonicalTokens(text).filter(token => !STOPWORDS.has(token)))]
-}
-
-function canonicalTokenCounts(text: string): Map<string, number> {
-  const counts = new Map<string, number>()
-  for (const token of canonicalTokens(text)) {
-    counts.set(token, (counts.get(token) ?? 0) + 1)
-  }
-  return counts
-}

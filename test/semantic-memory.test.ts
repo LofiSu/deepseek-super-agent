@@ -3,6 +3,7 @@ import { cosine, HashedEmbedding, type EmbeddingPort } from '../src/memory/embed
 import { SpillBackedLongTermMemory } from '../src/memory/long-term.ts'
 import { readSpillFor } from '../src/memory/acl.ts'
 import { Store } from '../src/store/sqlite.ts'
+import { embeddingFloorFromEnv, semanticRecallEnabled } from '../src/runtime.ts'
 import { freshRuntime, shutdown, tempHome } from './fixtures.ts'
 
 /**
@@ -71,6 +72,25 @@ describe('cosine', () => {
   })
 })
 
+describe('semantic configuration', () => {
+  it('parses the kill switch and the floor from the environment', () => {
+    expect(semanticRecallEnabled({})).toBe(true)
+    for (const value of ['0', 'false', 'OFF', ' no ']) {
+      expect(semanticRecallEnabled({ DS_AGENT_SEMANTIC_RECALL: value })).toBe(false)
+    }
+    expect(semanticRecallEnabled({ DS_AGENT_SEMANTIC_RECALL: '1' })).toBe(true)
+    // An explicit programmatic port wins over a stale kill switch.
+    expect(semanticRecallEnabled({ DS_AGENT_SEMANTIC_RECALL: '0' }, vectors)).toBe(true)
+    expect(semanticRecallEnabled({}, false)).toBe(false)
+
+    expect(embeddingFloorFromEnv({ DS_AGENT_EMBEDDING_FLOOR: '0.5' })).toBe(0.5)
+    expect(embeddingFloorFromEnv({ DS_AGENT_EMBEDDING_FLOOR: 'nope' })).toBeCloseTo(0.35)
+    expect(embeddingFloorFromEnv({ DS_AGENT_EMBEDDING_FLOOR: '2' })).toBe(1)
+    expect(embeddingFloorFromEnv({ DS_AGENT_EMBEDDING_FLOOR: '-1' })).toBe(0)
+    expect(embeddingFloorFromEnv({}, 0.42)).toBe(0.42)
+  })
+})
+
 describe('semantic recall', () => {
   it('finds a memory with no shared lexical token above the floor', () => {
     const store = new Store(tempHome())
@@ -125,12 +145,38 @@ describe('semantic recall', () => {
     second.close()
   })
 
-  it('recalls morphologically related text with the shipped embedding', () => {
+  it('recalls semantic-only text with the shipped embedding', () => {
     const store = new Store(tempHome())
     const memory = new SpillBackedLongTermMemory(store, { embedding: new HashedEmbedding() })
-    const saved = memory.put('ticket_a', 'deployment pipeline failed')
-    expect(memory.query({ ticketId: 'reader', text: 'deploying the pipeline broke' })
+    const saved = memory.put('ticket_a', 'idempotency key rejected')
+    // No shared canonical token: idempotency/idempotent and key/keys are not
+    // in the synonym table, so only the vector path can retrieve this.
+    expect(memory.query({ ticketId: 'reader', text: 'idempotent keys' })
       .map(entry => entry.id)).toEqual([saved.id])
+    store.close()
+  })
+
+  it('indexes the head so a long report cannot dilute the title match', () => {
+    const store = new Store(tempHome())
+    const memory = new SpillBackedLongTermMemory(store, { embedding: new HashedEmbedding() })
+    const report = Array.from({ length: 30 }, (_, index) => `line ${index} unrelated billing detail`)
+    const saved = memory.put('ticket_a', ['idempotency key rejected', ...report].join('\n'))
+    expect(memory.query({ ticketId: 'reader', text: 'idempotent keys' })
+      .map(entry => entry.id)).toEqual([saved.id])
+    store.close()
+  })
+
+  it('degrades to lexical recall when the embedding provider throws', () => {
+    const store = new Store(tempHome())
+    const exploding: EmbeddingPort = {
+      id: 'exploding',
+      embed: () => { throw new Error('provider down') },
+    }
+    const memory = new SpillBackedLongTermMemory(store, { embedding: exploding })
+    const saved = memory.put('ticket_a', 'invoice csv rejected blank rows')
+    expect(memory.query({ ticketId: 'reader', text: 'blank invoice rows' })
+      .map(entry => entry.id)).toEqual([saved.id])
+    expect(memory.query({ ticketId: 'reader', text: 'idempotent keys' })).toEqual([])
     store.close()
   })
 
@@ -158,6 +204,36 @@ describe('semantic recall', () => {
       expect(off.store.getDoc<{ embedding?: number[] }>('ltm', saved.id)?.embedding).toBeUndefined()
     } finally {
       await shutdown(off)
+    }
+  })
+
+  it('lets the Runtime tune the semantic floor', async () => {
+    const strict = freshRuntime({
+      jobDelayMs: 0,
+      watchdogIntervalMs: 60_000,
+      embeddings: vectors,
+      embeddingFloor: 1,
+    })
+    try {
+      strict.longTermMemory.put('ticket_a', launch)
+      expect(strict.longTermMemory.query({ ticketId: 'reader', text: 'when is the ship window' }))
+        .toEqual([])
+    } finally {
+      await shutdown(strict)
+    }
+
+    const loose = freshRuntime({
+      jobDelayMs: 0,
+      watchdogIntervalMs: 60_000,
+      embeddings: vectors,
+      embeddingFloor: 0.9,
+    })
+    try {
+      loose.longTermMemory.put('ticket_a', launch)
+      expect(loose.longTermMemory.query({ ticketId: 'reader', text: 'when is the ship window' }))
+        .toHaveLength(1)
+    } finally {
+      await shutdown(loose)
     }
   })
 

@@ -1,3 +1,5 @@
+import { canonicalTokens } from './text.ts'
+
 /**
  * Optional semantic recall. An EmbeddingPort turns text into a fixed-length,
  * L2-normalized vector; the shipped HashedEmbedding is deterministic, offline,
@@ -38,14 +40,9 @@ export class HashedEmbedding implements EmbeddingPort {
 
   embed(text: string): readonly number[] {
     const vector = new Float64Array(this.dimensions)
-    const words = text
-      .normalize('NFKC')
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}]+/gu, ' ')
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean)
-    for (const word of words) {
+    // Shares the lexical normalizer and synonym map so both candidate spaces
+    // agree on token shape.
+    for (const word of canonicalTokens(text)) {
       const wrapped = `#${word}#`
       const grams = wrapped.length <= 3
         ? [wrapped]
