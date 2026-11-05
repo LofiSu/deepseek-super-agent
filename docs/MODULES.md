@@ -249,9 +249,28 @@ Recall is lexical-first and deterministic (ADR-010, implemented in
   hop without a new link table. Entries without a readable spill are never
   eligible.
 - Orders by `tagHits` desc, then `textHits` desc (each query token capped at
-  5), then `hopScore` desc, then hot before cold, then `createdAt` desc, then
-  `id` desc. There is no randomness, provider call, or wall-clock-dependent
-  ranking.
+  5), then `hopScore` desc, then `similarity` desc, then hot before cold, then
+  `createdAt` desc, then `id` desc. There is no randomness, provider call, or
+  wall-clock-dependent ranking.
+
+Semantic recall is an optional hybrid layer (`src/memory/embedding.ts`).
+`EmbeddingPort` is a two-method contract (`id`, `embed`); the shipped
+`HashedEmbedding` is offline and deterministic: signed feature hashing over the
+character trigrams of `#word#`, 128 dimensions, L2-normalized. The Runtime
+enables it by default; `embeddings: false` or `DS_AGENT_SEMANTIC_RECALL=0`
+restores lexical-only behavior. A deployer can pass a local-model or hosted
+provider as the port; the memory store itself never calls the network.
+
+Vectors are stored on the entry (`embedding`, `embeddingId`) and recomputed
+lazily when the port id or dimensions change, including for entries written
+before a port existed. `query()` embeds the query once and marks an entry as a
+semantic candidate when `cosine >= embeddingFloor` (default 0.35, clamped to
+0..1). Semantic candidates do not seed the one-hop tag walk; an entry is
+eligible when it is a lexical direct candidate, is reached by the hop, or
+clears the floor. Every returned hit still receives the same reader-ticket
+spill grant, so semantic recall does not widen access. Empty or punctuation-only
+text maps to a zero vector and cannot match. Evidence:
+`test/semantic-memory.test.ts`.
 
 Retention is two-tier. Hot ticket/decision entries default to 1000 entries /
 90 days (`DS_AGENT_MEMORY_MAX_ENTRIES`, `DS_AGENT_MEMORY_MAX_AGE_DAYS`).

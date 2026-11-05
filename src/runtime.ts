@@ -37,6 +37,7 @@ import {
 } from './ingress/policy.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
 import { inlineOrSpill } from './memory/recall.ts'
+import { HashedEmbedding, type EmbeddingPort } from './memory/embedding.ts'
 import { refsForTrigger, triggerRef } from './memory/graph.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
 import { Metrics } from './metrics/metrics.ts'
@@ -112,6 +113,12 @@ export interface RuntimeOptions {
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
    */
   memoryRetention?: MemoryRetention
+  /**
+   * Optional semantic recall port. Defaults to the offline `HashedEmbedding`;
+   * `false` (or `DS_AGENT_SEMANTIC_RECALL=0`) keeps recall lexical-only.
+   * A configured port never makes a network or model call by itself.
+   */
+  embeddings?: EmbeddingPort | false
   /**
    * Bounded in-memory lifecycle history and the restart-replay cap.
    * Defaults to 1000 and keeps the newest events.
@@ -459,7 +466,13 @@ export class Runtime {
     // Retention keeps the durable index bounded: 1000 entries / 90 days by
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
-    const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
+    const embeddings = opts.embeddings === false || baseEnv.DS_AGENT_SEMANTIC_RECALL === '0'
+      ? undefined
+      : opts.embeddings ?? new HashedEmbedding()
+    const longTermMemory = new SpillBackedLongTermMemory(store, redact, {
+      ...retention,
+      ...(embeddings ? { embedding: embeddings } : {}),
+    })
     const lifecycle = new LifecycleBus(opts.lifecycleMaxEvents)
     const lifecycleRetention = lifecycleRetentionFor(opts.lifecycleRetention, lifecycle.maxEvents)
     // Restart replay: first bound any existing durable log, then fill the ring

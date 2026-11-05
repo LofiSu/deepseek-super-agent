@@ -121,7 +121,7 @@ Article evals. They do not block the release.
 Kept out of M11.
 
 - [~] Router scale-out / Worker-direct topology (§8.1) — always-wired `RouterShardRegistry` + `WorkerMeshRegistry`; `RemoteMeshRegistry`/`MeshInbox` add authenticated A2A registration/heartbeat/dispatch, but no listener starts by default and remote dispatch is not connected to the local queue yet.
-- [~] Memory that spans tickets and months (§8.1) — always-wired `SpillBackedLongTermMemory`: hot tickets/decisions (1000 / 90 days) plus cold Thread digests (200 / 3650 days); calendar-month behavior is bounded, not measured across real months
+- [~] Memory that spans tickets and months (§8.1) — always-wired `SpillBackedLongTermMemory`: hot tickets/decisions (1000 / 90 days) plus cold Thread digests (200 / 3650 days), with hybrid lexical + embedding recall (`EmbeddingPort`; offline hashed embedding by default, `DS_AGENT_SEMANTIC_RECALL=0` disables); calendar-month behavior is bounded, not measured across real months
 - [x] A product shell that is not a Session (§8.2) — always-wired `LifecycleBus` read model plus `ds-agent ui`, a read-only, required-token loopback dashboard with sanitized lifecycle events and no message bodies.
 - [x] Mid-task collaboration with a person (§8.2) — CLI `pause` / `intervene` / `resume` / `collab` + durable `Ticket.collaboration`; harness/watchdog honor pause
 - [x] Panel · Execution — `ds-agent panel` derives Open/Pending/Working/Waiting/Blocked/Awaiting from Ticket facts, with Mandate, Executor Session, directory, report, and Outbox delivery counts (`src/core/panel.ts`)
@@ -324,7 +324,7 @@ The functional domains keep the T45–T51 ids: evaluation and metrics, extension
 
 - `runtime.routerShards` — `src/ingress/shards.ts`; configure with `DS_AGENT_SHARDS` (JSON) or `RuntimeOptions.routerShards`. The default shard always exists.
 - `runtime.workerMesh` — `src/harness/mesh.ts`; `DS_AGENT_MESH_CAPACITY` or `RuntimeOptions.meshCapacity`; waiting launches use a bounded FIFO queue (`DS_AGENT_MESH_QUEUE`, default 100), and a failed non-queued start releases the reserved node and pumps the queue.
-- `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket and per Router Decision, with a cold Thread-digest tier for month-scale recall.
+- `runtime.longTermMemory` — `src/memory/long-term.ts`; one entry per finished ticket and per Router Decision, with a cold Thread-digest tier for month-scale recall. Recall is hybrid: lexical, one tag hop, and an optional `EmbeddingPort` (`src/memory/embedding.ts`) whose offline `HashedEmbedding` is on by default.
 - `runtime.lifecycle` — `src/core/lifecycle.ts`; read-model events for panels and CLI views.
 - `runtime.a2aRouter` / `runtime.sendA2A` — `src/channels/a2a.ts`; the Runtime registers its instance as the local recipient.
 

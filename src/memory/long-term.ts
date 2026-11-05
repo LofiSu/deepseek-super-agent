@@ -1,4 +1,5 @@
 import { grantTicketSpill } from './acl.ts'
+import { cosine, DEFAULT_EMBEDDING_FLOOR, type EmbeddingPort } from './embedding.ts'
 import { mergeRefs, refsForDecision, refsForTicket, threadRef } from './graph.ts'
 import type { Decision, ObjectRef, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
@@ -37,6 +38,14 @@ export interface LongTermMemoryRetention {
 export interface LongTermMemoryOptions extends LongTermMemoryRetention {
   /** Injectable clock for deterministic age/count pruning tests. */
   now?: () => Date
+  /**
+   * Optional semantic recall. Absent means lexical-only behavior, unchanged.
+   * Vectors are stored with the entry and recomputed lazily when the port id
+   * or dimensions change.
+   */
+  embedding?: EmbeddingPort
+  /** Cosine floor for a semantic-only hit. Defaults to 0.35, clamped to 0..1. */
+  embeddingFloor?: number
 }
 
 
@@ -52,6 +61,10 @@ export interface LongTermMemoryEntry {
   tier?: LongTermMemoryTier
   /** Next-hop refs inlined for Chain of Recall. */
   refs?: ObjectRef[]
+  /** Cached semantic vector, when an EmbeddingPort is configured. */
+  embedding?: number[]
+  /** Port id and dimensions that produced `embedding`. */
+  embeddingId?: string
 }
 
 interface QueryCandidate {
@@ -60,6 +73,7 @@ interface QueryCandidate {
   tagHits: number
   textHits: number
   hopScore: number
+  similarity: number
   direct: boolean
 }
 
@@ -80,6 +94,8 @@ export class SpillBackedLongTermMemory {
   }>
   private readonly redact: (text: string) => string
   private readonly clock: () => Date
+  private readonly embedding?: EmbeddingPort
+  private readonly embeddingFloor: number
 
   constructor(store: Store, options?: LongTermMemoryOptions)
   constructor(store: Store, redact?: (text: string) => string, options?: LongTermMemoryOptions)
@@ -98,6 +114,17 @@ export class SpillBackedLongTermMemory {
       coldMaxAgeDays: normalizeLimit(retention.coldMaxAgeDays ?? 3650),
     })
     this.clock = retention.now ?? (() => new Date())
+    this.embedding = retention.embedding
+    const floor = retention.embeddingFloor ?? DEFAULT_EMBEDDING_FLOOR
+    this.embeddingFloor = Number.isFinite(floor) ? Math.min(1, Math.max(0, floor)) : DEFAULT_EMBEDDING_FLOOR
+  }
+
+  /** Persisted vector and port id, or nothing when semantic recall is off. */
+  private vectorOf(text: string): { vector: number[]; id: string } | undefined {
+    if (!this.embedding) return undefined
+    const vector = [...this.embedding.embed(text)]
+    if (vector.length === 0) return undefined
+    return { vector, id: `${this.embedding.id}:${vector.length}` }
   }
 
   /**
@@ -129,19 +156,23 @@ export class SpillBackedLongTermMemory {
         .find(entry => entry.ticketId === ticketId && dedupeKeyOf(this.store, entry) === dedupeKey)
       if (existing) {
         const mergedRefs = mergeRefs(existing.refs ?? [], refs)
+        // Dedupe never rewrites the body; only the ref graph may grow. The
+        // cached vector may be added when a port was configured after the body.
+        const body = this.store.getSpill(existing.spillId)
+        const vector = body == null ? undefined : this.vectorOf(body)
         const entry: LongTermMemoryEntry = {
           ...existing,
           tags: normalizeTags([...(existing.tags ?? []), ...wanted]),
           refs: mergedRefs,
+          ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
         }
-        // Dedupe never rewrites the body; only the ref graph may grow.
-        const body = this.store.getSpill(existing.spillId)
         if (body != null) this.store.replaceSpill(existing.spillId, body, mergedRefs)
         this.store.putDoc('ltm', entry.id, entry)
         this.prune(entry.id)
         return entry
       }
       const spillId = this.store.putSpill(safe, refs)
+      const vector = this.vectorOf(safe)
       const entry: LongTermMemoryEntry = {
         id: this.store.nextId('ltm'),
         ticketId,
@@ -152,6 +183,7 @@ export class SpillBackedLongTermMemory {
         tier: opts.tier ?? 'hot',
         tags: wanted,
         refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
       }
       this.store.putDoc('ltm', entry.id, entry)
       grantTicketSpill(this.store, spillId, ticketId)
@@ -175,6 +207,7 @@ export class SpillBackedLongTermMemory {
       const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
       const spillId = existing?.spillId ?? `ltm_spill_${ticket.id}`
       this.store.replaceSpill(spillId, text, refs)
+      const vector = this.vectorOf(text)
       const entry: LongTermMemoryEntry = {
         id,
         ticketId: ticket.id,
@@ -185,6 +218,7 @@ export class SpillBackedLongTermMemory {
         tier: 'hot',
         tags: normalizeTags([...ticket.threadKeys, ...ticket.channels.map(channel => channel.source)]),
         refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
       }
       this.store.putDoc('ltm', id, entry)
       grantTicketSpill(this.store, spillId, ticket.id)
@@ -211,6 +245,7 @@ export class SpillBackedLongTermMemory {
       const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
       const spillId = existing?.spillId ?? `ltm_decision_spill_${decision.id}`
       this.store.replaceSpill(spillId, text, refs)
+      const vector = this.vectorOf(text)
       const entry: LongTermMemoryEntry = {
         id,
         ticketId: decision.ticketId ?? `decision:${decision.id}`,
@@ -221,6 +256,7 @@ export class SpillBackedLongTermMemory {
         tier: 'hot',
         tags: normalizeTags(['decision', decision.kind, decision.threadKey]),
         refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
       }
       this.store.putDoc('ltm', id, entry)
       if (decision.ticketId) grantTicketSpill(this.store, spillId, decision.ticketId)
@@ -299,6 +335,11 @@ export class SpillBackedLongTermMemory {
     const wanted = normalizeTags(query.tags)
     const needles = new Set([...words, ...wanted.flatMap(tag => canonicalTokens(tag))])
     const limit = Math.max(0, Math.floor(query.limit ?? 10))
+    // One vector per query. An empty (zero) vector cannot produce a hit.
+    const queryVector = this.embedding ? [...this.embedding.embed(query.text)] : undefined
+    const embeddingId = queryVector && queryVector.length > 0 && this.embedding
+      ? `${this.embedding.id}:${queryVector.length}`
+      : undefined
     return this.store.atomic(() => {
       const candidates: QueryCandidate[] = []
       const tagIndex = new Map<string, number[]>()
@@ -313,6 +354,19 @@ export class SpillBackedLongTermMemory {
         const wordTagHits = words.filter(word => tags.has(word)).length
         let textHits = 0
         for (const word of words) textHits += Math.min(5, counts.get(word) ?? 0)
+        // Semantic candidates stay separate from lexical `direct`, so they
+        // never seed the one-hop tag walk.
+        let similarity = 0
+        if (this.embedding && queryVector && embeddingId) {
+          let vector = entry.embedding
+          if (!vector || entry.embeddingId !== embeddingId || vector.length !== queryVector.length) {
+            vector = [...this.embedding.embed(body)]
+            entry.embedding = vector
+            entry.embeddingId = `${this.embedding.id}:${vector.length}`
+            this.store.putDoc('ltm', entry.id, entry)
+          }
+          if (vector.length === queryVector.length) similarity = cosine(queryVector, vector)
+        }
         const index = candidates.length
         candidates.push({
           entry,
@@ -320,6 +374,7 @@ export class SpillBackedLongTermMemory {
           tagHits,
           textHits,
           hopScore: 0,
+          similarity,
           direct: textHits > 0 || wordTagHits > 0,
         })
         for (const tag of tags) {
@@ -352,10 +407,13 @@ export class SpillBackedLongTermMemory {
         candidate.hopScore -= weight * candidate.tags.size
       }
       const matches = candidates
-        .filter(candidate => candidate.direct || candidate.hopScore > 0)
+        .filter(candidate => candidate.direct
+          || candidate.hopScore > 0
+          || (candidate.similarity > 0 && candidate.similarity >= this.embeddingFloor))
         .sort((a, b) => b.tagHits - a.tagHits
           || b.textHits - a.textHits
           || b.hopScore - a.hopScore
+          || b.similarity - a.similarity
           || tierRank(a) - tierRank(b)
           || b.entry.createdAt.localeCompare(a.entry.createdAt)
           || b.entry.id.localeCompare(a.entry.id))
@@ -443,6 +501,7 @@ export class SpillBackedLongTermMemory {
       const text = capDigest(existing ? `${block}\n${this.store.getSpill(existing.spillId) ?? existing.text}` : block)
       const refs = mergeRefs(existing?.refs ?? [], [threadRef(key)])
       this.store.replaceSpill(spillId, text, refs)
+      const vector = this.vectorOf(text)
       const digest: LongTermMemoryEntry = {
         id,
         ticketId: `thread:${key}`,
@@ -453,6 +512,7 @@ export class SpillBackedLongTermMemory {
         tier: 'cold',
         tags: normalizeTags([key, 'digest']),
         refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
       }
       this.store.putDoc('ltm', id, digest)
     }
