@@ -3,6 +3,7 @@ import type { SurfaceVerdict } from '../speculate/silent.ts'
 import { UserError } from '../shared/errors.ts'
 import type { WorkerReport } from '../shared/ports.ts'
 import type { Assignment, Ticket } from '../shared/types.ts'
+import { pendingApproval } from './collab.ts'
 import type { Host } from './host.ts'
 
 export type { WorkerReport }
@@ -219,7 +220,9 @@ export class Assignments {
    */
   recover(ticketId: string): Recovery | undefined {
     const ticket = this.must(ticketId)
-    if (ticket.ended || ticket.collab?.paused) return undefined
+    // An approval wait is intentional: the Worker is stopped on the pending
+    // request, not crashed by a process restart. Treat it like a pause.
+    if (ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) return undefined
     const interrupted = ticket.assignments.filter(item => item.state === 'running')
     if (interrupted.length === 0) return undefined
     const at = this.host.now()
@@ -265,7 +268,9 @@ export class Assignments {
    */
   pendingRecovery(ticketId: string): Recovery | undefined {
     const ticket = this.must(ticketId)
-    if (ticket.ended || ticket.collab?.paused) return undefined
+    // A pending approval is a live hold, not a recovery boundary. Relaunching
+    // its replacement would start a Worker turn the owner has not released.
+    if (ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) return undefined
     if (ticket.assignments.some(item => item.state === 'running')) return undefined
     const latest = ticket.assignments.at(-1)
     if (!latest || latest.state !== 'pending') return undefined

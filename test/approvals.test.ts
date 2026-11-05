@@ -8,6 +8,8 @@ import { ticketStage } from '../src/core/stage.ts'
 import { bindRolePorts } from '../src/core/role-ports.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
+import type { SessionJournal } from '../src/harness/session.ts'
+import type { CompletionRequest } from '../src/harness/model.ts'
 import { Metrics } from '../src/metrics/metrics.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import { Store } from '../src/store/sqlite.ts'
@@ -147,6 +149,142 @@ describe('approval domain', () => {
     engine.decideApproval('ticket_1', approval.id, 'denied')
     expect(() => engine.decideApproval('ticket_1', approval.id, 'approved'))
       .toThrow(/already decided/)
+  })
+
+  it('refuses a decision while the ticket is paused and leaves the approval pending', () => {
+    const { engine, store } = openEngine()
+    store.putDoc('ticket', 'ticket_1', fabricate())
+    const { approval } = engine.requestApproval('ticket_1', { action: 'publish', requestedBy: 'worker' })
+    engine.pause('ticket_1', { reason: 'human review' })
+
+    expect(() => engine.decideApproval('ticket_1', approval.id, 'approved'))
+      .toThrow(/is paused; resume it before deciding approval/)
+    const ticket = store.getDoc<Ticket>('ticket', 'ticket_1')!
+    expect(ticket.collab?.approvals?.[0]).toMatchObject({ status: 'pending' })
+    expect(ticket.collab?.approvals?.[0]?.decidedAt).toBeUndefined()
+    expect(store.listEvents().some(event => event.type === 'approval.decided')).toBe(false)
+  })
+
+  it('strips control and bidi characters from the action and reason', () => {
+    const { engine, store } = openEngine()
+    store.putDoc('ticket', 'ticket_1', fabricate())
+
+    const { approval } = engine.requestApproval('ticket_1', {
+      action: 'publish\u001b[31m the notes\u0000\u202e',
+      reason: 'needs\u0085review',
+      requestedBy: 'worker',
+    })
+
+    expect(approval.action).toBe('publish [31m the notes')
+    expect(approval.reason).toBe('needs review')
+    const stored = store.getDoc<Ticket>('ticket', 'ticket_1')!.collab!.approvals![0]!
+    expect(stored.action).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u202A-\u202E]/)
+    expect(stored.reason).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u202A-\u202E]/)
+  })
+
+  it('sanitizes and caps the owner note before storing it', () => {
+    const { engine, store } = openEngine()
+    store.putDoc('ticket', 'ticket_1', fabricate())
+    const { approval } = engine.requestApproval('ticket_1', { action: 'publish', requestedBy: 'worker' })
+
+    const decided = engine.decideApproval('ticket_1', approval.id, 'approved', {
+      note: `ship\u001b it\u202e ${'x'.repeat(400)}`,
+    })
+
+    const note = decided.approval.note ?? ''
+    expect(note.startsWith('ship it x')).toBe(true)
+    expect(note).toHaveLength(300)
+    expect(note).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u202A-\u202E]/)
+    expect(store.getDoc<Ticket>('ticket', 'ticket_1')!.collab!.approvals![0]!.note).toBe(note)
+    expect(engine.takeGuidance('ticket_1', 'worker')[0]).toContain(`Note: ${note}.`)
+  })
+
+  it('restart recovery leaves an approval-held ticket untouched and still recovers a normal one', () => {
+    const { engine, store } = openEngine()
+    const at = '2026-01-01T00:00:00.000Z'
+    const approval = {
+      id: 'appr_held',
+      at,
+      action: 'publish the release notes',
+      requestedBy: 'worker',
+      status: 'pending' as const,
+    }
+    const heldRunning = fabricate({
+      id: 'ticket_held_running',
+      assignments: [{ id: 'asg_held_running', state: 'running', speculative: false, startedAt: at }],
+      collab: { guidance: [], resumes: [], approvals: [approval] },
+    })
+    const heldRecovery = fabricate({
+      id: 'ticket_held_recovery',
+      assignments: [
+        { id: 'asg_held_old', state: 'ended', speculative: false, endedAt: at },
+        { id: 'asg_held_pending', state: 'pending', speculative: false },
+      ],
+      inputs: [{
+        id: 'input_held_recovered',
+        kind: 'context',
+        text: 'RECOVERED: assignment asg_held_old was interrupted by a process restart.',
+        at,
+        human: false,
+      }],
+      collab: { guidance: [], resumes: [], approvals: [approval] },
+    })
+    const normal = fabricate({
+      id: 'ticket_normal',
+      assignments: [{ id: 'asg_normal', state: 'running', speculative: false, startedAt: at }],
+    })
+    for (const ticket of [heldRunning, heldRecovery, normal]) store.putDoc('ticket', ticket.id, ticket)
+
+    const recovered = engine.recoverInterrupted()
+
+    // Only the ordinary interrupted ticket is recovered.
+    expect(recovered.map(item => item.ticketId)).toEqual(['ticket_normal'])
+    expect(store.getDoc<Ticket>('ticket', 'ticket_held_running')).toEqual(heldRunning)
+    expect(store.getDoc<Ticket>('ticket', 'ticket_held_recovery')).toEqual(heldRecovery)
+    const now = store.getDoc<Ticket>('ticket', 'ticket_normal')!
+    expect(now.assignments).toHaveLength(2)
+    expect(now.assignments[0]).toMatchObject({ id: 'asg_normal', state: 'ended' })
+    expect(now.assignments[1]?.state).toBe('pending')
+    expect(now.inputs.some(input => input.text?.startsWith('RECOVERED:'))).toBe(true)
+  })
+
+  it('does not nudge a stale session on an approval-held ticket', async () => {
+    const { engine, store, home, logs } = openEngine()
+    store.putDoc('ticket', 'ticket_1', fabricate({
+      assignments: [{
+        id: 'asg_1',
+        state: 'running',
+        speculative: false,
+        startedAt: '2020-01-01T00:00:00.000Z',
+      }],
+    }))
+    engine.requestApproval('ticket_1', { action: 'publish', requestedBy: 'worker' })
+    store.upsertSession({
+      id: 'worker_ticket_1',
+      role: 'worker',
+      ticketId: 'ticket_1',
+      status: 'running',
+      heartbeat: '2020-01-01T00:00:00.000Z',
+      createdAt: '2020-01-01T00:00:00.000Z',
+    })
+    const { Watchdog } = await import('../src/watchdog/watchdog.ts')
+    const appended: string[] = []
+    const watchdog = new Watchdog({
+      store,
+      engine,
+      journal: {
+        append: (sessionId: string) => { appended.push(sessionId) },
+      } as unknown as SessionJournal,
+      log: line => logs.push(line),
+      metrics: new Metrics(home),
+      intervalMs: 60_000,
+      stuckMs: 1_000,
+    })
+
+    watchdog.tick()
+
+    expect(appended).toHaveLength(0)
+    expect(logs.join('\n')).toContain('stuck=0')
   })
 
   it('treats an approval wait as intentional idle in the watchdog', async () => {
@@ -399,5 +537,84 @@ describe('approval hold end to end', () => {
     expect(workerCalls).toBeGreaterThan(1)
     const guidance = runtime.store.getDoc<Ticket>('ticket', ticket!.id)?.collab?.guidance ?? []
     expect(guidance.some(item => item.text.includes('approved: publish the release notes'))).toBe(true)
+  })
+
+  it('closes every tool call in a held batch so RESUME replays a valid transcript', async () => {
+    const home = tempHome()
+    dirs.push(home)
+    const workerRequests: CompletionRequest[] = []
+    let workerCalls = 0
+    const model = new ScriptedModel(request => {
+      if (request.role !== 'worker') return { text: 'owner-facing' }
+      workerRequests.push(request)
+      workerCalls += 1
+      if (workerCalls === 1) {
+        return {
+          toolCalls: [
+            {
+              id: 'call_approval',
+              name: 'request_approval',
+              args: { action: 'publish the release notes' },
+            },
+            {
+              id: 'call_bash',
+              name: 'bash',
+              args: { command: 'echo must-not-run' },
+            },
+          ],
+        }
+      }
+      return { text: 'resumed' }
+    })
+    const runtime = freshRuntime({ model, home, jobDelayMs: 0, watchdogIntervalMs: 60_000 })
+    runtimes.push(runtime)
+    runtime.ingest(imTrigger({
+      id: 'trg_batch',
+      thread: 'topic/batch',
+      text: '@ds-agent please publish the release notes',
+    }))
+    await runtime.jobsSettled()
+
+    const [ticket] = runtime.store.listDocs<Ticket>('ticket')
+    expect(ticket).toBeDefined()
+    const pending = ticket!.collab?.approvals?.find(item => item.status === 'pending')
+    expect(pending).toBeDefined()
+    // The second tool in the batch never ran; the hold stopped the turn.
+    expect(workerCalls).toBe(1)
+
+    type Entry = {
+      role?: string
+      name?: string
+      toolCallId?: string
+      content?: string
+      toolCalls?: { id: string }[]
+    }
+    const history = runtime.store.listMessages(`worker_${ticket!.id}`)
+      .map(row => JSON.parse(row.body) as Entry)
+    const assistant = [...history].reverse()
+      .find(entry => entry.role === 'assistant' && entry.toolCalls?.length)
+    expect(assistant?.toolCalls?.map(call => call.id)).toEqual(['call_approval', 'call_bash'])
+    const results = history.filter(entry => entry.role === 'tool')
+    // One synthetic (or real) result per tool_call id, including the call the
+    // hold prevented from executing.
+    expect(results.map(entry => entry.toolCallId).sort()).toEqual(['call_approval', 'call_bash'])
+    expect(JSON.parse(results.find(entry => entry.toolCallId === 'call_bash')!.content!))
+      .toMatchObject({ held: 'approval' })
+
+    await runtime.decideApproval(ticket!.id, pending!.id, 'approved', 'ship it')
+
+    const resumed = workerRequests.at(-1)!
+    const calledIds = resumed.messages.flatMap(message =>
+      message.toolCalls?.map(call => call.id) ?? [])
+    expect(calledIds).toEqual(expect.arrayContaining(['call_approval', 'call_bash']))
+    const resultIds = new Set(
+      resumed.messages.filter(message => message.role === 'tool').map(message => message.toolCallId),
+    )
+    for (const id of calledIds) expect(resultIds.has(id)).toBe(true)
+    const userLines = resumed.messages
+      .filter(message => message.role === 'user')
+      .map(message => message.content)
+      .join('\n')
+    expect(userLines).toContain('approved: publish the release notes')
   })
 })

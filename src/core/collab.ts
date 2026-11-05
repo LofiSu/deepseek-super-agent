@@ -64,6 +64,26 @@ export interface DecideApprovalOutcome {
 
 /** Longest action description a Worker may put in front of the owner. */
 export const MAX_APPROVAL_ACTION_CHARS = 300
+/** Longest reason shown with the request. */
+export const MAX_APPROVAL_REASON_CHARS = 300
+/** Longest owner note stored with a decision. */
+export const MAX_APPROVAL_NOTE_CHARS = 300
+
+/**
+ * C0/C1 controls (including NUL and ESC), DEL, and bidirectional formatting
+ * marks. These reach a terminal, a log line, or the owner UI; none of them is
+ * meaningful in a one-line approval field.
+ */
+const UNSAFE_APPROVAL_CHARS =
+  /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g
+
+/**
+ * Collapse Worker/owner-supplied text to one line and strip terminal and bidi
+ * control characters. Applied where approval fields enter the Engine.
+ */
+export function sanitizeApprovalText(value: string): string {
+  return value.replace(UNSAFE_APPROVAL_CHARS, ' ').replace(/\s+/g, ' ').trim()
+}
 
 /**
  * Mid-task collaboration rules. Engine commands wrap each call in one transaction.
@@ -183,16 +203,17 @@ export class Collaborations {
     if (pendingApproval(ticket)) {
       throw new UserError(`ticket ${ticketId} is already waiting for approval`)
     }
-    const action = input.action.replace(/\s+/g, ' ').trim()
+    const action = sanitizeApprovalText(input.action)
     if (!action) throw new UserError('approval needs the exact action')
     if (action.length > MAX_APPROVAL_ACTION_CHARS) {
       throw new UserError(`approval action is longer than ${MAX_APPROVAL_ACTION_CHARS} characters`)
     }
+    const reason = sanitizeApprovalText(input.reason ?? '').slice(0, MAX_APPROVAL_REASON_CHARS)
     const approval: ApprovalRequest = {
       id: this.host.repo.nextId('appr'),
       at: this.host.now(),
       action,
-      ...(input.reason?.trim() ? { reason: input.reason.replace(/\s+/g, ' ').trim().slice(0, 300) } : {}),
+      ...(reason ? { reason } : {}),
       requestedBy: input.requestedBy
         || ticket.assignments.at(-1)?.workerSessionId
         || 'worker',
@@ -225,6 +246,12 @@ export class Collaborations {
   ): DecideApprovalOutcome {
     const ticket = this.mustLive(ticketId, 'decide approval on')
     const collaboration = ensureCollaboration(ticket)
+    // No approve-but-keep-paused mode: deciding while paused would consume the
+    // pending entry, then the Harness resume would return early. Refuse before
+    // any mutation so the owner can resume first and decide afterwards.
+    if (collaboration.paused) {
+      throw new UserError(`ticket ${ticketId} is paused; resume it before deciding approval`)
+    }
     const approvals = collaboration.approvals ?? (collaboration.approvals = [])
     const approval = approvals.find(item => item.id === approvalId)
     if (!approval) throw new UserError(`unknown approval ${approvalId} on ticket ${ticketId}`)
@@ -233,7 +260,7 @@ export class Collaborations {
     }
     const at = this.host.now()
     const by = input.by ?? 'human'
-    const note = input.note?.replace(/\s+/g, ' ').trim()
+    const note = sanitizeApprovalText(input.note ?? '').slice(0, MAX_APPROVAL_NOTE_CHARS)
     approval.status = decision
     approval.decidedAt = at
     approval.decidedBy = by

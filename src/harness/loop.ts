@@ -940,12 +940,31 @@ async function runTurnBody(input: {
     messages.push({ role: 'assistant', content: text, toolCalls: calls })
     input.journal.append(input.session.id, { role: 'assistant', kind: 'message', content: text, toolCalls: calls })
     if (calls.length === 0) break
-    for (const toolCall of calls) {
+    for (let index = 0; index < calls.length; index += 1) {
+      const toolCall = calls[index]!
       const pausedBeforeTool = input.pause?.()
       if (pausedBeforeTool) {
         input.log(
           `[collab] tool held session=${input.session.id} tool=${toolCall.name} ticketId=${input.session.ticketId ?? '-'} reason=${pausedBeforeTool}`,
         )
+        // The assistant message above already carries the whole toolCalls
+        // batch. A provider rejects a replay with tool_calls that have no tool
+        // result, so close every call we are not executing before returning.
+        // RESUME then replays a complete transcript instead of an invalid one.
+        const approval = pausedBeforeTool.startsWith('approval=')
+        const content = redact(JSON.stringify(approval
+          ? { held: 'approval', reason: pausedBeforeTool }
+          : { held: 'paused' }))
+        for (const remaining of calls.slice(index)) {
+          messages.push({ role: 'tool', name: remaining.name, toolCallId: remaining.id, content })
+          input.journal.append(input.session.id, {
+            role: 'tool',
+            name: remaining.name,
+            kind: 'tool',
+            toolCallId: remaining.id,
+            content,
+          })
+        }
         input.journal.append(input.session.id, {
           kind: 'paused',
           content: `paused before tool ${toolCall.name}: ${pausedBeforeTool}`,

@@ -129,14 +129,18 @@ export class Watchdog {
       else if (hit.reason === 'failed-jobs' || this.nudged.has(hit.assignmentId)) this.fail(hit)
       else this.nudge(hit)
     }
-    const pausedTickets = new Set(
+    // A human pause and an owner approval wait are both intentional idle time.
+    // The stale running session row on either must not be nudged every tick.
+    const idleTickets = new Set(
       this.opts.store.listDocs<Ticket>('ticket')
-        .filter(ticket => ticket.collab?.paused)
+        .filter(ticket =>
+          ticket.collab?.paused
+          || ticket.collab?.approvals?.some(approval => approval.status === 'pending'))
         .map(ticket => ticket.id),
     )
     for (const session of stuckSessions(this.opts.store.listSessions(), now, this.opts.stuckMs)) {
       if (handled.has(session.id) || (session.ticketId != null && handled.has(session.ticketId))) continue
-      if (session.ticketId && pausedTickets.has(session.ticketId)) continue
+      if (session.ticketId && idleTickets.has(session.ticketId)) continue
       this.opts.journal.append(session.id, {
         role: 'user',
         kind: 'nudge',
