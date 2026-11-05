@@ -602,7 +602,10 @@ function localAgentTools(
       description: 'Run a configured local specialist agent on one self-contained task. Verify its output before reporting.',
       parameters: schema({
         agent: { type: 'string', description: 'Configured agent id; see list_local_agents.' },
-        task: { type: 'string', description: 'Complete task with all context the agent needs.' },
+        task: {
+          type: 'string',
+          description: 'Complete task with all context the agent needs. Must not start with "-": it is one argv entry and would be read as an option.',
+        },
       }),
       roles: ['worker'],
       run: guard('worker', 'delegate_agent', async (args, ctx) => {
@@ -610,9 +613,9 @@ function localAgentTools(
         const task = String(args.task ?? '')
         if (!agent) throw new UserError('delegate_agent needs an agent id')
         // A local agent runs outside the EnvPort sandbox, so it cannot be
-        // isolated for speculation, and it must not keep working after a
-        // ticket ends. Mirror mutableMode's lifecycle rules rather than
-        // letting delegation outlive them.
+        // isolated for speculation, and an ended ticket must not start one.
+        // Like mutableMode, this is a start-time check: a run already in
+        // flight is bounded by its own timeout, not cancelled on ticket end.
         const ticket = ticketOf(store, ctx)
         if (!ticket) throw new UserError('delegate_agent needs an active ticket')
         if (ticket.ended) throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome})`)

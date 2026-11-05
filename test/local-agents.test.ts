@@ -227,6 +227,13 @@ describe('local agent execution', () => {
     ).rejects.toThrow(/option/)
   })
 
+  it('keeps replacement-string patterns in the task literal', async () => {
+    const task = "run sed 's/x/[$&]/g' and keep $` and $' intact"
+    const result = await registry([echoAgent()]).run('echo', task, 'worker_1')
+    const parsed = JSON.parse(result.stdout) as { args: string[] }
+    expect(parsed.args).toEqual(['echo', task])
+  })
+
   it('does not rewrite a task that contains a workspace placeholder', async () => {
     const cwd = workspace()
     const result = await registry([echoAgent()], { cwd }).run('echo', 'literal {workspace} text', 'worker_1')
@@ -242,6 +249,7 @@ describe('local agent execution', () => {
     }
     expect(registryUnderTest.activeCount).toBe(1)
     registryUnderTest.killAll()
+    await expect(registryUnderTest.run('echo', 'after shutdown', 'worker_1')).rejects.toThrow(/shut down/)
     const result = await pending
     expect(result.timedOut).toBe(false)
     expect(result.code).not.toBe(0)

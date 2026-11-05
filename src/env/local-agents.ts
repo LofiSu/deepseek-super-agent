@@ -190,6 +190,7 @@ export class LocalAgentRegistry {
   private readonly defaultMaxOutputBytes: number
   private readonly maxConcurrent: number
   private running = 0
+  private closed = false
   private readonly active = new Set<ReturnType<typeof spawn>>()
 
   constructor(agents: readonly LocalAgentSpec[], options: LocalAgentRegistryOptions) {
@@ -218,16 +219,19 @@ export class LocalAgentRegistry {
   }
 
   /**
-   * Kill every child and its process group. Shutdown calls this so a detached
-   * specialist cannot outlive the daemon that spawned it.
+   * Kill every child and its process group, and refuse any later run. Shutdown
+   * calls this so a detached specialist cannot outlive the daemon that spawned
+   * it: draining queued Workers must not be able to start a fresh child.
    */
   killAll(): void {
+    this.closed = true
     const children = [...this.active]
     this.active.clear()
     for (const child of children) killGroup(child.pid, child)
   }
 
   async run(id: string, task: string, workerId: string): Promise<LocalAgentRunResult> {
+    if (this.closed) throw new UserError('local agents are shut down; delegation is unavailable')
     const spec = this.specs.get(id)
     if (!spec) {
       const configured = [...this.specs.keys()].join(', ') || 'none'
@@ -250,8 +254,10 @@ export class LocalAgentRegistry {
     fs.mkdirSync(cwd, { recursive: true })
     // Substitute the workspace first: a task that literally contains
     // `{workspace}` must reach the agent unchanged, not be rewritten by us.
+    // Function replacers keep `$&`, "$\`", `$'` and `$$` in the task literal:
+    // a replacement string would interpret those patterns and corrupt it.
     const args = (spec.args ?? []).map(arg =>
-      arg.replaceAll('{workspace}', cwd).replaceAll('{task}', body))
+      arg.replaceAll('{workspace}', () => cwd).replaceAll('{task}', () => body))
     if (!(spec.args ?? []).some(arg => arg.includes('{task}'))) args.push(body)
     const timeoutMs = Math.min(
       MAX_LOCAL_AGENT_TIMEOUT_MS,
