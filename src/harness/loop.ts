@@ -82,18 +82,22 @@ export function normalizeQueueLimit(value: number | undefined): number {
 /** Async ReAct loop plus the in-process daemon that launches workers. */
 export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = []): string {
   const mode = ticket.speculative ? 'speculative' : 'normal'
+  const directChat = directChatThread(ticket)
   return [
     ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
     `ticketId=${ticket.id}`,
     `triggerId=${ticket.originTriggerId}`,
     `title=${ticket.title}`,
+    // The title is capped at 80 characters; a direct chat needs the whole
+    // message because the Router answers it without a Worker reading the brief.
+    ...(directChat ? [`message=${ticket.brief}`] : []),
     `mode=${mode}`,
     'decision=accepted-by-gate',
     ...extraLines,
     // A direct iMessage is a conversation, not a thread ticket: the Router may
     // answer it briefly instead of leaving a vetoed message unanswered. Group
     // chats are excluded: only a 1:1 chat gets the conversational exception.
-    ...(directChatThread(ticket) ? [
+    ...(directChat ? [
       'direct-chat=true',
       'tone=warm, playful, cute: when they are comfortable, put 1-2 emoji in your reply, react to what they said, and end with an easy question. Write one short paragraph by default; add a second or third bubble only for a genuinely separate thought (no headings or lists). When answering an earlier line rather than the newest message, start that bubble with a short "> quote" of the earlier line. Follow their latest style instruction (stop using a word, emoji, or tone when asked) over this default. If they went quiet, open a fresh topic or tease them gently; never close the chat.',
     ] : []),

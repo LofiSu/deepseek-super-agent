@@ -29,11 +29,15 @@ function ticket(overrides: Partial<Ticket> = {}): Ticket {
 
 describe('router prompt', () => {
   it('marks a direct iMessage ticket so the Router answers conversationally', () => {
+    const message = '下午好呀，今天有什么计划吗？帮我看看窗边那本书提到的那个问题'
     const prompt = routerPromptFor(ticket({
+      title: message.slice(0, 80),
+      brief: message,
       threadKeys: ['imessage:chat:any;-;+1'],
       channels: [{ source: 'imessage', thread: 'chat:any;-;+1', address: { handle: '+1' } }],
     }))
     expect(prompt).toContain('direct-chat=true')
+    expect(prompt).toContain(`message=${message}`)
     expect(prompt).toContain('tone=warm, playful, cute')
     expect(prompt).toContain('Follow their latest style instruction')
     expect(systemPrompt('router')).toContain('direct-chat=true')
@@ -46,7 +50,9 @@ describe('router prompt', () => {
   })
 
   it('does not mark a GitHub issue as a direct chat', () => {
-    expect(routerPromptFor(ticket())).not.toContain('direct-chat=true')
+    const prompt = routerPromptFor(ticket())
+    expect(prompt).not.toContain('direct-chat=true')
+    expect(prompt).not.toContain('message=')
   })
 
   it('does not mark a group chat as a direct conversation', () => {
