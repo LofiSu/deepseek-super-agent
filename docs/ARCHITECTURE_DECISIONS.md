@@ -830,9 +830,12 @@ rewrite `PLAN.md`; link to the contract instead.
      `MAX_EMBEDDING_CALLS` (64) entry-embedding calls plus one query vector;
      entries beyond the budget join
      on a later read once the earlier ones are cached. Empty or failed results
-     do not consume the 32-vector budget, so a bad prefix cannot starve later
-     entries, and an empty result is not cached, so a transient response cannot
-     permanently disable an entry. A vector whose `embeddingId` does not match
+     do not consume the 32-vector budget, so a short bad prefix cannot starve
+     later entries, and an empty result is not cached, so a transient response
+     cannot permanently disable an entry. A persistent provider failure across
+     64 or more entries still exhausts that read's call budget: work stays
+     bounded, those entries are retried on later reads, and semantic recall for
+     them degrades to lexical-only until the provider recovers. A vector whose `embeddingId` does not match
      the active port is never scored, even when the call budget is exhausted;
      different embedding spaces can share dimensions and would otherwise
      produce false hits. Upgrading a 1000-entry index therefore cannot turn one
