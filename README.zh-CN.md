@@ -116,7 +116,7 @@ LofiSu × Grokbot（CoderBot）。
 ### §8 未决问题（明确不做进 M11）
 
 - [~] Router 扩展 / Worker 直连拓扑（§8.1）— `RouterShardRegistry` + `WorkerMeshRegistry` 常驻 Runtime；#130 增加 A2A HMAC 的 `RemoteMeshRegistry`/`MeshInbox`（心跳、上限、loopback 默认拒绝），但默认不监听、远端 dispatch 尚未接入本地放置队列；等待启动的 Worker 进入有界 FIFO 队列（`DS_AGENT_MESH_QUEUE`，默认 100）
-- [~] 跨 Ticket / 跨月长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime：hot Ticket/Decision（1000 条 / 90 天）+ cold Thread digest（200 条 / 3650 天）；真实跨月行为有界但未按自然月测量
+- [~] 跨 Ticket / 跨月长记忆（§8.1）— `SpillBackedLongTermMemory` 常驻 Runtime：hot Ticket/Decision（1000 条 / 90 天）+ cold Thread digest（200 条 / 3650 天）；召回为词法 + 一跳标签 + 可选向量混合（`EmbeddingPort`，默认离线 hashed embedding，`DS_AGENT_SEMANTIC_RECALL=0` 可关闭）；真实跨月行为有界但未按自然月测量
 - [x] 脱离 Session 的产品交互壳（§8.2）— `LifecycleBus` 常驻提供读取模型；`ds-agent ui` 只读 loopback 面板（必需 token、GET-only、生命周期事件白名单、speculative 隐藏、SSE 背压）
 - [x] 中途人机协同 UX（§8.2）— CLI `pause` / `intervene` / `resume` / `collab` + 持久 `Ticket.collaboration`；harness/watchdog 尊重 pause
 - [~] A2A 跨实例（§8.3）— `A2ARouter` 常驻 Runtime，HMAC-SHA256 HTTP transport 已实现（`a2a-auth.ts`/`a2a-http.ts`）；默认不监听，跨主机暴露与远端 dispatch 仍需 operator 决策
