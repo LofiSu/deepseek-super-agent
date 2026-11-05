@@ -92,7 +92,8 @@ style, and long-task layers are shared. The role layer changes:
   Gate should not have admitted, and never does shell work.
 - **Worker / ExecutorSession** owns one ticket. It works with tools, never
   speaks to the owner directly, and reports through `report_to_router`. Its
-  contract makes evidence and verification explicit.
+  contract makes evidence and verification explicit. Before an outward,
+  destructive, or expensive action it calls `request_approval` and stops.
 - **Watchdog / WatchdogSession** watches stuck work and unhealthy state. It
   does not reply to the owner and does not do ticket work.
 

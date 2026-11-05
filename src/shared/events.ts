@@ -13,6 +13,8 @@ export type DomainEventName =
   | 'thread.subscribed'
   | 'trigger.requeued'
   | 'subscription.removed'
+  | 'approval.requested'
+  | 'approval.decided'
   | 'collab.guidance'
   | 'collab.guidance_injected'
   | 'collab.delivery_held'

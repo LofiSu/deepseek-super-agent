@@ -22,7 +22,7 @@ that make a personal agent worth talking to and worth delegating work to.
 | **Skills** | `skills/` with `SKILL.md`; loaded on demand | Tools and workspace files | Skills | `skills/<id>/SKILL.md` index in the prompt; `read_skill` loads the body | **Parity on the core loop**; no bundled starter set yet |
 | **Proactivity / routines** | Scheduled etiquette and routines | `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, scheduling | Routines | `routines.json`: interval prompt, channel/thread, persisted last-run, daemon tick | **Parity on intervals**; no cron/daily-at scheduling or owner editor yet |
 | **Channels** | Texting, email, A2A, chat | App / channel surfaces | Bot connectors | CLI, iMessage, Feishu, GitHub, A2A, OpenAI-compatible gateway, loopback UI | **Ahead in one runtime**, **behind on email, browser, calendar, payments** |
-| **Approvals** | Dedicated approvals layer | Safety policy | Approval before send, publish, delete, spend | Prompt boundary plus Engine pause/intervene/resume; no interactive approval card or token | **Partial**; the state machine exists, the owner-facing approval flow does not |
+| **Approvals** | Dedicated approvals layer | Safety policy | Approval before send, publish, delete, spend | Worker `request_approval` → hold → Router asks → CLI approve/deny → audited RESUME | **Parity on the state machine**; decisions are CLI-only, no channel approval or approval token |
 | **Observability** | Layer inspection, logs | Workspace files are visible | Bot editor | Lifecycle bus, read-only token-gated UI, metrics, health, session journals, offline CLI inspection | **Ahead** |
 | **Safety / sandbox** | Rules layer, approvals | Safety and security policy last | Approval gates | Default-on fail-closed OS sandbox for bash, env allowlist, secret redaction sentinel, spill ACL, opt-in strict read isolation | **Ahead for its scope**; specialist CLIs and host reads remain trust boundaries |
 | **Self-improvement** | Editable persona, skills, memory, policy | Agent rewrites its workspace files | Instructions editor | Deterministic eval suite, metrics, review-driven fixes; no built-in reflection loop | **Behind on productized RSI**; ahead on repeatable offline verification |
@@ -61,9 +61,10 @@ implementation.
 2. **Routine scheduling depth.** Owner routines now exist for intervals. The
    canonical "every weekday at 8" still needs cron or a time-of-day field, and
    there is no owner-facing editor. Restart drift is documented, not solved.
-3. **Interactive approvals.** The rules layer says what needs approval and the
-   Engine can pause a ticket, but there is no first-class "ask the owner, wait,
-   approve/deny, resume with an audit trail" flow for a specific action.
+3. **Approval reach.** The request/hold/decide/resume flow exists, but the owner
+   must decide through the CLI. A channel reply cannot approve yet: that needs
+   an authenticated owner identity and a signed decision, not text the model
+   read. There is also no structured action id; the action is a description.
 4. **Semantic memory.** Recall is lexical plus one tag hop. Instinct and Muse
    have richer memory surfaces. An `EmbeddingPort` with a deterministic mock
    keeps CI offline while allowing a provider at runtime.
@@ -83,7 +84,7 @@ implementation.
 |---|---|---|
 | ~~P0~~ | ~~Skills loader and `read_skill`~~ — shipped in #149 | ✅ index injection, size caps, symlink/path rejection, role guards, `ds-agent skills`, docs |
 | ~~P0~~ | ~~Owner-defined routines / heartbeat~~ — shipped in #150 | ✅ fake-clock tests, persisted last-run, first-sight arming, gap fires once, ingress admission, `ds-agent routines`, docs |
-| P1 | Interactive approval flow | Worker requests approval, ticket pauses, Router asks, owner approves/denies, resume is audited |
+| ~~P1~~ | ~~Interactive approval flow~~ — shipped in #151 | ✅ worker tool, approval hold, Router question, CLI approve/deny, guidance + audit, watchdog idle, tests |
 | P1 | Semantic memory behind `EmbeddingPort` | Deterministic mock, hybrid ranking, recall eval stays green, no CI provider call |
 | P2 | Email and browser connectors | Adapter contract, approval gate, offline fakes, real-channel acceptance remains operator-gated |
 | P2 | Principal tiers | Trigger trust tiers, prompt `principal` layer, tests that a group member cannot become the owner |

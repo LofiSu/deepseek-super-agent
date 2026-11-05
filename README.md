@@ -14,7 +14,7 @@ Author: LofiSu. Co-written with Grokbot (CoderBot).
 
 [Docs](docs/index.md) · [Inspiration](#inspiration) · [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Demo](#demo) · [Models](#models) · [Credits](#credits) · [License](#license)
 
-Shorter pages, same facts: [install](docs/install.md), [architecture](docs/architecture.md), [safety](docs/safety.md), [skills](docs/SKILLS.md), [routines](docs/ROUTINES.md). [中文](docs/zh/index.md).
+Shorter pages, same facts: [install](docs/install.md), [architecture](docs/architecture.md), [safety](docs/safety.md), [skills](docs/SKILLS.md), [routines](docs/ROUTINES.md), [approvals](docs/APPROVALS.md). [中文](docs/zh/index.md).
 
 ## What this is
 
@@ -63,6 +63,7 @@ Where this stands against Instinct, Muse, and Grok Bot, including the gaps we ha
 - [x] **Local specialist agents inside a Worker.** When the owner configures them, a Worker can call `delegate_agent` to run a local CLI agent (Claude Code, Codex, OpenCode, Hermes, or a custom one) on one self-contained task. No shell, workspace cwd, bounded timeout/output, allowlisted environment. `ds-agent agents` lists the configuration; see [docs/LOCAL_AGENTS.md](docs/LOCAL_AGENTS.md).
 - [x] **Owner-authored skills.** A directory under `skills/<id>/SKILL.md` in the agent home adds a playbook without a code change. The prompt carries an id/description index capped at 2000 characters; `read_skill` loads a body on demand. A skill cannot grant a tool or widen a role. `ds-agent skills` lists the index; see [docs/SKILLS.md](docs/SKILLS.md).
 - [x] **Owner-defined routines.** `routines.json` schedules a prompt every N minutes on a chosen channel and thread. The daemon checks due routines on its normal tick, fires once after a gap instead of replaying missed slots, and persists last-run in SQLite. Routines enter through the normal ingress filter and rules; the model cannot create or change one. `ds-agent routines` lists them; see [docs/ROUTINES.md](docs/ROUTINES.md).
+- [x] **Approval hold before outward actions.** A Worker can call `request_approval` with the exact action instead of doing it. The ticket holds, the Router asks the owner, and `ds-agent approve` / `ds-agent deny` records the decision with a note and resumes through the normal RESUME path. The model can request, never decide; chat text does not count as consent. `ds-agent approvals` lists pending requests; see [docs/APPROVALS.md](docs/APPROVALS.md).
 - [x] **One UI, many topics.** Several Tickets can exist at once. `LifecycleBus` is always wired as a read model, and `ds-agent ui` serves a read-only, token-gated loopback dashboard with tickets, threads, outbox metadata, health, metrics, and sanitized lifecycle events (T15/T49).
 
 ### §3 Event-driven

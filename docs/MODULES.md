@@ -113,7 +113,10 @@ the stack and each layer's source; see `docs/PROMPTS.md`.
 
 ## M3 — engine
 
-`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. `lifecycle.ts`
+`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. `collab.ts`
+owns pause/intervene/resume plus the approval hold: a Worker records a pending
+action, Worker turns stop while it is pending, the Router may still speak, and
+the owner's decision writes guidance before the RESUME turns. `lifecycle.ts`
 is the read-model event bus:
 
 - Events: `ticket.created`, `ticket.ended`, `ticket.paused`,
@@ -367,7 +370,7 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
 `serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
-`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `routines`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
+`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `routines`, `approvals`, `approve`, `deny`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
 acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the

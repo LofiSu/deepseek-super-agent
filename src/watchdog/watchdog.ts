@@ -28,8 +28,9 @@ export function stuckAssignments(
   const stuck: StuckAssignment[] = []
   for (const ticket of tickets) {
     if (ticket.ended) continue
-    // A human pause is intentional idle time, not a stuck worker.
+    // A human pause or an owner approval wait is intentional idle time.
     if (ticket.collab?.paused) continue
+    if (ticket.collab?.approvals?.some(approval => approval.status === 'pending')) continue
     const assignment = ticket.assignments.at(-1)
     if (!assignment || assignment.state !== 'running') continue
     const sessionId = assignment.workerSessionId ?? `worker_${ticket.id}`
@@ -59,6 +60,7 @@ export function driftAssignments(tickets: Ticket[], rules: WatchdogRules): Stuck
   const hits: StuckAssignment[] = []
   for (const ticket of tickets) {
     if (ticket.ended || ticket.collab?.paused) continue
+    if (ticket.collab?.approvals?.some(approval => approval.status === 'pending')) continue
     const assignment = ticket.assignments.at(-1)
     if (!assignment || assignment.state !== 'running') continue
     const text = assignment.report?.text?.toLowerCase()

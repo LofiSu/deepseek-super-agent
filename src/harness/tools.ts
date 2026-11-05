@@ -399,6 +399,50 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
       }),
     },
     {
+      name: 'request_approval',
+      description: 'Ask the owner to approve one exact outward, destructive, or expensive action. Stops this ticket until the owner decides.',
+      parameters: schema({
+        action: { type: 'string', description: 'The exact action you will perform if approved, one line.' },
+        reason: { type: 'string', description: 'Why it needs the owner, one short line.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'request_approval', async (args, ctx) => {
+        if (!ctx.ticketId) throw new UserError('request_approval needs a ticket')
+        const oneLine = (value: string): string => value.replace(/\s+/g, ' ').trim()
+        const action = oneLine(String(args.action ?? ''))
+        if (!action) throw new UserError('request_approval needs the exact action')
+        const reason = args.reason == null ? undefined : oneLine(String(args.reason)).slice(0, 300)
+        const result = ctx.ports.requestApproval(ctx.ticketId, {
+          action,
+          ...(reason ? { reason } : {}),
+        })
+        const prompt = [
+          'APPROVAL',
+          `ticketId=${ctx.ticketId}`,
+          `approvalId=${result.approvalId}`,
+          `action=${action}`,
+          ...(reason ? [`reason=${reason}`] : []),
+          'The Worker stopped. Tell the owner the exact action in one short message and wait. You cannot approve it yourself; the owner decides with ds-agent approve or ds-agent deny.',
+        ].join('\n')
+        try {
+          await deps.routerTurn(prompt)
+        } catch (error) {
+          // The approval is already persisted, and the Worker stops on it. A
+          // failed question must not turn the tool result into an error; the
+          // owner can still find the request with `ds-agent approvals`.
+          deps.log(
+            `[approval] owner question not delivered approvalId=${result.approvalId}:`
+            + ` ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+        return {
+          approvalId: result.approvalId,
+          status: result.status,
+          note: 'The ticket is waiting for the owner. Do not perform the action; stop this turn.',
+        }
+      }),
+    },
+    {
       name: 'subscribe_thread',
       description: 'Subscribe this ticket to another thread. contextOnly means read but do not wake.',
       parameters: schema({

@@ -1,6 +1,7 @@
 import path from 'node:path'
 import type {
   CollaborationView,
+  DecideApprovalOutcome,
   InterveneInput,
   InterveneOutcome,
   PauseInput,
@@ -1187,6 +1188,26 @@ export class Runtime {
     if (outcome.resumed && !outcome.ticket.ended) {
       await this.harness.resume(outcome.ticket)
     }
+    return {
+      ...outcome,
+      ticket: this.store.getDoc<Ticket>('ticket', ticketId) ?? outcome.ticket,
+    }
+  }
+
+  /**
+   * Record the owner's approval decision, then start the RESUME turns. The
+   * decision and its guidance commit before any model call.
+   */
+  async decideApproval(
+    ticketId: string,
+    approvalId: string,
+    decision: 'approved' | 'denied',
+    note?: string,
+  ): Promise<DecideApprovalOutcome> {
+    const outcome = this.engine.decideApproval(ticketId, approvalId, decision, {
+      ...(note ? { note } : {}),
+    })
+    if (!outcome.ticket.ended) await this.harness.resume(outcome.ticket)
     return {
       ...outcome,
       ticket: this.store.getDoc<Ticket>('ticket', ticketId) ?? outcome.ticket,

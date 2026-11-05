@@ -5,10 +5,14 @@ import { Assignments, type Recovery, type ReportResult } from './assignments.ts'
 import {
   Collaborations,
   type CollaborationView,
+  type DecideApprovalInput,
+  type DecideApprovalOutcome,
   type InterveneInput,
   type InterveneOutcome,
   type PauseInput,
   type PauseOutcome,
+  type RequestApprovalInput,
+  type RequestApprovalOutcome,
   type ResumeOutcome,
 } from './collab.ts'
 import { Evals } from './evals.ts'
@@ -138,6 +142,25 @@ export class Engine {
   /** Clear the pause. The Harness resumes the Router/Worker turns after this commit. */
   resume(ticketId: string, input: PauseInput = {}): ResumeOutcome {
     return this.host.repo.atomic(() => this.collaborations.resume(ticketId, input))
+  }
+
+  /**
+   * A Worker asks the owner to approve one exact action. This holds the Worker
+   * without setting the human pause, so the Router can still speak the question.
+   */
+  requestApproval(ticketId: string, input: RequestApprovalInput): RequestApprovalOutcome {
+    return this.host.repo.atomic(() => this.collaborations.requestApproval(ticketId, input))
+  }
+
+  /** Owner decision. The Runtime calls Harness.resume after this commit. */
+  decideApproval(
+    ticketId: string,
+    approvalId: string,
+    decision: 'approved' | 'denied',
+    input: DecideApprovalInput = {},
+  ): DecideApprovalOutcome {
+    return this.host.repo.atomic(() =>
+      this.collaborations.decideApproval(ticketId, approvalId, decision, input))
   }
 
   /** Read and mark unseen guidance for one audience. Used by the Harness prompt builder. */
