@@ -95,7 +95,10 @@ export function ruleClassify(trigger: Trigger): SemanticHit {
   // A 1:1 conversation is answered by the Router, so everyday chatter such as
   // "haha" is a valid message there and must not be dropped as noise. Group
   // messages keep the noise rule: they are input, not a conversation with us.
-  const directChat = trigger.addressed === 'direct' && trigger.channel?.address?.group == null
+  // Agent-to-agent traffic is not a conversation either, even when addressed.
+  const directChat = trigger.source !== 'a2a'
+    && trigger.addressed === 'direct'
+    && trigger.channel?.address?.group == null
   if (NOISE.test(trigger.text) && !ACTION.test(trigger.text) && !directChat) {
     return { pass: false, strength: 'inferred', reason: 'noise' }
   }
