@@ -17,9 +17,17 @@ export {
   SpillBackedLongTermMemory,
   type LongTermMemoryEntry,
   type LongTermMemoryKind,
+  type LongTermMemoryOptions,
   type LongTermMemoryQuery,
   type LongTermMemoryTier,
 } from './memory/long-term.ts'
+export {
+  cosine,
+  DEFAULT_EMBEDDING_FLOOR,
+  EMBEDDING_DIMS,
+  HashedEmbedding,
+  type EmbeddingPort,
+} from './memory/embedding.ts'
 export { readObjectFor, readSpillFor, type SpillPage } from './memory/acl.ts'
 export { formatRefs, parseHandle, refsForDecision, refsForTicket, refsForTrigger } from './memory/graph.ts'
 export { compareBakeoff, type BakeoffComparison, type BakeoffSample } from './metrics/bakeoff.ts'
