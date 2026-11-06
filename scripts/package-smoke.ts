@@ -19,7 +19,11 @@ const failures: string[] = []
 let passed = 0
 
 function run(command: string, args: string[]): { status: number | null; output: string } {
-  const result = spawnSync(command, args, { cwd: root, encoding: 'utf8' })
+  const result = spawnSync(command, args, {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+  })
   if (result.error) throw result.error
   return {
     status: result.status,
@@ -49,6 +53,7 @@ function finish(): never {
 }
 
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as {
+  version?: string
   bin?: Record<string, string>
   files?: string[]
 }
@@ -81,6 +86,14 @@ check(
   'help prints usage text',
   help.output.includes('ds-agent') && help.output.includes('ds-agent init'),
   help.output.slice(0, 200),
+)
+
+const version = run('node', [distEntry, '--version'])
+check('node dist/cli/main.js --version exits 0', version.status === 0, version.output)
+check(
+  'built CLI prints the package version',
+  version.output === pkg.version,
+  `expected ${JSON.stringify(pkg.version)} got ${JSON.stringify(version.output)}`,
 )
 
 console.log('package smoke: checking tarball contents')

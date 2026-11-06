@@ -18,8 +18,14 @@ cd deepseek-super-agent
 pnpm install
 ```
 
-本仓只按源码使用：没有发布到 npm，没有 `bin`，也没有 `build` 步骤，所以不存在
-`npm install -g ds-agent`。在仓库里用 `pnpm ds-agent ...` 运行 CLI。
+本仓目前只按源码使用：还没有发布到 npm，所以不能从 registry 装
+`npm install -g ds-agent`。日常在仓库里用 `pnpm ds-agent ...` 运行 CLI。
+
+包里是有构建步骤的。`pnpm build` 会产出 `dist/` 和 `bin.ds-agent` 入口
+（`./dist/cli/main.js`），打出来的 tarball 不需要 `tsx` 就能跑。`ds-agent
+--version` 会打印包版本。想在本机做 pack/安装冒烟、不走 registry 的话，看
+[docs/RELEASE.md]({{ site.repository_url }}/blob/main/docs/RELEASE.md)，并运行
+`pnpm tsx scripts/package-smoke.ts`。
 
 `pnpm test` 和 `pnpm demo` 都要一个能打通的 OpenAI 兼容模型。这两条路径不用 MockModel。`pnpm demo:local` 是内存 fixture 冒烟，不是验收路径。
 

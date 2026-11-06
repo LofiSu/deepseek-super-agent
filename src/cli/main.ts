@@ -28,6 +28,7 @@ import { backupUsage, runBackupCli } from './backup.ts'
 import { runUi } from './ui.ts'
 import { runProfileCommand, runWireCommand } from './wiring.ts'
 import { runSetupCommand } from './setup.ts'
+import { readPackageVersion } from './version.ts'
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`)
@@ -108,6 +109,7 @@ function withEngine<T>(
 function help(): void {
   console.log(`ds-agent — local super-agent demo (not an official DeepSeek product)
 
+  pnpm ds-agent --version   print the package version (also -V, version)
   pnpm demo                 real GitHub issues/comments + live model (acceptance)
   pnpm demo -- --only watchdog
   pnpm demo:local           in-memory fixture baseline (not channel acceptance)
@@ -414,6 +416,10 @@ async function serve(home: string): Promise<void> {
 async function main(): Promise<void> {
   const [cmd, sub] = process.argv.slice(2)
   const home = defaultHome()
+  if (cmd === '--version' || cmd === '-V' || cmd === 'version') {
+    console.log(readPackageVersion())
+    return
+  }
   if (!cmd || cmd === 'help' || cmd === '--help') {
     help()
     return
