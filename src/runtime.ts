@@ -20,6 +20,8 @@ import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { loadRoutines, normalizeRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
 import { MachineRegistry } from './harness/machines.ts'
+import { McpToolSource } from './harness/mcp.ts'
+import { parseMcpServers, type McpServerConfig } from './harness/mcp-config.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
 import { directChatRouterShard, directChatThread, SessionJournal, sharesDirectChatThread, workerSessionId } from './harness/session.ts'
@@ -67,6 +69,11 @@ export interface RuntimeOptions {
   now?: () => string
   /** Environment for the LocalEnv allowlist, secret redaction, model ids, and instance settings. */
   env?: NodeJS.ProcessEnv
+  /**
+   * External MCP servers (array or JSON array string). Overrides
+   * `DS_AGENT_MCP_SERVERS`. Their tools are exposed to Workers only.
+   */
+  mcpServers?: unknown
   /**
    * Owner-editable persona, standing instructions, and owner context. Defaults
    * to PERSONA.md / AGENTS.md / USER.md in `home`, then DS_AGENT_* seeds.
@@ -365,6 +372,8 @@ export class Runtime {
   private readonly redact: (text: string) => string
   private readonly batchWindowMs: number
   private readonly admission: AdmissionRules
+  /** Kept so finish() can close external MCP server processes. */
+  private readonly tools: ToolRegistry
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
@@ -394,6 +403,7 @@ export class Runtime {
     redact: (text: string) => string
     batchWindowMs: number
     admission: AdmissionRules
+    tools: ToolRegistry
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -419,13 +429,21 @@ export class Runtime {
     this.redact = parts.redact
     this.batchWindowMs = parts.batchWindowMs
     this.admission = parts.admission
+    this.tools = parts.tools
   }
 
   static create(opts: RuntimeOptions): Runtime {
     const baseEnv = opts.env ?? process.env
-    const secrets = secretValues(baseEnv)
+    const mcpConfig = mcpServersFromConfig(opts.mcpServers, baseEnv)
+    // A server's own env is where its credentials live, so its secret-named
+    // values join the redaction list before anything logs or persists.
+    const secrets = [...new Set([
+      ...secretValues(baseEnv),
+      ...mcpConfig.configs.flatMap(config => secretValues(config.env)),
+    ])].sort((a, b) => b.length - a.length)
     const redact = (text: string) => redactSecrets(text, secrets)
     const log = new RedactingLogger(redact)
+    if (mcpConfig.error) log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${mcpConfig.error}`)
     const model = opts.model ?? createModelFromEnv(baseEnv)
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
     const store = new Store(opts.home)
@@ -671,6 +689,17 @@ export class Runtime {
     const journal = new SessionJournal(path.join(opts.home, 'sessions'), store, line => log.info(line))
     const teams = new TeamRegistry(store)
     const machines = new MachineRegistry()
+    const mcpConfigs = mcpConfig.configs
+    const mcp = mcpConfigs.length === 0
+      ? undefined
+      : new McpToolSource(mcpConfigs, {
+        log: line => log.info(line),
+        metrics,
+        redact,
+        spill: { put: body => store.putSpill(body) },
+        workspaceDir: path.join(opts.home, 'mcp'),
+        baseEnv,
+      })
     const tools = new ToolRegistry({
       store,
       ports: bindRolePorts(engine),
@@ -695,6 +724,7 @@ export class Runtime {
         store.addEvent('watchdog.nudge', { ticketId, sessionId })
       },
       teams,
+      ...(mcp ? { mcp } : {}),
       localAgents,
       ...(skills.size ? { skills } : {}),
     })
@@ -833,6 +863,7 @@ export class Runtime {
       redact,
       batchWindowMs: opts.batchWindowMs ?? 0,
       admission,
+      tools,
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
@@ -1334,9 +1365,14 @@ export class Runtime {
     } catch (error) {
       remember(error)
     } finally {
-      // The daemon timer and SQLite handle must be released even when a drain
-      // step rejects; otherwise the process stays alive after a failed shutdown.
+      // The daemon timer, MCP child processes, and SQLite handle must all be
+      // released even when a drain step rejects.
       this.daemon.stop()
+      try {
+        await this.tools.close()
+      } catch (error) {
+        remember(error)
+      }
       try {
         this.metrics.flush()
       } catch (error) {
@@ -1353,6 +1389,35 @@ export class Runtime {
       }
     }
     if (failed) throw failure
+  }
+}
+
+/**
+ * `DS_AGENT_MCP_SERVERS` (or `RuntimeOptions.mcpServers`) is configuration, not
+ * code: malformed config is reported and ignored so a bad file cannot stop the
+ * runtime from starting. The caller logs `error` once a logger exists.
+ */
+function mcpServersFromConfig(
+  raw: unknown,
+  env: NodeJS.ProcessEnv,
+): { configs: McpServerConfig[]; error?: string } {
+  let value = raw
+  if (value === undefined) {
+    const configured = env.DS_AGENT_MCP_SERVERS?.trim()
+    if (!configured) return { configs: [] }
+    value = configured
+  }
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value) as unknown
+    } catch (error) {
+      return { configs: [], error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  try {
+    return { configs: parseMcpServers(value) }
+  } catch (error) {
+    return { configs: [], error: error instanceof Error ? error.message : String(error) }
   }
 }
 

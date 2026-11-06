@@ -9,6 +9,7 @@ import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/p
 import type { Disposition, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
+import type { McpToolSourceLike } from './mcp.ts'
 import { routerOwnerShard, routerSessionId, workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 import { MAX_TEAM_MEMBERS, type TeamRegistry } from './team.ts'
@@ -41,6 +42,8 @@ export interface ToolDeps {
   /** Append a nudge to the worker session journal (same effect as Watchdog.nudge). */
   nudge?: (sessionId: string, ticketId: string) => void
   teams?: TeamRegistry
+  /** External MCP servers. Worker-only: the Router and Watchdog keep their surface. */
+  mcp?: McpToolSourceLike
   /** Owner-configured local specialist agents. Absent means delegation is unavailable. */
   localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks. Absent means read_skill is unavailable. */
@@ -94,20 +97,35 @@ export class ToolRegistry {
     ]
   }
 
-  specsFor(role: Role): ToolSpec[] {
-    return this.tools.filter(tool => tool.roles.includes(role)).map(({ name, description, parameters }) => ({
+  async specsFor(role: Role): Promise<ToolSpec[]> {
+    const specs = this.tools.filter(tool => tool.roles.includes(role)).map(({ name, description, parameters }) => ({
       name,
       description,
       parameters,
     }))
+    // MCP tools are external capabilities for Workers. The Router decides and
+    // the Watchdog fails stuck work; neither may reach a third-party server.
+    if (role === 'worker' && this.deps.mcp) specs.push(...await this.deps.mcp.specs())
+    return specs
   }
 
   async invoke(call: ToolCall, session: ToolSession): Promise<unknown> {
+    if (call.name.startsWith('mcp__')) {
+      if (session.role !== 'worker' || !this.deps.mcp) {
+        throw new UserError(`tool ${call.name} is not available to ${session.role}`)
+      }
+      return redactUnknown(await this.deps.mcp.invoke(call.name, call.args), this.redact)
+    }
     const tool = this.tools.find(item => item.name === call.name)
     if (!tool || !tool.roles.includes(session.role)) {
       throw new UserError(`tool ${call.name} is not available to ${session.role}`)
     }
     return redactUnknown(await tool.run(call.args, this.context(session)), this.redact)
+  }
+
+  /** Release external MCP server processes. Safe when none are configured. */
+  async close(): Promise<void> {
+    await this.deps.mcp?.close()
   }
 
   private context(session: ToolSession): ToolContext {

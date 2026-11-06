@@ -278,8 +278,8 @@ describe('local agent tools', () => {
       routerTurn: async () => {},
       localAgents: runtime.localAgents,
     })
-    const workerSpecs = tools.specsFor('worker').map(spec => spec.name)
-    const routerSpecs = tools.specsFor('router').map(spec => spec.name)
+    const workerSpecs = (await tools.specsFor('worker')).map(spec => spec.name)
+    const routerSpecs = (await tools.specsFor('router')).map(spec => spec.name)
     expect(workerSpecs).toContain('delegate_agent')
     expect(workerSpecs).toContain('list_local_agents')
     expect(routerSpecs).toContain('list_local_agents')

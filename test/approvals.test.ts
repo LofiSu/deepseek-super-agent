@@ -192,8 +192,8 @@ describe('request_approval tool', () => {
       scheduleJob: () => {},
       routerTurn: async prompt => { prompts.push(prompt) },
     })
-    expect(tools.specsFor('worker').map(spec => spec.name)).toContain('request_approval')
-    expect(tools.specsFor('router').map(spec => spec.name)).not.toContain('request_approval')
+    expect((await tools.specsFor('worker')).map(spec => spec.name)).toContain('request_approval')
+    expect((await tools.specsFor('router')).map(spec => spec.name)).not.toContain('request_approval')
 
     const result = await tools.invoke(
       {
