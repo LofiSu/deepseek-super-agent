@@ -439,7 +439,7 @@ Partial and owner-gated areas, stated plainly:
 - **Long-term memory** — hot/cold tiers and hybrid recall work; calendar-month behavior is bounded, not measured across real months.
 - **A2A** — HMAC-SHA256 HTTP transport is implemented; cross-host exposure and remote dispatch remain operator-gated.
 - **Watchdog drift checks** — nudge/fail, rules, and read-only `ds-agent health` work; deeper natural-language goal-drift checks are still thin.
-- **Latency bake-off** — the batching stress harness records curves; the full dual-layer versus single-session comparison is open.
+- **Latency bake-off** — one dated local dual-layer versus single-session run is recorded in [docs/BAKEOFF.md](docs/BAKEOFF.md); it is a single sample, not a benchmark.
 
 ## Documentation
 
