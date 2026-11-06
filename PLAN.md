@@ -281,7 +281,7 @@ flowchart TB
 | T45 | §7 实验指标 | §7 | M12 | counters + optional `curveSamples` / `summarizeCurve`（T45） |
 | T46 | §8 Router sharding | §8 | 扩展 | 同 T09；registry 常驻 Runtime |
 | T47 | §8 Worker mesh | §8 | 扩展 | `[~]` 本地 `WorkerMeshRegistry`（容量/队列）+ `RemoteMeshRegistry`/`MeshInbox`（A2A HMAC 传输、心跳、上限、loopback 默认拒绝；`src/harness/remote-node.ts`）。无默认 Runtime 监听器，远程 dispatch 接线仍属 operator-gated |
-| T48 | §8 Long-term memory | §8 | 长期记忆 | `[~]` `SpillBackedLongTermMemory`（Runtime 常驻；终止 Ticket 写一条；保留期/同票去重/ADR-010 词法+标签一跳召回已实现）。语义/embedding 召回与跨月实测仍未实现 |
+| T48 | §8 Long-term memory | §8 | 长期记忆 | `[~]` `SpillBackedLongTermMemory`（Runtime 常驻；终止 Ticket 写一条；保留期/同票去重/ADR-010 词法+标签一跳召回已实现；#152 落地 `EmbeddingPort` + 默认离线 `HashedEmbedding` 混合召回）。跨日历月实测仍未完成；测量协议见 `docs/T48_MONTH_SCALE_PROTOCOL.md` |
 | T49 | §8 Product UX without Session | §8 | 产品层 | `[x]` `LifecycleBus` 常驻读取模型 + 只读 loopback UI（`src/ui/server.ts`、`src/cli/ui.ts`、`ds-agent ui`；必需 token、GET-only、生命周期事件白名单、speculative 隐藏、SSE 背压）。远程多进程面板/多用户账号仍为外部边界 |
 | T50 | §8 A2A | §8 | 互操作 | `[x]` `A2ARouter` + 本地 transport + HMAC-SHA256 HTTP transport（±60s、nonce 重放缓存、32B 密钥、64KiB/128KiB 上限、deadline），`runtime.sendA2A`；远程 mesh handler 已实现但默认不监听，暴露需 operator 决策 |
 | T51 | §8 Security/privacy；credential never in context | §8 | M0+M9 | Env 变量描述可进 prompt；**值永不**；vault 外置 |

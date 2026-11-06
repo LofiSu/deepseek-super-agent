@@ -61,6 +61,13 @@ The program is complete only when all of the following hold:
 | MODEL-SLOW-PATH (T17) | done, opt-in (#128 `788be60`; channel wiring #135 `268809d`) | `src/ingress/policy.ts`, `src/ingress/filter.ts`, `src/runtime.ts`, channel loops, tests | rules-only default; `DS_AGENT_SLOW_PATH=model` adds structured-output policy with timeout and `ruleClassify` fallback on timeout/error/invalid output; sync `ingest` and A2A inbound never call the model; offline CI makes no provider call |
 | LIVE-BAKEOFF (T45) | measured (#115) | `docs/BAKEOFF.md`, no product code | dated local-Magpie run (2026-11-04T08:44Z): dual 11 calls / 38,805 ms vs single 10 calls / 38,684 ms, `wallRatio=1.0031`; limitations stated |
 
+> **T48 month-scale protocol (added 2026-11-06):**
+> `docs/T48_MONTH_SCALE_PROTOCOL.md` defines the dated measurement, metrics, and
+> result template. `pnpm t48:smoke` runs the offline fixture smoke with a
+> synthetic clock spanning four months; it validates the measurement hooks and
+> is **not** completion evidence. T48 stays `[~]` until a real operator
+> month-spanning run is recorded and reviewed.
+
 ### W3 — Product shell (landed)
 
 | Task | Status | Owner files | Acceptance |
@@ -111,7 +118,9 @@ Remaining program, in order:
    remote execution and exposed A2A are not claimed until an operator mounts
    them with per-peer secrets and TLS.
 2. T48 month-scale measurement with dated evidence. No code gap is known; the
-   semantic arm is landed, the calendar-month claim is not.
+   semantic arm is landed, the calendar-month claim is not. Follow
+   `docs/T48_MONTH_SCALE_PROTOCOL.md`; the offline fixture smoke is not that
+   evidence.
 3. Packaging `--version` surface already merged via #160; next is owner-gated mesh/A2A or T48 month-scale
 4. First release dispatch (human) per `docs/RELEASE.md`.
 
@@ -142,7 +151,7 @@ alone.
 | STORE-MIGRATIONS | #116 | `39ff321` | `src/store/schema.ts` `LATEST_SCHEMA_VERSION = 4` + `schema_migrations`; `test/store-migration.test.ts` |
 | HOST-READ-ISOLATION | #117 | `0201b4f` | `src/env/seccomp.ts` strict read roots; `test/sandbox-read-isolation.test.ts`; opt-in only |
 | PACKAGING | #122 (version surface: #160 merged) | `c72f514` | `package.json` `bin`/`files`/`build`, `tsconfig.build.json`, `scripts/copy-assets.ts`, `scripts/package-smoke.ts`, `scripts/release-check.ts`, `test/packaging.test.ts` |
-| SEMANTIC-LTM-IMPL | #152 | `922b3b9` | `src/memory/embedding.ts` `HashedEmbedding`; `src/memory/long-term.ts`; `test/memory-recall-eval.test.ts`. T48 month-scale still **[~]** |
+| SEMANTIC-LTM-IMPL | #152 | `922b3b9` | `src/memory/embedding.ts` `HashedEmbedding`; `src/memory/long-term.ts`; `test/memory-recall-eval.test.ts`. T48 month-scale still **[~]**; protocol in `docs/T48_MONTH_SCALE_PROTOCOL.md` |
 | LIVE-BAKEOFF | #115 | — | local Magpie run 2026-11-04T08:44Z: dual 11 calls / 38,805 ms vs single 10 calls / 38,684 ms; `wallRatio=1.0031`; summary and raw JSON appendix in `docs/BAKEOFF.md` |
 | MODEL-SLOW-PATH | #128, #135 | `788be60`, `268809d` | `src/ingress/policy.ts` `PolicyClassifier`; `RuntimeOptions.slowPath`; opt-in `DS_AGENT_SLOW_PATH=model`; `n-policy`/`n-model` tests |
 | LIFECYCLE-PERSISTENCE | #124 | `888f810` | `src/core/lifecycle.ts`; `test/lifecycle-persistence.test.ts`; schema v3 events |
