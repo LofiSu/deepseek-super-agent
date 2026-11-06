@@ -131,7 +131,9 @@ export async function runImessageCommand(home: string): Promise<void> {
 
   const api = new ChatDbImessageApi(dbPath)
   const runtime = Runtime.create({ home, model, jobDelayMs: 20, watchdogIntervalMs: 60_000 })
-  runtime.start()
+  // This command is a long-lived channel loop, so owner routines tick here
+  // just as they do under `serve`; one-shot commands do not.
+  runtime.start({ routines: true })
   if (allowAny) {
     runtime.log.info(
       '[imessage] WARNING: --allow-any is active; any sender in a 1:1 chat can trigger work. '

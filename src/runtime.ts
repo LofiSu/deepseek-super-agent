@@ -18,7 +18,7 @@ import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
-import { loadRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
+import { loadRoutines, normalizeRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { TeamRegistry } from './harness/team.ts'
 import { createModelFromEnv, HttpOpenAI, roleModelsFromEnv, type Model } from './harness/model.ts'
@@ -37,6 +37,7 @@ import {
 } from './ingress/policy.ts'
 import { RouterShardRegistry, type RouterShard } from './ingress/shards.ts'
 import { inlineOrSpill } from './memory/recall.ts'
+import { DEFAULT_EMBEDDING_FLOOR, HashedEmbedding, type EmbeddingPort } from './memory/embedding.ts'
 import { refsForTrigger, triggerRef } from './memory/graph.ts'
 import { SpillBackedLongTermMemory } from './memory/long-term.ts'
 import { Metrics } from './metrics/metrics.ts'
@@ -112,6 +113,17 @@ export interface RuntimeOptions {
    * `DS_AGENT_MEMORY_MAX_AGE_DAYS`; 0 disables that dimension.
    */
   memoryRetention?: MemoryRetention
+  /**
+   * Optional semantic recall port. Defaults to the offline `HashedEmbedding`;
+   * `false` (or `DS_AGENT_SEMANTIC_RECALL=0`) keeps recall lexical-only.
+   * A configured port never makes a network or model call by itself.
+   */
+  embeddings?: EmbeddingPort | false
+  /**
+   * Cosine floor for a semantic-only hit. Overrides
+   * `DS_AGENT_EMBEDDING_FLOOR`; defaults to 0.35 and is clamped to 0..1.
+   */
+  embeddingFloor?: number
   /**
    * Bounded in-memory lifecycle history and the restart-replay cap.
    * Defaults to 1000 and keeps the newest events.
@@ -241,6 +253,30 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
   if (raw == null || raw.trim() === '') return fallback
   const value = Number(raw)
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback
+}
+
+/**
+ * Semantic recall is on unless explicitly disabled. An explicit
+ * `RuntimeOptions.embeddings` wins over the environment, including an explicit
+ * provider next to a stale kill switch.
+ */
+export function semanticRecallEnabled(
+  env: NodeJS.ProcessEnv,
+  override?: EmbeddingPort | false,
+): boolean {
+  if (override !== undefined) return override !== false
+  const value = env.DS_AGENT_SEMANTIC_RECALL?.trim().toLowerCase()
+  return !(value === '' || value === '0' || value === 'false' || value === 'off' || value === 'no')
+}
+
+/** `DS_AGENT_EMBEDDING_FLOOR` in [0,1]; invalid values use the default. */
+export function embeddingFloorFromEnv(
+  env: NodeJS.ProcessEnv,
+  override?: number,
+): number {
+  const raw = override ?? (env.DS_AGENT_EMBEDDING_FLOOR?.trim() || undefined)
+  const value = raw === undefined ? NaN : Number(raw)
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : DEFAULT_EMBEDDING_FLOOR
 }
 
 /** Comma-separated ids: trimmed, empty entries ignored, empty result is unset. */
@@ -416,7 +452,11 @@ export class Runtime {
     // into Runtime.ingest once construction finishes, so routines take the
     // normal filter, spill, dedupe, and Engine path.
     let fireRoutine: (trigger: Trigger) => void = () => {}
-    const routineSpecs = opts.routines ?? loadRoutines(opts.home, baseEnv)
+    // Programmatic specs follow the same bounds as file/env specs; skipping
+    // normalization lets everyMinutes=0 create a fire-on-every-tick loop.
+    const routineSpecs = opts.routines === undefined
+      ? loadRoutines(opts.home, baseEnv)
+      : normalizeRoutines(opts.routines)
     const routines = routineSpecs.length
       ? new RoutineScheduler(routineSpecs, {
         now: () => Date.parse(now()),
@@ -459,7 +499,16 @@ export class Runtime {
     // Retention keeps the durable index bounded: 1000 entries / 90 days by
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
-    const longTermMemory = new SpillBackedLongTermMemory(store, redact, retention)
+    const embeddings = semanticRecallEnabled(baseEnv, opts.embeddings)
+      ? opts.embeddings || new HashedEmbedding()
+      : undefined
+    const longTermMemory = new SpillBackedLongTermMemory(store, redact, {
+      ...retention,
+      ...(embeddings ? {
+        embedding: embeddings,
+        embeddingFloor: embeddingFloorFromEnv(baseEnv, opts.embeddingFloor),
+      } : {}),
+    })
     const lifecycle = new LifecycleBus(opts.lifecycleMaxEvents)
     const lifecycleRetention = lifecycleRetentionFor(opts.lifecycleRetention, lifecycle.maxEvents)
     // Restart replay: first bound any existing durable log, then fill the ring
@@ -787,7 +836,6 @@ export class Runtime {
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
-    fireRoutine = trigger => runtime.ingest(trigger)
     host.onAssessmentNeeded = () => runtime.assessPending()
     // Local A2A endpoint: an envelope addressed to this instance becomes a normal,
     // untrusted Trigger and goes through the same ingress filter.
@@ -896,14 +944,16 @@ export class Runtime {
    * Start the daemon timer. `assessPending: false` also disables every later
    * assessment path (including `onAssessmentNeeded` from flushEvals), so a
    * MockModel process leaves Gate-deferred work queued instead of consuming it.
+   * `routines: true` is only for long-lived serving processes: a one-shot CLI
+   * command must not fire owner-level work whose channel loop is not running.
    */
-  start(options: { assessPending?: boolean } = {}): void {
+  start(options: { assessPending?: boolean; routines?: boolean } = {}): void {
     this.assessmentsEnabled = options.assessPending !== false
     // The Router layer is resident: every configured shard gets its Session
     // before recovery, assessment, or the first Trigger.
     this.armResidentRouters()
     this.recoverInterrupted()
-    this.daemon.start()
+    this.daemon.start({ routines: options.routines === true })
     if (this.assessmentsEnabled) {
       // Resume Gate-deferred work left in SQLite by a previous process.
       this.assessPending()
@@ -1274,6 +1324,10 @@ export class Runtime {
       failure = error
     }
     try {
+      // Local specialists run detached in their own process group, so they
+      // would outlive this process. Kill them before draining: shutdown must
+      // not block on a slow agent, and no child may survive finish().
+      this.localAgents?.killAll()
       await this.assessmentsSettled()
       this.flushEvals()
       await this.harness.jobsSettled()
