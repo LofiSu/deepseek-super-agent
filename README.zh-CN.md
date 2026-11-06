@@ -158,7 +158,7 @@ Router 是全局序点：它负责对话、批处理 Trigger 和分派。Worker 
 
 短摘要留在上下文里。长内容带 id **外置（Spill）**，工具先拿到类型化的 `kind:id` 句柄。`read_object` 每次只展开一跳，于是模型得到的是一条 **Chain of Recall**，而不是一次性灌满的上下文。详见 [docs/MODULES.md](docs/MODULES.md)。
 
-长期记忆保存 hot Ticket 与 Router Decision（1000 条 / 90 天），以及 cold Thread digest（200 条 / 3650 天）。召回是混合式的：词法检索、一跳标签，以及可选的 `EmbeddingPort`。默认的离线 `HashedEmbedding` 不需要模型；`DS_AGENT_SEMANTIC_RECALL=0` 可关闭语义召回，`DS_AGENT_EMBEDDING_FLOOR` 设置余弦下限（默认 `0.35`，限制在 0–1）。
+长期记忆保存 hot Ticket 与 Router Decision（1000 条 / 90 天），以及 cold Thread digest（200 条 / 3650 天）。召回是混合式的：词法检索、一跳标签，以及可选的 `EmbeddingPort`。默认的离线 `HashedEmbedding` 不需要模型；`DS_AGENT_SEMANTIC_RECALL=0` 可关闭语义召回，`DS_AGENT_EMBEDDING_FLOOR` 设置余弦下限（默认 `0.35`，限制在 0–1）。自然月尺度尚未实测，T48 仍为 partial；测量协议与离线 fixture smoke 见 [docs/T48_MONTH_SCALE_PROTOCOL.md](docs/T48_MONTH_SCALE_PROTOCOL.md)。
 
 ### 能跨轮次的工作
 
@@ -402,7 +402,7 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 故意保留真实 issue
 
 - **Router 水平扩展**：分片注册表已常驻、默认 shard 存在，但不宣称多进程扩展能力。
 - **Worker mesh**：放置是进程内的逻辑放置；远端 transport 已实现，但默认不监听，也尚未接入本地放置队列。
-- **长期记忆**：hot/cold 分层与混合召回可用；自然月尺度的行为有边界，尚未按真实月份测量。
+- **长期记忆**：hot/cold 分层与混合召回可用；自然月尺度的行为有边界，尚未按真实月份测量。测量协议见 [docs/T48_MONTH_SCALE_PROTOCOL.md](docs/T48_MONTH_SCALE_PROTOCOL.md)。
 - **A2A**：HMAC-SHA256 HTTP transport 已实现；跨主机暴露与远端 dispatch 仍需运维者开启。
 - **Watchdog 漂移检查**：nudge/fail、规则与只读 `ds-agent health` 可用；更深的自然语言目标漂移检查仍较薄。
 - **延迟对照**：批处理压测 harness 会记录曲线；完整双层 vs 单 Session 对照仍未完成。

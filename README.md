@@ -159,7 +159,7 @@ Each topic or pull request becomes a **Thread**. The Router batches triggers wai
 
 Short summaries stay inline. Long content is **spilled** out of band with an id, and tools receive typed `kind:id` handles first. `read_object` expands one hop at a time, which gives the model a **Chain of Recall** instead of a context dump. See [docs/MODULES.md](docs/MODULES.md).
 
-Long-term memory keeps hot tickets and Router decisions (1000 entries / 90 days) plus cold Thread digests (200 / 3650 days). Recall is hybrid: lexical search, one tag hop, and an optional `EmbeddingPort`. The default offline `HashedEmbedding` works without a model; `DS_AGENT_SEMANTIC_RECALL=0` disables the semantic arm, and `DS_AGENT_EMBEDDING_FLOOR` sets its cosine floor (default `0.35`, clamped to 0–1).
+Long-term memory keeps hot tickets and Router decisions (1000 entries / 90 days) plus cold Thread digests (200 / 3650 days). Recall is hybrid: lexical search, one tag hop, and an optional `EmbeddingPort`. The default offline `HashedEmbedding` works without a model; `DS_AGENT_SEMANTIC_RECALL=0` disables the semantic arm, and `DS_AGENT_EMBEDDING_FLOOR` sets its cosine floor (default `0.35`, clamped to 0–1). Month-scale behavior is not yet measured, so T48 stays partial; the dated measurement protocol and its offline fixture smoke are in [docs/T48_MONTH_SCALE_PROTOCOL.md](docs/T48_MONTH_SCALE_PROTOCOL.md).
 
 ### Work that outlives a turn
 

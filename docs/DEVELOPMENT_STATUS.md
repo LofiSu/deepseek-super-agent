@@ -34,9 +34,10 @@ not missing implementation.
   iMessage/Feishu via `Runtime.ingestAsync`; `ds-agent ui`, `backup`, `restore`
   are registered; `serve --imessage --feishu` runs both loops over one Runtime.
 - **Partial by design:** T47 remote mesh has registry/heartbeat/dispatch and an
-  authenticated handler, but no default Runtime listener; T48 is lexically
-  strong (retention, dedupe, tag hop) but has no embedding recall and no
-  month-scale measurement.
+  authenticated handler, but no default Runtime listener; T48 has retention,
+  dedupe, tag-hop recall, and the hybrid `EmbeddingPort`/`HashedEmbedding` arm
+  (#152), but no month-scale measurement. Protocol:
+  `docs/T48_MONTH_SCALE_PROTOCOL.md`.
 - **External/operator:** live bake-off measurement, real Feishu credentials,
   remote mesh exposure, release publishing, and any production infrastructure.
 
