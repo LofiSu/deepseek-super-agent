@@ -23,14 +23,15 @@ export interface ExecutionRow {
 }
 
 const ATTENTION: Record<ExecutionState, number> = {
-  'awaiting-answer': 0,
-  'awaiting-review': 1,
-  blocked: 2,
-  working: 3,
-  pending: 4,
-  'waiting-for-trigger': 5,
-  open: 6,
-  ended: 7,
+  'awaiting-approval': 0,
+  'awaiting-answer': 1,
+  'awaiting-review': 2,
+  blocked: 3,
+  working: 4,
+  pending: 5,
+  'waiting-for-trigger': 6,
+  open: 7,
+  ended: 8,
 }
 
 export function executionView(store: Store, home?: string): ExecutionRow[] {

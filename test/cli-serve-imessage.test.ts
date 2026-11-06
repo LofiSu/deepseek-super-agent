@@ -91,8 +91,8 @@ class FakeImessage implements ImessageApi {
 
 function spyIngest(runtime: Runtime): Trigger[] {
   const ingested: Trigger[] = []
-  const original = runtime.ingest.bind(runtime)
-  runtime.ingest = (trigger: Trigger) => {
+  const original = runtime.ingestAsync.bind(runtime)
+  runtime.ingestAsync = (trigger: Trigger) => {
     ingested.push(trigger)
     return original(trigger)
   }

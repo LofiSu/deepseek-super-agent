@@ -23,6 +23,33 @@ export interface ChannelRef {
 }
 
 /**
+ * One node in the Chain of Recall reference graph (§3.3). A ref is a typed
+ * pointer, never a capability: reading the target still checks its own ACL.
+ * `id` is the object id (`thread:<key>`, `ticket:<id>`, ...) or a spill id.
+ */
+export type ObjectRefKind =
+  | 'trigger'
+  | 'thread'
+  | 'ticket'
+  | 'session'
+  | 'channel'
+  | 'actor'
+  | 'decision'
+  | 'memory'
+
+export interface ObjectRef {
+  kind: ObjectRefKind
+  /** Stable handle: `<kind>:<objectId>` for documents, `spill_*` for stored bodies. */
+  id: string
+  /** Model-facing label. Never a secret; already redacted by the caller. */
+  label?: string
+  /** Spill that holds this object's body, when one exists. */
+  spillId?: string
+  /** Next-hop refs inlined with this object. One hop only. */
+  refs?: ObjectRef[]
+}
+
+/**
  * One immutable event from a source. `text` and `meta` are untrusted.
  * The Engine never reads a decision from `meta`; see `TriggerTrust`.
  */
@@ -43,6 +70,8 @@ export interface Trigger {
   text: string
   channel?: ChannelRef
   meta: Record<string, unknown>
+  /** Engine-owned next-hop refs for Chain of Recall. Adapters cannot set this. */
+  refs?: ObjectRef[]
 }
 
 export function threadKey(ref: ThreadRef): string {
@@ -57,6 +86,8 @@ export function threadKey(ref: ThreadRef): string {
 export interface TriggerTrust {
   /** Spill the ingress layer itself created for this trigger. The only grant source. */
   spillId?: string
+  /** Engine-owned Chain-of-Recall refs, including adjacent Thread triggers. */
+  refs?: ObjectRef[]
   /** Strength the ingress filter derived. Never copied from `meta.strength`. */
   strength?: Strength
   /**
@@ -190,6 +221,24 @@ export interface ResumeRecord {
 }
 
 /**
+ * One action a Worker paused to ask the owner about. The owner decides through
+ * the CLI; the model can request, never decide.
+ */
+export interface ApprovalRequest {
+  id: string
+  at: string
+  /** The exact action the Worker will perform if approved. One line. */
+  action: string
+  reason?: string
+  /** Session id that asked. */
+  requestedBy: string
+  status: 'pending' | 'approved' | 'denied'
+  decidedAt?: string
+  decidedBy?: string
+  note?: string
+}
+
+/**
  * Mid-task collaboration state for one Ticket. Persisted with the Ticket document
  * in SQLite, so pause/guidance/resume survive a process restart.
  */
@@ -197,6 +246,8 @@ export interface Collaboration {
   paused?: PauseState
   guidance: Guidance[]
   resumes: ResumeRecord[]
+  /** Approval requests in order. A pending entry stops Worker turns. */
+  approvals?: ApprovalRequest[]
 }
 
 export interface TicketEnd {
@@ -225,6 +276,8 @@ export interface Ticket {
   ended?: TicketEnd
   /** Mid-task pause / human guidance / resume state. Absent means untouched. */
   collab?: Collaboration
+  /** Engine-owned next-hop refs for Chain of Recall. */
+  refs?: ObjectRef[]
 }
 
 export interface Decision {
@@ -237,6 +290,8 @@ export interface Decision {
   at: string
   reason: string
   strength: Strength
+  /** Engine-owned next-hop refs for Chain of Recall. */
+  refs?: ObjectRef[]
 }
 
 export interface ReplyRow {

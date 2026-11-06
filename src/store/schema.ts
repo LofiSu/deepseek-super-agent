@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS spills (
   id TEXT PRIMARY KEY,
   body TEXT NOT NULL,
+  refs TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS spill_grants (
@@ -94,7 +95,7 @@ CREATE TABLE IF NOT EXISTS events (
 `
 
 /** The schema version this build writes and understands. */
-export const LATEST_SCHEMA_VERSION = 3
+export const LATEST_SCHEMA_VERSION = 4
 
 const SCHEMA_MIGRATIONS_DDL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -146,6 +147,12 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
   payload TEXT NOT NULL
 );
 `),
+  },
+  {
+    version: 4,
+    // Chain of Recall: each spill carries typed next-hop refs. Existing rows
+    // keep an empty ref list; the body and grants are untouched.
+    up: db => ensureColumn(db, 'spills', 'refs', "TEXT NOT NULL DEFAULT '[]'"),
   },
 ]
 

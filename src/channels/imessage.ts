@@ -393,7 +393,18 @@ export class ImessageSource {
   }
 }
 
-export type OsascriptRunner = (script: string, env: NodeJS.ProcessEnv) => Promise<string>
+/**
+ * Runs one AppleScript. `args` are passed to the script's `on run argv`
+ * handler, never through the environment: AppleScript's `system attribute`
+ * decodes env values with the process/system encoding, so UTF-8 text (any
+ * Chinese, emoji, or accented reply) arrives as mojibake. osascript decodes
+ * argv items as UTF-8, so non-ASCII payloads must travel there.
+ */
+export type OsascriptRunner = (
+  script: string,
+  env: NodeJS.ProcessEnv,
+  args?: readonly string[],
+) => Promise<string>
 
 /** Env names osascript needs; everything else (provider keys, tokens) stays out. */
 const OSASCRIPT_ENV = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR'])
@@ -408,9 +419,11 @@ export function osascriptEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return childEnv
 }
 
-/** Production runner: spawn `osascript` with the script on argv and text/target through env. */
-export const runOsascript: OsascriptRunner = (script, env) => new Promise((resolve, reject) => {
-  const child = spawn('osascript', ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'], env: osascriptEnv(env) })
+/** Production runner: spawn `osascript` with the script and UTF-8 args on argv. */
+export const runOsascript: OsascriptRunner = (script, env, args = []) => new Promise((resolve, reject) => {
+  // `--` stops option parsing so a message beginning with "-" stays an argv item.
+  const argv = ['-e', script, ...(args.length > 0 ? ['--', ...args] : [])]
+  const child = spawn('osascript', argv, { stdio: ['ignore', 'pipe', 'pipe'], env: osascriptEnv(env) })
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', (chunk: Buffer | string) => { stdout += String(chunk) })
@@ -429,8 +442,8 @@ export const runOsascript: OsascriptRunner = (script, env) => new Promise((resol
   })
 })
 
-const APPLE_SEND_SCRIPT = `on run
-  set theText to system attribute "DS_AGENT_IMSG_TEXT"
+const APPLE_SEND_SCRIPT = `on run argv
+  set theText to item 1 of argv
   set theTarget to system attribute "DS_AGENT_IMSG_TARGET"
   set theMode to system attribute "DS_AGENT_IMSG_MODE"
   tell application "Messages"
@@ -468,6 +481,29 @@ export class ChatDbImessageApi implements ImessageApi {
       throw imessageOpenError(this.dbPath, error)
     }
     return this.db
+  }
+
+  private attachmentsChecked = false
+  private attachmentsPresent = false
+
+  /**
+   * Older/partial chat.db fixtures may not have the attachment tables. Detect
+   * them once so the pull can still admit text without failing on a missing
+   * join table.
+   */
+  private ensureAttachmentSchema(db: DatabaseSync): boolean {
+    if (this.attachmentsChecked) return this.attachmentsPresent
+    this.attachmentsChecked = true
+    try {
+      const rows = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        + "AND name IN ('message_attachment_join', 'attachment')",
+      ).all() as Array<{ name?: unknown }>
+      this.attachmentsPresent = rows.length === 2
+    } catch {
+      this.attachmentsPresent = false
+    }
+    return this.attachmentsPresent
   }
 
   /**
@@ -513,6 +549,7 @@ export class ChatDbImessageApi implements ImessageApi {
     const limit = Math.min(Math.max(Math.floor(opts.limit ?? 50), 1), 200)
     const db = this.open()
     this.ensureChatSchema(db)
+    const attachments = this.ensureAttachmentSchema(db)
     // Skip rows with no text payload at all (tapbacks, pure attachments) in
     // SQL so they cannot occupy the page and stall the ROWID cursor. Page by
     // message ROWID, not by joined row: every chat of a selected message is
@@ -520,7 +557,10 @@ export class ChatDbImessageApi implements ImessageApi {
     const innerWhere = [
       'm2.ROWID > ?',
       'm2.is_from_me = 0',
-      '(m2.text IS NOT NULL AND m2.text <> \'\' OR m2.attributedBody IS NOT NULL)',
+      attachments
+        ? '(m2.text IS NOT NULL AND m2.text <> \'\' OR m2.attributedBody IS NOT NULL '
+          + 'OR EXISTS (SELECT 1 FROM message_attachment_join maj2 WHERE maj2.message_id = m2.ROWID))'
+        : '(m2.text IS NOT NULL AND m2.text <> \'\' OR m2.attributedBody IS NOT NULL)',
     ]
     const params: Array<number | string> = [afterRowId]
     if (opts.handle) {
@@ -543,7 +583,15 @@ export class ChatDbImessageApi implements ImessageApi {
              m.date AS date, m.service AS service,
              h.id AS handle, c.ROWID AS chatRowId,
              c.guid AS chatGuid, c.chat_identifier AS chatIdentifier,
-             c.style AS chatStyle, c.room_name AS roomName
+             c.style AS chatStyle, c.room_name AS roomName,
+             ${attachments
+    ? `(SELECT a.mime_type FROM message_attachment_join maj JOIN attachment a ON a.ROWID = maj.attachment_id
+         WHERE maj.message_id = m.ROWID LIMIT 1) AS attachmentMime,
+       (SELECT a.transfer_name FROM message_attachment_join maj JOIN attachment a ON a.ROWID = maj.attachment_id
+         WHERE maj.message_id = m.ROWID LIMIT 1) AS attachmentName,
+       (SELECT a.is_sticker FROM message_attachment_join maj JOIN attachment a ON a.ROWID = maj.attachment_id
+         WHERE maj.message_id = m.ROWID LIMIT 1) AS sticker`
+    : 'NULL AS attachmentMime, NULL AS attachmentName, NULL AS sticker'}
       FROM message m
       LEFT JOIN handle h ON m.handle_id = h.ROWID
       LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
@@ -645,9 +693,21 @@ export class ChatDbImessageApi implements ImessageApi {
       // ROWID is a group-only fallback identity: a 1:1 row never contributes
       // one, so 1:1 threads stay keyed by `handle:`.
       const chatRowId = isGroup ? aggregate.groupChatRowId : undefined
-      const body = row.text != null && String(row.text).length > 0
+      // Attachment slots are stored as an object replacement character, which
+      // trim() does not remove. Strip it so an attachment-only bubble reaches
+      // the placeholder branch instead of sending an invisible character.
+      const decoded = (row.text != null && String(row.text).length > 0
         ? String(row.text)
-        : decodeAttributedBody(row.attributedBody)
+        : decodeAttributedBody(row.attributedBody)).replace(/\uFFFC/g, '')
+      // An attachment-only bubble has no text but is still a message the
+      // conversation should see. A short placeholder lets the Router answer
+      // instead of silently dropping the image or sticker.
+      const mime = row.attachmentMime == null ? '' : String(row.attachmentMime)
+      const body = decoded.trim().length > 0
+        ? decoded
+        : mime
+          ? (Number(row.sticker) === 1 ? '[贴纸]' : mime.startsWith('image/') ? '[图片]' : '[附件]')
+          : ''
       // Keep empty decodes so the caller's cursor advances past them; the
       // source filters them out of the Trigger list.
       out.push({
@@ -673,11 +733,10 @@ export class ChatDbImessageApi implements ImessageApi {
     const externalId = nextExternalId()
     await this.run(APPLE_SEND_SCRIPT, {
       ...process.env,
-      DS_AGENT_IMSG_TEXT: text,
       DS_AGENT_IMSG_TARGET: value,
       DS_AGENT_IMSG_MODE: mode,
       DS_AGENT_IMSG_EXTERNAL_ID: externalId,
-    })
+    }, [text])
     return { externalId }
   }
 }

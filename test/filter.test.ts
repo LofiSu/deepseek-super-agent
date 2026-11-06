@@ -96,6 +96,23 @@ describe('two-level filter', () => {
     expect(ci).toMatchObject({ action: 'pass', strength: 'inferred' })
   })
 
+  it('admits everyday chatter in a direct chat but not in a group', () => {
+    const direct = {
+      ...imTrigger({ id: 'dm', thread: 'chat/+1', text: 'haha' }),
+      addressed: 'direct' as const,
+      channel: { source: 'imessage' as const, thread: 'chat:any;-;+1', address: { handle: '+1' } },
+    }
+    expect(filterTrigger(direct, semanticOnly)).toMatchObject({ action: 'pass', strength: 'explicit' })
+    const group = {
+      ...imTrigger({ id: 'grp', thread: 'chat/g1', text: '@ds-agent haha', addressed: true }),
+      addressed: 'mention' as const,
+      channel: { source: 'imessage' as const, thread: 'chat:g1', address: { group: 'g1' } },
+    }
+    // A mention does not make noise actionable in a group: the direct-chat
+    // exception only covers a 1:1 thread.
+    expect(filterTrigger(group, semanticOnly)).toMatchObject({ action: 'drop', reason: 'noise' })
+  })
+
   it('rejects an unknown source and records noise through the engine', async () => {
     const email = filterTrigger({
       id: 'mail',

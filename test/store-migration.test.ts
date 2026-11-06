@@ -100,8 +100,12 @@ function rawSpill(home: string, id: string): string | undefined {
 }
 
 function outboxColumns(home: string): string[] {
+  return tableColumns(home, 'outbox')
+}
+
+function tableColumns(home: string, table: string): string[] {
   return inspect(home, db =>
-    (db.prepare('PRAGMA table_info(outbox)').all() as { name: string }[]).map(row => row.name),
+    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name),
   )
 }
 
@@ -257,9 +261,12 @@ describe('store schema migrations', () => {
     }
     const sqlAfter = tableSql(home)
     for (const [table, sql] of Object.entries(legacySql)) {
-      if (table === 'outbox') continue
+      // Version 2 adds outbox columns; version 4 adds spill refs. Both use
+      // ALTER TABLE, so only those two DDL strings change.
+      if (table === 'outbox' || table === 'spills') continue
       expect(sqlAfter[table]).toBe(sql)
     }
+    expect(tableColumns(home, 'spills')).toContain('refs')
     expect(rawDocument(home, 'note', 'doc_1')).toBe(JSON.stringify({ body: 'keep me', nested: { n: 7 } }))
     expect(rawSpill(home, 'legacy_spill_1')).toBe('legacy spill body')
   })

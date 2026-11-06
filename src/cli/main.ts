@@ -6,13 +6,17 @@ import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
+import { buildSystemPrompt, describePromptLayers, loadPromptFiles } from '../harness/prompts.ts'
+import { LOCAL_AGENTS_FILE, loadLocalAgents } from '../env/local-agents.ts'
+import { SKILLS_DIR, SKILL_FILE, SkillRegistry } from '../env/skills.ts'
+import { loadRoutines, ROUTINES_ENV, ROUTINES_FILE } from '../harness/routines.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import type { A2AEnvelope } from '../channels/a2a.ts'
 import type { LongTermMemoryEntry } from '../memory/long-term.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
-import type { JobRow, SessionRow, Ticket } from '../shared/types.ts'
+import type { JobRow, Role, SessionRow, Ticket } from '../shared/types.ts'
 import { Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
 import { startEmbeddedGateway } from '../gateway/embedded.ts'
@@ -129,7 +133,7 @@ function help(): void {
   pnpm ds-agent ui [--host 127.0.0.1] [--port <n>] [--token <token>]
                             # read-only loopback dashboard over persisted state; requires
                             # DS_AGENT_UI_TOKEN or --token (at least 16 characters)
-  pnpm ds-agent backup [--out <file.db>]  # WAL-safe snapshot of the SQLite store
+  pnpm ds-agent backup --out <file.db>  # WAL-safe snapshot of the SQLite store
   pnpm ds-agent restore <file.db> [--force]
                             # replace the store from a snapshot; --force is required
                             # when a store already exists (the old one is kept aside)
@@ -142,9 +146,15 @@ function help(): void {
   pnpm ds-agent metrics
   pnpm ds-agent memory [--limit 10]   # persisted cross-ticket memories
   pnpm ds-agent a2a [--limit 10]      # persisted A2A envelopes
+  pnpm ds-agent prompt [--role router|worker|watchdog] [--layers] [--json]
+                            # the layered system prompt and where each layer comes from
+  pnpm ds-agent agents [--json]  # local specialist agents configured for delegation
+  pnpm ds-agent skills [--json]  # owner-authored playbooks the agent can load
+  pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
+  pnpm ds-agent stop <ticketId> [--reason "no longer needed"]
   pnpm ds-agent intervene <ticketId> "use the staging db" [--no-pause]
   pnpm ds-agent resume <ticketId> [--reason "human verified"]
   pnpm ds-agent collab <ticketId>          # pause state + guidance audit
@@ -156,6 +166,7 @@ Worker-internal teams (persisted in SQLite, offline reads):
   <teamId> accepts an exact id or a unique prefix.
 
 pause freezes Router/Worker turns, reports, and outbound replies.
+stop ends a ticket for good (an operator veto); pause is for a resumable hold.
 intervene records guidance and pauses by default, so the note lands before more work.
 resume clears the pause and continues with the unseen guidance in the next turn.
 demo/retry/resume need a live model; chat may use MockModel.
@@ -358,7 +369,9 @@ async function serve(home: string): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
   try {
-    runtime.start({ assessPending: canAssess })
+    // Only the long-lived serving process ticks owner routines; one-shot
+    // commands (approve, retry, chat, resume, emit) must not fire them.
+    runtime.start({ assessPending: canAssess, routines: true })
   } catch (error) {
     channels?.abort()
     channels?.close()
@@ -496,6 +509,9 @@ async function main(): Promise<void> {
           recent: memories.slice(-limit).map(entry => ({
             id: entry.id,
             ticketId: entry.ticketId,
+            kind: entry.kind ?? 'note',
+            tier: entry.tier ?? 'hot',
+            refs: entry.refs?.map(ref => ref.id) ?? [],
             text: entry.text,
           })),
         }, null, 2))
@@ -569,6 +585,80 @@ async function main(): Promise<void> {
     } finally {
       store.close()
     }
+    return
+  }
+  if (cmd === 'approvals') {
+    const store = new Store(home)
+    const pending: {
+      ticketId: string
+      title: string
+      approvalId: string
+      action: string
+      reason?: string
+      requestedBy: string
+      at: string
+    }[] = []
+    try {
+      for (const ticket of store.listDocs<Ticket>('ticket')) {
+        if (ticket.ended) continue
+        for (const approval of ticket.collab?.approvals ?? []) {
+          if (approval.status !== 'pending') continue
+          pending.push({
+            ticketId: ticket.id,
+            title: ticket.title,
+            approvalId: approval.id,
+            action: approval.action,
+            requestedBy: approval.requestedBy,
+            at: approval.at,
+            ...(approval.reason ? { reason: approval.reason } : {}),
+          })
+        }
+      }
+    } finally {
+      store.close()
+    }
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(pending, null, 2))
+      return
+    }
+    if (!pending.length) {
+      console.log('no approvals pending')
+      return
+    }
+    for (const item of pending) {
+      console.log(`${item.ticketId}  ${item.approvalId}  ${item.action}`)
+      console.log(`  ${item.title}${item.reason ? ` — ${item.reason}` : ''}`)
+      console.log(`  requested by ${item.requestedBy} at ${item.at}`)
+    }
+    return
+  }
+  if (cmd === 'approve' || cmd === 'deny') {
+    const rest = bare(3, ['note'])
+    const ticketRef = rest[0]
+    const approvalId = rest[1]
+    if (!ticketRef || !approvalId) {
+      throw new Error(`usage: ds-agent ${cmd} <ticketId> <approvalId> [--note "..."]`)
+    }
+    const note = option('note')
+    const resolved = (() => {
+      const store = new Store(home)
+      try {
+        return resolveTicket(store, ticketRef)
+      } finally {
+        store.close()
+      }
+    })()
+    await withRuntime(async runtime => {
+      const outcome = await runtime.decideApproval(
+        resolved.id,
+        approvalId,
+        cmd === 'approve' ? 'approved' : 'denied',
+        note,
+      )
+      console.log(`${cmd === 'approve' ? 'approved' : 'denied'} ${approvalId} on ${resolved.id} "${resolved.title}"`)
+      if (note) console.log(`  note: ${note}`)
+      console.log(`  stage: ${ticketStage(outcome.ticket)}`)
+    }, requireLiveModelFromEnv())
     return
   }
   if (cmd === 'pause') {
@@ -645,6 +735,18 @@ async function main(): Promise<void> {
           ? `paused: ${paused.at} by ${paused.by}${paused.reason ? ` — ${paused.reason}` : ''}`
           : 'paused: no',
       )
+      const approvals = collaboration.approvals ?? []
+      if (approvals.length === 0) {
+        console.log('approvals: none')
+      } else {
+        console.log('approvals:')
+        for (const approval of approvals) {
+          console.log(
+            `  ${approval.status.padEnd(8)} ${approval.id}  ${approval.action}`
+            + `${approval.note ? ` — ${approval.note}` : ''}`,
+          )
+        }
+      }
       if (collaboration.guidance.length === 0) {
         console.log('guidance: none')
       } else {
@@ -750,6 +852,86 @@ async function main(): Promise<void> {
     await withRuntime(runtime => {
       runtime.ingest(githubTrigger({ pr, text, speculate: option('speculate') === 'true' }))
     })
+    return
+  }
+  if (cmd === 'prompt') {
+    const role = option('role') ?? 'router'
+    if (role !== 'router' && role !== 'worker' && role !== 'watchdog') {
+      throw new Error('role must be router, worker, or watchdog')
+    }
+    const agents = loadLocalAgents(home, process.env).map(agent => ({
+      id: agent.id,
+      ...(agent.description ? { description: agent.description } : {}),
+    }))
+    const skills = SkillRegistry.fromHome(home)
+    const input = {
+      role: role as Role,
+      ...loadPromptFiles(home, process.env),
+      ...(agents.length ? { localAgents: agents } : {}),
+      ...(skills.size ? { skills: skills.list() } : {}),
+    }
+    const layers = describePromptLayers(input)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(layers, null, 2))
+      return
+    }
+    if (process.argv.includes('--layers')) {
+      for (const layer of layers) {
+        console.log(`${layer.id.padEnd(14)}${layer.text.length} chars  ${layer.source}`)
+      }
+      return
+    }
+    console.log(buildSystemPrompt(input))
+    return
+  }
+  if (cmd === 'routines') {
+    const routines = loadRoutines(home, process.env)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(routines, null, 2))
+      return
+    }
+    if (!routines.length) {
+      console.log(`no routines configured (${ROUTINES_FILE} or ${ROUTINES_ENV})`)
+      return
+    }
+    for (const routine of routines) {
+      const schedule = 'at' in routine
+        ? `${routine.at} UTC days ${routine.days.join(',')}`
+        : `every ${routine.everyMinutes}m`
+      console.log(
+        `${routine.id.padEnd(24)}${schedule}  ${routine.source}:${routine.thread}  ${routine.prompt}`,
+      )
+    }
+    return
+  }
+  if (cmd === 'skills') {
+    const skills = SkillRegistry.fromHome(home, line => console.error(line))
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(skills.list(), null, 2))
+      return
+    }
+    const list = skills.list()
+    if (!list.length) {
+      console.log(`no skills configured (${SKILLS_DIR}/<id>/${SKILL_FILE} in ${home})`)
+      return
+    }
+    for (const skill of list) console.log(`${skill.id.padEnd(24)}${skill.description}`)
+    return
+  }
+  if (cmd === 'agents') {
+    const agents = loadLocalAgents(home, process.env)
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(agents, null, 2))
+      return
+    }
+    if (!agents.length) {
+      console.log(`no local agents configured (${LOCAL_AGENTS_FILE} or DS_AGENT_LOCAL_AGENTS)`)
+      return
+    }
+    for (const agent of agents) {
+      const description = agent.description ? `  ${agent.description}` : ''
+      console.log(`${agent.id.padEnd(14)}${agent.command}${description}`)
+    }
     return
   }
   throw new Error(`unknown command ${cmd}`)

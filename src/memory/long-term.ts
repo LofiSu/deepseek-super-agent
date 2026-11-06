@@ -1,5 +1,8 @@
 import { grantTicketSpill } from './acl.ts'
-import type { Ticket } from '../shared/types.ts'
+import { cosine, DEFAULT_EMBEDDING_FLOOR, type EmbeddingPort } from './embedding.ts'
+import { mergeRefs, refsForDecision, refsForTicket, threadRef } from './graph.ts'
+import { canonicalTokenCounts, canonicalTokens, queryTokens } from './text.ts'
+import type { Decision, ObjectRef, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 
 export interface LongTermMemoryQuery {
@@ -8,9 +11,14 @@ export interface LongTermMemoryQuery {
   text: string
   limit?: number
   tags?: string[]
+  /** Optional tier filter. Absent means hot and cold entries are both eligible. */
+  tier?: LongTermMemoryTier
 }
 
-export type LongTermMemoryKind = 'note' | 'ticket'
+export type LongTermMemoryKind = 'note' | 'ticket' | 'decision' | 'digest'
+
+/** Hot entries are ticket/decision memories; cold entries are archived thread digests. */
+export type LongTermMemoryTier = 'hot' | 'cold'
 
 /**
  * Retention for the durable index. Either dimension is disabled by 0 or by
@@ -18,15 +26,27 @@ export type LongTermMemoryKind = 'note' | 'ticket'
  * such as the Runtime, which supplies conservative defaults.
  */
 export interface LongTermMemoryRetention {
-  /** Keep at most this many entries (oldest pruned first). 0 disables. */
+  /** Keep at most this many hot entries (oldest pruned first). 0 disables. */
   maxEntries?: number
-  /** Delete entries older than this many days. 0 disables. */
+  /** Delete hot entries older than this many days. 0 disables. */
   maxAgeDays?: number
+  /** Keep at most this many cold digests. 0 disables. */
+  coldMaxEntries?: number
+  /** Delete cold digests older than this many days. 0 disables. */
+  coldMaxAgeDays?: number
 }
 
 export interface LongTermMemoryOptions extends LongTermMemoryRetention {
   /** Injectable clock for deterministic age/count pruning tests. */
   now?: () => Date
+  /**
+   * Optional semantic recall. Absent means lexical-only behavior, unchanged.
+   * Vectors are stored with the entry and recomputed lazily when the port id
+   * or dimensions change.
+   */
+  embedding?: EmbeddingPort
+  /** Cosine floor for a semantic-only hit. Defaults to 0.35, clamped to 0..1. */
+  embeddingFloor?: number
 }
 
 
@@ -39,6 +59,13 @@ export interface LongTermMemoryEntry {
   createdAt: string
   kind?: LongTermMemoryKind
   tags?: string[]
+  tier?: LongTermMemoryTier
+  /** Next-hop refs inlined for Chain of Recall. */
+  refs?: ObjectRef[]
+  /** Cached semantic vector, when an EmbeddingPort is configured. */
+  embedding?: number[]
+  /** Port id and dimensions that produced `embedding`. */
+  embeddingId?: string
 }
 
 interface QueryCandidate {
@@ -47,10 +74,25 @@ interface QueryCandidate {
   tagHits: number
   textHits: number
   hopScore: number
+  similarity: number
   direct: boolean
 }
 
 const SUMMARY_CHARS = 160
+/**
+ * The semantic head is the first non-empty line, capped. Indexing a whole
+ * ticket body (title + brief + report) dilutes a short title query until the
+ * cosine can never clear the floor; the title line is the high-signal part.
+ */
+const SEMANTIC_HEAD_CHARS = 300
+/** Bound lazy write-back during a read so an upgrade cannot write 1200 docs. */
+const MAX_EMBEDDING_BACKFILL = 32
+/**
+ * Provider calls per read are bounded separately from persisted vectors. An
+ * empty or failed result does not consume the cache budget, so a bad prefix
+ * cannot starve later entries; the hard call cap still bounds provider work.
+ */
+const MAX_EMBEDDING_CALLS = MAX_EMBEDDING_BACKFILL * 2
 
 /**
  * Persistent cross-ticket memory index (T48). A body is stored as a spill;
@@ -59,15 +101,26 @@ const SUMMARY_CHARS = 160
  */
 export class SpillBackedLongTermMemory {
   /** Effective limits (0 means that dimension is disabled). */
-  readonly retention: Readonly<{ maxEntries: number; maxAgeDays: number }>
+  readonly retention: Readonly<{
+    maxEntries: number
+    maxAgeDays: number
+    coldMaxEntries: number
+    coldMaxAgeDays: number
+  }>
   private readonly redact: (text: string) => string
   private readonly clock: () => Date
+  private readonly embedding?: EmbeddingPort
+  private readonly embeddingFloor: number
 
   constructor(store: Store, options?: LongTermMemoryOptions)
   constructor(store: Store, redact?: (text: string) => string, options?: LongTermMemoryOptions)
   constructor(
     private readonly store: Store,
-    /** Applied before anything is written, including caller-supplied `put` text. */
+    /**
+     * Applied before anything is written, including caller-supplied `put` text.
+     * It must be idempotent: the embedding boundary redacts again on paths that
+     * already pass a redacted body.
+     */
     redactOrOptions: ((text: string) => string) | LongTermMemoryOptions = text => text,
     options: LongTermMemoryOptions = {},
   ) {
@@ -76,8 +129,31 @@ export class SpillBackedLongTermMemory {
     this.retention = Object.freeze({
       maxEntries: normalizeLimit(retention.maxEntries),
       maxAgeDays: normalizeLimit(retention.maxAgeDays),
+      coldMaxEntries: normalizeLimit(retention.coldMaxEntries ?? 200),
+      coldMaxAgeDays: normalizeLimit(retention.coldMaxAgeDays ?? 3650),
     })
     this.clock = retention.now ?? (() => new Date())
+    this.embedding = retention.embedding
+    const floor = retention.embeddingFloor ?? DEFAULT_EMBEDDING_FLOOR
+    this.embeddingFloor = Number.isFinite(floor) ? Math.min(1, Math.max(0, floor)) : DEFAULT_EMBEDDING_FLOOR
+  }
+
+  /**
+   * Persisted vector and port id, or nothing when semantic recall is off.
+   * Redaction runs before the port: like a spill, the provider is an egress
+   * boundary and must never receive unredacted text. An empty result is not
+   * cached, so a provider that transiently returns nothing can recover.
+   * A provider failure degrades to lexical-only instead of aborting the write.
+   */
+  private vectorOf(text: string): { vector: number[]; id: string } | undefined {
+    if (!this.embedding) return undefined
+    try {
+      const vector = [...this.embedding.embed(semanticHead(this.redact(text)))]
+      if (vector.length === 0) return undefined
+      return { vector, id: `${this.embedding.id}:${vector.length}` }
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -89,32 +165,54 @@ export class SpillBackedLongTermMemory {
    * truncated summary, so the write creates a fresh, recallable entry instead.
    * Different text (or the same text for another ticket) is stored as before.
    */
-  put(ticketId: string, text: string, opts: { tags?: string[] } = {}): LongTermMemoryEntry {
+  put(
+    ticketId: string,
+    text: string,
+    opts: {
+      tags?: string[]
+      refs?: readonly ObjectRef[]
+      kind?: LongTermMemoryKind
+      tier?: LongTermMemoryTier
+    } = {},
+  ): LongTermMemoryEntry {
     if (!ticketId.trim() || !text.trim()) throw new Error('ticketId and text are required')
     const safe = this.redact(text)
     const wanted = normalizeTags(opts.tags)
+    const refs = mergeRefs(opts.refs ?? [])
     const dedupeKey = normalizeForDedupe(safe)
     return this.store.atomic(() => {
       const existing = this.store.listDocs<LongTermMemoryEntry>('ltm')
         .find(entry => entry.ticketId === ticketId && dedupeKeyOf(this.store, entry) === dedupeKey)
       if (existing) {
+        const mergedRefs = mergeRefs(existing.refs ?? [], refs)
+        // Dedupe never rewrites the body; only the ref graph may grow. The
+        // cached vector may be added when a port was configured after the body.
+        const body = this.store.getSpill(existing.spillId)
+        const vector = body == null ? undefined : this.vectorOf(body)
         const entry: LongTermMemoryEntry = {
           ...existing,
           tags: normalizeTags([...(existing.tags ?? []), ...wanted]),
+          refs: mergedRefs,
+          ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
         }
+        if (body != null) this.store.replaceSpill(existing.spillId, body, mergedRefs)
         this.store.putDoc('ltm', entry.id, entry)
         this.prune(entry.id)
         return entry
       }
-      const spillId = this.store.putSpill(safe)
+      const spillId = this.store.putSpill(safe, refs)
+      const vector = this.vectorOf(safe)
       const entry: LongTermMemoryEntry = {
         id: this.store.nextId('ltm'),
         ticketId,
         spillId,
         text: summarize(safe),
         createdAt: this.clock().toISOString(),
-        kind: 'note',
+        kind: opts.kind ?? 'note',
+        tier: opts.tier ?? 'hot',
         tags: wanted,
+        refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
       }
       this.store.putDoc('ltm', entry.id, entry)
       grantTicketSpill(this.store, spillId, ticketId)
@@ -133,10 +231,12 @@ export class SpillBackedLongTermMemory {
       .filter((part): part is string => typeof part === 'string' && part.trim().length > 0))]
       .join('\n'))
     const id = `ltm_${ticket.id}`
+    const refs = mergeRefs(ticket.refs ?? refsForTicket(ticket))
     return this.store.atomic(() => {
       const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
       const spillId = existing?.spillId ?? `ltm_spill_${ticket.id}`
-      this.store.replaceSpill(spillId, text)
+      this.store.replaceSpill(spillId, text, refs)
+      const vector = this.vectorOf(text)
       const entry: LongTermMemoryEntry = {
         id,
         ticketId: ticket.id,
@@ -144,13 +244,92 @@ export class SpillBackedLongTermMemory {
         text: summarize(text),
         createdAt: existing?.createdAt ?? this.clock().toISOString(),
         kind: 'ticket',
+        tier: 'hot',
         tags: normalizeTags([...ticket.threadKeys, ...ticket.channels.map(channel => channel.source)]),
+        refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
       }
       this.store.putDoc('ltm', id, entry)
       grantTicketSpill(this.store, spillId, ticket.id)
       this.prune(entry.id)
       return entry
     })
+  }
+
+  /**
+   * Router global memory (§2.1): one durable entry per terminal Decision, so
+   * "we chose A here, then switched to B there" survives across Tickets and
+   * channels. Idempotent by decision id.
+   */
+  rememberDecision(decision: Decision): LongTermMemoryEntry {
+    const text = this.redact([
+      `decision ${decision.kind} on ${decision.threadKey}`,
+      decision.reason,
+      `triggers ${decision.triggerIds.join(' ')}`,
+      ...(decision.ticketId ? [`ticket ${decision.ticketId}`] : []),
+    ].join('\n'))
+    const id = `ltm_decision_${decision.id}`
+    const refs = mergeRefs(decision.refs ?? refsForDecision(decision))
+    return this.store.atomic(() => {
+      const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
+      const spillId = existing?.spillId ?? `ltm_decision_spill_${decision.id}`
+      this.store.replaceSpill(spillId, text, refs)
+      // The first line is the generic "decision <kind> on <thread>" header;
+      // embed the reason, which carries the searchable meaning.
+      const vector = this.vectorOf(decision.reason)
+      const entry: LongTermMemoryEntry = {
+        id,
+        ticketId: decision.ticketId ?? `decision:${decision.id}`,
+        spillId,
+        text: summarize(text),
+        createdAt: existing?.createdAt ?? this.clock().toISOString(),
+        kind: 'decision',
+        tier: 'hot',
+        tags: normalizeTags(['decision', decision.kind, decision.threadKey]),
+        refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
+      }
+      this.store.putDoc('ltm', id, entry)
+      if (decision.ticketId) grantTicketSpill(this.store, spillId, decision.ticketId)
+      this.prune(entry.id)
+      return entry
+    })
+  }
+
+  /**
+   * Decisions, ticket memories, and archived digests for these Threads.
+   * This is how the Router sees cross-task context even when the next title
+   * does not lexically match the earlier one.
+   */
+  forThreads(threadKeys: readonly string[], limit = 5, readerTicketId?: string): LongTermMemoryEntry[] {
+    const wanted = new Set(threadKeys)
+    if (wanted.size === 0) return []
+    const entries = this.store.listDocs<LongTermMemoryEntry>('ltm')
+      .filter(entry => (entry.tags ?? []).some(tag => wanted.has(tag))
+        || (entry.refs ?? []).some(ref => ref.kind === 'thread' && wanted.has(ref.id.replace(/^thread:/, ''))))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      .slice(0, Math.max(0, Math.floor(limit)))
+    // Same rule as query(): the reader gets the exact spill of every hit.
+    if (readerTicketId) {
+      for (const entry of entries) grantTicketSpill(this.store, entry.spillId, readerTicketId)
+    }
+    return entries
+  }
+
+  /**
+   * Router global memory (§2.1): the newest Decisions across every Thread.
+   * The Router is the global sequence point, so a decision made in one channel
+   * can steer a Ticket opened in another. Worker injection stays Thread-local.
+   */
+  recentDecisions(limit = 5, readerTicketId?: string): LongTermMemoryEntry[] {
+    const entries = this.store.listDocs<LongTermMemoryEntry>('ltm')
+      .filter(entry => entry.kind === 'decision')
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      .slice(0, Math.max(0, Math.floor(limit)))
+    if (readerTicketId) {
+      for (const entry of entries) grantTicketSpill(this.store, entry.spillId, readerTicketId)
+    }
+    return entries
   }
 
   /**
@@ -187,10 +366,30 @@ export class SpillBackedLongTermMemory {
     const wanted = normalizeTags(query.tags)
     const needles = new Set([...words, ...wanted.flatMap(tag => canonicalTokens(tag))])
     const limit = Math.max(0, Math.floor(query.limit ?? 10))
+    // One vector per query. An empty (zero) vector cannot produce a hit, and a
+    // provider failure degrades to lexical-only instead of failing recall.
+    let queryVector: number[] | undefined
+    if (this.embedding) {
+      try {
+        queryVector = [...this.embedding.embed(semanticHead(this.redact(query.text)))]
+      } catch {
+        queryVector = undefined
+      }
+    }
+    if (queryVector?.length === 0) queryVector = undefined
+    const embeddingId = queryVector && this.embedding
+      ? `${this.embedding.id}:${queryVector.length}`
+      : undefined
+    // Bound provider calls as well as writes. A hosted provider must not turn
+    // one recall over a legacy index into thousands of calls inside a
+    // transaction; uncached entries join over successive queries.
+    let embeddingCalls = 0
+    let embeddingWrites = 0
     return this.store.atomic(() => {
       const candidates: QueryCandidate[] = []
       const tagIndex = new Map<string, number[]>()
       for (const entry of this.store.listDocs<LongTermMemoryEntry>('ltm')) {
+        if (query.tier && (entry.tier ?? 'hot') !== query.tier) continue
         if (wanted.length && !wanted.every(tag => entry.tags?.includes(tag))) continue
         const body = this.store.getSpill(entry.spillId)
         if (body == null) continue
@@ -200,6 +399,37 @@ export class SpillBackedLongTermMemory {
         const wordTagHits = words.filter(word => tags.has(word)).length
         let textHits = 0
         for (const word of words) textHits += Math.min(5, counts.get(word) ?? 0)
+        // Semantic candidates stay separate from lexical `direct`, so they
+        // never seed the one-hop tag walk.
+        let similarity = 0
+        if (this.embedding && queryVector && embeddingId) {
+          let vector = entry.embedding
+          const stale = !vector || entry.embeddingId !== embeddingId || vector.length !== queryVector.length
+          if (stale) {
+            // Never score a vector from another port: vectors in different
+            // embedding spaces can share dimensions and produce false hits.
+            vector = undefined
+            if (embeddingCalls < MAX_EMBEDDING_CALLS && embeddingWrites < MAX_EMBEDDING_BACKFILL) {
+              embeddingCalls += 1
+              try {
+                vector = [...this.embedding.embed(semanticHead(this.redact(body)))]
+              } catch {
+                vector = undefined
+              }
+              if (vector && vector.length > 0) {
+                entry.embedding = vector
+                entry.embeddingId = `${this.embedding.id}:${vector.length}`
+                this.store.putDoc('ltm', entry.id, entry)
+                embeddingWrites += 1
+              } else {
+                // Empty or failed: retry on a later read without consuming the
+                // cache budget, so one bad prefix cannot starve the rest.
+                vector = undefined
+              }
+            }
+          }
+          if (vector && vector.length === queryVector.length) similarity = cosine(queryVector, vector)
+        }
         const index = candidates.length
         candidates.push({
           entry,
@@ -207,6 +437,7 @@ export class SpillBackedLongTermMemory {
           tagHits,
           textHits,
           hopScore: 0,
+          similarity,
           direct: textHits > 0 || wordTagHits > 0,
         })
         for (const tag of tags) {
@@ -239,10 +470,14 @@ export class SpillBackedLongTermMemory {
         candidate.hopScore -= weight * candidate.tags.size
       }
       const matches = candidates
-        .filter(candidate => candidate.direct || candidate.hopScore > 0)
+        .filter(candidate => candidate.direct
+          || candidate.hopScore > 0
+          || (candidate.similarity > 0 && candidate.similarity >= this.embeddingFloor))
         .sort((a, b) => b.tagHits - a.tagHits
           || b.textHits - a.textHits
           || b.hopScore - a.hopScore
+          || b.similarity - a.similarity
+          || tierRank(a) - tierRank(b)
           || b.entry.createdAt.localeCompare(a.entry.createdAt)
           || b.entry.id.localeCompare(a.entry.id))
         .slice(0, limit)
@@ -270,36 +505,23 @@ export class SpillBackedLongTermMemory {
   }
 
   /**
-   * Runs inside the caller's `store.atomic()` transaction. The entry that was
-   * just written/upserted is never removed by its own retention pass, even
-   * when its preserved `createdAt` would otherwise age it out.
+   * Runs inside the caller's `store.atomic()` transaction. Hot ticket/decision
+   * entries follow `maxEntries`/`maxAgeDays`; cold thread digests follow their
+   * own limits. Before a hot entry is deleted, its summary is folded into the
+   * Thread digest so month-scale recall survives ticket pruning (§8.1).
    */
   private prune(protectedId: string): void {
-    const { maxEntries, maxAgeDays } = this.retention
-    if (maxEntries <= 0 && maxAgeDays <= 0) return
     const entries = this.store.listDocs<LongTermMemoryEntry>('ltm')
     if (entries.length <= 1) return
     const indexById = new Map(entries.map((entry, index) => [entry.id, index]))
-    const doomed = new Set<string>()
-    if (maxAgeDays > 0) {
-      const cutoff = this.clock().getTime() - maxAgeDays * 86_400_000
-      for (const entry of entries) {
-        if (entry.id === protectedId) continue
-        const createdAt = Date.parse(entry.createdAt)
-        if (Number.isFinite(createdAt) && createdAt < cutoff) doomed.add(entry.id)
-      }
-    }
-    if (maxEntries > 0) {
-      const survivors = entries.filter(entry => !doomed.has(entry.id))
-      const hasProtected = survivors.some(entry => entry.id === protectedId)
-      // Newest first; equal timestamps fall back to insertion order (rowid).
-      const ranked = survivors
-        .filter(entry => entry.id !== protectedId)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)
-          || (indexById.get(b.id) ?? 0) - (indexById.get(a.id) ?? 0))
-      const quota = Math.max(0, maxEntries - (hasProtected ? 1 : 0))
-      for (const entry of ranked.slice(quota)) doomed.add(entry.id)
-    }
+    const hot = entries.filter(entry => (entry.tier ?? 'hot') === 'hot')
+    const cold = entries.filter(entry => entry.tier === 'cold')
+    const doomed = new Set<string>([
+      ...selectDoomed(hot, this.retention.maxEntries, this.retention.maxAgeDays, protectedId, this.clock),
+      ...selectDoomed(cold, this.retention.coldMaxEntries, this.retention.coldMaxAgeDays, protectedId, this.clock),
+    ])
+    const archived = hot.filter(entry => doomed.has(entry.id) && entry.id !== protectedId && entry.kind !== 'digest')
+    if (archived.length) this.archive(archived)
     const oldestFirst = [...doomed].sort((a, b) => {
       const byTime = (entries[indexById.get(a)!]?.createdAt ?? '').localeCompare(
         entries[indexById.get(b)!]?.createdAt ?? '',
@@ -312,11 +534,108 @@ export class SpillBackedLongTermMemory {
       if (spillId) this.store.deleteSpill(spillId)
     }
   }
+
+  /**
+   * Fold pruned ticket/decision summaries into one bounded cold digest per
+   * Thread. The digest keeps handles, not grants: `query()` still grants the
+   * reader ticket on every hit.
+   */
+  private archive(entries: readonly LongTermMemoryEntry[]): void {
+    const byThread = new Map<string, LongTermMemoryEntry[]>()
+    for (const entry of entries) {
+      const threads = (entry.refs ?? [])
+        .filter(ref => ref.kind === 'thread')
+        .map(ref => ref.id.replace(/^thread:/, ''))
+      for (const key of threads) {
+        const bucket = byThread.get(key)
+        if (bucket) bucket.push(entry)
+        else byThread.set(key, [entry])
+      }
+    }
+    for (const [key, bucket] of byThread) {
+      const id = `ltm_digest_${encodeId(key)}`
+      const spillId = `ltm_digest_spill_${encodeId(key)}`
+      const existing = this.store.getDoc<LongTermMemoryEntry>('ltm', id)
+      const ordered = [...bucket].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      const block = [
+        `archived ${ordered.length} entries for ${key}`,
+        ...ordered.map(entry => `${entry.createdAt} ${entry.text}`),
+      ].join('\n')
+      const text = capDigest(existing ? `${block}\n${this.store.getSpill(existing.spillId) ?? existing.text}` : block)
+      const refs = mergeRefs(existing?.refs ?? [], [threadRef(key)])
+      this.store.replaceSpill(spillId, text, refs)
+      // The digest's first line is a generic "archived N entries" header.
+      const vector = this.vectorOf(ordered[0]?.text ?? text)
+      const digest: LongTermMemoryEntry = {
+        id,
+        ticketId: `thread:${key}`,
+        spillId,
+        text: summarize(text),
+        createdAt: existing?.createdAt ?? this.clock().toISOString(),
+        kind: 'digest',
+        tier: 'cold',
+        tags: normalizeTags([key, 'digest']),
+        refs,
+        ...(vector ? { embedding: vector.vector, embeddingId: vector.id } : {}),
+      }
+      this.store.putDoc('ltm', id, digest)
+    }
+  }
 }
 
 function normalizeLimit(value: number | undefined): number {
   const limit = Math.floor(value ?? 0)
   return Number.isFinite(limit) && limit > 0 ? limit : 0
+}
+
+function selectDoomed(
+  entries: readonly LongTermMemoryEntry[],
+  maxEntries: number,
+  maxAgeDays: number,
+  protectedId: string,
+  clock: () => Date,
+): Set<string> {
+  const doomed = new Set<string>()
+  if (maxEntries <= 0 && maxAgeDays <= 0) return doomed
+  const indexById = new Map(entries.map((entry, index) => [entry.id, index]))
+  if (maxAgeDays > 0) {
+    const cutoff = clock().getTime() - maxAgeDays * 86_400_000
+    for (const entry of entries) {
+      if (entry.id === protectedId) continue
+      const createdAt = Date.parse(entry.createdAt)
+      if (Number.isFinite(createdAt) && createdAt < cutoff) doomed.add(entry.id)
+    }
+  }
+  if (maxEntries > 0) {
+    const survivors = entries.filter(entry => !doomed.has(entry.id))
+    const hasProtected = survivors.some(entry => entry.id === protectedId)
+    const ranked = survivors
+      .filter(entry => entry.id !== protectedId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)
+        || (indexById.get(b.id) ?? 0) - (indexById.get(a.id) ?? 0))
+    const quota = Math.max(0, maxEntries - (hasProtected ? 1 : 0))
+    for (const entry of ranked.slice(quota)) doomed.add(entry.id)
+  }
+  return doomed
+}
+
+function tierRank(candidate: QueryCandidate): number {
+  return candidate.entry.tier === 'cold' ? 1 : 0
+}
+
+/**
+ * Injective, filesystem-safe encoding for a Thread key. Two distinct keys must
+ * never share one digest: base64url is one-to-one, while character
+ * substitution would merge e.g. `github:pr/7` and `github:pr_7`.
+ */
+function encodeId(key: string): string {
+  return Buffer.from(key, 'utf8').toString('base64url')
+}
+
+/** Cold digests stay bounded even after many pruning passes. */
+function capDigest(text: string): string {
+  const CLEAN = text.replace(/\r\n?/g, '\n')
+  return CLEAN.length <= 4000 ? CLEAN : `${CLEAN.slice(0, 3999)}…`
 }
 
 function summarize(text: string): string {
@@ -326,6 +645,12 @@ function summarize(text: string): string {
 
 function normalizeTags(tags: readonly string[] | undefined): string[] {
   return [...new Set((tags ?? []).map(tag => tag.trim()).filter(Boolean))]
+}
+
+/** First non-empty line, capped; indexes the high-signal head of a body. */
+function semanticHead(text: string): string {
+  const line = text.split(/\r?\n/).map(part => part.trim()).find(Boolean)
+  return (line ?? text.trim()).slice(0, SEMANTIC_HEAD_CHARS)
 }
 
 /** Dedupe key: collapse whitespace, trim, and compare case-insensitively. */
@@ -340,97 +665,4 @@ function normalizeForDedupe(text: string): string {
 function dedupeKeyOf(store: Store, entry: LongTermMemoryEntry): string | undefined {
   const body = store.getSpill(entry.spillId)
   return body == null ? undefined : normalizeForDedupe(body)
-}
-
-/**
- * Small, explicit, in-repo synonym/morphology map. The first word in each
- * group is canonical. It is deliberately tiny and deterministic: no learned
- * vocabulary, no model, no external dependency.
- */
-const SYNONYM_GROUPS: readonly (readonly string[])[] = [
-  ['token', 'tokens', 'credential', 'credentials'],
-  ['rotate', 'rotated', 'rotates', 'rotating', 'rotation', 'rotations'],
-  ['prune', 'prunes', 'pruned', 'pruning', 'remove', 'removes', 'removed', 'removal'],
-  ['old', 'older', 'oldest'],
-  ['entry', 'entries'],
-  ['fail', 'failed', 'failing', 'failure', 'failures'],
-  ['expand', 'expanded', 'expands', 'expansion'],
-  ['synonym', 'synonyms'],
-  ['paraphrase', 'paraphrases'],
-  ['own', 'owns', 'owned', 'owner', 'ownership'],
-  ['restore', 'restored', 'restores', 'restoring'],
-  ['deploy', 'deploys', 'deployed', 'deployment', 'deployments'],
-  ['release', 'releases', 'released'],
-  ['incident', 'incidents'],
-  ['auth', 'authentication', 'authenticate', 'authenticated'],
-  ['memory', 'memories'],
-  ['retention', 'retain', 'retains', 'retained'],
-  ['measure', 'measures', 'measured', 'measuring'],
-  ['evaluate', 'evaluation', 'evaluates', 'evaluated'],
-  ['embed', 'embedding', 'embeddings'],
-  ['expire', 'expired', 'expires', 'expiration', 'expiring'],
-  ['retry', 'retries', 'retried', 'retrying'],
-  ['reject', 'rejects', 'rejected', 'rejection', 'invalid'],
-  ['queue', 'queued', 'queues'],
-  ['delay', 'delays', 'delayed', 'latency', 'latencies'],
-  ['missing', 'absent'],
-  ['reply', 'replies', 'replied', 'replying'],
-  ['deliver', 'delivers', 'delivered', 'delivery'],
-  ['configure', 'configures', 'configured', 'configuration'],
-  ['allow', 'allows', 'allowed', 'allowlist'],
-  ['deny', 'denies', 'denied'],
-  ['install', 'installs', 'installed', 'installation'],
-  ['origin', 'originating', 'originates', 'original'],
-  ['approve', 'approves', 'approved', 'approval', 'approvals'],
-  ['permanent', 'permanently'],
-  ['transient', 'transiently'],
-  ['performance', 'perf'],
-  ['group', 'groups'],
-  ['error', 'errors'],
-  ['message', 'messages'],
-  ['command', 'commands'],
-  ['row', 'rows'],
-]
-
-const CANONICAL = new Map<string, string>()
-for (const group of SYNONYM_GROUPS) {
-  const canonical = group[0]!
-  for (const word of group) CANONICAL.set(word, canonical)
-}
-
-/** Query-only stop words. Body tokens are kept so phrase statistics stay intact. */
-const STOPWORDS = new Set([
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'before', 'but', 'by',
-  'did', 'do', 'does', 'for', 'from', 'how', 'if', 'in', 'into', 'is', 'it',
-  'its', 'no', 'nor', 'not', 'of', 'on', 'or', 'over', 'so', 'such', 'than',
-  'that', 'the', 'their', 'then', 'there', 'these', 'this', 'to', 'was',
-  'were', 'what', 'when', 'where', 'which', 'who', 'whose', 'why', 'will',
-  'with', 'without',
-])
-
-/** NFKC, lower-case, and collapse punctuation/whitespace into single spaces. */
-function tokenize(text: string): string[] {
-  return text
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-}
-
-function canonicalTokens(text: string): string[] {
-  return tokenize(text).map(token => CANONICAL.get(token) ?? token)
-}
-
-function queryTokens(text: string): string[] {
-  return [...new Set(canonicalTokens(text).filter(token => !STOPWORDS.has(token)))]
-}
-
-function canonicalTokenCounts(text: string): Map<string, number> {
-  const counts = new Map<string, number>()
-  for (const token of canonicalTokens(text)) {
-    counts.set(token, (counts.get(token) ?? 0) + 1)
-  }
-  return counts
 }

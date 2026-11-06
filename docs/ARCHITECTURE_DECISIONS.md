@@ -306,9 +306,9 @@ rewrite `PLAN.md`; link to the contract instead.
 ## ADR-010 — Long-term memory recall stays lexical-first with an offline evaluation harness; embeddings stay behind a port
 
 - **Date:** 2026-11-04
-- **Status:** accepted and implemented (2026-11-04). Recall remains
-  lexical-first; this ADR still does not implement semantic search or
-  embeddings.
+- **Status:** accepted and implemented (2026-11-04); partially superseded by
+  ADR-016 (2026-11-05), which ships an optional embedding layer. The lexical
+  path, evaluation harness, and ACL rules remain in force.
 - **Context:** `SpillBackedLongTermMemory.query`
   (`src/memory/long-term.ts`) is word-AND substring matching over the
   lower-cased redacted spill body. Requested tags are an exact AND filter, and
@@ -639,3 +639,228 @@ rewrite `PLAN.md`; link to the contract instead.
   - **Await an async `onAssignment`.** The A2A HTTP router seam is synchronous;
     an async callback could keep working after the sender was told the delivery
     failed. The contract is synchronous and the type rejects `Promise` returns.
+
+## ADR-013 — The local UI is a read-only, token-gated projection of persisted state
+
+- **Date:** 2026-11-04
+- **Status:** accepted; #129 merged the server and #136 wired the command
+- **Context:** Operators need to see tickets, threads, outbox metadata, health,
+  and lifecycle events without holding a Session or starting a model. Persisted
+  lifecycle payloads can contain titles, thread keys, guidance text, and
+  speculative work; the bus itself is not an authorization boundary. A network
+  UI would add accounts, TLS, and a much larger exposure surface.
+- **Decision:** `src/ui/server.ts` serves one `buildSnapshot()` read model to
+  HTML, `/api/snapshot`, and SSE. It binds `127.0.0.1` only and refuses any
+  non-loopback host. A token of at least 16 characters is mandatory; comparison
+  uses SHA-256 digests and `timingSafeEqual`. The `GET /?token=` bootstrap
+  exchanges the token for an HttpOnly SameSite=Strict cookie and a clean 303.
+  Auth precedes routing; only `GET /health` is unauthenticated and state-free.
+  All routes are GET. The read model hides speculative tickets from tickets,
+  outbox, events, and thread subscriptions; outbox text is omitted; lifecycle
+  events are rebuilt from a per-kind whitelist and events for invisible tickets
+  or unknown kinds are dropped. Metrics are re-read from disk on each frame.
+  The UI never writes domain state and never calls `Metrics.flush()`. SSE uses a
+  bounded drain wait rather than unbounded buffering. `ds-agent ui` wires the
+  command in `main.ts`; token and loopback enforcement stay in `runUi`.
+- **Consequences:** the UI is single-user and local-trust. The token appears
+  once in browser history during bootstrap; any same-uid process that can read
+  the environment or state directory can still reach loopback. There is no
+  TLS, account system, remote bind, or mutation path. Those remain external
+  decisions, not hidden capabilities.
+- **Alternatives rejected:**
+  - **Token-optional or no auth.** State includes ticket titles and thread keys;
+    loopback is not an authorization boundary.
+  - **Render raw lifecycle payloads.** Persisted payloads are caller-supplied
+    and can carry secrets or speculative titles.
+  - **Separate read models for HTML/JSON/SSE.** They drift and one surface
+    eventually leaks what another filters.
+  - **Remote bind in this change.** Requires TLS, accounts, and a threat model
+    of its own.
+
+## ADR-014 — Backup is a verified snapshot; restore is force-gated and reversible
+
+- **Date:** 2026-11-04
+- **Status:** accepted; #131 merged backup/restore and release checks
+- **Context:** The SQLite store is the durable domain state. A naive file copy
+  of a live WAL database is not a consistent snapshot, and a restore that
+  overwrites `ds-agent.db` can destroy the only copy on a failed copy. Operators
+  also need a non-destructive release gate.
+- **Decision:** `backupStore` runs `PRAGMA integrity_check` on the source,
+  refuses newer schemas, uses `VACUUM INTO` a unique temp file in the output
+  directory, verifies the temp snapshot's integrity and ledger, computes
+  SHA-256, and installs it with `fs.linkSync(temp, out)`. `EEXIST` is treated
+  as a race loss: the existing output is preserved, never deleted. The live
+  source is never modified. `restoreStore` requires `--force` when a store
+  exists, integrity-checks the backup, verifies the candidate before install,
+  moves the old DB plus WAL/SHM sidecars to
+  `<state-dir>/backups/pre-restore-<timestamp>.db*`, and rolls back on failure.
+  The release check validates semver, bin/dist entries, rules assets, and
+  `npm pack --dry-run`; the GitHub release workflow is manual (merged in #132
+  `a1985c0` without recorded owner approval; audited as `workflow_dispatch`,
+  `contents: read`, no secrets, no publish).
+- **Consequences:** the daemon must be stopped before restore; backup and
+  install require a filesystem that supports hard links in the same directory.
+  Backups are plaintext SQLite and inherit the state directory's permissions.
+  Publishing is not automated and remains an owner decision.
+- **Alternatives rejected:**
+  - **Copy the live DB/WAL files.** Not a consistent snapshot.
+  - **Overwrite the target unconditionally.** Can delete a race-created or
+    pre-existing backup and leaves no rollback.
+  - **Auto-publish from the release workflow.** Needs secrets and production
+    authority the program does not have.
+
+## ADR-015 — Memory follows the article's object graph, Router decision memory, and two-tier retention
+
+- **Date:** 2026-11-04
+- **Status:** accepted and implemented (2026-11-04).
+- **Context:** ADR-010 made long-term recall lexical and deterministic, but the
+  article's §3.3 Chain of Recall is an **object graph**: every Trigger, Thread,
+  and Worker Session gets an id; each injected object inlines the ids of its
+  tightly related neighbours; a recalled object inlines the next hop. The
+  shipped `read_object` only paged a spill body and returned no neighbours, and
+  §2.1's Router was described as the global sequence point and memory while the
+  implementation only remembered finished Tickets. §8.1 names month-scale
+  memory as the remaining scalability bottleneck.
+- **Decision:**
+  1. **Typed handles and refs.** `src/memory/graph.ts` defines one handle per
+     object (`trigger:<id>`, `thread:<key>`, `ticket:<id>`, `decision:<id>`,
+     `session:<id>`, `channel:<source>:<thread>`, `actor:<source>:<id>`).
+     `refsForTrigger`, `refsForTicket`, and `refsForDecision` build one-hop
+     ref lists; `inlineOrSpill` returns them alongside the inline result, the
+     Router/Worker task lines carry `refs=`, and the same list is persisted on
+     the spill. The trigger text stays clean for user-facing acknowledgements.
+  2. **Schema v4.** `spills.refs` stores that JSON list. Existing rows default
+     to `[]`; body and grants are untouched.
+  3. **Chain of Recall is resolved, not trusted.** `read_object` accepts a
+     spill id or a `kind:id` handle. `readObjectFor` re-checks the reader
+     ticket on every hop: trigger/thread/ticket/decision require a shared
+     Thread; a session requires the caller's own session. A handle never
+     becomes a capability.
+  4. **Router global memory.** Every persisted Decision (accept, ignore, stop,
+     unavailable) becomes a `kind=decision` LTM entry with thread/ticket/
+     trigger refs. The Router prompt and main-agent assessment receive
+     `recentDecisions()` (the global sequence point) plus
+     `forThreads(ticket.threadKeys)`, so a same-Thread decision is visible
+     without a lexical title match and a cross-channel decision can steer a
+     new Ticket. The Worker receives lexical query hits plus the same-Thread
+     entries.
+  5. **Long-range memory.** Hot ticket/decision entries keep the existing
+     1000-entry / 90-day bound. Before a hot entry is pruned, its summary is
+     folded into one bounded cold Thread digest (200 entries / 3650 days).
+     `query({ tier: 'cold' })` searches the digests. This is the concrete
+     answer to §8.1: month-scale recall does not require unbounded history.
+  6. **The Router is a resident Session.** `Runtime.start()` arms every
+     configured shard before recovery or assessment. `Harness.armRouter`
+     persists one `sessions` row per shard and appends `session.started`;
+     a later process keeps the original `createdAt` and appends
+     `session.resumed`. Every admitted or filtered Trigger, Decision, Ticket
+     created/ended event, and assessment outcome is appended as a redacted,
+     bounded `observe.*`/`assessment` entry. Router turns and main-agent
+     assessment share the shard's Session chain (`routerExclusive`), and
+     assessment receives `routerHistory()` as `routerSession`. The observed
+     entries have no model role, so they are durable Session memory rather
+     than fabricated user turns in the replay.
+- **Security:** redaction runs before every spill and summary. `query()` still
+  requires a reader `ticketId` and grants each hit. `readObjectFor` resolves
+  only ids and re-checks the reader's Thread relation; it does not grant the
+  target. `ltm` ids remain references, not capabilities.
+- **Determinism:** refs are plain JSON, ordering is stable, and handle
+  resolution is synchronous over SQLite. No network, model, provider, or
+  wall-clock-dependent ranking is added. Hot/cold pruning uses the injectable
+  clock and runs inside the write transaction.
+- **Retention defaults:** hot 1000 / 90 days; cold 200 / 3650 days. Both are
+  configurable (`DS_AGENT_MEMORY_MAX_ENTRIES`, `DS_AGENT_MEMORY_MAX_AGE_DAYS`,
+  `DS_AGENT_MEMORY_COLD_MAX_ENTRIES`, `DS_AGENT_MEMORY_COLD_MAX_AGE_DAYS`) and
+  `0` disables a dimension.
+- **Evidence:** `test/memory-graph.test.ts` covers spill refs, trigger→thread→
+  ticket hops, cross-ticket denial, decision memory, and cold-digest creation.
+  `test/long-term-memory.test.ts`, `test/memory-recall-eval.test.ts`,
+  `test/spill.test.ts`, and `test/store-migration.test.ts` remain green;
+  schema v4 upgrades a legacy database without rewriting body rows.
+- **Alternatives rejected:**
+  - **A separate graph database or unbounded edge table.** The existing JSON
+    documents and spill refs already carry the same ids; a new store would add
+    migration and query cost without a measured need.
+  - **Making a ref a capability.** It would let any recalled id read an
+    unrelated Ticket's body and bypass the per-hit grant.
+  - **Remembering only Tickets.** It loses mid-task Router decisions (the
+    "plan A then plan B" case) and makes the Router's global memory a fiction.
+  - **Keeping pruned history forever.** It contradicts §8.1's cost concern;
+    bounded cold digests preserve the summary without unbounded growth.
+
+## ADR-016 — Semantic recall ships as an optional, bounded hybrid layer behind `EmbeddingPort`
+
+- **Date:** 2026-11-05
+- **Status:** accepted and implemented (PR #152).
+- **Context:** ADR-010 deferred embeddings until evidence required them and
+  required any future attempt to sit behind an `EmbeddingPort`, use only
+  redacted text, and keep CI offline. The competitive gap analysis still lists
+  semantic recall as a P1 difference from Instinct and Muse. A learned
+  provider cannot be a CI dependency, and indexing a whole ticket body
+  (title + brief + report) against a short title query dilutes the cosine
+  below any useful floor.
+- **Decision:**
+  1. **Two-method port.** `EmbeddingPort` (`src/memory/embedding.ts`) is
+     `{ id, embed(text) }`. The shipped `HashedEmbedding` uses signed feature
+     hashing over the character trigrams of `#word#`, 128 dimensions, and
+     L2 normalization. It is deterministic, offline, and dependency-free.
+     `src/memory/text.ts` owns the normalizer and synonym map shared with the
+     lexical path, so the two candidate spaces cannot drift.
+  2. **Index the head, not the body.** The memory layer embeds the first
+     non-empty line, capped at 300 characters. For a ticket that is the title;
+     for a decision it is the reason; for a cold digest it is the newest
+     archived summary. This keeps a short query from being diluted by a long
+     report while storing one vector per entry.
+  3. **Hybrid ranking.** An entry is eligible when it is a lexical direct
+     candidate, is reached by the existing one-hop tag walk, or its cosine
+     clears `embeddingFloor` (default 0.35, clamped to 0..1,
+     `RuntimeOptions.embeddingFloor` or `DS_AGENT_EMBEDDING_FLOOR`). Semantic
+     candidates never seed a hop. Ordering adds `similarity` after `hopScore`.
+  4. **Default on, explicitly off.** The Runtime constructs `HashedEmbedding`
+     by default. `embeddings: false` or `DS_AGENT_SEMANTIC_RECALL` set to
+     `0`, `false`, `off`, `no`, or empty disables it. An explicit
+     programmatic port wins over the environment.
+  5. **Fail open to lexical-only.** A provider throw during a write leaves the
+     entry without a vector and does not abort the write. A provider throw
+     during a query disables the semantic branch for that query; lexical and
+     tag-hop results are still returned.
+  6. **Bounded backfill.** Vectors carry a port id that includes their
+     dimensions and are recomputed when it changes. A read persists at most
+     `MAX_EMBEDDING_BACKFILL` (32) new vectors and makes at most
+     `MAX_EMBEDDING_CALLS` (64) entry-embedding calls plus one query vector;
+     entries beyond the budget join
+     on a later read once the earlier ones are cached. Empty or failed results
+     do not consume the 32-vector budget, so a short bad prefix cannot starve
+     later entries, and an empty result is not cached, so a transient response
+     cannot permanently disable an entry. A persistent provider failure across
+     64 or more entries still exhausts that read's call budget: work stays
+     bounded, those entries are retried on later reads, and semantic recall for
+     them degrades to lexical-only until the provider recovers. A vector whose `embeddingId` does not match
+     the active port is never scored, even when the call budget is exhausted;
+     different embedding spaces can share dimensions and would otherwise
+     produce false hits. Upgrading a 1000-entry index therefore cannot turn one
+     recall into 1000 sequential provider calls or an unbounded write
+     transaction.
+  7. **Security is unchanged.** Redaction runs before every port call, on
+     writes and on the query text. Every returned hit, semantic or lexical,
+     still grants the reader ticket access to that exact spill. No new
+     lookup-by-id path is added.
+- **Consequences:** the shipped hashing catches morphology, shared stems,
+  word-order variation, and typos for words outside the synonym table. It does
+  **not** catch true synonyms ("invoice" vs "billing"); that remains a reason
+  to inject a learned provider. Stored vectors add roughly 1 KB per entry,
+  bounded by the existing 1000-hot / 200-cold retention defaults. The
+  lexical recall evaluation remains the regression floor; `test/semantic-
+  memory.test.ts` covers the vector path, the precision floor, provider
+  failure, lazy backfill, and Runtime configuration.
+- **Alternatives rejected:**
+  - **Embedding the whole body.** Measured cosine for a short title against a
+    30-sentence report stays near 0.14, so the feature would be inert for real
+    tickets.
+  - **A hosted embedding provider by default.** It adds network egress,
+    non-determinism, and an outage path to the default suite. The port is the
+    extension point.
+  - **Lowering the floor to force matches.** Unrelated hashed text scores
+    around 0.1-0.2; a lower floor turns recall into noise.
+  - **Writing every missing vector during a query.** It makes a read an
+    unbounded write and blocks recall behind the slowest provider call.

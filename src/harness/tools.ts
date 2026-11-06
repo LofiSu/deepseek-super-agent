@@ -1,6 +1,8 @@
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
-import { readSpillFor } from '../memory/acl.ts'
+import type { LocalAgentRegistry } from '../env/local-agents.ts'
+import type { SkillRegistry } from '../env/skills.ts'
+import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
@@ -8,7 +10,7 @@ import type { Disposition, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import type { McpToolSourceLike } from './mcp.ts'
-import { routerSessionId, workerSessionId } from './session.ts'
+import { routerOwnerShard, routerSessionId, workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 import { MAX_TEAM_MEMBERS, type TeamRegistry } from './team.ts'
 
@@ -42,6 +44,10 @@ export interface ToolDeps {
   teams?: TeamRegistry
   /** External MCP servers. Worker-only: the Router and Watchdog keep their surface. */
   mcp?: McpToolSourceLike
+  /** Owner-configured local specialist agents. Absent means delegation is unavailable. */
+  localAgents?: LocalAgentRegistry
+  /** Owner-authored playbooks. Absent means read_skill is unavailable. */
+  skills?: SkillRegistry
 }
 
 interface ToolDef extends ToolSpec {
@@ -86,6 +92,8 @@ export class ToolRegistry {
         teams: deps.teams,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
+      ...(deps.localAgents ? localAgentTools(deps.localAgents, store, log) : []),
+      ...(deps.skills ? skillTools(deps.skills) : []),
     ]
   }
 
@@ -180,8 +188,11 @@ function assertShardOwner(
   if (!disposition) {
     throw new UserError(`no disposition for trigger ${dispositionKey}; cannot resolve shard owner`)
   }
-  const shard = disposition.shards?.[0] ?? 'default'
-  const owner = routerSessionId(shard)
+  // A direct chat runs in its own thread Router session, not the disposition
+  // shard, so ownership must follow the same rule the Harness used to run it.
+  const owner = routerSessionId(
+    ticket ? routerOwnerShard(ticket, disposition.shards?.[0]) : disposition.shards?.[0],
+  )
   if (sessionId !== owner) {
     throw new UserError(
       `router shard session ${sessionId} does not own ticket ${call.ticketId ?? '-'} (owner=${owner}); `
@@ -355,7 +366,7 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
     },
     {
       name: 'read_object',
-      description: 'Recall one page of a spilled object. The caller ticket or session must be granted.',
+      description: 'Recall one page of a spilled object or follow a ref from Chain of Recall. The caller ticket or session must be granted.',
       parameters: schema({
         id: { type: 'string' },
         offset: { type: 'number' },
@@ -365,14 +376,14 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
       run: guard('worker', 'read_object', async (args, ctx) => {
         const offset = Number(args.offset ?? 0)
         const limit = args.limit == null ? undefined : Number(args.limit)
-        const page = readSpillFor(store, String(args.id ?? ''), {
+        const page = readObjectFor(store, String(args.id ?? ''), {
           ticketId: ctx.ticketId,
           sessionId: ctx.sessionId,
         }, {
           offset: Number.isFinite(offset) ? offset : 0,
           limit: limit != null && Number.isFinite(limit) ? limit : undefined,
         })
-        log(`[memory] read_object id=${page.id} bytes=${page.text.length} total=${page.total}`)
+        log(`[memory] read_object id=${page.id} bytes=${page.text.length} total=${page.total} refs=${page.refs.length}`)
         return page
       }),
     },
@@ -406,6 +417,50 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const prompt = ['REPORT', `deliver=${announced ? 'true' : 'false'}`, `ticketId=${ticketId}`, `reportText=${text}`].join('\n')
         await deps.routerTurn(prompt)
         return { ...result, deliver: announced }
+      }),
+    },
+    {
+      name: 'request_approval',
+      description: 'Ask the owner to approve one exact outward, destructive, or expensive action. Stops this ticket until the owner decides.',
+      parameters: schema({
+        action: { type: 'string', description: 'The exact action you will perform if approved, one line.' },
+        reason: { type: 'string', description: 'Why it needs the owner, one short line.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'request_approval', async (args, ctx) => {
+        if (!ctx.ticketId) throw new UserError('request_approval needs a ticket')
+        const oneLine = (value: string): string => value.replace(/\s+/g, ' ').trim()
+        const action = oneLine(String(args.action ?? ''))
+        if (!action) throw new UserError('request_approval needs the exact action')
+        const reason = args.reason == null ? undefined : oneLine(String(args.reason)).slice(0, 300)
+        const result = ctx.ports.requestApproval(ctx.ticketId, {
+          action,
+          ...(reason ? { reason } : {}),
+        })
+        const prompt = [
+          'APPROVAL',
+          `ticketId=${ctx.ticketId}`,
+          `approvalId=${result.approvalId}`,
+          `action=${action}`,
+          ...(reason ? [`reason=${reason}`] : []),
+          'The Worker stopped. Tell the owner the exact action in one short message and wait. You cannot approve it yourself; the owner decides with ds-agent approve or ds-agent deny.',
+        ].join('\n')
+        try {
+          await deps.routerTurn(prompt)
+        } catch (error) {
+          // The approval is already persisted, and the Worker stops on it. A
+          // failed question must not turn the tool result into an error; the
+          // owner can still find the request with `ds-agent approvals`.
+          deps.log(
+            `[approval] owner question not delivered approvalId=${result.approvalId}:`
+            + ` ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+        return {
+          approvalId: result.approvalId,
+          status: result.status,
+          note: 'The ticket is waiting for the owner. Do not perform the action; stop this turn.',
+        }
       }),
     },
     {
@@ -517,6 +572,83 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const jobId = String(args.jobId ?? '')
         if (jobId) store.completeJob(jobId, 'stopped')
         return { status: 'stopped', jobId }
+      }),
+    },
+  ]
+}
+
+/**
+ * Owner-authored playbooks. The index is already in the system prompt; this
+ * tool loads one body by id. It reads documentation only: the skill cannot
+ * grant a tool or widen the caller's role.
+ */
+function skillTools(registry: SkillRegistry): ToolDef[] {
+  return [
+    {
+      name: 'read_skill',
+      description: 'Load the full instructions for one owner-authored skill by id.',
+      parameters: schema({
+        skill: { type: 'string', description: 'Skill id from the Skills section of the system prompt.' },
+      }),
+      roles: ['router', 'worker'],
+      run: async args => {
+        const skill = String(args.skill ?? '').trim()
+        if (!skill) throw new UserError('read_skill needs a skill id')
+        return registry.read(skill)
+      },
+    },
+  ]
+}
+
+/**
+ * Owner-configured local specialist agents. The model can only name an agent
+ * and supply a task; the command, argv, cwd, environment, and limits come from
+ * the owner's configuration. Workers delegate; the Router may only list.
+ */
+function localAgentTools(
+  registry: LocalAgentRegistry,
+  store: Store,
+  log: (line: string) => void,
+): ToolDef[] {
+  return [
+    {
+      name: 'list_local_agents',
+      description: 'List local specialist agents configured on this machine.',
+      parameters: schema(),
+      roles: ['router', 'worker'],
+      run: async () => ({ agents: registry.list() }),
+    },
+    {
+      name: 'delegate_agent',
+      description: 'Run a configured local specialist agent on one self-contained task. Verify its output before reporting.',
+      parameters: schema({
+        agent: { type: 'string', description: 'Configured agent id; see list_local_agents.' },
+        task: {
+          type: 'string',
+          description: 'Complete task with all context the agent needs. Must not start with "-": it is one argv entry and would be read as an option.',
+        },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'delegate_agent', async (args, ctx) => {
+        const agent = String(args.agent ?? '').trim()
+        const task = String(args.task ?? '')
+        if (!agent) throw new UserError('delegate_agent needs an agent id')
+        // A local agent runs outside the EnvPort sandbox, so it cannot be
+        // isolated for speculation, and an ended ticket must not start one.
+        // Like mutableMode, this is a start-time check: a run already in
+        // flight is bounded by its own timeout, not cancelled on ticket end.
+        const ticket = ticketOf(store, ctx)
+        if (!ticket) throw new UserError('delegate_agent needs an active ticket')
+        if (ticket.ended) throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome})`)
+        if (ticket.speculative) {
+          throw new UserError('delegate_agent is unavailable to speculative workers (local agents run unsandboxed)')
+        }
+        const result = await registry.run(agent, task, ctx.sessionId)
+        log(
+          `[local-agent] agent=${agent} session=${ctx.sessionId} code=${result.code}`
+          + ` timedOut=${result.timedOut} truncated=${result.truncated}`,
+        )
+        return result
       }),
     },
   ]
