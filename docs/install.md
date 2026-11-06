@@ -17,9 +17,15 @@ cd deepseek-super-agent
 pnpm install
 ```
 
-This repository is source-only. It is not published to npm and has no `bin` or
-`build` step, so there is no `npm install -g ds-agent`. Run the CLI in the
+This repository is source-only for now: it is not published to npm, so there is
+no `npm install -g ds-agent` from the registry. Day to day, run the CLI in the
 checkout with `pnpm ds-agent ...`.
+
+The package does build. `pnpm build` emits `dist/` and the `bin.ds-agent` entry
+(`./dist/cli/main.js`), so a packed tarball runs without `tsx`. `ds-agent
+--version` prints the package version. To smoke a local pack/install without a
+registry, see [docs/RELEASE.md]({{ site.repository_url }}/blob/main/docs/RELEASE.md)
+and run `pnpm tsx scripts/package-smoke.ts`.
 
 `pnpm test` and `pnpm demo` both need a live OpenAI-compatible model. MockModel is not used on that path. `pnpm demo:local` is an in-memory fixture smoke check. It is not the acceptance path.
 

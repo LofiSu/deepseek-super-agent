@@ -1,9 +1,20 @@
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+/** Run the CLI from source so the unit suite does not need a prior build. */
+function runCli(arg: string) {
+  return spawnSync(process.execPath, ['--import', 'tsx', 'src/cli/main.ts', arg], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+  })
+}
+
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as {
   name: string
   version: string
@@ -35,6 +46,22 @@ describe('package manifest', () => {
   it('exposes the built CLI as the ds-agent bin', () => {
     expect(pkg.bin).toEqual({ 'ds-agent': './dist/cli/main.js' })
     expect(existsSync(path.join(root, 'src', 'cli', 'main.ts'))).toBe(true)
+  })
+
+  it('surfaces the package version on the CLI', () => {
+    for (const arg of ['--version', '-V', 'version']) {
+      const result = runCli(arg)
+      expect(result.status, `${arg}: ${result.stderr}`).toBe(0)
+      expect(result.stdout.trim(), arg).toBe(pkg.version)
+      expect(result.stderr, arg).toBe('')
+    }
+  })
+
+  it('lists the version flags in --help', () => {
+    const result = runCli('--help')
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('--version')
+    expect(result.stdout).toContain('-V')
   })
 
   it('builds dist through the build tsconfig and on prepack', () => {

@@ -43,7 +43,7 @@ The program is complete only when all of the following hold:
 |---|---|---|---|
 | STORE-MIGRATIONS | agent running (`agent/store-migrations`) | `src/store/schema.ts`, `src/store/sqlite.ts`, `test/store-migration.test.ts` | `schema_migrations`, versioned transactional upgrade, legacy baseline, fail-closed future version, no data loss |
 | HOST-READ-ISOLATION | agent running (`agent/host-read-isolation`) | `src/env/seccomp.ts`, `src/env/local-env.ts`, `test/sandbox-read-isolation.test.ts` | opt-in strict read allowlist on Darwin/Linux, no blanket `/` or home read, invalid env fails closed, existing behavior unchanged when off |
-| PACKAGING | not started | `package.json`, `tsconfig.build.json`, `src/cli/main.ts`, docs | `pnpm build` emits `dist/`, `bin.ds-agent`, install/run without `tsx`, version surfaced |
+| PACKAGING | done (PR pending merge) | `package.json`, `tsconfig.build.json`, `src/cli/main.ts`, `src/cli/version.ts`, `scripts/package-smoke.ts`, docs | `pnpm build` emits `dist/`, `bin.ds-agent`, install/run without `tsx`, `ds-agent --version` prints the package version; evidence in `test/packaging.test.ts` and `docs/install.md` |
 
 ### W2 — Recall and policy
 
@@ -120,4 +120,4 @@ alone.
 | A2A-HTTP + PEER-AUTH | not started | — | — | owner gate |
 | CROSS-HOST-MESH | not started | — | — | owner gate |
 | ROUTER-SHARD-MULTI-FILTER (T09/T46) | not started | — | — | — |
-| PACKAGING/RELEASE | not started | — | — | — |
+| PACKAGING/RELEASE | pending | — | local: typecheck + lint + `test/packaging.test.ts` | PACKAGING complete: `dist/` + `bin.ds-agent` build, `ds-agent --version`, install docs corrected, `scripts/package-smoke.ts` covers the built CLI. RELEASE: workflow already on `main` (PR #132); publish remains a human step per `docs/RELEASE.md` |
