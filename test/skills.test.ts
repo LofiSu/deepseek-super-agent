@@ -182,9 +182,9 @@ describe('skill tools', () => {
       skills: runtime.skills,
     })
     for (const role of ['router', 'worker'] as const) {
-      expect(tools.specsFor(role).map(spec => spec.name)).toContain('read_skill')
+      expect((await tools.specsFor(role)).map(spec => spec.name)).toContain('read_skill')
     }
-    expect(tools.specsFor('watchdog').map(spec => spec.name)).not.toContain('read_skill')
+    expect((await tools.specsFor('watchdog')).map(spec => spec.name)).not.toContain('read_skill')
 
     await expect(tools.invoke(
       { id: 'r1', name: 'read_skill', args: { skill: 'deploy' } },

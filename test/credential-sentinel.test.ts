@@ -202,7 +202,7 @@ describe('credential sentinel non-leakage (P0-5/D13)', () => {
     fs.rmSync(home, { recursive: true, force: true })
   })
 
-  it('does not expose reply/decide/receive tools or ports to the Worker role', () => {
+  it('does not expose reply/decide/receive tools or ports to the Worker role', async () => {
     // Deliberately not shaped like a known credential pattern: this test must
     // fail if exact-value/env redaction stops working.
     const sentinel = `sentinel-${randomUUID()}`
@@ -218,11 +218,11 @@ describe('credential sentinel non-leakage (P0-5/D13)', () => {
       routerTurn: async () => {},
     })
 
-    const workerTools = tools.specsFor('worker').map(tool => tool.name)
+    const workerTools = (await tools.specsFor('worker')).map(tool => tool.name)
     for (const name of ['reply_user', 'assess_trigger', 'list_tasks', 'create_worker', 'stop_worker']) {
       expect(workerTools).not.toContain(name)
     }
-    const routerTools = tools.specsFor('router').map(tool => tool.name)
+    const routerTools = (await tools.specsFor('router')).map(tool => tool.name)
     expect(routerTools).toEqual(expect.arrayContaining(['reply_user', 'assess_trigger']))
 
     const workerSession = { sessionId: 'worker_ticket_1', role: 'worker' as const }

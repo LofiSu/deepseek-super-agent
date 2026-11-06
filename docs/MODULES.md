@@ -73,6 +73,17 @@ Capacity is enforced in-process with a bounded FIFO queue owned by the Harness
 `launch` resolves when the Worker turn completes, when a full queue rejects it,
 or when `drain()` releases it.
 
+`mcp-config.ts` validates `DS_AGENT_MCP_SERVERS` (or
+`RuntimeOptions.mcpServers`) into server records and rejects bad names
+(including `__`), duplicates, and malformed fields. `mcp.ts` starts one stdio
+MCP client per record, lists its tools as `mcp__<server>__<tool>`, and
+normalizes results: text stays text, image/resource bytes are written under
+`<home>/mcp/<server>/` and referenced by path, and JSON over 64 KB is redacted
+before being written to spill. Only Worker sessions see or call these tools; a
+server that fails or hangs at startup is logged, counted as
+`mcp.connect_error`, and omitted without blocking the runtime, and
+`Runtime.finish()` closes the child processes.
+
 `ds-agent serve` runs the in-process watchdog/daemon timer over persisted SQLite
 state and owns one Runtime for the process lifetime. It starts no inbound channel
 loop, so triggers written by a separate `emit`/`chat` process are not picked up.

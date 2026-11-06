@@ -9,6 +9,7 @@ import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/p
 import type { Disposition, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
+import type { McpToolSourceLike } from './mcp.ts'
 import { routerOwnerShard, routerSessionId, workerSessionId } from './session.ts'
 import type { Store } from '../store/sqlite.ts'
 import { MAX_TEAM_MEMBERS, type TeamRegistry } from './team.ts'
@@ -41,6 +42,8 @@ export interface ToolDeps {
   /** Append a nudge to the worker session journal (same effect as Watchdog.nudge). */
   nudge?: (sessionId: string, ticketId: string) => void
   teams?: TeamRegistry
+  /** External MCP servers. Worker-only: the Router and Watchdog keep their surface. */
+  mcp?: McpToolSourceLike
   /** Owner-configured local specialist agents. Absent means delegation is unavailable. */
   localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks. Absent means read_skill is unavailable. */
@@ -89,25 +92,40 @@ export class ToolRegistry {
         teams: deps.teams,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
-      ...(deps.localAgents ? localAgentTools(deps.localAgents, log) : []),
+      ...(deps.localAgents ? localAgentTools(deps.localAgents, store, log) : []),
       ...(deps.skills ? skillTools(deps.skills) : []),
     ]
   }
 
-  specsFor(role: Role): ToolSpec[] {
-    return this.tools.filter(tool => tool.roles.includes(role)).map(({ name, description, parameters }) => ({
+  async specsFor(role: Role): Promise<ToolSpec[]> {
+    const specs = this.tools.filter(tool => tool.roles.includes(role)).map(({ name, description, parameters }) => ({
       name,
       description,
       parameters,
     }))
+    // MCP tools are external capabilities for Workers. The Router decides and
+    // the Watchdog fails stuck work; neither may reach a third-party server.
+    if (role === 'worker' && this.deps.mcp) specs.push(...await this.deps.mcp.specs())
+    return specs
   }
 
   async invoke(call: ToolCall, session: ToolSession): Promise<unknown> {
+    if (call.name.startsWith('mcp__')) {
+      if (session.role !== 'worker' || !this.deps.mcp) {
+        throw new UserError(`tool ${call.name} is not available to ${session.role}`)
+      }
+      return redactUnknown(await this.deps.mcp.invoke(call.name, call.args), this.redact)
+    }
     const tool = this.tools.find(item => item.name === call.name)
     if (!tool || !tool.roles.includes(session.role)) {
       throw new UserError(`tool ${call.name} is not available to ${session.role}`)
     }
     return redactUnknown(await tool.run(call.args, this.context(session)), this.redact)
+  }
+
+  /** Release external MCP server processes. Safe when none are configured. */
+  async close(): Promise<void> {
+    await this.deps.mcp?.close()
   }
 
   private context(session: ToolSession): ToolContext {
@@ -587,7 +605,11 @@ function skillTools(registry: SkillRegistry): ToolDef[] {
  * and supply a task; the command, argv, cwd, environment, and limits come from
  * the owner's configuration. Workers delegate; the Router may only list.
  */
-function localAgentTools(registry: LocalAgentRegistry, log: (line: string) => void): ToolDef[] {
+function localAgentTools(
+  registry: LocalAgentRegistry,
+  store: Store,
+  log: (line: string) => void,
+): ToolDef[] {
   return [
     {
       name: 'list_local_agents',
@@ -601,13 +623,26 @@ function localAgentTools(registry: LocalAgentRegistry, log: (line: string) => vo
       description: 'Run a configured local specialist agent on one self-contained task. Verify its output before reporting.',
       parameters: schema({
         agent: { type: 'string', description: 'Configured agent id; see list_local_agents.' },
-        task: { type: 'string', description: 'Complete task with all context the agent needs.' },
+        task: {
+          type: 'string',
+          description: 'Complete task with all context the agent needs. Must not start with "-": it is one argv entry and would be read as an option.',
+        },
       }),
       roles: ['worker'],
       run: guard('worker', 'delegate_agent', async (args, ctx) => {
         const agent = String(args.agent ?? '').trim()
         const task = String(args.task ?? '')
         if (!agent) throw new UserError('delegate_agent needs an agent id')
+        // A local agent runs outside the EnvPort sandbox, so it cannot be
+        // isolated for speculation, and an ended ticket must not start one.
+        // Like mutableMode, this is a start-time check: a run already in
+        // flight is bounded by its own timeout, not cancelled on ticket end.
+        const ticket = ticketOf(store, ctx)
+        if (!ticket) throw new UserError('delegate_agent needs an active ticket')
+        if (ticket.ended) throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome})`)
+        if (ticket.speculative) {
+          throw new UserError('delegate_agent is unavailable to speculative workers (local agents run unsandboxed)')
+        }
         const result = await registry.run(agent, task, ctx.sessionId)
         log(
           `[local-agent] agent=${agent} session=${ctx.sessionId} code=${result.code}`

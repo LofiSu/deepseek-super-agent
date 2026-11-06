@@ -17,8 +17,10 @@ export interface ToolSpec {
   description: string
   parameters: {
     type: 'object'
-    properties: Record<string, { type: string; description?: string }>
-    additionalProperties: boolean
+    properties?: Record<string, unknown>
+    required?: string[]
+    additionalProperties?: boolean | Record<string, unknown>
+    [key: string]: unknown
   }
 }
 
