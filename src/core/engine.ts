@@ -4,6 +4,7 @@ import type { Decision, ReceiveResult, Ticket, Trigger, TriggerTrust } from '../
 import { Assignments, type Recovery, type ReportResult } from './assignments.ts'
 import {
   Collaborations,
+  pendingApproval,
   type CollaborationView,
   type DecideApprovalInput,
   type DecideApprovalOutcome,
@@ -101,7 +102,10 @@ export class Engine {
       for (const ticket of this.host.repo.listDocs<Ticket>('ticket')) {
         // One malformed Ticket must not roll back recovery for the others.
         try {
-          if (ticket.ended || ticket.collab?.paused) continue
+          // A human pause and an owner approval wait are both deliberate stops,
+          // not evidence that a Worker crashed. Recovery must not end the
+          // running Assignment or queue a duplicate turn for either.
+          if (ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) continue
           if (ticket.assignments.some(assignment => assignment.state === 'running')) {
             const outcome = this.assignments.recover(ticket.id)
             if (outcome) recovered.push(outcome)

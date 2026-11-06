@@ -72,7 +72,8 @@ ds-agent collab <ticketId>             # pending and decided requests on one tic
 - Approving resumes the ticket, which starts model turns. Like `ds-agent resume`,
   `approve` and `deny` require a configured live model; without one the command
   fails before deciding, so guidance is not consumed by a mock. There is no
-  "approve but keep paused" mode.
+  "approve but keep paused" mode: while the ticket is paused, `approve` and
+  `deny` refuse and leave the request pending; run `ds-agent resume` first.
 - `ds-agent approvals` lists live tickets only. A pending request on an ended
   ticket is stale and is not shown; `collab` still shows the history.
 - The action is a description, not a structured action id. The Worker is trusted
