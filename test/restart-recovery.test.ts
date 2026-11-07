@@ -340,6 +340,20 @@ describe('restart recovery', () => {
     expect(normalPrompt).not.toContain('RECOVERED:')
   })
 
+  it('persists a recovery boundary record with ticket transitions', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_boundary', runningTicket('ticket_boundary'))
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.resolve())
+
+    runtime.start({ assessPending: false })
+
+    const boundary = runtime.recoveryBoundary()
+    expect(boundary?.outcome).toBe('completed')
+    expect(boundary?.model).toBe('StubLiveModel')
+    expect(boundary?.tickets.some(t => t.ticketId === 'ticket_boundary')).toBe(true)
+  })
+
   it('never writes an environment credential into recovery state, events, or logs', () => {
     const home = tempHome()
     const runtime = createRuntime(home, { env: { ...process.env, DS_AGENT_API_KEY: SECRET } })

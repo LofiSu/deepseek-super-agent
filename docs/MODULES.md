@@ -134,7 +134,9 @@ the stack and each layer's source; see `docs/PROMPTS.md`.
 
 ## M3 — engine
 
-`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. `collab.ts`
+`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. Persisted
+`recovery/latest` documents the last startup recovery boundary (outcome, per-ticket
+transitions). `collab.ts`
 owns pause/intervene/resume plus the approval hold: a Worker records a pending
 action, Worker turns stop while it is pending, the Router may still speak, and
 the owner's decision writes guidance before the RESUME turns. `lifecycle.ts`
