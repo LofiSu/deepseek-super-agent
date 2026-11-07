@@ -63,8 +63,11 @@ export interface SandboxConfinementProbe {
 
 const EXIT_WRITE_SUCCEEDED_OUTSIDE = 12
 
-export function probeSandboxWrapper(system: SandboxSystem = defaultSystem()): SandboxWrapperProbe {
-  const policy = baseProbePolicy()
+export function probeSandboxWrapper(
+  system: SandboxSystem = defaultSystem(),
+  probePolicy: SandboxPolicy = baseProbePolicy(),
+): SandboxWrapperProbe {
+  const policy = probePolicy
   try {
     if (system.platform === 'darwin') {
       if (!system.available('sandbox-exec')) return { platform: system.platform, wrapper: null, canWrap: false }
@@ -90,12 +93,31 @@ function defaultSystem(): SandboxSystem {
   }
 }
 
-function baseProbePolicy(writableRoots?: readonly string[]): SandboxPolicy {
+/** Policy used for worker bash and for host probes when LocalEnv enforces required dimensions. */
+export function sandboxPolicyForProbe(
+  effective: SandboxPolicy,
+  writableRoots?: readonly string[],
+): SandboxPolicy {
   return {
-    enabled: true,
+    enabled: effective.enabled,
     writableRoots: writableRoots ?? [tmpdir()],
-    readIsolation: readIsolationFromEnv(process.env),
+    readIsolation: effective.readIsolation === true,
+    readRoots: effective.readRoots,
+    allowNetwork: effective.allowNetwork,
   }
+}
+
+function baseProbePolicy(
+  writableRoots?: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): SandboxPolicy {
+  return sandboxPolicyForProbe(
+    {
+      enabled: true,
+      readIsolation: readIsolationFromEnv(env),
+    },
+    writableRoots,
+  )
 }
 
 function shellQuote(path: string): string {
@@ -240,19 +262,26 @@ function parseRequiredDimensionsEnv(env: NodeJS.ProcessEnv = process.env): Set<S
   return out
 }
 
-function isDimensionSatisfied(required: SandboxRequiredDimension, status: SandboxDimensionStatus): boolean {
-  void required
+function isDimensionSatisfied(
+  required: SandboxRequiredDimension,
+  status: SandboxDimensionStatus,
+  effective: SandboxPolicy,
+): boolean {
+  if (required === 'read' && effective.readIsolation !== true) return false
   return status === 'enforced'
 }
 
 /**
  * Fail closed when the operator listed dimensions in `DS_AGENT_SANDBOX_REQUIRED`
- * and the latest host probe did not show enforcement for each one.
- * Default (unset env): write must be `enforced` only; `not_enforced`, `unsupported`, and `probe_failed` deny.
+ * and the latest host probe did not show enforcement for each one under `effectivePolicy`
+ * (the same policy LocalEnv will use for worker bash — not a stricter probe-only profile).
+ * Default (unset env): write must be `enforced` only; `not_enforced`, `unsupported`,
+ * `not_tested`, and `probe_failed` deny.
  */
 export function assertRequiredSandboxDimensions(
   confinement: SandboxConfinementProbe,
   env: NodeJS.ProcessEnv = process.env,
+  effectivePolicy: SandboxPolicy = { enabled: true },
 ): void {
   const required = parseRequiredDimensionsEnv(env)
   const checks: SandboxRequiredDimension[]
@@ -265,28 +294,47 @@ export function assertRequiredSandboxDimensions(
         ? confinement.outcome
         : confinement.dimensions.write)
       : confinement.dimensions[dim]
-    if (!isDimensionSatisfied(dim, status)) {
+    if (!isDimensionSatisfied(dim, status, effectivePolicy)) {
       const label = required.size > 0 ? `required dimension ${dim}` : 'default write sandbox'
+      const reported = dim === 'read' && effectivePolicy.readIsolation !== true
+        ? 'not_enforced'
+        : status
       throw new UserError(
-        `${label} is not satisfied (status=${status}); refusing unconfined or unproven worker bash`,
+        `${label} is not satisfied (status=${reported}); refusing unconfined or unproven worker bash`,
       )
     }
   }
 }
 
-/** Run host confinement probe and fail closed when required dimensions are not met. */
-export function enforceRequiredSandboxOnHost(
-  env: NodeJS.ProcessEnv = process.env,
+/**
+ * Run host confinement probe under the effective LocalEnv sandbox policy and fail
+ * closed when required dimensions are not met. Refuses when sandbox is disabled.
+ */
+export function enforceRequiredSandbox(
+  env: NodeJS.ProcessEnv,
+  effectivePolicy: SandboxPolicy,
 ): SandboxConfinementProbe {
+  if (effectivePolicy.enabled === false) {
+    throw new UserError(
+      'required sandbox dimensions cannot be satisfied while sandbox is disabled (sandbox.enabled: false)',
+    )
+  }
   const system: SandboxSystem = {
     platform: process.platform,
     available: bin => spawnSync('which', [bin], { stdio: 'ignore' }).status === 0,
     exists: existsSync,
     execPath: process.execPath,
   }
-  const confinement = probeSandboxConfinement(system)
-  assertRequiredSandboxDimensions(confinement, env)
+  const confinement = probeSandboxConfinement(system, {}, effectivePolicy)
+  assertRequiredSandboxDimensions(confinement, env, effectivePolicy)
   return confinement
+}
+
+/** @deprecated Prefer `enforceRequiredSandbox(env, effectivePolicy)` from LocalEnv. */
+export function enforceRequiredSandboxOnHost(
+  env: NodeJS.ProcessEnv = process.env,
+): SandboxConfinementProbe {
+  return enforceRequiredSandbox(env, baseProbePolicy(undefined, env))
 }
 
 /** Wrapped `kill -0 $$` should succeed; wrapped kill of parent pid should fail when process isolation holds. */
@@ -320,8 +368,10 @@ function emptyDimensions(): SandboxConfinementDimensions {
 export function probeSandboxConfinement(
   system: SandboxSystem = defaultSystem(),
   hooks: SandboxConfinementProbeHooks = {},
+  effectivePolicy: SandboxPolicy = baseProbePolicy(),
 ): SandboxConfinementProbe {
-  const wrapper = probeSandboxWrapper(system)
+  const probePolicy = sandboxPolicyForProbe(effectivePolicy)
+  const wrapper = probeSandboxWrapper(system, { ...probePolicy, enabled: true })
   const dimensions = emptyDimensions()
   if (!wrapper.canWrap || !wrapper.wrapper) {
     return {
@@ -344,7 +394,7 @@ export function probeSandboxConfinement(
   mkdirSync(forbiddenDir, { recursive: true })
   const forbiddenFile = join(forbiddenDir, 'probe-write.txt')
   const allowedMarker = join(workspace, 'positive-write.txt')
-  const policy = baseProbePolicy([workspace])
+  const policy = sandboxPolicyForProbe(effectivePolicy, [workspace])
   const runWrapped = hooks.runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
   const runUnsandboxed = hooks.runUnsandboxed ?? runUnsandboxedDefault
 
@@ -415,8 +465,7 @@ export function probeSandboxConfinement(
         ? dimensions.write
         : 'probe_failed'
 
-    const readPolicy: SandboxPolicy = { ...policy, readIsolation: true }
-    dimensions.read = probeReadIsolation(readPolicy, system, hooks.runWrapped, forbiddenFile)
+    dimensions.read = probeReadIsolation(policy, system, hooks.runWrapped, forbiddenFile)
     dimensions.network = probeNetworkIsolation(policy, system, hooks)
     dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped)
 

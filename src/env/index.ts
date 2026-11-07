@@ -23,7 +23,9 @@ export {
 export { MemoryVault, FileVault, type Vault } from './vault.ts'
 export {
   assertRequiredSandboxDimensions,
+  enforceRequiredSandbox,
   enforceRequiredSandboxOnHost,
+  sandboxPolicyForProbe,
   probeSandboxConfinement,
   type SandboxConfinementProbe,
   type SandboxRequiredDimension,
