@@ -7,7 +7,7 @@ export const DEFAULT_T48_JOURNAL_DIR = '.ds-agent/measurement/t48-journal'
 export interface T48JournalEntry {
   schemaVersion: 1
   recordedAt: string
-  /** Always true for entries from the offline longitudinal harness. */
+  /** True for synthetic fixture clock; false for wall-clock observation samples (still not calendar-month T48 complete). */
   syntheticClock: boolean
   runId: string
   report: unknown

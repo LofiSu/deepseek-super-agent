@@ -143,6 +143,18 @@ calendar-month evidence. Recommended parent frequency: weekly or monthly cron
 on a **copy** of the store; this repo does not create cron jobs. See
 `scripts/t48-longitudinal-harness.ts` and `src/measurement/t48-journal.ts`.
 
+### 5.1.2 Wall-clock observation mode (restartable, not `[x]`)
+
+```bash
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 DS_AGENT_HOME=/copy/of/store pnpm t48:observe
+```
+
+Uses real `recordedAt` timestamps and writes `syntheticClock: false` JSONL rows plus
+`$DS_AGENT_HOME/.ds-agent/measurement/t48-wall-clock-state.json` for restartable sampling.
+Default cadence is 24h (`minIntervalMs`); force with `DS_AGENT_T48_OBSERVE_FORCE=1` for tests.
+This accumulates **longitudinal observation data** for future month-spanning analysis; it does
+**not** satisfy operator month-scale acceptance (§3) and must not flip T48 to `[x]`.
+
 ### 5.2 Operator month-spanning run (required for `[x]`)
 
 1. Record the baseline commit SHA, the run date in UTC, the machine, the Node
