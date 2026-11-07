@@ -1,8 +1,19 @@
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { probeSandboxConfinement, probeSandboxWrapper } from '../src/env/sandbox-probe.ts'
+import {
+  probeSandboxConfinement,
+  probeSandboxWrapper,
+  type SandboxConfinementProbeHooks,
+} from '../src/env/sandbox-probe.ts'
 import { wrapBashCommand, type SandboxSystem } from '../src/env/seccomp.ts'
 import { UserError } from '../src/shared/errors.ts'
+
+const linuxBwrapSystem = (): SandboxSystem => ({
+  platform: 'linux',
+  available: bin => bin === 'bwrap',
+  exists: () => true,
+  execPath: '/usr/bin/node',
+})
 
 describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
   it('fails closed when wrapper is unavailable on Linux', () => {
@@ -16,25 +27,39 @@ describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
   })
 
   it('builds wrapped argv when bwrap is available (positive)', () => {
-    const system: SandboxSystem = {
-      platform: 'linux',
-      available: bin => bin === 'bwrap',
-      exists: () => true,
-    }
+    const system = linuxBwrapSystem()
     const probe = probeSandboxWrapper(system)
     expect(probe.wrapper).toBe('bwrap')
     expect(probe.canWrap).toBe(true)
   })
 
-  it('deterministic confinement probe with injectable spawn (unit)', () => {
-    const system: SandboxSystem = {
-      platform: 'linux',
-      available: bin => bin === 'bwrap',
-      exists: () => true,
-      execPath: '/usr/bin/node',
+  it('fake unconfined wrapper yields not_enforced, not enforced', () => {
+    const system = linuxBwrapSystem()
+    const hooks: SandboxConfinementProbeHooks = {
+      runWrapped: (command) => {
+        // Deliberately ignore the wrapper argv and run unsandboxed bash.
+        return spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' })
+      },
+      runUnsandboxed: (command) => spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' }),
     }
-    const confinement = probeSandboxConfinement(system)
-    expect(['enforced', 'not_enforced', 'probe_failed', 'unsupported']).toContain(confinement.outcome)
+    const confinement = probeSandboxConfinement(system, hooks)
+    expect(confinement.positiveExecOk).toBe(true)
+    expect(confinement.unconfinedForbiddenWriteOk).toBe(true)
+    expect(confinement.outcome).toBe('not_enforced')
+    expect(confinement.dimensions.write).toBe('not_enforced')
+    expect(confinement.negativeWriteBlocked).toBe(false)
+  })
+
+  it('failed wrapped exec is probe_failed, not enforcement', () => {
+    const system = linuxBwrapSystem()
+    const hooks: SandboxConfinementProbeHooks = {
+      runWrapped: () => ({ status: 1, stdout: '', stderr: 'boom', pid: 0, output: [null, '', 'boom'], signal: null, error: undefined }),
+      runUnsandboxed: (command) => spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' }),
+    }
+    const confinement = probeSandboxConfinement(system, hooks)
+    expect(confinement.outcome).toBe('probe_failed')
+    expect(confinement.dimensions.write).toBe('probe_failed')
+    expect(confinement.negativeWriteBlocked).toBeNull()
   })
 
   it('on-host optional smoke: run wrapped true when wrapper exists', () => {
@@ -60,6 +85,7 @@ describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
     expect(['enforced', 'not_enforced', 'probe_failed', 'unsupported']).toContain(confinement.outcome)
     if (confinement.outcome !== 'unsupported') {
       expect(confinement.positiveExecOk).toBe(true)
+      expect(confinement.positiveWriteOk).toBe(true)
     }
   })
 
@@ -73,8 +99,11 @@ describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
     const confinement = probeSandboxConfinement(system)
     if (confinement.outcome === 'unsupported') return
     expect(confinement.positiveExecOk).toBe(true)
+    expect(confinement.positiveWriteOk).toBe(true)
+    expect(confinement.unconfinedForbiddenWriteOk).toBe(true)
     expect(confinement.negativeWriteBlocked).not.toBeNull()
+    expect(confinement.dimensions.process).toBe('not_tested')
+    expect(confinement.dimensions.network).toBe('not_tested')
     expect(['enforced', 'not_enforced', 'probe_failed']).toContain(confinement.outcome)
   })
 })
-
