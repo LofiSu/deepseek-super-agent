@@ -50,5 +50,7 @@ CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm t48:long
 
 ## Sandbox honesty
 
-Worker bash uses OS wrappers (`sandbox-exec` / `bwrap`) when present. **PATH presence is not enforcement.**
-Health reports `enforced: unknown` unless a separate probe PR lands. Opt-in read isolation is documented in `docs/CONTAINER.md`.
+Worker bash uses OS wrappers (`sandbox-exec` / `bwrap`) when present. **PATH presence alone is not enforcement.**
+Use `probeSandboxConfinement()` (`src/env/sandbox-probe.ts`) for a host-safe positive exec + negative write-outside-workspace check;
+outcomes are `enforced`, `not_enforced`, `unsupported`, or `probe_failed` — never implied kernel guarantees beyond what the probe observed.
+PR #163 remains the dedicated health/sandbox track; this PR does not claim full seccomp coverage. Opt-in read isolation is in `docs/CONTAINER.md`.
