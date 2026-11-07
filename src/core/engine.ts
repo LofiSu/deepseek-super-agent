@@ -2,9 +2,9 @@ import { maySurface } from '../speculate/gate.ts'
 import type { AssessmentOutcome, WorkerReport } from '../shared/ports.ts'
 import type { Decision, ReceiveResult, Ticket, Trigger, TriggerTrust } from '../shared/types.ts'
 import { Assignments, type Recovery, type ReportResult } from './assignments.ts'
+import { blocksRestartRecovery, isUnknownOutcomeApproval, releaseUnknownOutcomeEffects } from './external-effects.ts'
 import {
   Collaborations,
-  pendingApproval,
   type CollaborationView,
   type DecideApprovalInput,
   type DecideApprovalOutcome,
@@ -105,7 +105,7 @@ export class Engine {
           // A human pause and an owner approval wait are both deliberate stops,
           // not evidence that a Worker crashed. Recovery must not end the
           // running Assignment or queue a duplicate turn for either.
-          if (ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) continue
+          if (ticket.ended || ticket.collab?.paused || blocksRestartRecovery(ticket, this.host.repo)) continue
           if (ticket.assignments.some(assignment => assignment.state === 'running')) {
             const outcome = this.assignments.recover(ticket.id)
             if (outcome) recovered.push(outcome)
@@ -163,8 +163,17 @@ export class Engine {
     decision: 'approved' | 'denied',
     input: DecideApprovalInput = {},
   ): DecideApprovalOutcome {
-    return this.host.repo.atomic(() =>
-      this.collaborations.decideApproval(ticketId, approvalId, decision, input))
+    return this.host.repo.atomic(() => {
+      const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
+      const pending = ticket?.collab?.approvals?.find(item => item.id === approvalId)
+      const wasUnknown = pending ? isUnknownOutcomeApproval(pending) : false
+      const outcome = this.collaborations.decideApproval(ticketId, approvalId, decision, input)
+      if (wasUnknown && decision === 'approved') {
+        const released = releaseUnknownOutcomeEffects(this.host.repo, ticketId, this.host.now())
+        this.host.log(`[recovery] unknown-outcome released ticketId=${ticketId} count=${released}`)
+      }
+      return outcome
+    })
   }
 
   /** Read and mark unseen guidance for one audience. Used by the Harness prompt builder. */
