@@ -34,6 +34,10 @@ export interface HarnessOptions {
   routerSessions?: (ticket: Ticket) => string[]
   /** Logical Worker mesh placement. Released by the host on ticket end. */
   pickNode?: (ticketId: string) => string | undefined
+  /** When true, the Worker turn runs on a remote peer instead of this process. */
+  isRemoteNode?: (nodeId: string | undefined) => boolean
+  /** Deliver assignment to a remote mesh node (no local ReAct turn). */
+  dispatchRemote?: (ticket: Ticket, node: string) => Promise<void>
   /**
    * Maximum Workers waiting for mesh capacity. `0` rejects instead of queueing.
    * Default 100. The queue lives in the Harness scheduler; the mesh registry
@@ -454,6 +458,17 @@ export class Harness {
     if (!assignment) {
       this.opts.log(`[harness] worker skipped ticketId=${ticket.id} no-assignment`)
       return Promise.resolve()
+    }
+    if (node && this.opts.isRemoteNode?.(node)) {
+      this.activeWorkers.add(ticket.id)
+      this.opts.log(`[mesh] remote dispatch ticketId=${ticket.id} node=${node}`)
+      this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
+      this.opts.assignmentPlaced(ticket.id, assignment.id, node)
+      const work = (this.opts.dispatchRemote?.(ticket, node) ?? Promise.resolve())
+      return work.finally(() => {
+        this.activeWorkers.delete(ticket.id)
+        this.pump()
+      })
     }
     this.activeWorkers.add(ticket.id)
     this.opts.log(`[harness] ExecutorSession start session=${sessionId} ticketId=${ticket.id} role=worker`)

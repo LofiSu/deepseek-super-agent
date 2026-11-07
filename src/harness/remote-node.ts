@@ -39,7 +39,7 @@ export const DEFAULT_REMOTE_MAX_NODES = 256
 export const DEFAULT_REMOTE_MAX_ADDRESSES = 64
 
 /** Body kinds accepted by the remote mesh inbox. Everything else fails closed. */
-export const REMOTE_MESH_BODY_KINDS = ['register', 'heartbeat', 'assignment'] as const
+export const REMOTE_MESH_BODY_KINDS = ['register', 'heartbeat', 'assignment', 'assignment_result'] as const
 export type RemoteMeshBodyKind = (typeof REMOTE_MESH_BODY_KINDS)[number]
 
 export interface RemoteNodeRegistration {
@@ -472,6 +472,16 @@ export interface RemoteMeshAssignmentEvent {
   envelope: A2AEnvelope
 }
 
+export interface RemoteMeshAssignmentResultEvent {
+  peerId: string
+  ticketId: string
+  assignmentId: string
+  report: unknown
+  /** Stable idempotence key from the authenticated inbound request. */
+  deliveryKey: string
+  envelope: A2AEnvelope
+}
+
 export interface RemoteMeshHandlerOptions {
   /**
    * Registry to update for `register`/`heartbeat`. When omitted the inbox
@@ -484,6 +494,11 @@ export interface RemoteMeshHandlerOptions {
    * reject an `async` callback; a thrown error becomes a non-leaking 502.
    */
   onAssignment: (event: RemoteMeshAssignmentEvent) => undefined
+  /**
+   * Optional inbound worker results. When omitted, `assignment_result` bodies
+   * fail closed like any unsupported kind.
+   */
+  onAssignmentResult?: (event: RemoteMeshAssignmentResultEvent) => undefined
   /** Inbound peer secret lookup, also used for the outbound registry entry. */
   resolveSecret: A2ASecretResolver
   /** Local identity; also the default inbox address. */
@@ -638,6 +653,9 @@ export class MeshInbox {
       case 'assignment':
         this.handleAssignment(peerId, body, envelope)
         return
+      case 'assignment_result':
+        this.handleAssignmentResult(peerId, body, envelope)
+        return
       default:
         // Unknown kinds are a failed delivery (HTTP 502) and never reach the
         // assignment callback.
@@ -741,6 +759,43 @@ export class MeshInbox {
         void Promise.resolve(result).catch(() => {})
       }
       throw new Error('mesh assignment callback must be synchronous')
+    }
+  }
+
+  private handleAssignmentResult(
+    peerId: string,
+    body: Record<string, unknown>,
+    envelope: A2AEnvelope,
+  ): void {
+    const callback = this.options.onAssignmentResult
+    if (!callback) throw new Error('unsupported mesh body kind')
+    if (!nonEmptyString(body.ticketId)) throw new Error('mesh assignment_result requires a ticketId')
+    if (!nonEmptyString(body.assignmentId)) throw new Error('mesh assignment_result requires an assignmentId')
+    if (!hasOwn(body, 'report')) throw new Error('mesh assignment_result requires a report')
+    const deliveryKey = nonEmptyString(body.deliveryKey)
+      ? body.deliveryKey
+      : nonEmptyString(envelope.id)
+        ? envelope.id
+        : ''
+    if (!deliveryKey) throw new Error('mesh assignment_result requires a deliveryKey')
+    const event: RemoteMeshAssignmentResultEvent = {
+      peerId,
+      ticketId: body.ticketId,
+      assignmentId: body.assignmentId,
+      report: body.report,
+      deliveryKey,
+      envelope,
+    }
+    if ((callback as unknown as { constructor?: { name?: string } })
+      .constructor?.name === 'AsyncFunction') {
+      throw new Error('mesh assignment_result callback must be synchronous')
+    }
+    const result: unknown = callback(event)
+    if (result !== undefined) {
+      if (result !== null && typeof (result as PromiseLike<unknown>).then === 'function') {
+        void Promise.resolve(result).catch(() => {})
+      }
+      throw new Error('mesh assignment_result callback must be synchronous')
     }
   }
 

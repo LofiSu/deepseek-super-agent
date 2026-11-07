@@ -50,6 +50,12 @@ bounds inbound nodes and addresses, and rejects peer-registered loopback
 endpoints unless the operator opts in; its assignment callback is synchronous.
 The module starts no listener and makes no remote-execution claim; mounting it
 in Runtime/CLI remains owner-gated.
+`WorkerPlacement` (`mesh-runtime.ts`) merges the in-process node with optional
+`DS_AGENT_REMOTE_MESH` peers for `pick`/`release`/`dispatch`. Inbound
+`assignment_result` is handled via `Runtime.applyRemoteAssignmentResult` when
+operators mount `createRemoteMeshHandler`. Physical multi-machine placement is
+still operator-gated; loopback integration tests cover the HTTP path only.
+
 Capacity is enforced in-process with a bounded FIFO queue owned by the Harness
 (the registry stays pure accounting):
 

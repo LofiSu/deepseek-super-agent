@@ -46,6 +46,10 @@ import { Metrics } from './metrics/metrics.ts'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
+import { WorkerPlacement } from './harness/mesh-runtime.ts'
+import { recordRemoteResult } from './harness/remote-results.ts'
+import type { RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
+import type { WorkerReport } from './shared/ports.ts'
 import { Logger } from './shared/log.ts'
 import { threadKey, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
@@ -360,6 +364,8 @@ export class Runtime {
   readonly instanceId: string
   readonly routerShards: RouterShardRegistry
   readonly workerMesh: WorkerMeshRegistry
+  /** Local + optional remote mesh placement (T47 runtime path). */
+  readonly placement: WorkerPlacement
   readonly longTermMemory: SpillBackedLongTermMemory
   /** Read-model lifecycle events for panels and CLI views. */
   readonly lifecycle: LifecycleBus
@@ -395,6 +401,7 @@ export class Runtime {
     instanceId: string
     routerShards: RouterShardRegistry
     workerMesh: WorkerMeshRegistry
+    placement: WorkerPlacement
     longTermMemory: SpillBackedLongTermMemory
     lifecycle: LifecycleBus
     a2aRouter: A2ARouter
@@ -421,6 +428,7 @@ export class Runtime {
     this.instanceId = parts.instanceId
     this.routerShards = parts.routerShards
     this.workerMesh = parts.workerMesh
+    this.placement = parts.placement
     this.longTermMemory = parts.longTermMemory
     this.lifecycle = parts.lifecycle
     this.a2aRouter = parts.a2aRouter
@@ -514,6 +522,7 @@ export class Runtime {
     }
     for (const shard of opts.routerShards ?? []) routerShards.register(shard)
     const workerMesh = new WorkerMeshRegistry([{ id: instanceId, capacity: meshCapacity }])
+    const placement = WorkerPlacement.fromEnv(baseEnv, instanceId, workerMesh, line => log.info(line))
     // Retention keeps the durable index bounded: 1000 entries / 90 days by
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
@@ -583,7 +592,7 @@ export class Runtime {
     const releaseMesh = (ticketId: string): void => {
       queueMicrotask(() => {
         try {
-          workerMesh.release(ticketId)
+          placement.release(ticketId)
         } catch (error) {
           log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
         }
@@ -759,13 +768,30 @@ export class Runtime {
         return disposition?.shards?.length ? disposition.shards : ['default']
       },
       pickNode: ticketId => {
-        const node = workerMesh.pickNode(ticketId)
-        if (node) metrics.increment('mesh.assigned')
-        return node?.id
+        const nodeId = placement.pickNode(ticketId)
+        if (nodeId) metrics.increment('mesh.assigned')
+        return nodeId
+      },
+      isRemoteNode: nodeId => placement.isRemote(nodeId),
+      dispatchRemote: async (ticket, node) => {
+        const assignment = ticket.assignments.at(-1)
+        if (!assignment) return
+        const payload = {
+          assignmentId: assignment.id,
+          ticketId: ticket.id,
+          title: ticket.title,
+          brief: ticket.brief,
+          mandate: ticket.mandate,
+        }
+        const delivery = await placement.dispatch(ticket.id, payload)
+        if (delivery?.status !== 'delivered') {
+          log.info(`[mesh] remote dispatch failed ticketId=${ticket.id} node=${node} status=${delivery?.status ?? 'none'}`)
+          placement.release(ticket.id)
+        }
       },
       queueLimit: meshQueue,
       releaseNode: ticketId => {
-        workerMesh.release(ticketId)
+        placement.release(ticketId)
       },
       repliedTo: ticketId => store.listReplies().some(
         reply => reply.ticketId === ticketId && reply.channel === 'imessage',
@@ -855,6 +881,7 @@ export class Runtime {
       instanceId,
       routerShards,
       workerMesh,
+      placement,
       longTermMemory,
       lifecycle,
       a2aRouter,
@@ -883,6 +910,36 @@ export class Runtime {
       runtime.ingest(trigger)
     })
     return runtime
+  }
+
+  /**
+   * Apply an authenticated inbound mesh worker result. Idempotent on
+   * `deliveryKey`. Does not start a listener; operators mount
+   * `createRemoteMeshHandler` themselves.
+   */
+  applyRemoteAssignmentResult(event: RemoteMeshAssignmentResultEvent): void {
+    if (!this.store.isOpen) return
+    const report = event.report as WorkerReport
+    if (typeof report?.kind !== 'string' || typeof report?.text !== 'string') {
+      this.log.info(`[mesh] remote result ignored ticketId=${event.ticketId} reason=bad-report`)
+      return
+    }
+    const applied = recordRemoteResult(this.store, {
+      ticketId: event.ticketId,
+      assignmentId: event.assignmentId,
+      report,
+      deliveryKey: event.deliveryKey,
+    })
+    if (!applied) {
+      this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
+      return
+    }
+    try {
+      this.engine.report(event.ticketId, report)
+    } finally {
+      this.placement.release(event.ticketId)
+    }
+    this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
   }
 
   private assessments = new Set<Promise<void>>()
