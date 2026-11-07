@@ -17,11 +17,11 @@ force-pushed. Commit **`ffffbf3b`** (PR #166 format fix) and this document use
 
 | PR | Branch | Base | Head | `typecheck and test` | Local full suite (pipefail) |
 |----|--------|------|------|----------------------|-----------------------------|
-| [#164](https://github.com/LofiSu/deepseek-super-agent/pull/164) **M3** | `feat/m3-recovery-boundary-os-fault` | `main` | **`7009aebea58e17766e9cf24f216f8f51f826ee39`** | **pass** (run `42401111947`) | **98** / **3** (101); **926** / **16** (942) pipefail |
+| [#164](https://github.com/LofiSu/deepseek-super-agent/pull/164) **M3** | `feat/m3-recovery-boundary-os-fault` | `main` | **`9c34349033d6d22370a43e420e5b271edf16fd41`** | re-run CI on head | **100** / **3** (103); **929** / **16** (945) pipefail |
 | [#165](https://github.com/LofiSu/deepseek-super-agent/pull/165) **M1** | `feat/m1-remote-mesh-runtime-path` | `main` | **`a19879f52ea2c818bd7fc52f946ce8e164db3ba6`** | re-run CI on head | **101** / **3** (104); **935** / **16** (951) pipefail |
 | [#166](https://github.com/LofiSu/deepseek-super-agent/pull/166) **M6** | `feat/m6-t48-longitudinal-harness` | `main` | **`ec75f7f93a2c44b36a26e173b17f70dfb5f6e715`** | re-run CI on head | **97** / **3** (100); **926** / **16** (942) pipefail |
-| [#167](https://github.com/LofiSu/deepseek-super-agent/pull/167) **M10** | `feat/m10-deployment-security` | `main` | **`eeb0245fcd44e63ddacf9eb2e0c1c7e50f8a6528`** | **pass** (run `42402569894`) | **98** / **3** (101); **942** / **16** (958) pipefail |
-| **integration** `integration/final-167-m10` | (merges #164+#165+#166+#167 tips) | `main` | **`c01bd0b9d6a2b7169682ff19c8950e70bb6a6f76`** | local only | **112** / **3** (115); **972** / **16** (988) pipefail |
+| [#167](https://github.com/LofiSu/deepseek-super-agent/pull/167) **M10** | `feat/m10-deployment-security` | `main` | **`f1499fbcdeab7ce0ee1e7f82e2c61789c627d7bb`** | re-run CI on head | **101** / **3** (104); **947** / **16** (963) pipefail |
+| **integration** `integration/final-167-m10` | (merges #164+#165+#166+#167 tips) | `main` | **`5c78019f4f89c48fe14b5d93ff2adee5e016b13e`** | local only | **117** / **3** (120); **980** / **16** (996) pipefail |
 
 `demo fixture smoke` is **skipped** on all four (CI dependency: `typecheck and test`).
 
@@ -40,10 +40,12 @@ force-pushed. Commit **`ffffbf3b`** (PR #166 format fix) and this document use
 
 ### Current tip SHAs (authoritative mapping)
 
-- **#164 M3 `7009aeb`**: recovery-boundary docs + OS-fault delegate tests (includes `59a5355` runtime.create fix).
+- **#164 M3 `9c34349`**: `finishOutboxSendOperation` after successful/terminal outbox send (no spurious `unknown_outcome` on restart); docs `RECOVERY_UNKNOWN_OUTCOME.md` operator retry semantics.
+- **#164 M3 `7009aeb`** (prior): recovery-boundary docs + OS-fault delegate tests (includes `59a5355` runtime.create fix).
 - **#165 M1 `a19879f`**: format/EOF hygiene atop remote mesh + cancel path (`2d8ead0` feature work).
 - **#166 M6 `ec75f7f`**: EOF format fix on T48 observer + persistent store (`fb72685` corpus harness).
-- **#167 M10 `eeb0245`**: required sandbox gate aligned with `LocalEnv` effective policy (after `06691c2` / `daaae12` loopback probe fixes); CI green on `42402569894`.
+- **#167 M10 `f1499fb`**: resident `ingestResidentTrigger` backpressure in `runFeishuLoop` / `runImessageLoop`; Linux `unsharePid` on effective LocalEnv when `process` required; process probe uses effective policy (not probe-only `unsharePid`); `test/channel-resident-gate.test.ts`, deployment serve E2E.
+- **#167 M10 `eeb0245`** (prior): required sandbox gate aligned with `LocalEnv` effective policy (after `06691c2` / `daaae12` loopback probe fixes); CI green on `42402569894`.
 
 ### `live-modules.test.ts` on integration
 
@@ -87,13 +89,13 @@ No routine/cron is created by this repo — schedule externally (e.g. daily
 | M1 in-process remote mesh placement + cancel + result wait (#165) | **partial [~]** for T47: dispatch/cancel/result on loopback child; **not** full production cross-host lifecycle (listeners owner-gated per `docs/PRODUCTION_PROGRAM.md` W4) |
 | Mesh queue **backpressure** (local worker capacity) | **done** — `test/worker-mesh.test.ts` “P1-3” |
 | **Cancel** + remote **capability matching** on reassignment | **partial [~]** — **#165 `2d8ead0`**: HTTP `assignment_cancel` at OS child boundary + late-result suppression; capability filter / reassignment mismatch still open |
-| Supported channel **reconnect / backpressure lifecycle** (Feishu/iMessage serve) | **partial [~]** — serve loops and gateway recovery exist on `main`; dedicated reconnect/backpressure acceptance for supported channels is **not** fully implemented in #164–#167 |
+| Supported channel **reconnect / backpressure lifecycle** (Feishu/iMessage serve) | **done** on #167 — exponential poll backoff + abortable sleep (`channel-loop.ts` / `feishu.ts`); bounded resident ingress via `channel-resident-gate.ts` + `DS_AGENT_RESIDENT_INGRESS_LIMIT`; `test/deployment-serve-resident-e2e.test.ts` and `test/channel-resident-gate.test.ts` |
 | M6 longitudinal journal + wall-clock observer (#166) | **done** for persistent fixture store + process re-run tests; **not** month-scale T48 complete |
 | M10 loopback deployment / sandbox probe honesty (#167) | **done** for documented probe scope |
 | Real elapsed T48 / physical multi-week machine | **future validation** (legitimate, not confused with above coding gaps) |
 
 ## Local gates re-run (evidence)
 
-2026-11-08 on integration `c01bd0b` and per-PR worktrees at tips above:
-`pnpm typecheck`, `pnpm lint`, `DS_AGENT_FORMAT_BASE=origin/main pnpm format:check` — **clean**;
-`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 bash -o pipefail -c 'pnpm test'` — **pass** on #164–#167 tips and integration (counts in matrix).
+2026-11-08 on integration **`5c78019`** and per-PR tips **`9c34349`** (M3), **`f1499fb`** (M10):
+`pnpm typecheck`, `pnpm lint`, `DS_AGENT_FORMAT_BASE=origin/main pnpm format:check` — **clean** on integration;
+`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 bash -o pipefail -c 'pnpm test'` — **980** passed / **16** skipped (**996** total), **117** files passed / **3** skipped on integration.
