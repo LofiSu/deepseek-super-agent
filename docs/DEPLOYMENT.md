@@ -25,6 +25,15 @@ default. Real Feishu/GitHub accounts are operator-gated; CI uses simulated loopb
 | `DS_AGENT_SANDBOX_READ_ISOLATION` | Opt-in `1`/`true`/`strict` strict read roots |
 | `DS_AGENT_ALLOW_MOCK_FIXTURE` | Offline CI only; must be `1` with `CI=true` in automation |
 
+## Unsupported resident inbound adapters
+
+| Adapter | Resident poll/webhook in `serve` | Notes |
+|---------|----------------------------------|-------|
+| Feishu | `--feishu` (opt-in poll) | SQLite cursor; loopback-tested dedupe |
+| iMessage | `--imessage` (opt-in poll) | Local `chat.db` only |
+| GitHub | **Unsupported** | No daemon poll/webhook; use `github-source` tooling |
+| Generic webhook listener | **Unsupported** | No public HTTP listener by default |
+
 ## Channel loops (M11)
 
 - **Feishu (`--feishu`)**: poll one chat; cursor in SQLite (`feishu_cursor`); transient poll errors use capped exponential backoff (`maxBackoffMs`, default 30s); does not open a webhook listener.

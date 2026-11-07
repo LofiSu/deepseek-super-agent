@@ -1,7 +1,8 @@
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { createServer } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { readIsolationFromEnv, wrapBashCommand, type SandboxPolicy, type SandboxSystem } from './seccomp.ts'
 
 /** Diagnostic only: wrapper on PATH and argv shape. Never implies kernel enforcement. */
@@ -155,17 +156,79 @@ function probeReadIsolation(
 }
 
 function probeNetworkIsolation(
-  _policy: SandboxPolicy,
-  _system: SandboxSystem,
-  _runWrapped: SandboxConfinementProbeHooks['runWrapped'],
+  policy: SandboxPolicy,
+  system: SandboxSystem,
+  runWrapped: SandboxConfinementProbeHooks['runWrapped'],
 ): SandboxDimensionStatus {
-  // No loopback connect probe here: would be flaky across hosts and does not
-  // prove egress policy. Operators rely on wrapper policy flags + write probe.
-  return 'not_tested'
+  if (policy.allowNetwork === true) return 'unsupported'
+  if (system.platform !== 'linux' && system.platform !== 'darwin') return 'unsupported'
+  const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end('ds-agent-sandbox-net-ok')
+  })
+  let port = 0
+  try {
+    port = bindLoopbackSync(server)
+    const node = shellQuote(system.execPath ?? process.execPath)
+    const fetchCmd = (hostPort: string) => [
+      `${node} -e "fetch('http://${hostPort}/').then(r=>r.ok?process.exit(0):process.exit(2)).catch(()=>process.exit(1))"`,
+    ].join('')
+    const target = `127.0.0.1:${port}`
+    const positive = runner(
+      fetchCmd(target),
+      { ...policy, allowNetwork: true },
+      system,
+    )
+    if (spawnFailed(positive) || positive.status !== 0) return 'probe_failed'
+    const negative = runner(
+      fetchCmd(target),
+      { ...policy, allowNetwork: false },
+      system,
+    )
+    if (spawnFailed(negative)) return 'probe_failed'
+    if (negative.status === 0) return 'not_enforced'
+    return 'enforced'
+  } catch {
+    return 'probe_failed'
+  } finally {
+    server.closeAllConnections()
+    server.close()
+  }
+}
+
+function bindLoopbackSync(server: ReturnType<typeof createServer>): number {
+  server.listen(0, '127.0.0.1')
+  const deadline = Date.now() + 5_000
+  while (!server.listening && Date.now() < deadline) {
+    /* spin until listening */
+  }
+  const addr = server.address()
+  if (typeof addr !== 'object' || addr === null) throw new Error('loopback bind failed')
+  return addr.port
+}
+
+/** Wrapped `kill -0 $$` should succeed; wrapped kill of parent pid should fail when process isolation holds. */
+function probeProcessIsolation(
+  policy: SandboxPolicy,
+  system: SandboxSystem,
+  runWrapped: SandboxConfinementProbeHooks['runWrapped'],
+): SandboxDimensionStatus {
+  if (system.platform !== 'linux') {
+    // No host-safe wrapped parent-kill probe on Darwin without broader policy review.
+    return 'unsupported'
+  }
+  const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
+  const selfAlive = runner('kill -0 $$', policy, system)
+  if (spawnFailed(selfAlive) || selfAlive.status !== 0) return 'probe_failed'
+  const parentSignal = runner('kill -0 $PPID', policy, system)
+  if (spawnFailed(parentSignal)) return 'probe_failed'
+  if (parentSignal.status === 0) return 'not_enforced'
+  return 'enforced'
 }
 
 function emptyDimensions(): SandboxConfinementDimensions {
-  return { write: 'unsupported', read: 'not_tested', network: 'not_tested', process: 'not_tested' }
+  return { write: 'unsupported', read: 'unsupported', network: 'unsupported', process: 'unsupported' }
 }
 
 /**
@@ -271,9 +334,10 @@ export function probeSandboxConfinement(
         ? dimensions.write
         : 'probe_failed'
 
-    dimensions.read = probeReadIsolation(policy, system, hooks.runWrapped, forbiddenFile)
+    const readPolicy: SandboxPolicy = { ...policy, readIsolation: true }
+    dimensions.read = probeReadIsolation(readPolicy, system, hooks.runWrapped, forbiddenFile)
     dimensions.network = probeNetworkIsolation(policy, system, hooks.runWrapped)
-    dimensions.process = 'not_tested'
+    dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped)
 
     let detail: string
     if (outcome === 'enforced') {

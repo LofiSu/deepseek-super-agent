@@ -102,8 +102,9 @@ describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
     expect(confinement.positiveWriteOk).toBe(true)
     expect(confinement.unconfinedForbiddenWriteOk).toBe(true)
     expect(confinement.negativeWriteBlocked).not.toBeNull()
-    expect(confinement.dimensions.process).toBe('not_tested')
-    expect(confinement.dimensions.network).toBe('not_tested')
+    for (const dim of ['read', 'network', 'process'] as const) {
+      expect(['enforced', 'not_enforced', 'unsupported', 'probe_failed']).toContain(confinement.dimensions[dim])
+    }
     expect(['enforced', 'not_enforced', 'probe_failed']).toContain(confinement.outcome)
   })
 })

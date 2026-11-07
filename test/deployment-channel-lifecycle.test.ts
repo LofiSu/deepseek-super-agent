@@ -113,6 +113,9 @@ describe('deployment resident channel lifecycle', () => {
       once: true,
     })
     expect(ingested).toEqual(['feishu_om_1'])
+    const cursor = rt.store.getDoc<{ chatId: string; lastCreateTimeMs: number }>('feishu_cursor', 'cursor')
+    expect(cursor?.chatId).toBe('oc_test')
+    expect(cursor?.lastCreateTimeMs).toBe(1_761_958_800_000)
     await rt.finish()
   })
 
