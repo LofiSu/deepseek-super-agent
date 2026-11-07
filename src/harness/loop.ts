@@ -33,7 +33,7 @@ export interface HarnessOptions {
   /** Router shards for a ticket. Default `['router']`; a shard owns one Router session. */
   routerSessions?: (ticket: Ticket) => string[]
   /** Logical Worker mesh placement. Released by the host on ticket end. */
-  pickNode?: (ticketId: string) => string | undefined
+  pickNode?: (ticketId: string, ticket: Ticket) => string | undefined
   /** When true, the Worker turn runs on a remote peer instead of this process. */
   isRemoteNode?: (nodeId: string | undefined) => boolean
   /** Deliver assignment to a remote mesh node (no local ReAct turn). */
@@ -301,7 +301,7 @@ export class Harness {
     }
     // No mesh configured: keep the original no-placement behavior.
     if (!this.opts.pickNode) return this.startNow(latest)
-    const node = this.opts.pickNode(latest.id)
+    const node = this.opts.pickNode(latest.id, latest)
     if (!node) return this.enqueueWorker(latest.id)
     this.opts.log(`[mesh] place ticketId=${latest.id} node=${node}`)
     return this.startNow(latest, node)
@@ -368,15 +368,15 @@ export class Harness {
     while (this.queued.length > 0) {
       const next = this.queued[0]!
       const check = this.queueState(next.ticketId)
-      if (check.skip) {
+      if (check.skip || !check.ticket) {
         this.queued.shift()
         this.opts.metrics.increment('mesh.dequeued')
-        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length} skipped=${check.skip}`)
+        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length} skipped=${check.skip ?? 'ticket-missing'}`)
         next.resolve()
         continue
       }
       if (this.opts.pickNode) {
-        const node = this.opts.pickNode(next.ticketId)
+        const node = this.opts.pickNode(next.ticketId, check.ticket)
         if (!node) return
         this.queued.shift()
         this.opts.metrics.increment('mesh.dequeued')

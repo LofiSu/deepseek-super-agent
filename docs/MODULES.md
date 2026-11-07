@@ -51,10 +51,14 @@ endpoints unless the operator opts in; its assignment callback is synchronous.
 The module starts no listener and makes no remote-execution claim; mounting it
 in Runtime/CLI remains owner-gated.
 `WorkerPlacement` (`mesh-runtime.ts`) merges the in-process node with optional
-`DS_AGENT_REMOTE_MESH` peers for `pick`/`release`/`dispatch`. Inbound
-`assignment_result` is handled via `Runtime.applyRemoteAssignmentResult` when
-operators mount `createRemoteMeshHandler`. Physical multi-machine placement is
-still operator-gated; loopback integration tests cover the HTTP path only.
+`DS_AGENT_REMOTE_MESH` peers for `pick`/`release`/`dispatch`. Remote nodes may
+advertise `capabilities`; `DS_AGENT_MESH_REQUIRED_CAPABILITIES` (comma-separated)
+restricts which remote peer may receive a ticket when the local slot is full.
+Inbound `assignment_result` is handled via `Runtime.applyRemoteAssignmentResult`
+when operators mount `createRemoteMeshHandler` (idempotent on `deliveryKey`;
+late results after ticket end are ignored). `releaseMesh` clears remote result
+wait timers on ticket end/cancel. Physical multi-machine placement is still
+operator-gated; loopback integration tests cover the HTTP path only.
 
 Capacity is enforced in-process with a bounded FIFO queue owned by the Harness
 (the registry stays pure accounting):

@@ -46,7 +46,7 @@ import { Metrics } from './metrics/metrics.ts'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
-import { WorkerPlacement } from './harness/mesh-runtime.ts'
+import { WorkerPlacement, requiredMeshCapabilities } from './harness/mesh-runtime.ts'
 import {
   RemoteMeshResultWait,
   remoteResultTimeoutMsFromEnv,
@@ -620,6 +620,7 @@ export class Runtime {
      * A microtask runs after the synchronous transaction commits.
      */
     const releaseMesh = (ticketId: string): void => {
+      late.remoteResultWait?.clear(ticketId)
       queueMicrotask(() => {
         try {
           placement.release(ticketId)
@@ -797,8 +798,9 @@ export class Runtime {
         const disposition = store.getDoc<Disposition>('disposition', ticket.originTriggerId)
         return disposition?.shards?.length ? disposition.shards : ['default']
       },
-      pickNode: ticketId => {
-        const nodeId = placement.pickNode(ticketId)
+      pickNode: (ticketId, _ticket) => {
+        const need = requiredMeshCapabilities(baseEnv)
+        const nodeId = placement.pickNode(ticketId, need)
         if (nodeId) metrics.increment('mesh.assigned')
         return nodeId
       },
@@ -966,9 +968,18 @@ export class Runtime {
     })
     if (!applied) {
       this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
+      this.remoteResultWait?.clear(event.ticketId)
       return
     }
     this.remoteResultWait?.clear(event.ticketId)
+    const ticket = this.store.getDoc<Ticket>('ticket', event.ticketId)
+    if (ticket?.ended) {
+      this.log.info(
+        `[mesh] remote result after ticket end ticketId=${event.ticketId} outcome=${ticket.ended.outcome}`,
+      )
+      this.placement.release(event.ticketId)
+      return
+    }
     try {
       this.engine.report(event.ticketId, report)
     } finally {

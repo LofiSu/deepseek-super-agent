@@ -3,6 +3,16 @@ import type { A2ASecret } from '../channels/a2a-auth.ts'
 import { RemoteMeshRegistry, type RemoteNodeRegistration } from './remote-node.ts'
 import { WorkerMeshRegistry } from './mesh.ts'
 
+function parseCapabilitiesCsv(raw: string | undefined): string[] {
+  if (!raw?.trim()) return []
+  return [...new Set(raw.split(',').map(s => s.trim()).filter(s => s.length > 0))]
+}
+
+/** Required remote worker capabilities for placement (`DS_AGENT_MESH_REQUIRED_CAPABILITIES`). */
+export function requiredMeshCapabilities(env: NodeJS.ProcessEnv): string[] {
+  return parseCapabilitiesCsv(env.DS_AGENT_MESH_REQUIRED_CAPABILITIES)
+}
+
 /** One remote peer from `DS_AGENT_REMOTE_MESH` JSON. Secrets stay env-local only. */
 export interface RemoteMeshEnvNode {
   id: string
@@ -10,6 +20,7 @@ export interface RemoteMeshEnvNode {
   peerId: string
   secret: A2ASecret
   capacity?: number
+  capabilities?: readonly string[]
 }
 
 function nonEmpty(value: unknown): value is string {
@@ -34,6 +45,9 @@ export function parseRemoteMeshNodesFromEnv(env: NodeJS.ProcessEnv): RemoteMeshE
         peerId: row.peerId,
         secret: row.secret as A2ASecret,
         capacity: typeof row.capacity === 'number' ? row.capacity : undefined,
+        capabilities: Array.isArray(row.capabilities)
+          ? row.capabilities.filter((c): c is string => typeof c === 'string' && c.trim().length > 0)
+          : undefined,
       })
     }
     return nodes
@@ -88,10 +102,10 @@ export class WorkerPlacement {
     return new WorkerPlacement(localNodeId, local, remote)
   }
 
-  pickNode(ticketId: string): string | undefined {
+  pickNode(ticketId: string, requiredCapabilities: readonly string[] = []): string | undefined {
     const localNode = this.local.pickNode(ticketId)
     if (localNode) return localNode.id
-    return this.remote?.pick(ticketId)?.id
+    return this.remote?.pick(ticketId, undefined, requiredCapabilities)?.id
   }
 
   release(ticketId: string): void {

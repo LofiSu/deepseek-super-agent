@@ -54,6 +54,8 @@ export interface RemoteNodeRegistration {
   secret: A2ASecret
   /** Maximum concurrent assignments. Defaults to 1. */
   capacity?: number
+  /** Advertised worker capabilities (for example `linux`, `bwrap`). Empty means generic. */
+  capabilities?: readonly string[]
 }
 
 /** Public, secret-free view of a registered remote node. */
@@ -62,6 +64,7 @@ export interface RemoteMeshNode {
   url: string
   peerId: string
   capacity: number
+  capabilities: string[]
   online: boolean
   lastHeartbeatAt: number
   inFlight: number
@@ -208,8 +211,23 @@ interface RemoteNodeRecord {
   peerId: string
   secret: A2ASecret
   capacity: number
+  capabilities: string[]
   online: boolean
   lastHeartbeatAt: number
+}
+
+function normalizeCapabilities(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const caps: string[] = []
+  for (const item of value) {
+    if (typeof item === 'string' && item.trim().length > 0) caps.push(item.trim())
+  }
+  return [...new Set(caps)]
+}
+
+function capabilitiesMatch(nodeCaps: readonly string[], required: readonly string[]): boolean {
+  if (required.length === 0) return true
+  return required.every(cap => nodeCaps.includes(cap))
 }
 
 function defaultTransportFactory(options: A2AHttpTransportOptions): A2ATransport {
@@ -277,6 +295,7 @@ export class RemoteMeshRegistry {
       peerId,
       secret,
       capacity,
+      capabilities: normalizeCapabilities(input.capabilities),
       online: true,
       lastHeartbeatAt: this.clock(),
     }
@@ -320,14 +339,19 @@ export class RemoteMeshRegistry {
    * picks while that node remains eligible. A stale/offline/unknown assignment
    * is released so its capacity is not leaked; callers may then pick again.
    */
-  pick(ticketId: string, now: number = this.clock()): RemoteMeshNode | undefined {
+  pick(
+    ticketId: string,
+    now: number = this.clock(),
+    requiredCapabilities: readonly string[] = [],
+  ): RemoteMeshNode | undefined {
     if (!nonEmptyString(ticketId)) return undefined
     const at = finiteNow(now, this.clock())
 
     const assignedId = this.assignments.get(ticketId)
     if (assignedId !== undefined) {
       const assigned = this.nodes.get(assignedId)
-      if (!assigned || !this.eligible(assigned, at)) {
+      if (!assigned || !this.eligible(assigned, at)
+        || !capabilitiesMatch(assigned.capabilities, requiredCapabilities)) {
         this.assignments.delete(ticketId)
         return undefined
       }
@@ -338,6 +362,7 @@ export class RemoteMeshRegistry {
     let bestLoad = Number.POSITIVE_INFINITY
     for (const node of this.nodes.values()) {
       if (!this.eligible(node, at)) continue
+      if (!capabilitiesMatch(node.capabilities, requiredCapabilities)) continue
       const load = this.inFlight(node.id)
       if (load >= node.capacity || load >= bestLoad) continue
       best = node
@@ -455,6 +480,7 @@ export class RemoteMeshRegistry {
       url: node.url,
       peerId: node.peerId,
       capacity: node.capacity,
+      capabilities: [...node.capabilities],
       online: node.online,
       lastHeartbeatAt: node.lastHeartbeatAt,
       inFlight: this.inFlight(node.id),
@@ -703,6 +729,7 @@ export class MeshInbox {
       peerId,
       secret,
       capacity: capacity as number | undefined,
+      capabilities: normalizeCapabilities(body.capabilities),
     })
   }
 
