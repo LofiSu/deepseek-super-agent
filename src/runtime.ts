@@ -1278,6 +1278,13 @@ export class Runtime {
     return this.residentIngressInFlight
   }
 
+  /** Atomically reserve an in-flight slot when below `limit` (no await between check and increment). */
+  tryResidentIngressBegin(limit: number): boolean {
+    if (this.residentIngressInFlight >= limit) return false
+    this.residentIngressInFlight += 1
+    return true
+  }
+
   residentIngressBegin(): void {
     this.residentIngressInFlight += 1
   }
