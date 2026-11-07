@@ -126,6 +126,38 @@ performs the following inside one temporary SQLite store:
 Record the output in the template below if you quote it. Label it
 **synthetic fixture smoke**, never "month-scale result".
 
+### 5.1.1 Longitudinal offline harness (synthetic clock, parent-scheduled)
+
+```bash
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm t48:long
+```
+
+This runs the fixture smoke, simulates a store reopen, checks unrelated-query
+contamination (expect 0 hits), and **appends one JSONL row** to:
+
+`$DS_AGENT_HOME/.ds-agent/measurement/t48-journal/t48-measurements.jsonl`
+
+Override the file with `DS_AGENT_T48_JOURNAL=/absolute/path.jsonl`. The harness
+uses an injected multi-month clock only — label output **synthetic**, not
+calendar-month evidence. Recommended parent frequency: weekly or monthly cron
+on a **copy** of the store; this repo does not create cron jobs. See
+`scripts/t48-longitudinal-harness.ts` and `src/measurement/t48-journal.ts`.
+
+### 5.1.2 Wall-clock observation mode (restartable, not `[x]`)
+
+```bash
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 DS_AGENT_HOME=/copy/of/store pnpm t48:observe
+```
+
+Persists the fixture SQLite corpus under `DS_AGENT_HOME` across invocations (incremental
+inserts + held-out queries). Journal rows use `syntheticClock: false` (real retention clock)
+and **`syntheticWorkload: true`** (fixture data only — never implied non-synthetic workload).
+Uses real `recordedAt` timestamps and writes JSONL rows plus
+`$DS_AGENT_HOME/.ds-agent/measurement/t48-wall-clock-state.json` for restartable sampling.
+Default cadence is 24h (`minIntervalMs`); force with `DS_AGENT_T48_OBSERVE_FORCE=1` for tests.
+This accumulates **longitudinal observation data** for future month-spanning analysis; it does
+**not** satisfy operator month-scale acceptance (§3) and must not flip T48 to `[x]`.
+
 ### 5.2 Operator month-spanning run (required for `[x]`)
 
 1. Record the baseline commit SHA, the run date in UTC, the machine, the Node
