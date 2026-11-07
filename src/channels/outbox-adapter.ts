@@ -1,3 +1,4 @@
+import { recordOutboxSendStart } from '../core/external-effects.ts'
 import type { OutboxRow } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -53,10 +54,8 @@ export class Outbox {
 
   start(intervalMs = 500): void {
     if (this.timer) return
-    // A crashed process may have left a row in `sending`. Requeue it; the
-    // Channel uses the idempotency key to avoid a duplicate post.
-    const requeued = this.store.requeueSending()
-    if (requeued > 0) this.log(`[outbox] requeued=${requeued} from interrupted sends`)
+    const marked = this.store.markSendingOutboxUnknownOutcome()
+    if (marked > 0) this.log(`[outbox] unknown_outcome=${marked} from interrupted sends`)
     void this.flush().catch(() => undefined)
     this.timer = setInterval(() => { void this.flush().catch(() => undefined) }, intervalMs)
     // Do not keep a short-lived demo process alive just for the outbox timer.
@@ -99,6 +98,7 @@ export class Outbox {
         continue
       }
       try {
+        recordOutboxSendStart(this.store, row, now)
         const result = await adapter.send(row)
         this.store.markOutboxSent(row.id, result.externalId)
         this.store.markReplySent(row.replyId)
