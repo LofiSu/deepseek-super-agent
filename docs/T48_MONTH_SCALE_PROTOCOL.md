@@ -126,6 +126,23 @@ performs the following inside one temporary SQLite store:
 Record the output in the template below if you quote it. Label it
 **synthetic fixture smoke**, never "month-scale result".
 
+### 5.1.1 Longitudinal offline harness (synthetic clock, parent-scheduled)
+
+```bash
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm t48:long
+```
+
+This runs the fixture smoke, simulates a store reopen, checks unrelated-query
+contamination (expect 0 hits), and **appends one JSONL row** to:
+
+`$DS_AGENT_HOME/.ds-agent/measurement/t48-journal/t48-measurements.jsonl`
+
+Override the file with `DS_AGENT_T48_JOURNAL=/absolute/path.jsonl`. The harness
+uses an injected multi-month clock only — label output **synthetic**, not
+calendar-month evidence. Recommended parent frequency: weekly or monthly cron
+on a **copy** of the store; this repo does not create cron jobs. See
+`scripts/t48-longitudinal-harness.ts` and `src/measurement/t48-journal.ts`.
+
 ### 5.2 Operator month-spanning run (required for `[x]`)
 
 1. Record the baseline commit SHA, the run date in UTC, the machine, the Node
