@@ -15,7 +15,12 @@ import {
   type FeishuConfig,
 } from '../channels/feishu.ts'
 import { Outbox, type OutboundAdapter } from '../channels/outbox-adapter.ts'
-import { ingestResidentTrigger, ResidentIngressRejectedError, residentIngressLimitFromEnv } from './channel-resident-gate.ts'
+import {
+  ingestResidentTrigger,
+  ResidentIngressAbortedError,
+  ResidentIngressRejectedError,
+  residentIngressLimitFromEnv,
+} from './channel-resident-gate.ts'
 import type { Runtime } from '../runtime.ts'
 import type { Trigger } from '../shared/types.ts'
 
@@ -227,7 +232,10 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
             })
           } catch (error) {
             log(`[feishu] ingest failed ${messageOf(error)}`)
-            if (error instanceof ResidentIngressRejectedError) {
+            if (
+              error instanceof ResidentIngressRejectedError
+              || error instanceof ResidentIngressAbortedError
+            ) {
               cursorBlockedByIngress = true
               break
             }
