@@ -123,6 +123,7 @@ function linuxStrictArgv(policy: SandboxPolicy, exists: (path: string) => boolea
   return [
     'bwrap',
     ...(policy.allowNetwork ? [] : ['--unshare-net']),
+    ...(policy.unsharePid === true ? ['--unshare-pid'] : []),
     ...reads,
     '--dev', '/dev',
     '--proc', '/proc',

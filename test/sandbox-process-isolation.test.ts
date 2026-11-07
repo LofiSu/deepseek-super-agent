@@ -18,7 +18,7 @@ describe('sandbox process isolation probe', () => {
       runWrapped: (command) => spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' }),
       runUnsandboxed: (command) => spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' }),
     }
-    const confinement = probeSandboxConfinement(system, hooks)
+    const confinement = probeSandboxConfinement(system, hooks, { enabled: true, unsharePid: true })
     expect(confinement.dimensions.process).toBe('not_enforced')
   })
 
@@ -31,6 +31,6 @@ describe('sandbox process isolation probe', () => {
     }
     const probe = probeSandboxConfinement(system)
     if (probe.outcome === 'unsupported') return
-    expect(['enforced', 'not_enforced', 'probe_failed', 'unsupported']).toContain(probe.dimensions.process)
+    expect(['enforced', 'not_enforced', 'probe_failed', 'unsupported', 'not_tested']).toContain(probe.dimensions.process)
   })
 })

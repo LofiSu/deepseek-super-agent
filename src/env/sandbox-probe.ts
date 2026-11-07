@@ -69,16 +69,15 @@ export function probeSandboxWrapper(
   system: SandboxSystem = defaultSystem(),
   probePolicy: SandboxPolicy = baseProbePolicy(),
 ): SandboxWrapperProbe {
-  const policy = probePolicy
   try {
     if (system.platform === 'darwin') {
       if (!system.available('sandbox-exec')) return { platform: system.platform, wrapper: null, canWrap: false }
-      wrapBashCommand('true', policy, system)
+      wrapBashCommand('true', probePolicy, system)
       return { platform: system.platform, wrapper: 'sandbox-exec', canWrap: true }
     }
     if (system.platform === 'linux') {
       if (!system.available('bwrap')) return { platform: system.platform, wrapper: null, canWrap: false }
-      wrapBashCommand('true', policy, system)
+      wrapBashCommand('true', probePolicy, system)
       return { platform: system.platform, wrapper: 'bwrap', canWrap: true }
     }
     return { platform: system.platform, wrapper: null, canWrap: false }
@@ -106,6 +105,7 @@ export function sandboxPolicyForProbe(
     readIsolation: effective.readIsolation === true,
     readRoots: effective.readRoots,
     allowNetwork: effective.allowNetwork,
+    unsharePid: effective.unsharePid === true,
   }
 }
 
@@ -268,8 +268,10 @@ function isDimensionSatisfied(
   required: SandboxRequiredDimension,
   status: SandboxDimensionStatus,
   effective: SandboxPolicy,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (required === 'read' && effective.readIsolation !== true) return false
+  if (required === 'process' && platform === 'linux' && effective.unsharePid !== true) return false
   return status === 'enforced'
 }
 
@@ -296,11 +298,13 @@ export function assertRequiredSandboxDimensions(
         ? confinement.outcome
         : confinement.dimensions.write)
       : confinement.dimensions[dim]
-    if (!isDimensionSatisfied(dim, status, effectivePolicy)) {
+    if (!isDimensionSatisfied(dim, status, effectivePolicy, confinement.platform as NodeJS.Platform)) {
       const label = required.size > 0 ? `required dimension ${dim}` : 'default write sandbox'
       const reported = dim === 'read' && effectivePolicy.readIsolation !== true
         ? 'not_enforced'
-        : status
+        : dim === 'process' && confinement.platform === 'linux' && effectivePolicy.unsharePid !== true
+          ? 'not_enforced'
+          : status
       throw new UserError(
         `${label} is not satisfied (status=${reported}); refusing unconfined or unproven worker bash`,
       )
@@ -355,10 +359,10 @@ function probeProcessIsolation(
   if (system.platform !== 'linux') {
     return 'unsupported'
   }
+  if (policy.unsharePid !== true) return 'not_tested'
   const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
   const runUnsandboxed = hooks.runUnsandboxed ?? runUnsandboxedDefault
-  const probePolicy: SandboxPolicy = { ...policy, unsharePid: true }
-  const selfAlive = runner('kill -0 $$', probePolicy, system)
+  const selfAlive = runner('kill -0 $$', policy, system)
   if (spawnFailed(selfAlive) || selfAlive.status !== 0) return 'probe_failed'
 
   const pidFile = join(tmpdir(), `ds-agent-sandbox-extpid-${process.pid}-${Date.now()}.json`)
@@ -367,7 +371,7 @@ function probeProcessIsolation(
   try {
     if (hooks.externalPid !== undefined) {
       const ext = hooks.externalPid
-      const wrapped = runner(`kill -0 ${ext}`, probePolicy, system)
+      const wrapped = runner(`kill -0 ${ext}`, policy, system)
       if (spawnFailed(wrapped)) return 'probe_failed'
       return wrapped.status === 0 ? 'not_enforced' : 'enforced'
     }
@@ -387,7 +391,7 @@ function probeProcessIsolation(
     if (externalPid === undefined) return 'probe_failed'
     const control = runUnsandboxed(`kill -0 ${externalPid}`)
     if (spawnFailed(control) || control.status !== 0) return 'probe_failed'
-    const wrapped = runner(`kill -0 ${externalPid}`, probePolicy, system)
+    const wrapped = runner(`kill -0 ${externalPid}`, policy, system)
     if (spawnFailed(wrapped)) return 'probe_failed'
     return wrapped.status === 0 ? 'not_enforced' : 'enforced'
   } catch {
@@ -418,8 +422,8 @@ export function probeSandboxConfinement(
   hooks: SandboxConfinementProbeHooks = {},
   effectivePolicy: SandboxPolicy = baseProbePolicy(),
 ): SandboxConfinementProbe {
-  const probePolicy = sandboxPolicyForProbe(effectivePolicy)
-  const wrapper = probeSandboxWrapper(system, { ...probePolicy, enabled: true })
+  const wrapperPolicy = sandboxPolicyForProbe(effectivePolicy)
+  const wrapper = probeSandboxWrapper(system, { ...wrapperPolicy, enabled: true })
   const dimensions = emptyDimensions()
   if (!wrapper.canWrap || !wrapper.wrapper) {
     return {
