@@ -6,7 +6,7 @@ import {
   resolveT48JournalPath,
   type T48JournalEntry,
 } from '../src/measurement/t48-journal.ts'
-import { runT48LongitudinalHarness } from './t48-longitudinal-harness.ts'
+import { runT48PersistentIncrementalStep } from '../src/measurement/t48-persistent-store.ts'
 
 const CADENCE_MS = 24 * 60 * 60 * 1000
 
@@ -17,6 +17,7 @@ export interface WallClockObservationState {
   journalPath: string
   samples: number
   lastSampleAt?: string
+  corpusSamplesInserted?: number
 }
 
 function statePath(home: string): string {
@@ -36,16 +37,19 @@ export function writeWallClockState(state: WallClockObservationState): void {
 
 /**
  * Appends one wall-clock observation row when interval elapsed (or force).
- * Does NOT flip T48 to calendar-month complete — labels `syntheticClock: false` only for real `recordedAt`.
+ * Persists fixture corpus under `home` across invocations; journal rows keep
+ * `syntheticWorkload: true` and `syntheticClock: false` (real retention clock only).
+ * Does NOT flip T48 to calendar-month complete.
  */
 export function runT48WallClockObservation(options: {
   home: string
   journalPath?: string
   minIntervalMs?: number
   force?: boolean
-}): { action: 'appended' | 'skipped'; reason?: string; state: WallClockObservationState } {
+  env?: NodeJS.ProcessEnv
+}): { action: 'appended' | 'skipped', reason?: string, state: WallClockObservationState } {
   const journalPath = options.journalPath ?? resolveT48JournalPath({
-    ...process.env,
+    ...(options.env ?? process.env),
     DS_AGENT_HOME: options.home,
   })
   const minIntervalMs = options.minIntervalMs ?? CADENCE_MS
@@ -61,26 +65,29 @@ export function runT48WallClockObservation(options: {
   }
 
   fs.mkdirSync(options.home, { recursive: true })
-  const result = runT48LongitudinalHarness({
-    journalPath,
-    appendJournal: false,
+  const { runId, report, state: corpus } = runT48PersistentIncrementalStep({
+    home: options.home,
+    wallClockMeasurement: true,
+    env: options.env,
   })
   const entry: T48JournalEntry = {
     schemaVersion: 1,
-    recordedAt: new Date().toISOString(),
+    recordedAt: report.recordedAt,
     syntheticClock: false,
-    runId: result.runId,
-    report: result.report,
+    syntheticWorkload: true,
+    runId,
+    report,
   }
   appendT48Journal(journalPath, entry)
 
   const state: WallClockObservationState = {
     schemaVersion: 1,
-    startedAt: prior?.startedAt ?? new Date().toISOString(),
+    startedAt: prior?.startedAt ?? report.recordedAt,
     home: options.home,
     journalPath,
     samples: (prior?.samples ?? 0) + 1,
     lastSampleAt: entry.recordedAt,
+    corpusSamplesInserted: corpus.insertedSampleIndices.length,
   }
   writeWallClockState(state)
   return { action: 'appended', state }
@@ -94,10 +101,12 @@ function main(): void {
   }
   const force = process.env.DS_AGENT_T48_OBSERVE_FORCE === '1'
   const { action, reason, state } = runT48WallClockObservation({ home, force })
-  console.log(`T48 wall-clock observation — NOT calendar-month acceptance (T48 remains [~])`)
-  console.log(`action=${action} samples=${state.samples} journal=${state.journalPath}`)
+  console.log('T48 wall-clock observation — synthetic fixture workload, real elapsed retention clock')
+  console.log('NOT calendar-month T48 acceptance (T48 remains [~])')
+  console.log(`action=${action} samples=${state.samples} corpusInserted=${state.corpusSamplesInserted ?? 0} journal=${state.journalPath}`)
   if (reason) console.log(`reason=${reason}`)
 }
 
 const entry = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : ''
 if (import.meta.url === entry) main()
+

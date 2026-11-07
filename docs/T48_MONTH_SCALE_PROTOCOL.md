@@ -149,7 +149,10 @@ on a **copy** of the store; this repo does not create cron jobs. See
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 DS_AGENT_HOME=/copy/of/store pnpm t48:observe
 ```
 
-Uses real `recordedAt` timestamps and writes `syntheticClock: false` JSONL rows plus
+Persists the fixture SQLite corpus under `DS_AGENT_HOME` across invocations (incremental
+inserts + held-out queries). Journal rows use `syntheticClock: false` (real retention clock)
+and **`syntheticWorkload: true`** (fixture data only — never implied non-synthetic workload).
+Uses real `recordedAt` timestamps and writes JSONL rows plus
 `$DS_AGENT_HOME/.ds-agent/measurement/t48-wall-clock-state.json` for restartable sampling.
 Default cadence is 24h (`minIntervalMs`); force with `DS_AGENT_T48_OBSERVE_FORCE=1` for tests.
 This accumulates **longitudinal observation data** for future month-spanning analysis; it does

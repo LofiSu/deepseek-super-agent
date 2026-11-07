@@ -48,8 +48,8 @@ force-pushed. Commit **`ffffbf3b`** (PR #166 format fix) and this document use
 ## T48 wall-clock observe (coding harness; not month acceptance)
 
 Protocol: `docs/T48_MONTH_SCALE_PROTOCOL.md`. T48 remains **`[~]`** until a
-real calendar-month corpus exists; wall-clock rows only set `syntheticClock:
-false`.
+real calendar-month corpus exists; wall-clock rows set `syntheticClock: false`
+and **`syntheticWorkload: true`** (fixture corpus persists under `DS_AGENT_HOME`).
 
 **Reproducible operator command** (persistent home; default cadence **24h**;
 `DS_AGENT_T48_OBSERVE_FORCE=1` for an immediate sample without waiting):
@@ -79,7 +79,7 @@ No routine/cron is created by this repo — schedule externally (e.g. daily
 | Mesh queue **backpressure** (local worker capacity) | **done** — `test/worker-mesh.test.ts` “P1-3” |
 | **Cancel** + remote **capability matching** on reassignment | **partial [~]** — capacity/registry accounting tested; explicit cancel-on-mismatch / remote capability filter not a closed acceptance story on these heads |
 | Supported channel **reconnect / backpressure lifecycle** (Feishu/iMessage serve) | **partial [~]** — serve loops and gateway recovery exist on `main`; dedicated reconnect/backpressure acceptance for supported channels is **not** fully implemented in #164–#167 |
-| M6 longitudinal journal + wall-clock observer (#166) | **done** for offline harness; **not** month-scale T48 complete |
+| M6 longitudinal journal + wall-clock observer (#166) | **done** for persistent fixture store + process re-run tests; **not** month-scale T48 complete |
 | M10 loopback deployment / sandbox probe honesty (#167) | **done** for documented probe scope |
 | Real elapsed T48 / physical multi-week machine | **future validation** (legitimate, not confused with above coding gaps) |
 

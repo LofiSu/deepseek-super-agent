@@ -57,6 +57,7 @@ export function runT48LongitudinalHarness(options: {
       schemaVersion: 1,
       recordedAt: new Date().toISOString(),
       syntheticClock: true,
+      syntheticWorkload: true,
       runId,
       report,
     }

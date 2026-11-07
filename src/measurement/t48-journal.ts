@@ -7,8 +7,13 @@ export const DEFAULT_T48_JOURNAL_DIR = '.ds-agent/measurement/t48-journal'
 export interface T48JournalEntry {
   schemaVersion: 1
   recordedAt: string
-  /** True for synthetic fixture clock; false for wall-clock observation samples (still not calendar-month T48 complete). */
+  /**
+   * Measurement clock: true when sample timestamps / ages use an injected fixture clock;
+   * false when inserts and retention use real elapsed time. Not the same as workload labelling.
+   */
   syntheticClock: boolean
+  /** Fixture corpus only — never relabelled non-synthetic because wall-clock mode is on. */
+  syntheticWorkload: boolean
   runId: string
   report: unknown
 }
