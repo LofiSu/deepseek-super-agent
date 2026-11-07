@@ -5,7 +5,8 @@ Exactly-once side effects to local specialists (`delegate_agent`) or remote chan
 ## Persisted lifecycle
 
 - `documents` kind `external_op`: phases `started` → `completed` | `failed` | `unknown_outcome` | `operator_released`.
-- Outbox rows mid-send move to `unknown_outcome` instead of blind `pending` retry.
+- Outbox: `recordOutboxSendStart` on claim/send; `finishOutboxSendOperation` on success or terminal failure so a normal send is not left `started` across restart.
+- Outbox rows still in `sending` at restart move to `unknown_outcome` instead of blind `pending` retry.
 
 ## On `Runtime.start()`
 
@@ -17,7 +18,7 @@ Exactly-once side effects to local specialists (`delegate_agent`) or remote chan
 
 1. Inspect SQLite under `DS_AGENT_HOME`: ticket `collab.approvals`, `external_op` docs, outbox `unknown_outcome` rows.
 2. Verify remote/local state out of band (Feishu message, specialist workspace, etc.).
-3. Approve the `UNKNOWN-OUTCOME` request only if safe to retry; approval runs `releaseUnknownOutcomeEffects` (outbox → `pending`, ops → `operator_released`).
+3. Approve the `UNKNOWN-OUTCOME` request only if safe to retry; approval runs `releaseUnknownOutcomeEffects`, which moves eligible outbox rows back to `pending` and ops to `operator_released` for an **explicit** operator-approved retry — not a silent duplicate on restart.
 4. Deny if the effect already happened or must not repeat; then resume or close the ticket manually.
 
 ## Boundaries

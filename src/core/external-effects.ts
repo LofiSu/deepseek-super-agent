@@ -130,6 +130,24 @@ export function recordOutboxSendStart(store: Store, row: OutboxRow, now: string)
   putExternalOp(store, record)
 }
 
+export function finishOutboxSendOperation(
+  store: Store,
+  row: OutboxRow,
+  phase: 'completed' | 'failed',
+  now: string,
+  detail?: string,
+): void {
+  const id = `outbox_${row.id}`
+  const current = store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, id)
+  if (!current || current.phase !== 'started') return
+  putExternalOp(store, {
+    ...current,
+    phase,
+    updatedAt: now,
+    ...(detail ? { detail } : {}),
+  })
+}
+
 /**
  * After a crash: in-flight delegate runs and mid-send outbox rows cannot be
  * replayed blindly. Mark uncertainty and require owner approval first.

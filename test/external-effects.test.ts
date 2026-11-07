@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   beginDelegateOperation,
   blocksRestartRecovery,
-  finalizeUncertainExternalEffects,
   EXTERNAL_OP_KIND,
+  finalizeUncertainExternalEffects,
+  finishOutboxSendOperation,
+  recordOutboxSendStart,
   type ExternalOperationRecord,
 } from '../src/core/external-effects.ts'
 import type { Ticket } from '../src/shared/types.ts'
@@ -54,6 +56,36 @@ describe('external-effects lifecycle', () => {
       const ops = store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)
       expect(ops[0]?.phase).toBe('unknown_outcome')
       expect(blocksRestartRecovery(saved, store)).toBe(true)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('successful outbox send completes external_op so restart does not mark unknown', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    try {
+      const at = new Date().toISOString()
+      const row = {
+        id: 'obx_1',
+        ticketId: 'ticket_y',
+        channel: 'im',
+        status: 'pending' as const,
+        replyId: 'rpl_1',
+        thread: 'feishu:t',
+        target: { provider: 'feishu', chat_id: 't' },
+        text: 'hi',
+        idempotencyKey: 'idem_1',
+        createdAt: at,
+      }
+      store.enqueueOutbox(row)
+      store.claimOutbox(row.id)
+      recordOutboxSendStart(store, row, at)
+      finishOutboxSendOperation(store, row, 'completed', at, 'ext_99')
+      const summary = finalizeUncertainExternalEffects(store, at)
+      expect(summary.unknownOps).toBe(0)
+      const op = store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, `outbox_${row.id}`)
+      expect(op?.phase).toBe('completed')
     } finally {
       store.close()
     }
