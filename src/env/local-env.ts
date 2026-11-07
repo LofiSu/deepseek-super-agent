@@ -5,7 +5,14 @@ import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import { UserError } from '../shared/errors.ts'
 import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
 import type { Vault } from './vault.ts'
+import { enforceRequiredSandbox } from './sandbox-probe.ts'
 import { readIsolationFromEnv, sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
+
+function unsharePidRequiredFromEnv(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.DS_AGENT_SANDBOX_REQUIRED?.trim()
+  if (!raw) return false
+  return raw.split(',').map(t => t.trim()).includes('process')
+}
 
 export interface LocalEnvOptions {
   timeoutMs?: number
@@ -61,10 +68,15 @@ export class LocalEnv implements EnvPort {
     // value fails closed instead of being silently shadowed.
     const envReadIsolation = readIsolationFromEnv(env)
     const sandbox: SandboxPolicy = options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }
+    const unsharePid = (process.platform === 'linux' && unsharePidRequiredFromEnv(env)) || sandbox.unsharePid === true
     this.sandbox = {
       ...sandbox,
       readIsolation: options.readIsolation ?? sandbox.readIsolation ?? envReadIsolation,
       readRoots: [...(sandbox.readRoots ?? []), ...(options.readRoots ?? [])],
+      unsharePid,
+    }
+    if (env.DS_AGENT_SANDBOX_REQUIRED?.trim()) {
+      enforceRequiredSandbox(env, this.sandbox)
     }
     const vaultSecrets = this.vault
       ? Object.values(this.vault.resolveForChild(this.vaultNames)).filter(
