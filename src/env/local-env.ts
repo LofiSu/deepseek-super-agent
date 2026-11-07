@@ -5,6 +5,7 @@ import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import { UserError } from '../shared/errors.ts'
 import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
 import type { Vault } from './vault.ts'
+import { enforceRequiredSandboxOnHost } from './sandbox-probe.ts'
 import { readIsolationFromEnv, sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
 
 export interface LocalEnvOptions {
@@ -65,6 +66,9 @@ export class LocalEnv implements EnvPort {
       ...sandbox,
       readIsolation: options.readIsolation ?? sandbox.readIsolation ?? envReadIsolation,
       readRoots: [...(sandbox.readRoots ?? []), ...(options.readRoots ?? [])],
+    }
+    if (this.sandbox.enabled !== false && env.DS_AGENT_SANDBOX_REQUIRED?.trim()) {
+      enforceRequiredSandboxOnHost(env)
     }
     const vaultSecrets = this.vault
       ? Object.values(this.vault.resolveForChild(this.vaultNames)).filter(

@@ -1,8 +1,8 @@
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
-import { createServer } from 'node:http'
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { UserError } from '../shared/errors.ts'
 import { readIsolationFromEnv, wrapBashCommand, type SandboxPolicy, type SandboxSystem } from './seccomp.ts'
 
 /** Diagnostic only: wrapper on PATH and argv shape. Never implies kernel enforcement. */
@@ -31,10 +31,16 @@ export interface SandboxConfinementDimensions {
   process: SandboxDimensionStatus
 }
 
+export type SandboxRequiredDimension = 'write' | 'read' | 'network' | 'process'
+
+const REQUIRED_DIMENSIONS = new Set<SandboxRequiredDimension>(['write', 'read', 'network', 'process'])
+
 /** Injectable runner for unit tests (fake wrappers, forced failures). */
 export interface SandboxConfinementProbeHooks {
   runWrapped?: (command: string, policy: SandboxPolicy, system: SandboxSystem) => SpawnSyncReturns<string>
   runUnsandboxed?: (command: string) => SpawnSyncReturns<string>
+  /** When set, skips spawning the external loopback fixture. */
+  loopbackPort?: number
 }
 
 /** Host execution probe: positive exec/write + negative write outside writable root. */
@@ -155,57 +161,131 @@ function probeReadIsolation(
   return 'probe_failed'
 }
 
-function probeNetworkIsolation(
-  policy: SandboxPolicy,
+const LOOPBACK_FIXTURE = join(import.meta.dirname, '../../test/fixtures/sandbox-loopback-server.mjs')
+
+function withLoopbackFixture<T>(
+  hooks: SandboxConfinementProbeHooks,
   system: SandboxSystem,
-  runWrapped: SandboxConfinementProbeHooks['runWrapped'],
-): SandboxDimensionStatus {
-  if (policy.allowNetwork === true) return 'unsupported'
-  if (system.platform !== 'linux' && system.platform !== 'darwin') return 'unsupported'
-  const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
-  const server = createServer((_req, res) => {
-    res.writeHead(200, { 'content-type': 'text/plain' })
-    res.end('ds-agent-sandbox-net-ok')
+  fn: (port: number) => T,
+): T {
+  if (hooks.loopbackPort !== undefined) return fn(hooks.loopbackPort)
+  const portFile = join(tmpdir(), `ds-agent-sandbox-net-${process.pid}-${Date.now()}.port`)
+  rmSync(portFile, { force: true })
+  const child = spawn(system.execPath ?? process.execPath, [LOOPBACK_FIXTURE, portFile], {
+    stdio: 'ignore',
+    detached: false,
   })
-  let port = 0
   try {
-    port = bindLoopbackSync(server)
-    const node = shellQuote(system.execPath ?? process.execPath)
-    const fetchCmd = (hostPort: string) => [
-      `${node} -e "fetch('http://${hostPort}/').then(r=>r.ok?process.exit(0):process.exit(2)).catch(()=>process.exit(1))"`,
-    ].join('')
-    const target = `127.0.0.1:${port}`
-    const positive = runner(
-      fetchCmd(target),
-      { ...policy, allowNetwork: true },
-      system,
-    )
-    if (spawnFailed(positive) || positive.status !== 0) return 'probe_failed'
-    const negative = runner(
-      fetchCmd(target),
-      { ...policy, allowNetwork: false },
-      system,
-    )
-    if (spawnFailed(negative)) return 'probe_failed'
-    if (negative.status === 0) return 'not_enforced'
-    return 'enforced'
-  } catch {
-    return 'probe_failed'
+    const deadline = Date.now() + 8_000
+    while (Date.now() < deadline) {
+      if (existsSync(portFile)) {
+        const raw = readFileSync(portFile, 'utf8').trim()
+        const port = Number.parseInt(raw, 10)
+        if (Number.isFinite(port) && port > 0) return fn(port)
+      }
+      spawnSync('sleep', ['0.02'], { stdio: 'ignore' })
+    }
+    throw new Error('loopback fixture did not publish a port')
   } finally {
-    server.closeAllConnections()
-    server.close()
+    if (child.pid != null) {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        /* already gone */
+      }
+    }
+    rmSync(portFile, { force: true })
   }
 }
 
-function bindLoopbackSync(server: ReturnType<typeof createServer>): number {
-  server.listen(0, '127.0.0.1')
-  const deadline = Date.now() + 5_000
-  while (!server.listening && Date.now() < deadline) {
-    /* spin until listening */
+function probeNetworkIsolation(
+  policy: SandboxPolicy,
+  system: SandboxSystem,
+  hooks: SandboxConfinementProbeHooks,
+): SandboxDimensionStatus {
+  if (policy.allowNetwork === true) return 'unsupported'
+  if (system.platform !== 'linux' && system.platform !== 'darwin') return 'unsupported'
+  const runner = hooks.runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
+  const node = shellQuote(system.execPath ?? process.execPath)
+  const fetchCmd = (hostPort: string) =>
+    `${node} -e "fetch('http://${hostPort}/').then(r=>r.ok?process.exit(0):process.exit(2)).catch(()=>process.exit(1))"`
+  try {
+    return withLoopbackFixture(hooks, system, port => {
+      const target = `127.0.0.1:${port}`
+      const positive = runner(fetchCmd(target), { ...policy, allowNetwork: true }, system)
+      if (spawnFailed(positive) || positive.status !== 0) return 'probe_failed'
+      const negative = runner(fetchCmd(target), { ...policy, allowNetwork: false }, system)
+      if (spawnFailed(negative)) return 'probe_failed'
+      if (negative.status === 0) return 'not_enforced'
+      return 'enforced'
+    })
+  } catch {
+    return 'probe_failed'
   }
-  const addr = server.address()
-  if (typeof addr !== 'object' || addr === null) throw new Error('loopback bind failed')
-  return addr.port
+}
+
+function parseRequiredDimensionsEnv(env: NodeJS.ProcessEnv = process.env): Set<SandboxRequiredDimension> {
+  const raw = env.DS_AGENT_SANDBOX_REQUIRED?.trim()
+  if (raw === undefined || raw === '') return new Set()
+  const out = new Set<SandboxRequiredDimension>()
+  for (const token of raw.split(',').map(t => t.trim()).filter(Boolean)) {
+    if (!REQUIRED_DIMENSIONS.has(token as SandboxRequiredDimension)) {
+      throw new UserError(
+        `invalid DS_AGENT_SANDBOX_REQUIRED token "${token}" (expected write, read, network, process)`,
+      )
+    }
+    out.add(token as SandboxRequiredDimension)
+  }
+  return out
+}
+
+function isDimensionSatisfied(required: SandboxRequiredDimension, status: SandboxDimensionStatus): boolean {
+  void required
+  return status === 'enforced'
+}
+
+/**
+ * Fail closed when the operator listed dimensions in `DS_AGENT_SANDBOX_REQUIRED`
+ * and the latest host probe did not show enforcement for each one.
+ * Default (unset env): write must be `enforced` only; `not_enforced`, `unsupported`, and `probe_failed` deny.
+ */
+export function assertRequiredSandboxDimensions(
+  confinement: SandboxConfinementProbe,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const required = parseRequiredDimensionsEnv(env)
+  const checks: SandboxRequiredDimension[]
+    = required.size > 0
+      ? [...required]
+      : ['write']
+  for (const dim of checks) {
+    const status = dim === 'write'
+      ? (confinement.dimensions.write === 'unsupported' || confinement.dimensions.write === 'probe_failed'
+        ? confinement.outcome
+        : confinement.dimensions.write)
+      : confinement.dimensions[dim]
+    if (!isDimensionSatisfied(dim, status)) {
+      const label = required.size > 0 ? `required dimension ${dim}` : 'default write sandbox'
+      throw new UserError(
+        `${label} is not satisfied (status=${status}); refusing unconfined or unproven worker bash`,
+      )
+    }
+  }
+}
+
+/** Run host confinement probe and fail closed when required dimensions are not met. */
+export function enforceRequiredSandboxOnHost(
+  env: NodeJS.ProcessEnv = process.env,
+): SandboxConfinementProbe {
+  const system: SandboxSystem = {
+    platform: process.platform,
+    available: bin => spawnSync('which', [bin], { stdio: 'ignore' }).status === 0,
+    exists: existsSync,
+    execPath: process.execPath,
+  }
+  const confinement = probeSandboxConfinement(system)
+  assertRequiredSandboxDimensions(confinement, env)
+  return confinement
 }
 
 /** Wrapped `kill -0 $$` should succeed; wrapped kill of parent pid should fail when process isolation holds. */
@@ -336,7 +416,7 @@ export function probeSandboxConfinement(
 
     const readPolicy: SandboxPolicy = { ...policy, readIsolation: true }
     dimensions.read = probeReadIsolation(readPolicy, system, hooks.runWrapped, forbiddenFile)
-    dimensions.network = probeNetworkIsolation(policy, system, hooks.runWrapped)
+    dimensions.network = probeNetworkIsolation(policy, system, hooks)
     dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped)
 
     let detail: string

@@ -23,6 +23,7 @@ default. Real Feishu/GitHub accounts are operator-gated; CI uses simulated loopb
 | `DS_AGENT_REMOTE_MESH` | JSON array of remote peers (HTTPS or loopback HTTP); secrets in env only |
 | `DS_AGENT_UI_TOKEN` | Required for `ds-agent ui` (≥16 chars) |
 | `DS_AGENT_SANDBOX_READ_ISOLATION` | Opt-in `1`/`true`/`strict` strict read roots |
+| `DS_AGENT_SANDBOX_REQUIRED` | Comma list (`write`, `read`, `network`, `process`). When set, `LocalEnv` runs `probeSandboxConfinement()` at construction and **fails closed** unless every listed dimension is **`enforced`** (`not_enforced`, `unsupported`, and `probe_failed` deny). Default unset: implicit **write** gate uses the same rule. **`process` is not guaranteed** on Darwin; **`network` probes use a child loopback fixture** so synchronous `spawnSync` wrapped children can connect. |
 | `DS_AGENT_ALLOW_MOCK_FIXTURE` | Offline CI only; must be `1` with `CI=true` in automation |
 
 ## Unsupported resident inbound adapters
