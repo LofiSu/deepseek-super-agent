@@ -256,12 +256,27 @@ export class Store {
     ).run(error, id)
   }
 
-  /** A process died mid-send. Requeue the row; the Channel should dedupe by idempotency key. */
-  requeueSending(): number {
+  /** Mid-send rows after a crash: unknown outcome until the owner releases retry. */
+  markSendingOutboxUnknownOutcome(): number {
     const result = this.db.prepare(
-      `UPDATE outbox SET status = 'pending' WHERE status = 'sending'`,
+      `UPDATE outbox SET status = 'unknown_outcome', error = COALESCE(error, 'interrupted while sending') WHERE status = 'sending'`,
     ).run()
     return Number(result.changes ?? 0)
+  }
+
+  /** After UNKNOWN-OUTCOME approval: return rows to pending for idempotent drain. */
+  requeueUnknownOutcomeOutbox(ticketId: string): number {
+    const result = this.db.prepare(
+      `UPDATE outbox SET status = 'pending', next_attempt_at = NULL WHERE status = 'unknown_outcome' AND ticket_id = ?`,
+    ).run(ticketId)
+    return Number(result.changes ?? 0)
+  }
+
+  /**
+   * @deprecated Uncertain sends use `unknown_outcome`; operator must approve before requeue.
+   */
+  requeueSending(): number {
+    return this.markSendingOutboxUnknownOutcome()
   }
 
   addSubscription(threadKey: string, ticketId: string, at: string): void {

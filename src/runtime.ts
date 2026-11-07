@@ -17,6 +17,7 @@ import {
   recoveryBoundaryFromOutcomes,
   type RecoveryBoundaryRecord,
 } from './core/recovery-boundary.ts'
+import { finalizeUncertainExternalEffects } from './core/external-effects.ts'
 import { arbitrateSubscribers } from './core/intake.ts'
 import { withSessionRole } from './core/session-role.ts'
 import { bindRolePorts } from './core/role-ports.ts'
@@ -1149,6 +1150,12 @@ export class Runtime {
     // that our own asynchronous launch has already marked `running`.
     this.recoveryAttempted = true
     const attemptedAt = new Date().toISOString()
+    const uncertain = finalizeUncertainExternalEffects(this.store, attemptedAt)
+    if (uncertain.unknownOps > 0 || uncertain.unknownOutbox > 0) {
+      this.log.info(
+        `[recovery] uncertain external effects ops=${uncertain.unknownOps} outbox=${uncertain.unknownOutbox} approvals=${uncertain.approvalsQueued}`,
+      )
+    }
     if (this.model.name === 'MockModel') {
       this.log.info('[recovery] deferred reason=mock-model')
       this.persistRecoveryBoundary(recoveryBoundaryFromOutcomes(

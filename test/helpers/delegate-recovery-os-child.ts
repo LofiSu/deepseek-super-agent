@@ -10,6 +10,7 @@ import { ScriptedModel } from '../scripted-model.ts'
 import { ToolRegistry } from '../../src/harness/tools.ts'
 import { Runtime } from '../../src/runtime.ts'
 import type { Ticket } from '../../src/shared/types.ts'
+import { UNKNOWN_OUTCOME_PREFIX } from '../../src/core/external-effects.ts'
 import { RECOVERY_BOUNDARY_DOC_ID, type RecoveryBoundaryRecord } from '../../src/core/recovery-boundary.ts'
 
 const home = process.argv[2]
@@ -79,8 +80,10 @@ async function main(): Promise<void> {
   })
 
   if (mode === 'seed') {
-    runtime.store.putDoc('ticket', 'ticket_delegate_os', runningTicket())
+    // Start once with no tickets so recoveryAttempted is set; then seed a
+    // running ticket without auto-recover mutating it before delegate_agent.
     runtime.start({ assessPending: false })
+    runtime.store.putDoc('ticket', 'ticket_delegate_os', runningTicket())
     void tools.invoke(
       { id: 'd1', name: 'delegate_agent', args: { agent: 'ipc-hold', task } },
       { sessionId: 'worker_ticket_delegate_os', role: 'worker', ticketId: 'ticket_delegate_os' },
@@ -102,6 +105,8 @@ async function main(): Promise<void> {
       assignmentCount: ticket?.assignments.length,
       lastAssignmentState: ticket?.assignments.at(-1)?.state,
       recoveredInputs: ticket?.inputs.filter(i => i.text?.startsWith('RECOVERED:')).length ?? 0,
+      unknownApprovals: ticket?.collab?.approvals?.filter(a =>
+        a.status === 'pending' && a.action.startsWith(UNKNOWN_OUTCOME_PREFIX)).length ?? 0,
     })}\n`)
   }
 

@@ -319,7 +319,7 @@ export interface OutboxRow {
   /** Delivery address copied from `ChannelRef.address` (repo/issue or chat_id/message_id). */
   target: Record<string, string>
   text: string
-  status: 'pending' | 'sending' | 'sent' | 'failed'
+  status: 'pending' | 'sending' | 'unknown_outcome' | 'sent' | 'failed'
   /** Stable key the remote channel can use to deduplicate a retried send. */
   idempotencyKey?: string
   attempts?: number

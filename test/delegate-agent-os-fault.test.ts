@@ -5,8 +5,6 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { LocalAgentRegistry, type LocalAgentSpec } from '../src/env/local-agents.ts'
 import { Store } from '../src/store/sqlite.ts'
-import type { RecoveryBoundaryRecord } from '../src/core/recovery-boundary.ts'
-import { RECOVERY_BOUNDARY_DOC_ID } from '../src/core/recovery-boundary.ts'
 import type { Ticket } from '../src/shared/types.ts'
 
 const children: ChildProcess[] = []
@@ -63,7 +61,7 @@ afterEach(() => {
 })
 
 describe('delegate_agent OS fault boundary', () => {
-  it('SIGKILL during delegate_agent leaves recovery/latest completed; restart recovery then single delegate_agent', async () => {
+  it('SIGKILL during delegate_agent holds UNKNOWN-OUTCOME approval instead of auto RECOVERED replay', async () => {
     const home = tempHome()
     fs.writeFileSync(
       path.join(home, 'local-agents.json'),
@@ -99,9 +97,6 @@ describe('delegate_agent OS fault boundary', () => {
       expect(ticket.assignments.length).toBeGreaterThanOrEqual(1)
       const last = ticket.assignments.at(-1)
       expect(['pending', 'running']).toContain(last?.state)
-      const boundary = store.getDoc<RecoveryBoundaryRecord>('recovery', RECOVERY_BOUNDARY_DOC_ID)
-      expect(boundary?.outcome).toBe('completed')
-      expect(boundary?.model).toBe('ScriptedRecoveryModel')
     } finally {
       store.close()
     }
@@ -111,8 +106,8 @@ describe('delegate_agent OS fault boundary', () => {
     const after = await waitForMarker(home)
     expect(after.phase).toBe('post-recovery')
     expect(after.recoveryOutcome).toBe('completed')
-    expect(after.recoveredInputs).toBeGreaterThanOrEqual(1)
-    expect(['pending', 'running']).toContain(after.lastAssignmentState)
+    expect(after.recoveredInputs).toBe(0)
+    expect(after.unknownApprovals).toBeGreaterThanOrEqual(1)
     second.kill('SIGTERM')
   }, 90_000)
 
