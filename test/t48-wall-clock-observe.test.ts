@@ -33,4 +33,3 @@ describe('T48 wall-clock observation (not month-scale acceptance)', () => {
     expect(skipped.action).toBe('skipped')
   })
 })
-
