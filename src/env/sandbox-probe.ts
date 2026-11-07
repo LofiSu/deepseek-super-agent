@@ -171,7 +171,8 @@ function withLoopbackFixture<T>(
   if (hooks.loopbackPort !== undefined) return fn(hooks.loopbackPort)
   const portFile = join(tmpdir(), `ds-agent-sandbox-net-${process.pid}-${Date.now()}.port`)
   rmSync(portFile, { force: true })
-  const child = spawn(system.execPath ?? process.execPath, [LOOPBACK_FIXTURE, portFile], {
+  // Loopback fixture runs on the real host Node, not a synthetic probe execPath (e.g. unit tests).
+  const child = spawn(process.execPath, [LOOPBACK_FIXTURE, portFile], {
     stdio: 'ignore',
     detached: false,
   })
