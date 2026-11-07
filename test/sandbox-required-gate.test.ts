@@ -96,7 +96,15 @@ describe('required sandbox dimensions gate', () => {
     ).toThrow(UserError)
   })
 
-  it('LocalEnv fails closed when DS_AGENT_SANDBOX_REQUIRED includes process and probe is not enforced', () => {
+  it('LocalEnv fails closed when DS_AGENT_SANDBOX_REQUIRED includes process and host probe is not enforced', () => {
+    const system: SandboxSystem = {
+      platform: process.platform,
+      available: bin => spawnSync('which', [bin], { stdio: 'ignore' }).status === 0,
+      exists: () => true,
+      execPath: process.execPath,
+    }
+    const probe = probeSandboxConfinement(system)
+    if (probe.dimensions.process === 'enforced') return
     const home = tempHome()
     const prev = process.env.DS_AGENT_SANDBOX_REQUIRED
     process.env.DS_AGENT_SANDBOX_REQUIRED = 'process'

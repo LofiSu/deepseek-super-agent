@@ -17,6 +17,8 @@ export interface SandboxPolicy {
   readIsolation?: boolean
   /** Extra host paths exposed read-only in strict mode (absolute paths). */
   readRoots?: readonly string[]
+  /** Linux bwrap: separate PID namespace when the wrapper supports it. */
+  unsharePid?: boolean
 }
 
 export interface SandboxSystem {
@@ -176,6 +178,7 @@ export function wrapBashCommand(
       : [
         'bwrap',
         ...(policy.allowNetwork ? [] : ['--unshare-net']),
+        ...(policy.unsharePid === true ? ['--unshare-pid'] : []),
         '--ro-bind', '/', '/',
         '--dev', '/dev',
         '--proc', '/proc',

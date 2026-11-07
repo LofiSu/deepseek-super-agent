@@ -41,6 +41,8 @@ export interface SandboxConfinementProbeHooks {
   runUnsandboxed?: (command: string) => SpawnSyncReturns<string>
   /** When set, skips spawning the external loopback fixture. */
   loopbackPort?: number
+  /** Inject a known host PID instead of spawning the external fixture. */
+  externalPid?: number
 }
 
 /** Host execution probe: positive exec/write + negative write outside writable root. */
@@ -337,23 +339,69 @@ export function enforceRequiredSandboxOnHost(
   return enforceRequiredSandbox(env, baseProbePolicy(undefined, env))
 }
 
-/** Wrapped `kill -0 $$` should succeed; wrapped kill of parent pid should fail when process isolation holds. */
+const EXTERNAL_PID_FIXTURE = join(import.meta.dirname, '../../test/fixtures/sandbox-external-pid-fixture.mjs')
+
+/**
+ * Process isolation: `kill -0 $PPID` inside wrapped bash targets the sandbox
+ * parent (often the worker shell), not the host daemon — a false negative.
+ * The owned external PID fixture is the positive control for host visibility.
+ */
 function probeProcessIsolation(
   policy: SandboxPolicy,
   system: SandboxSystem,
   runWrapped: SandboxConfinementProbeHooks['runWrapped'],
+  hooks: SandboxConfinementProbeHooks,
 ): SandboxDimensionStatus {
   if (system.platform !== 'linux') {
-    // No host-safe wrapped parent-kill probe on Darwin without broader policy review.
     return 'unsupported'
   }
   const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
-  const selfAlive = runner('kill -0 $$', policy, system)
+  const runUnsandboxed = hooks.runUnsandboxed ?? runUnsandboxedDefault
+  const probePolicy: SandboxPolicy = { ...policy, unsharePid: true }
+  const selfAlive = runner('kill -0 $$', probePolicy, system)
   if (spawnFailed(selfAlive) || selfAlive.status !== 0) return 'probe_failed'
-  const parentSignal = runner('kill -0 $PPID', policy, system)
-  if (spawnFailed(parentSignal)) return 'probe_failed'
-  if (parentSignal.status === 0) return 'not_enforced'
-  return 'enforced'
+
+  const pidFile = join(tmpdir(), `ds-agent-sandbox-extpid-${process.pid}-${Date.now()}.json`)
+  rmSync(pidFile, { force: true })
+  let child: ReturnType<typeof spawn> | undefined
+  try {
+    if (hooks.externalPid !== undefined) {
+      const ext = hooks.externalPid
+      const wrapped = runner(`kill -0 ${ext}`, probePolicy, system)
+      if (spawnFailed(wrapped)) return 'probe_failed'
+      return wrapped.status === 0 ? 'not_enforced' : 'enforced'
+    }
+    child = spawn(process.execPath, [EXTERNAL_PID_FIXTURE, pidFile], { stdio: 'ignore' })
+    const deadline = Date.now() + 8_000
+    let externalPid: number | undefined
+    while (Date.now() < deadline) {
+      if (existsSync(pidFile)) {
+        const parsed = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid?: number }
+        if (typeof parsed.pid === 'number') {
+          externalPid = parsed.pid
+          break
+        }
+      }
+      spawnSync('sleep', ['0.02'], { stdio: 'ignore' })
+    }
+    if (externalPid === undefined) return 'probe_failed'
+    const control = runUnsandboxed(`kill -0 ${externalPid}`)
+    if (spawnFailed(control) || control.status !== 0) return 'probe_failed'
+    const wrapped = runner(`kill -0 ${externalPid}`, probePolicy, system)
+    if (spawnFailed(wrapped)) return 'probe_failed'
+    return wrapped.status === 0 ? 'not_enforced' : 'enforced'
+  } catch {
+    return 'probe_failed'
+  } finally {
+    if (child?.pid != null) {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        /* gone */
+      }
+    }
+    rmSync(pidFile, { force: true })
+  }
 }
 
 function emptyDimensions(): SandboxConfinementDimensions {
@@ -467,7 +515,7 @@ export function probeSandboxConfinement(
 
     dimensions.read = probeReadIsolation(policy, system, hooks.runWrapped, forbiddenFile)
     dimensions.network = probeNetworkIsolation(policy, system, hooks)
-    dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped)
+    dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped, hooks)
 
     let detail: string
     if (outcome === 'enforced') {
