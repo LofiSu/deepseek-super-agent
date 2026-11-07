@@ -1,7 +1,8 @@
 # Four-PR workflow progress (M3 / M1 / M6 / M10)
 
-> Checkpoint: 2026-11-08. `main` unchanged for #163; open implementation PRs #164–#167.
-> Offline gate command:
+> Checkpoint: 2026-11-08. `main` unchanged; open implementation PRs **#164–#167**.
+> **[#163](https://github.com/LofiSu/deepseek-super-agent/pull/163)** (`feat/health-sandbox-enforcement-probe`) remains open on the remote branch but is **omitted** from the four-PR integration stack on purpose (narrower M10 health probe; superseded in scope by #167 deployment/sandbox probes).
+> Offline gate command (no exclusions):
 > `CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 bash -o pipefail -c 'pnpm test'`
 
 ## Co-author trailer violation (historical, not rewritten)
@@ -16,10 +17,11 @@ force-pushed. Commit **`ffffbf3b`** (PR #166 format fix) and this document use
 
 | PR | Branch | Base | Head | `typecheck and test` | Local full suite (pipefail) |
 |----|--------|------|------|----------------------|-----------------------------|
-| [#164](https://github.com/LofiSu/deepseek-super-agent/pull/164) | `feat/m3-recovery-boundary-os-fault` | `main` | `7bc212199f76c360bac4a644732e7e126a30c215` | **pass** (run `42393403924`) | **97** files pass, **3** skipped (100); **924** passed, **16** skipped (940) |
-| [#165](https://github.com/LofiSu/deepseek-super-agent/pull/165) | `feat/m1-remote-mesh-runtime-path` | `main` | `2d8ead0e9f156c5f30ecc916a60f62903476d5b5` | pending CI on new head | **101** / **3** (104); **935** / **16** (951) local pipefail |
-| [#166](https://github.com/LofiSu/deepseek-super-agent/pull/166) | `feat/m6-t48-longitudinal-harness` | `main` | `fb72685e747f7d161864182337c698257a3acab1` | pending CI on new head | **97** / **3** (100); **926** / **16** (942) local pipefail |
-| [#167](https://github.com/LofiSu/deepseek-super-agent/pull/167) | `feat/m10-deployment-security` | `main` | `9c3ad44aba8630ceccd452764f1e3f8271cf440c` | **pass** (run `42395066250`) | **97** / **3** (100); **930** / **16** (946) |
+| [#164](https://github.com/LofiSu/deepseek-super-agent/pull/164) **M3** | `feat/m3-recovery-boundary-os-fault` | `main` | **`7009aebea58e17766e9cf24f216f8f51f826ee39`** | **pass** (run `42401111947`) | **98** / **3** (101); **926** / **16** (942) pipefail |
+| [#165](https://github.com/LofiSu/deepseek-super-agent/pull/165) **M1** | `feat/m1-remote-mesh-runtime-path` | `main` | **`a19879f52ea2c818bd7fc52f946ce8e164db3ba6`** | re-run CI on head | **101** / **3** (104); **935** / **16** (951) pipefail |
+| [#166](https://github.com/LofiSu/deepseek-super-agent/pull/166) **M6** | `feat/m6-t48-longitudinal-harness` | `main` | **`ec75f7f93a2c44b36a26e173b17f70dfb5f6e715`** | re-run CI on head | **97** / **3** (100); **926** / **16** (942) pipefail |
+| [#167](https://github.com/LofiSu/deepseek-super-agent/pull/167) **M10** | `feat/m10-deployment-security` | `main` | **`eeb0245fcd44e63ddacf9eb2e0c1c7e50f8a6528`** | **pass** (run `42402569894`) | **98** / **3** (101); **942** / **16** (958) pipefail |
+| **integration** `integration/final-167-m10` | (merges #164+#165+#166+#167 tips) | `main` | **`c01bd0b9d6a2b7169682ff19c8950e70bb6a6f76`** | local only | **112** / **3** (115); **972** / **16** (988) pipefail |
 
 `demo fixture smoke` is **skipped** on all four (CI dependency: `typecheck and test`).
 
@@ -36,16 +38,16 @@ force-pushed. Commit **`ffffbf3b`** (PR #166 format fix) and this document use
 `test/live-modules.test.ts` is **not** excluded; it runs under
 `DS_AGENT_ALLOW_MOCK_FIXTURE=1` like CI.
 
-### #165 / #166 / #167 fix heads
+### Current tip SHAs (authoritative mapping)
 
-- **#165 `2d8ead0`**: `assignment_cancel` over authenticated A2A HTTP,
-  `WorkerPlacement.cancelRemote`, OS-process test suppressing late result after
-  cancel ack (prior `b53bd02` had result-wait only).
-- **#167 `9c3ad44`**: sandbox write probe honesty (no false-positive
-  “enforced”), injectable fake wrapper regression.
-- **#166 `fb72685`**: persistent fixture store (`t48-persistent-store.ts`),
-  wall-clock observe incremental corpus, `syntheticWorkload` journal field,
-  `test/t48-persistent-process.test.ts` (prior `ffffbf3` was EOF format fix).
+- **#164 M3 `7009aeb`**: recovery-boundary docs + OS-fault delegate tests (includes `59a5355` runtime.create fix).
+- **#165 M1 `a19879f`**: format/EOF hygiene atop remote mesh + cancel path (`2d8ead0` feature work).
+- **#166 M6 `ec75f7f`**: EOF format fix on T48 observer + persistent store (`fb72685` corpus harness).
+- **#167 M10 `eeb0245`**: required sandbox gate aligned with `LocalEnv` effective policy (after `06691c2` / `daaae12` loopback probe fixes); CI green on `42402569894`.
+
+### `live-modules.test.ts` on integration
+
+Under `CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1`, all **11** cases in `test/live-modules.test.ts` run (MockModel path). On `integration/final-167-m10` @ `c01bd0b`, three consecutive full-suite and isolated-file runs **passed** (2026-11-08). Earlier **953** passed / **966** total counts reflected per-PR heads before M1/M3 mesh and deployment tests landed on the integration branch (**972** passed / **988** total as of this checkpoint).
 
 ## T48 wall-clock observe (coding harness; not month acceptance)
 
@@ -69,6 +71,11 @@ pnpm t48:observe
 Journal default file:
 `/workspace/ds-agent-longitudinal/.ds-agent/measurement/t48-journal/t48-measurements.jsonl`
 
+Wall-clock state file:
+`/workspace/ds-agent-longitudinal/.ds-agent/measurement/t48-wall-clock-state.json`
+
+**First observation after M6 head `ec75f7f`** (existing on disk; no new sample forced for this gate): **1** journal row, **`samples`: 1**, `lastSampleAt` `2026-11-07T18:08:53.173Z`, `corpusSamplesInserted`: 1, `syntheticClock`: false, `syntheticWorkload`: true. Stable operator entrypoint: `pnpm t48:observe` with `DS_AGENT_HOME=/workspace/ds-agent-longitudinal` and optional `DS_AGENT_T48_JOURNAL_DIR=.ds-agent/measurement/t48-journal` (see command block above).
+
 No routine/cron is created by this repo — schedule externally (e.g. daily
 `systemd`/`cron` invoking the same env block).
 
@@ -87,6 +94,6 @@ No routine/cron is created by this repo — schedule externally (e.g. daily
 
 ## Local gates re-run (evidence)
 
-On each PR worktree after final heads: `pnpm typecheck`, `pnpm lint`,
-`DS_AGENT_FORMAT_BASE=origin/main pnpm format:check` — **clean** on #165–#167
-and on #166 after `ffffbf3`.
+2026-11-08 on integration `c01bd0b` and per-PR worktrees at tips above:
+`pnpm typecheck`, `pnpm lint`, `DS_AGENT_FORMAT_BASE=origin/main pnpm format:check` — **clean**;
+`CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 bash -o pipefail -c 'pnpm test'` — **pass** on #164–#167 tips and integration (counts in matrix).
