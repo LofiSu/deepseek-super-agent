@@ -15,6 +15,7 @@ import {
   type FeishuConfig,
 } from '../channels/feishu.ts'
 import { Outbox, type OutboundAdapter } from '../channels/outbox-adapter.ts'
+import { ingestResidentTrigger, ResidentIngressRejectedError, residentIngressLimitFromEnv } from './channel-resident-gate.ts'
 import type { Runtime } from '../runtime.ts'
 import type { Trigger } from '../shared/types.ts'
 
@@ -192,6 +193,7 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
   outbox.start(400)
 
   const aborted = (): boolean => options.signal?.aborted === true
+  const ingressLimit = residentIngressLimitFromEnv(process.env)
   const explicitSince = typeof options.since === 'number'
     && Number.isFinite(options.since)
     && options.since > 0
@@ -212,22 +214,31 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
       if (aborted()) break
       try {
         const triggers = await source.pull()
+        let cursorBlockedByIngress = false
         for (const trigger of triggers) {
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[feishu] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
-            // The opt-in model Slow Path lives behind ingestAsync; rules mode
-            // stays exactly the sync path, so this is a no-op by default.
-            await runtime.ingestAsync(trigger)
+            await ingestResidentTrigger(runtime, trigger, {
+              limit: ingressLimit,
+              signal: options.signal,
+              log,
+              channel: 'feishu',
+            })
           } catch (error) {
             log(`[feishu] ingest failed ${messageOf(error)}`)
+            if (error instanceof ResidentIngressRejectedError) {
+              cursorBlockedByIngress = true
+              break
+            }
           }
         }
         // Persist only after the pulled triggers were ingested, matching the
         // iMessage loop: a crashed ingest window is retried on the next pull.
         const advanced = source.cursorMs
         if (
-          Number.isFinite(advanced)
+          !cursorBlockedByIngress
+          && Number.isFinite(advanced)
           && advanced > 0
           && (cursor === undefined || advanced > cursor)
         ) {

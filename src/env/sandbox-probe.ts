@@ -41,6 +41,8 @@ export interface SandboxConfinementProbeHooks {
   runUnsandboxed?: (command: string) => SpawnSyncReturns<string>
   /** When set, skips spawning the external loopback fixture. */
   loopbackPort?: number
+  /** Inject a known host PID instead of spawning the external fixture. */
+  externalPid?: number
 }
 
 /** Host execution probe: positive exec/write + negative write outside writable root. */
@@ -67,16 +69,15 @@ export function probeSandboxWrapper(
   system: SandboxSystem = defaultSystem(),
   probePolicy: SandboxPolicy = baseProbePolicy(),
 ): SandboxWrapperProbe {
-  const policy = probePolicy
   try {
     if (system.platform === 'darwin') {
       if (!system.available('sandbox-exec')) return { platform: system.platform, wrapper: null, canWrap: false }
-      wrapBashCommand('true', policy, system)
+      wrapBashCommand('true', probePolicy, system)
       return { platform: system.platform, wrapper: 'sandbox-exec', canWrap: true }
     }
     if (system.platform === 'linux') {
       if (!system.available('bwrap')) return { platform: system.platform, wrapper: null, canWrap: false }
-      wrapBashCommand('true', policy, system)
+      wrapBashCommand('true', probePolicy, system)
       return { platform: system.platform, wrapper: 'bwrap', canWrap: true }
     }
     return { platform: system.platform, wrapper: null, canWrap: false }
@@ -104,6 +105,7 @@ export function sandboxPolicyForProbe(
     readIsolation: effective.readIsolation === true,
     readRoots: effective.readRoots,
     allowNetwork: effective.allowNetwork,
+    unsharePid: effective.unsharePid === true,
   }
 }
 
@@ -266,8 +268,10 @@ function isDimensionSatisfied(
   required: SandboxRequiredDimension,
   status: SandboxDimensionStatus,
   effective: SandboxPolicy,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (required === 'read' && effective.readIsolation !== true) return false
+  if (required === 'process' && platform === 'linux' && effective.unsharePid !== true) return false
   return status === 'enforced'
 }
 
@@ -294,11 +298,13 @@ export function assertRequiredSandboxDimensions(
         ? confinement.outcome
         : confinement.dimensions.write)
       : confinement.dimensions[dim]
-    if (!isDimensionSatisfied(dim, status, effectivePolicy)) {
+    if (!isDimensionSatisfied(dim, status, effectivePolicy, confinement.platform as NodeJS.Platform)) {
       const label = required.size > 0 ? `required dimension ${dim}` : 'default write sandbox'
       const reported = dim === 'read' && effectivePolicy.readIsolation !== true
         ? 'not_enforced'
-        : status
+        : dim === 'process' && confinement.platform === 'linux' && effectivePolicy.unsharePid !== true
+          ? 'not_enforced'
+          : status
       throw new UserError(
         `${label} is not satisfied (status=${reported}); refusing unconfined or unproven worker bash`,
       )
@@ -337,23 +343,69 @@ export function enforceRequiredSandboxOnHost(
   return enforceRequiredSandbox(env, baseProbePolicy(undefined, env))
 }
 
-/** Wrapped `kill -0 $$` should succeed; wrapped kill of parent pid should fail when process isolation holds. */
+const EXTERNAL_PID_FIXTURE = join(import.meta.dirname, '../../test/fixtures/sandbox-external-pid-fixture.mjs')
+
+/**
+ * Process isolation: `kill -0 $PPID` inside wrapped bash targets the sandbox
+ * parent (often the worker shell), not the host daemon — a false negative.
+ * The owned external PID fixture is the positive control for host visibility.
+ */
 function probeProcessIsolation(
   policy: SandboxPolicy,
   system: SandboxSystem,
   runWrapped: SandboxConfinementProbeHooks['runWrapped'],
+  hooks: SandboxConfinementProbeHooks,
 ): SandboxDimensionStatus {
   if (system.platform !== 'linux') {
-    // No host-safe wrapped parent-kill probe on Darwin without broader policy review.
     return 'unsupported'
   }
+  if (policy.unsharePid !== true) return 'not_tested'
   const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
+  const runUnsandboxed = hooks.runUnsandboxed ?? runUnsandboxedDefault
   const selfAlive = runner('kill -0 $$', policy, system)
   if (spawnFailed(selfAlive) || selfAlive.status !== 0) return 'probe_failed'
-  const parentSignal = runner('kill -0 $PPID', policy, system)
-  if (spawnFailed(parentSignal)) return 'probe_failed'
-  if (parentSignal.status === 0) return 'not_enforced'
-  return 'enforced'
+
+  const pidFile = join(tmpdir(), `ds-agent-sandbox-extpid-${process.pid}-${Date.now()}.json`)
+  rmSync(pidFile, { force: true })
+  let child: ReturnType<typeof spawn> | undefined
+  try {
+    if (hooks.externalPid !== undefined) {
+      const ext = hooks.externalPid
+      const wrapped = runner(`kill -0 ${ext}`, policy, system)
+      if (spawnFailed(wrapped)) return 'probe_failed'
+      return wrapped.status === 0 ? 'not_enforced' : 'enforced'
+    }
+    child = spawn(process.execPath, [EXTERNAL_PID_FIXTURE, pidFile], { stdio: 'ignore' })
+    const deadline = Date.now() + 8_000
+    let externalPid: number | undefined
+    while (Date.now() < deadline) {
+      if (existsSync(pidFile)) {
+        const parsed = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid?: number }
+        if (typeof parsed.pid === 'number') {
+          externalPid = parsed.pid
+          break
+        }
+      }
+      spawnSync('sleep', ['0.02'], { stdio: 'ignore' })
+    }
+    if (externalPid === undefined) return 'probe_failed'
+    const control = runUnsandboxed(`kill -0 ${externalPid}`)
+    if (spawnFailed(control) || control.status !== 0) return 'probe_failed'
+    const wrapped = runner(`kill -0 ${externalPid}`, policy, system)
+    if (spawnFailed(wrapped)) return 'probe_failed'
+    return wrapped.status === 0 ? 'not_enforced' : 'enforced'
+  } catch {
+    return 'probe_failed'
+  } finally {
+    if (child?.pid != null) {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        /* gone */
+      }
+    }
+    rmSync(pidFile, { force: true })
+  }
 }
 
 function emptyDimensions(): SandboxConfinementDimensions {
@@ -370,8 +422,8 @@ export function probeSandboxConfinement(
   hooks: SandboxConfinementProbeHooks = {},
   effectivePolicy: SandboxPolicy = baseProbePolicy(),
 ): SandboxConfinementProbe {
-  const probePolicy = sandboxPolicyForProbe(effectivePolicy)
-  const wrapper = probeSandboxWrapper(system, { ...probePolicy, enabled: true })
+  const wrapperPolicy = sandboxPolicyForProbe(effectivePolicy)
+  const wrapper = probeSandboxWrapper(system, { ...wrapperPolicy, enabled: true })
   const dimensions = emptyDimensions()
   if (!wrapper.canWrap || !wrapper.wrapper) {
     return {
@@ -467,7 +519,7 @@ export function probeSandboxConfinement(
 
     dimensions.read = probeReadIsolation(policy, system, hooks.runWrapped, forbiddenFile)
     dimensions.network = probeNetworkIsolation(policy, system, hooks)
-    dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped)
+    dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped, hooks)
 
     let detail: string
     if (outcome === 'enforced') {

@@ -401,6 +401,8 @@ export class Runtime {
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
+  /** In-flight resident channel ingests (serve loops); used for backpressure. */
+  private residentIngressInFlight = 0
 
   private constructor(parts: {
     home: string
@@ -1270,6 +1272,18 @@ export class Runtime {
     const raced = this.duplicate(trigger)
     if (raced) return raced
     return this.commitIngress(safe, verdict)
+  }
+
+  get residentIngressDepth(): number {
+    return this.residentIngressInFlight
+  }
+
+  residentIngressBegin(): void {
+    this.residentIngressInFlight += 1
+  }
+
+  residentIngressEnd(): void {
+    if (this.residentIngressInFlight > 0) this.residentIngressInFlight -= 1
   }
 
   /** A persisted trigger id is a duplicate; re-receive so the Engine stays authoritative. */

@@ -68,6 +68,7 @@ describe('required sandbox dimensions gate', () => {
   })
 
   it('rejects when required process is not_enforced', () => {
+    const effective = { enabled: true, unsharePid: true } satisfies SandboxPolicy
     const probe = probeSandboxConfinement(linuxBwrapSystem(), {
       runWrapped: (command) => {
         if (command.includes('probe-write.txt')) {
@@ -89,14 +90,23 @@ describe('required sandbox dimensions gate', () => {
       },
       runUnsandboxed: command => spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' }),
       loopbackPort: 19_876,
-    })
+    }, effective)
     expect(probe.dimensions.process).toBe('not_enforced')
     expect(() =>
-      assertRequiredSandboxDimensions(probe, { DS_AGENT_SANDBOX_REQUIRED: 'process' }),
+      assertRequiredSandboxDimensions(probe, { DS_AGENT_SANDBOX_REQUIRED: 'process' }, effective),
     ).toThrow(UserError)
   })
 
-  it('LocalEnv fails closed when DS_AGENT_SANDBOX_REQUIRED includes process and probe is not enforced', () => {
+  it('LocalEnv fails closed when DS_AGENT_SANDBOX_REQUIRED includes process and host probe is not enforced', () => {
+    const system: SandboxSystem = {
+      platform: process.platform,
+      available: bin => spawnSync('which', [bin], { stdio: 'ignore' }).status === 0,
+      exists: () => true,
+      execPath: process.execPath,
+    }
+    const effective: SandboxPolicy = { enabled: true, unsharePid: true }
+    const probe = probeSandboxConfinement(system, {}, effective)
+    if (probe.dimensions.process === 'enforced') return
     const home = tempHome()
     const prev = process.env.DS_AGENT_SANDBOX_REQUIRED
     process.env.DS_AGENT_SANDBOX_REQUIRED = 'process'
