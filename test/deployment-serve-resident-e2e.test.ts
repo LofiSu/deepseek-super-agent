@@ -72,7 +72,10 @@ describe('deployment serve resident e2e (loopback mocks)', () => {
       maxBackoffMs: 20,
       signal: controller.signal,
     })
-    await new Promise(r => setTimeout(r, 120))
+    const deadline = Date.now() + 3_000
+    while (Date.now() < deadline && source.pulls < 2) {
+      await new Promise(r => setTimeout(r, 20))
+    }
     controller.abort()
     await loop
     expect(ingested).toEqual(expect.arrayContaining(['feishu_a', 'feishu_b']))
