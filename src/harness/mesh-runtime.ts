@@ -121,6 +121,25 @@ export class WorkerPlacement {
   dispatch(ticketId: string, assignment: unknown): Promise<A2ADelivery | undefined> {
     return this.remote?.dispatch(ticketId, assignment) ?? Promise.resolve(undefined)
   }
+
+  remoteHasTicket(ticketId: string): boolean {
+    return this.remote?.hasTicketAssignment(ticketId) ?? false
+  }
+
+  /**
+   * Authenticated HTTP cancel to the child runtime; releases mesh capacity after send.
+   */
+  async cancelRemote(ticketId: string, assignmentId: string): Promise<void> {
+    if (!this.remote?.hasTicketAssignment(ticketId)) {
+      this.release(ticketId)
+      return
+    }
+    try {
+      await this.remote.dispatchCancel(ticketId, assignmentId)
+    } finally {
+      this.remote?.release(ticketId)
+    }
+  }
 }
 
 export function registerRemoteNodes(

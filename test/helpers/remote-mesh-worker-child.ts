@@ -37,6 +37,11 @@ const runtime = Runtime.create({
 })
 
 let server: Server | undefined
+const cancelledAssignments = new Set<string>()
+
+function assignmentKey(ticketId: string, assignmentId: string): string {
+  return `${ticketId}::${assignmentId}`
+}
 
 function assignmentRecord(event: RemoteMeshAssignmentEvent): void {
   const body = event.assignment
@@ -53,19 +58,31 @@ function assignmentRecord(event: RemoteMeshAssignmentEvent): void {
   if (mode === 'hang') return
   if (mode === 'no-result') return
 
-  const deliveryKey = `deliv-os-${event.ticketId}-${assignmentId}`
-  const transport = new A2AHttpTransport({ url: meshHostResultUrl, peerId: workerPeer, secret: meshSecret })
-  void transport.send({
-    from: workerPeer,
-    to: hostPeer,
-    body: {
-      kind: 'assignment_result',
-      ticketId: event.ticketId,
-      assignmentId,
-      deliveryKey,
-      report: { kind: 'ready', text: 'remote os worker done', deliver: false },
-    },
-  })
+  const key = assignmentKey(event.ticketId, assignmentId)
+  if (cancelledAssignments.has(key)) return
+
+  const sendResult = (): void => {
+    if (cancelledAssignments.has(key)) return
+    const deliveryKey = `deliv-os-${event.ticketId}-${assignmentId}`
+    const transport = new A2AHttpTransport({ url: meshHostResultUrl, peerId: workerPeer, secret: meshSecret })
+    void transport.send({
+      from: workerPeer,
+      to: hostPeer,
+      body: {
+        kind: 'assignment_result',
+        ticketId: event.ticketId,
+        assignmentId,
+        deliveryKey,
+        report: { kind: 'ready', text: 'remote os worker done', deliver: false },
+      },
+    })
+  }
+
+  if (mode === 'slow-result') {
+    setTimeout(sendResult, 2_000).unref?.()
+    return
+  }
+  sendResult()
 }
 
 async function main(): Promise<void> {
@@ -76,6 +93,17 @@ async function main(): Promise<void> {
     resolveSecret: peer => (peer === hostPeer ? meshSecret : undefined),
     replayCache: createA2AReplayCache(),
     onAssignment: event => { assignmentRecord(event) },
+    onAssignmentCancel: event => {
+      cancelledAssignments.add(assignmentKey(event.ticketId, event.assignmentId))
+      runtime.store.putDoc('mesh_worker_cancel', event.ticketId, {
+        assignmentId: event.assignmentId,
+        receivedAt: new Date().toISOString(),
+        peerId: event.peerId,
+      })
+      runtime.log.info(
+        `[mesh-worker] cancel ack ticketId=${event.ticketId} assignmentId=${event.assignmentId}`,
+      )
+    },
   })
   server = createServer(handler)
   await new Promise<void>((resolve, reject) => {
@@ -104,3 +132,4 @@ function shutdown(): void {
 
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
+

@@ -39,7 +39,13 @@ export const DEFAULT_REMOTE_MAX_NODES = 256
 export const DEFAULT_REMOTE_MAX_ADDRESSES = 64
 
 /** Body kinds accepted by the remote mesh inbox. Everything else fails closed. */
-export const REMOTE_MESH_BODY_KINDS = ['register', 'heartbeat', 'assignment', 'assignment_result'] as const
+export const REMOTE_MESH_BODY_KINDS = [
+  'register',
+  'heartbeat',
+  'assignment',
+  'assignment_cancel',
+  'assignment_result',
+] as const
 export type RemoteMeshBodyKind = (typeof REMOTE_MESH_BODY_KINDS)[number]
 
 export interface RemoteNodeRegistration {
@@ -451,6 +457,55 @@ export class RemoteMeshRegistry {
     return safeDelivery(delivery)
   }
 
+  hasTicketAssignment(ticketId: string): boolean {
+    return this.assignments.has(ticketId)
+  }
+
+  /**
+   * Propagate ticket end / local cancel to the assigned remote worker inbox.
+   * Keeps the in-flight slot when `delivered`; caller should `release` after ack.
+   */
+  async dispatchCancel(ticketId: string, assignmentId: string): Promise<A2ADelivery | undefined> {
+    if (!nonEmptyString(ticketId) || !nonEmptyString(assignmentId)) return undefined
+    const nodeId = this.assignments.get(ticketId)
+    if (nodeId === undefined) return undefined
+    const node = this.nodes.get(nodeId)
+    if (!node || !this.eligible(node, this.clock())) {
+      this.assignments.delete(ticketId)
+      return undefined
+    }
+
+    const envelope: A2AEnvelope = {
+      from: this.localPeerId,
+      to: node.peerId,
+      body: { kind: 'assignment_cancel', ticketId, assignmentId },
+    }
+
+    let transport: A2ATransport
+    try {
+      transport = this.transportFor(node)
+    } catch {
+      this.assignments.delete(ticketId)
+      return failedDelivery(envelope)
+    }
+
+    let delivery: unknown
+    try {
+      delivery = await transport.send(envelope)
+    } catch {
+      this.assignments.delete(ticketId)
+      return failedDelivery(envelope)
+    }
+    if (!isDelivery(delivery)) {
+      this.assignments.delete(ticketId)
+      return failedDelivery(envelope)
+    }
+
+    if (delivery.status === 'delivered') return safeDelivery(delivery)
+    this.assignments.delete(ticketId)
+    return safeDelivery(delivery)
+  }
+
   private transportFor(node: RemoteNodeRecord): A2ATransport {
     const cached = this.transports.get(node.id)
     if (cached) return cached
@@ -498,6 +553,13 @@ export interface RemoteMeshAssignmentEvent {
   envelope: A2AEnvelope
 }
 
+export interface RemoteMeshAssignmentCancelEvent {
+  peerId: string
+  ticketId: string
+  assignmentId: string
+  envelope: A2AEnvelope
+}
+
 export interface RemoteMeshAssignmentResultEvent {
   peerId: string
   ticketId: string
@@ -520,6 +582,11 @@ export interface RemoteMeshHandlerOptions {
    * reject an `async` callback; a thrown error becomes a non-leaking 502.
    */
   onAssignment: (event: RemoteMeshAssignmentEvent) => undefined
+  /**
+   * Inbound cancel from the host router. When omitted, `assignment_cancel` bodies
+   * fail closed like any unsupported kind.
+   */
+  onAssignmentCancel?: (event: RemoteMeshAssignmentCancelEvent) => undefined
   /**
    * Optional inbound worker results. When omitted, `assignment_result` bodies
    * fail closed like any unsupported kind.
@@ -679,6 +746,9 @@ export class MeshInbox {
       case 'assignment':
         this.handleAssignment(peerId, body, envelope)
         return
+      case 'assignment_cancel':
+        this.handleAssignmentCancel(peerId, body, envelope)
+        return
       case 'assignment_result':
         this.handleAssignmentResult(peerId, body, envelope)
         return
@@ -786,6 +856,34 @@ export class MeshInbox {
         void Promise.resolve(result).catch(() => {})
       }
       throw new Error('mesh assignment callback must be synchronous')
+    }
+  }
+
+  private handleAssignmentCancel(
+    peerId: string,
+    body: Record<string, unknown>,
+    envelope: A2AEnvelope,
+  ): void {
+    const callback = this.options.onAssignmentCancel
+    if (!callback) throw new Error('unsupported mesh body kind')
+    if (!nonEmptyString(body.ticketId)) throw new Error('mesh assignment_cancel requires a ticketId')
+    if (!nonEmptyString(body.assignmentId)) throw new Error('mesh assignment_cancel requires an assignmentId')
+    const event: RemoteMeshAssignmentCancelEvent = {
+      peerId,
+      ticketId: body.ticketId,
+      assignmentId: body.assignmentId,
+      envelope,
+    }
+    if ((callback as unknown as { constructor?: { name?: string } })
+      .constructor?.name === 'AsyncFunction') {
+      throw new Error('mesh assignment_cancel callback must be synchronous')
+    }
+    const result: unknown = callback(event)
+    if (result !== undefined) {
+      if (result !== null && typeof (result as PromiseLike<unknown>).then === 'function') {
+        void Promise.resolve(result).catch(() => {})
+      }
+      throw new Error('mesh assignment_cancel callback must be synchronous')
     }
   }
 

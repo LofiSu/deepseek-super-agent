@@ -210,6 +210,48 @@ describe('remote mesh OS process boundary (loopback)', () => {
     expect(replay.status).toBe(401)
   }, 45_000)
 
+  it('propagates assignment_cancel over HTTP and suppresses late assignment_result', async () => {
+    const hostHome = tempHome()
+    homes.push(hostHome)
+    const workerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-worker-cancel-'))
+    homes.push(workerHome)
+    const results: RemoteMeshAssignmentResultEvent[] = []
+    const hostResultUrl = await listenHost(event => { results.push(event) })
+
+    spawnWorker(workerHome, hostResultUrl, { DS_AGENT_MESH_WORKER_MODE: 'slow-result' })
+    const { url: workerUrl } = await waitForMarker(workerHome)
+
+    const registry = new RemoteMeshRegistry({ localPeerId: HOST_PEER })
+    registry.register({
+      id: 'worker-os-node',
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 2,
+    })
+    const ticketId = 'ticket_os_cancel'
+    const assignmentId = 'asg_os_cancel_1'
+    expect(registry.pick(ticketId)?.id).toBe('worker-os-node')
+    const delivery = await registry.dispatch(ticketId, { assignmentId, brief: 'slow remote' })
+    expect(delivery?.status).toBe('delivered')
+    expect(registry.hasTicketAssignment(ticketId)).toBe(true)
+
+    const cancel = await registry.dispatchCancel(ticketId, assignmentId)
+    expect(cancel?.status).toBe('delivered')
+    registry.release(ticketId)
+    expect(registry.hasTicketAssignment(ticketId)).toBe(false)
+
+    const workerStore = new Store(workerHome)
+    try {
+      expect(workerStore.getDoc('mesh_worker_cancel', ticketId)).toMatchObject({ assignmentId })
+    } finally {
+      workerStore.close()
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 2_500))
+    expect(results).toHaveLength(0)
+  }, 45_000)
+
   it('documents RemoteMeshRegistry does not auto-release when the worker process dies', async () => {
     const workerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-worker-kill-'))
     homes.push(workerHome)

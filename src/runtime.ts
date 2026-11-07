@@ -623,7 +623,17 @@ export class Runtime {
       late.remoteResultWait?.clear(ticketId)
       queueMicrotask(() => {
         try {
-          placement.release(ticketId)
+          const ticket = store.getDoc<Ticket>('ticket', ticketId)
+          const assignmentId = ticket?.assignments.at(-1)?.id
+          if (assignmentId && placement.remoteHasTicket(ticketId)) {
+            void placement.cancelRemote(ticketId, assignmentId).catch(error => {
+              log.info(
+                `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+              )
+            })
+          } else {
+            placement.release(ticketId)
+          }
         } catch (error) {
           log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
         }
@@ -826,7 +836,17 @@ export class Runtime {
       },
       queueLimit: meshQueue,
       releaseNode: ticketId => {
-        placement.release(ticketId)
+        const ticket = store.getDoc<Ticket>('ticket', ticketId)
+        const assignmentId = ticket?.assignments.at(-1)?.id
+        if (assignmentId && placement.remoteHasTicket(ticketId)) {
+          void placement.cancelRemote(ticketId, assignmentId).catch(error => {
+            log.info(
+              `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+            )
+          })
+        } else {
+          placement.release(ticketId)
+        }
       },
       repliedTo: ticketId => store.listReplies().some(
         reply => reply.ticketId === ticketId && reply.channel === 'imessage',
