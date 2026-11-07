@@ -165,7 +165,7 @@ const LOOPBACK_FIXTURE = join(import.meta.dirname, '../../test/fixtures/sandbox-
 
 function withLoopbackFixture<T>(
   hooks: SandboxConfinementProbeHooks,
-  system: SandboxSystem,
+  _system: SandboxSystem,
   fn: (port: number) => T,
 ): T {
   if (hooks.loopbackPort !== undefined) return fn(hooks.loopbackPort)
