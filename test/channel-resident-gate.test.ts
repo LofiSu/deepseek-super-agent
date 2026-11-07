@@ -18,6 +18,7 @@ function trigger(id: string): Trigger {
     addressed: 'direct',
     at: new Date().toISOString(),
     text: 'hi',
+    meta: {},
   }
 }
 
@@ -50,4 +51,3 @@ describe('channel-resident-gate', () => {
     await rt.finish()
   })
 })
-
