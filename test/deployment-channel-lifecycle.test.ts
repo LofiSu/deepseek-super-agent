@@ -22,12 +22,18 @@ function noNetworkFeishu(): FeishuClient {
 class CountingFeishuSource implements FeishuLoopSource {
   pulls = 0
   private cursor = 0
-  constructor(private readonly batch: readonly Trigger[] = []) {}
+  constructor(
+    private readonly batch: readonly Trigger[] = [],
+    private readonly failPull?: number,
+  ) {}
   get cursorMs(): number {
     return this.cursor
   }
   async pull(): Promise<readonly Trigger[]> {
     this.pulls += 1
+    if (this.failPull !== undefined && this.pulls >= this.failPull) {
+      throw new Error('simulated feishu poll failure')
+    }
     if (this.pulls === 1) {
       for (const item of this.batch) {
         this.cursor = Math.max(this.cursor, Date.parse(item.at))
@@ -107,6 +113,26 @@ describe('deployment resident channel lifecycle', () => {
       once: true,
     })
     expect(ingested).toEqual(['feishu_om_1'])
+    await rt.finish()
+  })
+
+  it('feishu loop logs poll errors and exits cleanly on abort', async () => {
+    const rt = runtime()
+    rt.start()
+    const controller = new AbortController()
+    const source = new CountingFeishuSource([], 1)
+    const loop = runFeishuLoop({
+      runtime: rt,
+      chatId: 'oc_test',
+      client: noNetworkFeishu(),
+      createSource: () => source,
+      intervalMs: 5,
+      signal: controller.signal,
+    })
+    await new Promise(r => setTimeout(r, 20))
+    controller.abort()
+    await loop
+    expect(rt.log.text()).toContain('[feishu] poll error')
     await rt.finish()
   })
 

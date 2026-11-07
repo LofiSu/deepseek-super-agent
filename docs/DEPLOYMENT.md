@@ -27,10 +27,11 @@ default. Real Feishu/GitHub accounts are operator-gated; CI uses simulated loopb
 
 ## Channel loops (M11)
 
-- **Feishu (`--feishu`)**: poll one chat; cursor in SQLite; transient errors backoff; does not open a webhook listener.
-- **iMessage (`--imessage`)**: polls `chat.db`; admission errors fail closed.
+- **Feishu (`--feishu`)**: poll one chat; cursor in SQLite (`feishu_cursor`); transient poll errors use capped exponential backoff (`maxBackoffMs`, default 30s); does not open a webhook listener.
+- **iMessage (`--imessage`)**: polls `chat.db`; admission errors fail closed; `AbortSignal` stops the loop and `outbox.stop()` ends the flush timer.
+- **GitHub**: no resident inbound poll loop in `serve` — only `github-source` tooling and demo paths; do not assume webhook or poll ingestion on the daemon.
 - **Combined serve**: independent `AbortController` per loop; one loop failure is logged, not fatal to the other.
-- **Dedupe / backpressure**: ingress dedupe on triggers; outbox retries with cap; mesh queue rejects when full (`mesh.queue-full`).
+- **Dedupe / backpressure**: Feishu/iMessage cursors prevent re-ingest of the same row; ingress dedupe on triggers; outbox retries with cap (5 attempts); mesh queue bounded by `DS_AGENT_MESH_QUEUE` (`mesh.queue-full` rejects).
 
 ## Simulated acceptance (CI)
 
