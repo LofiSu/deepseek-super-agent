@@ -80,4 +80,3 @@ describe('T48 persistent corpus across processes', () => {
     expect(report.metrics.coldRecallAt3ForInserted).toBe(1)
   })
 })
-

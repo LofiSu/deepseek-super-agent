@@ -109,4 +109,3 @@ function main(): void {
 
 const entry = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : ''
 if (import.meta.url === entry) main()
-

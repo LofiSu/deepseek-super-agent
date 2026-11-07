@@ -92,4 +92,3 @@ describe('T48 wall-clock observation (persistent corpus, not month-scale accepta
     expect(fs.existsSync(path.join(home, 'ds-agent.db'))).toBe(true)
   })
 })
-
