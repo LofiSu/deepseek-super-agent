@@ -474,7 +474,7 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
       log: line => runtime.log.info(line),
       jobDelayMs: 0,
       singleSession: true,
-      pickNode: ticketId => runtime.workerMesh.pickNode(ticketId)?.id,
+      pickNode: (ticketId, _ticket) => runtime.workerMesh.pickNode(ticketId)?.id,
     })
 
     await harness.launch(load(runtime, a.ticketId))
