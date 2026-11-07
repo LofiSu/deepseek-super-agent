@@ -11,4 +11,3 @@ process.stdout.write(JSON.stringify({
   task,
 }))
 process.exit(0)
-

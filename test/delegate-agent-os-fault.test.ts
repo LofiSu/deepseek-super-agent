@@ -139,4 +139,3 @@ describe('delegate_agent OS fault boundary', () => {
     await expect(reg.run('slow', 'again', 'worker_kill')).rejects.toThrow(/shut down/)
   })
 })
-
