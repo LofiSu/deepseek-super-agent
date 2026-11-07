@@ -54,6 +54,15 @@ describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
     expect(result.status, result.stderr).toBe(0)
   })
 
+  it('cloud host runtime sandbox probe (non-gating)', () => {
+    if (!process.env.DS_AGENT_CLOUD_SANDBOX_PROBE) return
+    const confinement = probeSandboxConfinement()
+    expect(['enforced', 'not_enforced', 'probe_failed', 'unsupported']).toContain(confinement.outcome)
+    if (confinement.outcome !== 'unsupported') {
+      expect(confinement.positiveExecOk).toBe(true)
+    }
+  })
+
   it('on-host confinement smoke when wrapper exists', () => {
     const system: SandboxSystem = {
       platform: process.platform,
