@@ -47,14 +47,25 @@ export function parseRemoteMeshNodesFromEnv(env: NodeJS.ProcessEnv): RemoteMeshE
  * Release always clears both registries for a ticket.
  */
 export class WorkerPlacement {
-  readonly remote?: RemoteMeshRegistry
+  private remoteRegistry?: RemoteMeshRegistry
+
+  get remote(): RemoteMeshRegistry | undefined {
+    return this.remoteRegistry
+  }
 
   constructor(
     readonly localNodeId: string,
     readonly local: WorkerMeshRegistry,
     remote?: RemoteMeshRegistry,
   ) {
-    this.remote = remote
+    this.remoteRegistry = remote
+  }
+
+  /** Register a remote peer after worker inbox URL is known (tests / late bind). */
+  registerRemoteNode(node: RemoteNodeRegistration): void {
+    const registry = this.remoteRegistry ?? new RemoteMeshRegistry({ localPeerId: this.localNodeId })
+    if (!this.remoteRegistry) this.remoteRegistry = registry
+    registry.register(node)
   }
 
   static fromEnv(

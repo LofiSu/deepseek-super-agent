@@ -210,7 +210,7 @@ describe('remote mesh OS process boundary (loopback)', () => {
     expect(replay.status).toBe(401)
   }, 45_000)
 
-  it('releases in-flight slot when worker dies before sending a result', async () => {
+  it('documents RemoteMeshRegistry does not auto-release when the worker process dies', async () => {
     const workerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-worker-kill-'))
     homes.push(workerHome)
     const hostResultUrl = await listenHost(() => undefined)
@@ -232,6 +232,8 @@ describe('remote mesh OS process boundary (loopback)', () => {
 
     process.kill(pid, 'SIGKILL')
     await new Promise(resolve => setTimeout(resolve, 100))
+    expect(registry.inFlight('worker-os-node')).toBe(1)
+
     registry.release(ticketId)
     expect(registry.inFlight('worker-os-node')).toBe(0)
 

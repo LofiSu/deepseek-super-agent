@@ -47,6 +47,10 @@ import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
 import { WorkerPlacement } from './harness/mesh-runtime.ts'
+import {
+  RemoteMeshResultWait,
+  remoteResultTimeoutMsFromEnv,
+} from './harness/remote-mesh-wait.ts'
 import { recordRemoteResult } from './harness/remote-results.ts'
 import type { RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
 import type { WorkerReport } from './shared/ports.ts'
@@ -104,6 +108,11 @@ export interface RuntimeOptions {
    * or 100. `0` rejects instead of queueing.
    */
   meshQueue?: number
+  /**
+   * Max wait for remote `assignment_result` after dispatch is delivered.
+   * Overrides `DS_AGENT_REMOTE_RESULT_TIMEOUT_MS`.
+   */
+  remoteResultTimeoutMs?: number
   /** Extra Router shards. `DS_AGENT_SHARDS` JSON is merged in as well. */
   routerShards?: RouterShard[]
   /** T45 bake-off baseline: run one Worker chain with no Router turn. */
@@ -380,6 +389,7 @@ export class Runtime {
   private readonly admission: AdmissionRules
   /** Kept so finish() can close external MCP server processes. */
   private readonly tools: ToolRegistry
+  private readonly remoteResultWait?: RemoteMeshResultWait
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
@@ -411,6 +421,7 @@ export class Runtime {
     batchWindowMs: number
     admission: AdmissionRules
     tools: ToolRegistry
+    remoteResultWait?: RemoteMeshResultWait
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -438,6 +449,7 @@ export class Runtime {
     this.batchWindowMs = parts.batchWindowMs
     this.admission = parts.admission
     this.tools = parts.tools
+    this.remoteResultWait = parts.remoteResultWait
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -580,7 +592,25 @@ export class Runtime {
       )
     }
     // Bound late because the host and the tool ports both reach the Harness.
-    const late: { harness?: Harness } = {}
+    const late: { harness?: Harness; remoteResultWait?: RemoteMeshResultWait } = {}
+    const remoteResultTimeoutMs = remoteResultTimeoutMsFromEnv(baseEnv, opts.remoteResultTimeoutMs)
+    late.remoteResultWait = new RemoteMeshResultWait(remoteResultTimeoutMs, (ticketId, assignmentId) => {
+      log.info(
+        `[mesh] remote result timeout ticketId=${ticketId} assignmentId=${assignmentId} timeoutMs=${remoteResultTimeoutMs}`,
+      )
+      try {
+        engine.report(ticketId, {
+          kind: 'failed',
+          text: 'remote worker result timeout',
+          deliver: false,
+        })
+      } catch (error) {
+        log.info(
+          `[mesh] remote timeout report failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+        )
+        placement.release(ticketId)
+      }
+    })
     /**
      * Engine.report runs inside `Store.atomic`; the Ticket document is written
      * just before the hook, but the Store snapshot only becomes observable to
@@ -787,7 +817,10 @@ export class Runtime {
         if (delivery?.status !== 'delivered') {
           log.info(`[mesh] remote dispatch failed ticketId=${ticket.id} node=${node} status=${delivery?.status ?? 'none'}`)
           placement.release(ticket.id)
+          late.remoteResultWait?.clear(ticket.id)
+          return
         }
+        late.remoteResultWait?.arm(ticket.id, assignment.id)
       },
       queueLimit: meshQueue,
       releaseNode: ticketId => {
@@ -891,6 +924,7 @@ export class Runtime {
       batchWindowMs: opts.batchWindowMs ?? 0,
       admission,
       tools,
+      remoteResultWait: late.remoteResultWait,
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
@@ -934,6 +968,7 @@ export class Runtime {
       this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
       return
     }
+    this.remoteResultWait?.clear(event.ticketId)
     try {
       this.engine.report(event.ticketId, report)
     } finally {
@@ -1425,6 +1460,7 @@ export class Runtime {
       // The daemon timer, MCP child processes, and SQLite handle must all be
       // released even when a drain step rejects.
       this.daemon.stop()
+      this.remoteResultWait?.clearAll()
       try {
         await this.tools.close()
       } catch (error) {
