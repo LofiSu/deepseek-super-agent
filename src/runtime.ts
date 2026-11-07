@@ -46,6 +46,14 @@ import { Metrics } from './metrics/metrics.ts'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
+import { WorkerPlacement, requiredMeshCapabilities } from './harness/mesh-runtime.ts'
+import {
+  RemoteMeshResultWait,
+  remoteResultTimeoutMsFromEnv,
+} from './harness/remote-mesh-wait.ts'
+import { recordRemoteResult } from './harness/remote-results.ts'
+import type { RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
+import type { WorkerReport } from './shared/ports.ts'
 import { Logger } from './shared/log.ts'
 import { threadKey, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
@@ -100,6 +108,11 @@ export interface RuntimeOptions {
    * or 100. `0` rejects instead of queueing.
    */
   meshQueue?: number
+  /**
+   * Max wait for remote `assignment_result` after dispatch is delivered.
+   * Overrides `DS_AGENT_REMOTE_RESULT_TIMEOUT_MS`.
+   */
+  remoteResultTimeoutMs?: number
   /** Extra Router shards. `DS_AGENT_SHARDS` JSON is merged in as well. */
   routerShards?: RouterShard[]
   /** T45 bake-off baseline: run one Worker chain with no Router turn. */
@@ -360,6 +373,8 @@ export class Runtime {
   readonly instanceId: string
   readonly routerShards: RouterShardRegistry
   readonly workerMesh: WorkerMeshRegistry
+  /** Local + optional remote mesh placement (T47 runtime path). */
+  readonly placement: WorkerPlacement
   readonly longTermMemory: SpillBackedLongTermMemory
   /** Read-model lifecycle events for panels and CLI views. */
   readonly lifecycle: LifecycleBus
@@ -374,6 +389,7 @@ export class Runtime {
   private readonly admission: AdmissionRules
   /** Kept so finish() can close external MCP server processes. */
   private readonly tools: ToolRegistry
+  private readonly remoteResultWait?: RemoteMeshResultWait
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
@@ -395,6 +411,7 @@ export class Runtime {
     instanceId: string
     routerShards: RouterShardRegistry
     workerMesh: WorkerMeshRegistry
+    placement: WorkerPlacement
     longTermMemory: SpillBackedLongTermMemory
     lifecycle: LifecycleBus
     a2aRouter: A2ARouter
@@ -404,6 +421,7 @@ export class Runtime {
     batchWindowMs: number
     admission: AdmissionRules
     tools: ToolRegistry
+    remoteResultWait?: RemoteMeshResultWait
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -421,6 +439,7 @@ export class Runtime {
     this.instanceId = parts.instanceId
     this.routerShards = parts.routerShards
     this.workerMesh = parts.workerMesh
+    this.placement = parts.placement
     this.longTermMemory = parts.longTermMemory
     this.lifecycle = parts.lifecycle
     this.a2aRouter = parts.a2aRouter
@@ -430,6 +449,7 @@ export class Runtime {
     this.batchWindowMs = parts.batchWindowMs
     this.admission = parts.admission
     this.tools = parts.tools
+    this.remoteResultWait = parts.remoteResultWait
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -514,6 +534,7 @@ export class Runtime {
     }
     for (const shard of opts.routerShards ?? []) routerShards.register(shard)
     const workerMesh = new WorkerMeshRegistry([{ id: instanceId, capacity: meshCapacity }])
+    const placement = WorkerPlacement.fromEnv(baseEnv, instanceId, workerMesh, line => log.info(line))
     // Retention keeps the durable index bounded: 1000 entries / 90 days by
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
@@ -571,7 +592,25 @@ export class Runtime {
       )
     }
     // Bound late because the host and the tool ports both reach the Harness.
-    const late: { harness?: Harness } = {}
+    const late: { harness?: Harness; remoteResultWait?: RemoteMeshResultWait } = {}
+    const remoteResultTimeoutMs = remoteResultTimeoutMsFromEnv(baseEnv, opts.remoteResultTimeoutMs)
+    late.remoteResultWait = new RemoteMeshResultWait(remoteResultTimeoutMs, (ticketId, assignmentId) => {
+      log.info(
+        `[mesh] remote result timeout ticketId=${ticketId} assignmentId=${assignmentId} timeoutMs=${remoteResultTimeoutMs}`,
+      )
+      try {
+        engine.report(ticketId, {
+          kind: 'failed',
+          text: 'remote worker result timeout',
+          deliver: false,
+        })
+      } catch (error) {
+        log.info(
+          `[mesh] remote timeout report failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+        )
+        placement.release(ticketId)
+      }
+    })
     /**
      * Engine.report runs inside `Store.atomic`; the Ticket document is written
      * just before the hook, but the Store snapshot only becomes observable to
@@ -581,9 +620,20 @@ export class Runtime {
      * A microtask runs after the synchronous transaction commits.
      */
     const releaseMesh = (ticketId: string): void => {
+      late.remoteResultWait?.clear(ticketId)
       queueMicrotask(() => {
         try {
-          workerMesh.release(ticketId)
+          const ticket = store.getDoc<Ticket>('ticket', ticketId)
+          const assignmentId = ticket?.assignments.at(-1)?.id
+          if (assignmentId && placement.remoteHasTicket(ticketId)) {
+            void placement.cancelRemote(ticketId, assignmentId).catch(error => {
+              log.info(
+                `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+              )
+            })
+          } else {
+            placement.release(ticketId)
+          }
         } catch (error) {
           log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
         }
@@ -758,14 +808,45 @@ export class Runtime {
         const disposition = store.getDoc<Disposition>('disposition', ticket.originTriggerId)
         return disposition?.shards?.length ? disposition.shards : ['default']
       },
-      pickNode: ticketId => {
-        const node = workerMesh.pickNode(ticketId)
-        if (node) metrics.increment('mesh.assigned')
-        return node?.id
+      pickNode: (ticketId, _ticket) => {
+        const need = requiredMeshCapabilities(baseEnv)
+        const nodeId = placement.pickNode(ticketId, need)
+        if (nodeId) metrics.increment('mesh.assigned')
+        return nodeId
+      },
+      isRemoteNode: nodeId => placement.isRemote(nodeId),
+      dispatchRemote: async (ticket, node) => {
+        const assignment = ticket.assignments.at(-1)
+        if (!assignment) return
+        const payload = {
+          assignmentId: assignment.id,
+          ticketId: ticket.id,
+          title: ticket.title,
+          brief: ticket.brief,
+          mandate: ticket.mandate,
+        }
+        const delivery = await placement.dispatch(ticket.id, payload)
+        if (delivery?.status !== 'delivered') {
+          log.info(`[mesh] remote dispatch failed ticketId=${ticket.id} node=${node} status=${delivery?.status ?? 'none'}`)
+          placement.release(ticket.id)
+          late.remoteResultWait?.clear(ticket.id)
+          return
+        }
+        late.remoteResultWait?.arm(ticket.id, assignment.id)
       },
       queueLimit: meshQueue,
       releaseNode: ticketId => {
-        workerMesh.release(ticketId)
+        const ticket = store.getDoc<Ticket>('ticket', ticketId)
+        const assignmentId = ticket?.assignments.at(-1)?.id
+        if (assignmentId && placement.remoteHasTicket(ticketId)) {
+          void placement.cancelRemote(ticketId, assignmentId).catch(error => {
+            log.info(
+              `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+            )
+          })
+        } else {
+          placement.release(ticketId)
+        }
       },
       repliedTo: ticketId => store.listReplies().some(
         reply => reply.ticketId === ticketId && reply.channel === 'imessage',
@@ -855,6 +936,7 @@ export class Runtime {
       instanceId,
       routerShards,
       workerMesh,
+      placement,
       longTermMemory,
       lifecycle,
       a2aRouter,
@@ -864,6 +946,7 @@ export class Runtime {
       batchWindowMs: opts.batchWindowMs ?? 0,
       admission,
       tools,
+      remoteResultWait: late.remoteResultWait,
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
@@ -883,6 +966,46 @@ export class Runtime {
       runtime.ingest(trigger)
     })
     return runtime
+  }
+
+  /**
+   * Apply an authenticated inbound mesh worker result. Idempotent on
+   * `deliveryKey`. Does not start a listener; operators mount
+   * `createRemoteMeshHandler` themselves.
+   */
+  applyRemoteAssignmentResult(event: RemoteMeshAssignmentResultEvent): void {
+    if (!this.store.isOpen) return
+    const report = event.report as WorkerReport
+    if (typeof report?.kind !== 'string' || typeof report?.text !== 'string') {
+      this.log.info(`[mesh] remote result ignored ticketId=${event.ticketId} reason=bad-report`)
+      return
+    }
+    const applied = recordRemoteResult(this.store, {
+      ticketId: event.ticketId,
+      assignmentId: event.assignmentId,
+      report,
+      deliveryKey: event.deliveryKey,
+    })
+    if (!applied) {
+      this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
+      this.remoteResultWait?.clear(event.ticketId)
+      return
+    }
+    this.remoteResultWait?.clear(event.ticketId)
+    const ticket = this.store.getDoc<Ticket>('ticket', event.ticketId)
+    if (ticket?.ended) {
+      this.log.info(
+        `[mesh] remote result after ticket end ticketId=${event.ticketId} outcome=${ticket.ended.outcome}`,
+      )
+      this.placement.release(event.ticketId)
+      return
+    }
+    try {
+      this.engine.report(event.ticketId, report)
+    } finally {
+      this.placement.release(event.ticketId)
+    }
+    this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
   }
 
   private assessments = new Set<Promise<void>>()
@@ -1368,6 +1491,7 @@ export class Runtime {
       // The daemon timer, MCP child processes, and SQLite handle must all be
       // released even when a drain step rejects.
       this.daemon.stop()
+      this.remoteResultWait?.clearAll()
       try {
         await this.tools.close()
       } catch (error) {
