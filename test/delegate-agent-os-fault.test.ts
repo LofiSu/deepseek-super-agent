@@ -3,10 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import {
-  LocalAgentRegistry,
-  type LocalAgentSpec,
-} from '../src/env/local-agents.ts'
+import { LocalAgentRegistry, type LocalAgentSpec } from '../src/env/local-agents.ts'
 import { Store } from '../src/store/sqlite.ts'
 import type { RecoveryBoundaryRecord } from '../src/core/recovery-boundary.ts'
 import { RECOVERY_BOUNDARY_DOC_ID } from '../src/core/recovery-boundary.ts'
@@ -20,13 +17,6 @@ function tempHome(): string {
   homes.push(dir)
   return dir
 }
-
-const delegateSpec = (fixture: string): LocalAgentSpec => ({
-  id: 'ipc-echo',
-  command: process.execPath,
-  args: ['--import', 'tsx', fixture, '{task}'],
-  timeoutMs: 30_000,
-})
 
 function markerPath(home: string): string {
   return path.join(home, '.delegate-os-ready')

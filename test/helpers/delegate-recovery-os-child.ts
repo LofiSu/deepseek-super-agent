@@ -5,13 +5,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { bindRolePorts } from '../../src/core/role-ports.ts'
-import { loadLocalAgents, LocalAgentRegistry } from '../../src/env/local-agents.ts'
 import { LocalEnv } from '../../src/env/local-env.ts'
 import { ScriptedModel } from '../scripted-model.ts'
 import { ToolRegistry } from '../../src/harness/tools.ts'
 import { Runtime } from '../../src/runtime.ts'
 import type { Ticket } from '../../src/shared/types.ts'
-import { RECOVERY_BOUNDARY_DOC_ID } from '../../src/core/recovery-boundary.ts'
+import { RECOVERY_BOUNDARY_DOC_ID, type RecoveryBoundaryRecord } from '../../src/core/recovery-boundary.ts'
 
 const home = process.argv[2]
 if (!home) {
@@ -62,12 +61,10 @@ async function main(): Promise<void> {
     env: { ...process.env, DS_AGENT_ALLOW_MOCK_FIXTURE: '1' },
   })
 
-  const agents = loadLocalAgents(home, process.env)
-  const localAgents = new LocalAgentRegistry(agents, {
-    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    workspace: workerId => path.join(home, 'workspaces', workerId),
-  })
-  runtime.localAgents = localAgents
+  const localAgents = runtime.localAgents
+  if (!localAgents) {
+    throw new Error('delegate-recovery-os-child: local-agents.json missing in home')
+  }
 
   const tools = new ToolRegistry({
     store: runtime.store,
@@ -97,7 +94,7 @@ async function main(): Promise<void> {
     })}\n`)
   } else if (mode === 'restart') {
     runtime.start({ assessPending: false })
-    const boundary = runtime.store.getDoc('recovery', RECOVERY_BOUNDARY_DOC_ID)
+    const boundary = runtime.store.getDoc<RecoveryBoundaryRecord>('recovery', RECOVERY_BOUNDARY_DOC_ID)
     const ticket = runtime.store.getDoc<Ticket>('ticket', 'ticket_delegate_os')
     fs.writeFileSync(marker, `${JSON.stringify({
       phase: 'post-recovery',
