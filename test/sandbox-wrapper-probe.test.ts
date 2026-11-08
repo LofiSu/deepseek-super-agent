@@ -1,11 +1,12 @@
-import { spawnSync } from 'node:child_process'
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 import {
+  assertRequiredSandboxDimensions,
   probeSandboxConfinement,
   probeSandboxWrapper,
   type SandboxConfinementProbeHooks,
 } from '../src/env/sandbox-probe.ts'
-import { wrapBashCommand, type SandboxSystem } from '../src/env/seccomp.ts'
+import { wrapBashCommand, type SandboxPolicy, type SandboxSystem } from '../src/env/seccomp.ts'
 import { UserError } from '../src/shared/errors.ts'
 
 const linuxBwrapSystem = (): SandboxSystem => ({
@@ -14,6 +15,41 @@ const linuxBwrapSystem = (): SandboxSystem => ({
   exists: () => true,
   execPath: '/usr/bin/node',
 })
+
+const fakeResult = (status: number): SpawnSyncReturns<string> => ({
+  status,
+  stdout: '',
+  stderr: '',
+  pid: 0,
+  output: [null, '', ''],
+  signal: null,
+  error: undefined,
+})
+
+const realBash = (command: string): SpawnSyncReturns<string> =>
+  spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' })
+
+/** Wrapped hooks where write is blocked and only the read result varies. */
+function readIsolationHooks(
+  wrappedReadStatus: number,
+  runUnsandboxed: (command: string) => SpawnSyncReturns<string>,
+): SandboxConfinementProbeHooks {
+  return {
+    runWrapped: command => {
+      if (command === 'true') return fakeResult(0)
+      if (command.includes('echo ok')) return fakeResult(0)
+      if (command.includes('ds-agent-sandbox-negative-probe')) return fakeResult(0)
+      if (command.includes('test -r') && command.includes('probe-write.txt')) return fakeResult(wrappedReadStatus)
+      if (command.includes('fetch(')) return fakeResult(1)
+      if (command.includes('kill -0')) return fakeResult(command.includes('PPID') ? 1 : 0)
+      return fakeResult(0)
+    },
+    runUnsandboxed,
+    loopbackPort: 19_879,
+  }
+}
+
+const strictReadPolicy: SandboxPolicy = { enabled: true, readIsolation: true }
 
 describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
   it('fails closed when wrapper is unavailable on Linux', () => {
@@ -106,5 +142,44 @@ describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
       expect(['enforced', 'not_enforced', 'unsupported', 'probe_failed', 'not_tested']).toContain(confinement.dimensions[dim])
     }
     expect(['enforced', 'not_enforced', 'probe_failed']).toContain(confinement.outcome)
+  })
+})
+
+describe('sandbox read isolation requires a readable canary', () => {
+  it('does not claim enforced read isolation when the unsandboxed positive control cannot read the canary', () => {
+    const denyReadControl = (command: string): SpawnSyncReturns<string> => {
+      if (command.includes('test -r') && command.includes('probe-write.txt')) return fakeResult(1)
+      return realBash(command)
+    }
+    const probe = probeSandboxConfinement(
+      linuxBwrapSystem(),
+      readIsolationHooks(1, denyReadControl),
+      strictReadPolicy,
+    )
+    expect(probe.dimensions.write).toBe('enforced')
+    expect(probe.dimensions.read).toBe('probe_failed')
+  })
+
+  it('reports enforced read isolation when the canary is readable unsandboxed and hidden when wrapped', () => {
+    const probe = probeSandboxConfinement(
+      linuxBwrapSystem(),
+      readIsolationHooks(1, realBash),
+      strictReadPolicy,
+    )
+    expect(probe.dimensions.write).toBe('enforced')
+    expect(probe.dimensions.read).toBe('enforced')
+    expect(() =>
+      assertRequiredSandboxDimensions(probe, { DS_AGENT_SANDBOX_REQUIRED: 'read' }, strictReadPolicy),
+    ).not.toThrow()
+  })
+
+  it('reports not_enforced when the wrapped read succeeds', () => {
+    const probe = probeSandboxConfinement(
+      linuxBwrapSystem(),
+      readIsolationHooks(0, realBash),
+      strictReadPolicy,
+    )
+    expect(probe.dimensions.write).toBe('enforced')
+    expect(probe.dimensions.read).toBe('not_enforced')
   })
 })

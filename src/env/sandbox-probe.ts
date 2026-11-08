@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { UserError } from '../shared/errors.ts'
@@ -173,16 +173,23 @@ function probeReadIsolation(
   policy: SandboxPolicy,
   system: SandboxSystem,
   runWrapped: SandboxConfinementProbeHooks['runWrapped'],
+  runUnsandboxed: (command: string) => SpawnSyncReturns<string>,
   forbiddenFile: string,
 ): SandboxDimensionStatus {
   if (!policy.readIsolation) return 'not_tested'
   const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
   const path = shellQuote(forbiddenFile)
-  const result = runner(`test -r ${path} && cat ${path} >/dev/null`, policy, system)
+  const readCommand = `test -r ${path} && cat ${path} >/dev/null`
+  // Positive control: a wrapped read that fails proves isolation only when the
+  // same file is readable unsandboxed. A missing canary means the earlier
+  // negative-write probe removed it, not that the sandbox hid it.
+  if (!existsSync(forbiddenFile)) return 'probe_failed'
+  const control = runUnsandboxed(readCommand)
+  if (spawnFailed(control) || control.status !== 0) return 'probe_failed'
+  const result = runner(readCommand, policy, system)
   if (spawnFailed(result)) return 'probe_failed'
   if (result.status === 0) return 'not_enforced'
-  if (result.status !== 0) return 'enforced'
-  return 'probe_failed'
+  return 'enforced'
 }
 
 const LOOPBACK_FIXTURE = join(import.meta.dirname, '../../test/fixtures/sandbox-loopback-server.mjs')
@@ -517,7 +524,19 @@ export function probeSandboxConfinement(
         ? dimensions.write
         : 'probe_failed'
 
-    dimensions.read = probeReadIsolation(policy, system, hooks.runWrapped, forbiddenFile)
+    try {
+      writeFileSync(forbiddenFile, 'ds-agent-read-canary')
+    } catch {
+      // Leave the canary missing: the read probe's positive control then fails
+      // closed without changing the already-computed write dimension.
+    }
+    dimensions.read = probeReadIsolation(
+      policy,
+      system,
+      hooks.runWrapped,
+      runUnsandboxed,
+      forbiddenFile,
+    )
     dimensions.network = probeNetworkIsolation(policy, system, hooks)
     dimensions.process = probeProcessIsolation(policy, system, hooks.runWrapped, hooks)
 
