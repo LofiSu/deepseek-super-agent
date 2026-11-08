@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  beginDelegateOperation,
+  EXTERNAL_OP_KIND,
+  recordOutboxSendStart,
+  UNKNOWN_OUTCOME_PREFIX,
+  type ExternalOperationRecord,
+} from '../src/core/external-effects.ts'
 import type { SemanticHit } from '../src/ingress/filter.ts'
 import { MockModel, type Completion, type CompletionRequest, type Model } from '../src/harness/model.ts'
 import { Runtime, type RuntimeOptions } from '../src/runtime.ts'
-import type { Ticket } from '../src/shared/types.ts'
+import type { OutboxRow, Ticket } from '../src/shared/types.ts'
 import { shutdown, tempHome } from './fixtures.ts'
 
 /**
@@ -93,6 +100,11 @@ function createRuntime(home: string, opts: Partial<RuntimeOptions> = {}): Runtim
 
 function recoveredInputs(ticket: Ticket) {
   return ticket.inputs.filter(input => input.kind === 'context' && input.text?.startsWith('RECOVERED:'))
+}
+
+function unknownApprovals(ticket: Ticket) {
+  return (ticket.collab?.approvals ?? []).filter(approval =>
+    approval.status === 'pending' && approval.action.startsWith(UNKNOWN_OUTCOME_PREFIX))
 }
 
 function recoveredEvents(runtime: Runtime) {
@@ -192,6 +204,74 @@ describe('restart recovery', () => {
     expect(recoveredEvents(runtime)).toHaveLength(0)
     expect(launch).not.toHaveBeenCalled()
     expect(runtime.log.text()).toContain('[recovery] deferred reason=mock-model')
+  })
+
+  it('defers under MockModel without finalizing a started delegate operation', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home, { model: new MockModel() })
+    runtime.store.putDoc('ticket', 'ticket_mock_delegate', runningTicket('ticket_mock_delegate'))
+    const started = beginDelegateOperation({
+      store: runtime.store,
+      ticketId: 'ticket_mock_delegate',
+      assignmentId: 'asg_ticket_mock_delegate_1',
+      sessionId: 'worker_ticket_mock_delegate',
+      agent: 'a',
+      task: 'do the work',
+      now: new Date().toISOString(),
+    })
+    const launch = vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.resolve())
+
+    runtime.start({ assessPending: false })
+
+    const ticket = runtime.store.getDoc<Ticket>('ticket', 'ticket_mock_delegate')!
+    expect(ticket.assignments).toHaveLength(1)
+    expect(ticket.assignments[0]?.state).toBe('running')
+    expect(ticket.inputs).toHaveLength(0)
+    expect(ticket.collab?.approvals ?? []).toHaveLength(0)
+    expect(unknownApprovals(ticket)).toHaveLength(0)
+    const ops = runtime.store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)
+    expect(ops).toHaveLength(1)
+    expect(ops[0]?.id).toBe(started.id)
+    expect(ops[0]?.phase).toBe('started')
+    expect(launch).not.toHaveBeenCalled()
+    expect(runtime.log.text()).toContain('[recovery] deferred reason=mock-model')
+    expect(runtime.log.text()).not.toContain('[recovery] uncertain external effects')
+  })
+
+  it('defers under MockModel without flipping a started outbox send to unknown', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home, { model: new MockModel() })
+    runtime.store.putDoc('ticket', 'ticket_mock_outbox', runningTicket('ticket_mock_outbox'))
+    const at = new Date().toISOString()
+    const row: OutboxRow = {
+      id: 'obx_mock_inflight',
+      replyId: 'rpl_mock_inflight',
+      ticketId: 'ticket_mock_outbox',
+      channel: 'im',
+      thread: 'im:topic/disk',
+      target: { provider: 'feishu', chat_id: 'topic/disk' },
+      text: 'still sending',
+      status: 'pending',
+      idempotencyKey: 'idem_mock_inflight',
+      createdAt: at,
+    }
+    runtime.store.enqueueOutbox(row)
+    expect(runtime.store.claimOutbox(row.id)).toBe(true)
+    recordOutboxSendStart(runtime.store, row, at)
+    const launch = vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.resolve())
+
+    runtime.start({ assessPending: false })
+
+    const current = runtime.store.listOutbox().find(item => item.id === row.id)!
+    expect(current.status).toBe('sending')
+    const op = runtime.store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, `outbox_${row.id}`)
+    expect(op?.phase).toBe('started')
+    const ticket = runtime.store.getDoc<Ticket>('ticket', 'ticket_mock_outbox')!
+    expect(ticket.assignments[0]?.state).toBe('running')
+    expect(unknownApprovals(ticket)).toHaveLength(0)
+    expect(launch).not.toHaveBeenCalled()
+    expect(runtime.log.text()).toContain('[recovery] deferred reason=mock-model')
+    expect(runtime.log.text()).not.toContain('[recovery] uncertain external effects')
   })
 
   it('is idempotent across repeated start() calls and a process restart', async () => {

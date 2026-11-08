@@ -1027,12 +1027,10 @@ export class Runtime {
     // that our own asynchronous launch has already marked `running`.
     this.recoveryAttempted = true
     const attemptedAt = new Date().toISOString()
-    const uncertain = finalizeUncertainExternalEffects(this.store, attemptedAt)
-    if (uncertain.unknownOps > 0 || uncertain.unknownOutbox > 0) {
-      this.log.info(
-        `[recovery] uncertain external effects ops=${uncertain.unknownOps} outbox=${uncertain.unknownOutbox} approvals=${uncertain.approvalsQueued}`,
-      )
-    }
+    // A keyless process must leave interrupted work untouched. Finalizing
+    // uncertain external effects mutates the store (started ops become
+    // unknown_outcome, mid-send outbox rows flip, approvals queue), so the
+    // deferral has to happen before that call — not after it.
     if (this.model.name === 'MockModel') {
       this.log.info('[recovery] deferred reason=mock-model')
       this.persistRecoveryBoundary(recoveryBoundaryFromOutcomes(
@@ -1043,6 +1041,12 @@ export class Runtime {
         { deferReason: 'mock-model' },
       ))
       return
+    }
+    const uncertain = finalizeUncertainExternalEffects(this.store, attemptedAt)
+    if (uncertain.unknownOps > 0 || uncertain.unknownOutbox > 0) {
+      this.log.info(
+        `[recovery] uncertain external effects ops=${uncertain.unknownOps} outbox=${uncertain.unknownOutbox} approvals=${uncertain.approvalsQueued}`,
+      )
     }
     let recovered: ReturnType<Engine['recoverInterrupted']>
     try {
