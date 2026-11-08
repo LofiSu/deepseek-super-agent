@@ -24,6 +24,9 @@ strategy** for speculative **DeliverGate** (`deliver-gate-v1`). Runtime compiles
   - `kl-ucb` — statistical arms only; **policy memory OFF**.
   - `policy-memory` — lesson-filtered failure arms + parent→child token deltas; **KL OFF**; after retirement skips contradicted train ids (e.g. glimmer trap → next train miss `orbit`).
   - `simplified-greedy` — round-robin arms; memory OFF (counterfactual baseline).
+- **Search exclusivity**: `search-run.lock` (OS `wx`) — at most one active `evolution run` search per home; fail closed if held.
+- **Experiment persistence**: counters (`totalOpportunities`, `totalCandidatesGenerated`, `klArms`) commit in the same `mutateExperiment` transaction as budget reserves (no reload clobber).
+- **Budget ledger**: `reservations[]` lists search vs `finaltest_*` pools; `childEvalLaunches` counts actual isolated eval children; baseline search splits scored in-process once and cached on `baselineSearchCache` (digest-bound).
 - **Final test claim**: OS `wx` lock file + consumed marker under trusted `DS_AGENT_HOME/evolution/` (same-local-user threat model).
 - **No LLM** policy memory: `policy-memory.json` stores parent→child token deltas tied to exact train case ids.
 - **Frozen model**: proposals are train-failure token additions (deterministic).
@@ -32,7 +35,7 @@ strategy** for speculative **DeliverGate** (`deliver-gate-v1`). Runtime compiles
 
 ## Pipeline
 
-1. **Search (A+B)** — train + validation via isolated child; budget ledger with reserve.
+1. **Search (A+B)** — train + validation via **separate OS child processes** (`evolution-eval-child.mjs`) with temp JSON only; this is **not** a network/kernel sandbox. Per-split **eval timeout** is bounded (`evalTimeoutMs`); there is no separate global wall-clock pool beyond experiment budgets.
 2. **Propose** — `TrainFailureProposer`; arm pick via `--selector kl-ucb` | `policy-memory` | `simplified-greedy` (`search-selector.ts`).
 3. **Freeze** — `evolution freeze <candidateId>`.
 4. **Final test (C)** — one-shot `evolution finalize`; sealed ledger; refuses repeat.
@@ -48,8 +51,8 @@ pnpm ds-agent evolution freeze <candidateId> --home "$DS_AGENT_HOME"
 pnpm ds-agent evolution finalize <candidateId> --home "$DS_AGENT_HOME"
 pnpm ds-agent evolution approve <runId> <candidateId> --home "$DS_AGENT_HOME"
 pnpm ds-agent evolution rollback --home "$DS_AGENT_HOME"
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm exec tsx scripts/evolution-rounds-demo.ts
-CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm exec tsx scripts/evolution-two-cli-rounds.ts   # two OS CLI processes; LABEL synth; log under /tmp/
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm exec tsx scripts/evolution-two-cli-rounds.ts   # preferred: two OS CLI processes; LABEL synth 2/2; log under /tmp/
+# legacy in-process fixture demo (deprecated): scripts/evolution-rounds-demo.ts
 ```
 
 Automatic merge/deploy is **disabled by design**.

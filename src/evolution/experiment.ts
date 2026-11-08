@@ -58,6 +58,18 @@ export function saveExperiment(home: string, state: ExperimentState): void {
   writeJsonAtomic(experimentPath(home), state)
 }
 
+/** Load → mutate → save in one transaction (prevents stale overwrites). */
+export function mutateExperiment(
+  home: string,
+  mutator: (state: ExperimentState) => void,
+): ExperimentState {
+  const state = loadExperiment(home)
+  if (!state) throw new Error('missing experiment')
+  mutator(state)
+  saveExperiment(home, state)
+  return state
+}
+
 export function loadPersistedRunReport(home: string, runId: string): EvolutionRunReport {
   if (!/^[a-zA-Z0-9_.-]+$/.test(runId)) {
     throw new Error('invalid run id')

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /**
- * Two-round + restart demo (LABEL fixture). Writes JSON steps to stdout.
+ * @deprecated Prefer LABEL synth two-process CLI demo:
+ *   CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm exec tsx scripts/evolution-two-cli-rounds.ts
+ *
+ * In-process fixture demo (legacy); uses adequate budgets for finalize reserve pool.
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -21,31 +24,25 @@ async function main(): Promise<void> {
   const home = process.env.DS_AGENT_HOME ?? fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-evo-demo-'))
   process.env.DS_AGENT_HOME = home
   const log: unknown[] = []
+  const budget = {
+    maxCandidates: 4,
+    maxEvals: 32,
+    evalTimeoutMs: 15_000,
+    reserveEvals: 4,
+  }
 
-  const r1 = await runEvolution({
-    home,
-    datasetRoot,
-    round: 1,
-    budget: { maxCandidates: 4, maxEvals: 20, evalTimeoutMs: 15_000, reserveEvals: 2 },
-  })
+  const r1 = await runEvolution({ home, datasetRoot, round: 1, budget })
   log.push({ step: 'round1', candidates: r1.candidates.length, budget: r1.budget })
 
-  const r2 = await runEvolution({
-    home,
-    datasetRoot,
-    round: 2,
-    budget: { maxCandidates: 4, maxEvals: 20, evalTimeoutMs: 15_000, reserveEvals: 2 },
-  })
+  const r2 = await runEvolution({ home, datasetRoot, round: 2, budget })
   const mem = loadPolicyMemory(home, r2.experimentId)
+  const exp = loadExperiment(home)
   log.push({
     step: 'round2',
     lessons: mem.lessons.length,
-    round2Directions: r2.candidates.map(item => item.directionKey),
+    totalCandidatesGenerated: exp?.totalCandidatesGenerated,
+    totalOpportunities: exp?.totalOpportunities,
   })
-
-  const expPath = path.join(home, 'evolution', 'experiment.json')
-  const saved = JSON.parse(fs.readFileSync(expPath, 'utf8'))
-  fs.writeFileSync(expPath + '.bak', JSON.stringify(saved))
 
   type Pick = { report: typeof r1; winner: (typeof r1.candidates)[number] }
   let pick: Pick | undefined
@@ -64,21 +61,14 @@ async function main(): Promise<void> {
   const fin = await runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId })
   log.push({ step: 'finalize', ledgerId: fin.ledgerId, finaltest: fin.scores })
 
-  try {
-    await runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId })
-  } catch (error) {
-    log.push({ step: 'finalize_retry_rejected', error: error instanceof Error ? error.message : String(error) })
-  }
-
   const prev = process.env.DS_AGENT_USE_PROMOTED_DELIVER_GATE
   process.env.DS_AGENT_USE_PROMOTED_DELIVER_GATE = '1'
   try {
-    const artifact = path.join(winReport.archiveDir, winner.candidateId, 'candidate.json')
     approvePromotion({
       home,
       runReport: winReport,
       candidateId: winner.candidateId,
-      artifactPath: artifact,
+      artifactPath: path.join(winReport.archiveDir, winner.candidateId, 'candidate.json'),
     })
     log.push({ step: 'approve', gate: resolveDeliverGate(home).constructor.name })
     rollbackPromotion(home)
@@ -88,7 +78,6 @@ async function main(): Promise<void> {
     else process.env.DS_AGENT_USE_PROMOTED_DELIVER_GATE = prev
   }
 
-  log.push({ step: 'restart_reload', experiment: loadExperiment(home)?.phase, policyRound: mem.round, home })
   console.log(JSON.stringify(log, null, 2))
 }
 

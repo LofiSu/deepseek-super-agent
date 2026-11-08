@@ -12,7 +12,7 @@ import {
   recordFinalTest,
 } from './experiment.ts'
 import { computeEvaluatorDigest } from './evaluator-identity.ts'
-import { reserveFinalTestUnits } from './budget-ledger.ts'
+import { recordChildEvalLaunch, reserveFinalTestUnits } from './budget-ledger.ts'
 import { evolutionArchiveRoot } from './archive.ts'
 import { readJsonFile, resolveInsideDir } from './io.ts'
 import type { EvolutionCandidateRecord, SplitScore } from './types.ts'
@@ -110,6 +110,7 @@ export async function runFinalTestOnce(input: {
       if (result.timedOut || !result.ok || !result.score) {
         abortFinalTestClaim(input.home, lockToken, result.error ?? 'finaltest_eval_failed')
       }
+      recordChildEvalLaunch(input.home, 1)
       score = result.score.split === 'finaltest'
         ? result.score
         : { ...result.score, split: 'finaltest' }

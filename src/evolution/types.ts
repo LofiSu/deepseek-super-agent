@@ -88,6 +88,7 @@ export interface BudgetLedger {
   evalTimeoutMs: number
   maxOutputBytes: number
   reserveEvals: number
+  /** Upper-bound eval units reserved (search + finaltest). */
   usedEvals: number
   errors: number
   timeouts: number
@@ -95,6 +96,8 @@ export interface BudgetLedger {
   reservations?: BudgetReservation[]
   finaltestReserved?: boolean
   baselineSearchReserved?: boolean
+  /** Isolated child scoring processes launched (train/val/finaltest). */
+  childEvalLaunches?: number
   totalWallDeadlineMs?: number
   wallStartedAt?: string
 }
@@ -153,12 +156,19 @@ export interface KlArmSnapshot {
   observations: { id: string; reward: 0 | 1; skip?: boolean }[]
 }
 
+export interface BaselineSearchCache {
+  datasetDigest: string
+  evaluatorDigest: string
+  scores: SplitScore[]
+}
+
 export interface ExperimentState {
   experimentId: string
   phase: ExperimentPhase
   datasetDigest: string
   evaluatorDigest: string
   seed: number
+  baselineSearchCache?: BaselineSearchCache | null
   selectedCandidateId: string | null
   frozenSelection: FrozenSelection | null
   frozenAt: string | null
