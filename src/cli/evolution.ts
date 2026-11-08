@@ -6,6 +6,9 @@ import { evolutionRunsDir } from '../evolution/archive.ts'
 import { runEvolution } from '../evolution/evolve.ts'
 import type { EvolutionRunReport } from '../evolution/types.ts'
 import { loadPromotedStrategy } from '../evolution/promotion.ts'
+import { freezeCandidate } from '../evolution/experiment.ts'
+import { runFinalTestOnce } from '../evolution/finalize.ts'
+import { loadExperiment } from '../evolution/experiment.ts'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
@@ -22,15 +25,17 @@ function loadRunReport(home: string, runId: string): EvolutionRunReport {
 export async function runEvolutionCommand(home: string, argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub || sub === 'help' || sub === '--help') {
-    console.log(`ds-agent evolution — offline controlled self-evolution (strategy JSON v1)
+    console.log(`ds-agent evolution — offline controlled self-evolution (strategy tokens v2)
 
-  pnpm ds-agent evolution run [--home <dir>] [--dataset <dir>]
+  pnpm ds-agent evolution run [--home <dir>] [--dataset <dir>] [--selector kl-ucb|simplified-greedy]
+  pnpm ds-agent evolution freeze <candidateId> [--home <dir>]
+  pnpm ds-agent evolution finalize <candidateId> [--home <dir>] [--dataset <dir>]
   pnpm ds-agent evolution approve <runId> <candidateId> [--artifact <path>] [--home <dir>]
   pnpm ds-agent evolution rollback [--home <dir>]
   pnpm ds-agent evolution status [--home <dir>]
 
-  LABEL: default dataset is a redacted fixture under test/fixtures/evolution.
-  Never auto-merges or edits production git; promotion writes only under <home>/evolution/.`)
+  LABEL: tiny fixture dataset; no general quality guarantee.
+  Split C (finaltest) is one-shot sealed; never used during search.`)
     return
   }
 
@@ -40,28 +45,54 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
     return home
   }
 
+  function datasetRoot(): string {
+    const dIndex = rest.indexOf('--dataset')
+    return dIndex >= 0 && rest[dIndex + 1] ? rest[dIndex + 1]! : defaultDatasetRoot()
+  }
+
   const stateHome = homeArg()
 
   if (sub === 'run') {
-    const dIndex = rest.indexOf('--dataset')
-    const datasetRoot = dIndex >= 0 && rest[dIndex + 1] ? rest[dIndex + 1]! : defaultDatasetRoot()
-    const report = await runEvolution({ home: stateHome, datasetRoot })
-    const evaluated = report.candidates.filter(item => item.status === 'evaluated')
+    const selIndex = rest.indexOf('--selector')
+    const selector = selIndex >= 0 && rest[selIndex + 1] === 'simplified-greedy'
+      ? 'simplified-greedy' as const
+      : 'kl-ucb' as const
+    const report = await runEvolution({ home: stateHome, datasetRoot: datasetRoot(), selector })
     console.log(JSON.stringify({
       runId: report.runId,
+      experimentId: report.experimentId,
+      round: report.round,
       datasetDigest: report.datasetDigest,
       evaluatorDigest: report.evaluatorDigest,
       baseline: report.baseline,
+      budget: report.budget,
+      selector: report.selector,
       candidates: report.candidates.map(item => ({
         candidateId: item.candidateId,
         status: item.status,
+        reward: item.reward,
         scores: item.scores,
         rejectionReason: item.rejectionReason,
         strategyDigest: item.strategyDigest,
+        directionKey: item.directionKey,
       })),
-      evaluatedCount: evaluated.length,
-      trainFailuresAddressed: evaluated.length > 0,
     }, null, 2))
+    return
+  }
+
+  if (sub === 'freeze') {
+    const candidateId = rest[0]
+    if (!candidateId) throw new Error('usage: evolution freeze <candidateId>')
+    const state = freezeCandidate(stateHome, candidateId)
+    console.log(JSON.stringify({ frozen: true, selectedCandidateId: state.selectedCandidateId, phase: state.phase }, null, 2))
+    return
+  }
+
+  if (sub === 'finalize') {
+    const candidateId = rest[0]
+    if (!candidateId) throw new Error('usage: evolution finalize <candidateId>')
+    const outcome = runFinalTestOnce({ home: stateHome, datasetRoot: datasetRoot(), candidateId })
+    console.log(JSON.stringify({ finalized: true, ...outcome }, null, 2))
     return
   }
 
@@ -72,8 +103,6 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
     const aIndex = rest.indexOf('--artifact')
     let artifactPath = aIndex >= 0 && rest[aIndex + 1] ? rest[aIndex + 1] : undefined
     const report = loadRunReport(stateHome, runId)
-    const record = report.candidates.find(item => item.candidateId === candidateId)
-    if (!record) throw new Error(`unknown candidate ${candidateId}`)
     if (!artifactPath) {
       artifactPath = path.join(report.archiveDir, candidateId, 'candidate.json')
     }
@@ -90,11 +119,12 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
 
   if (sub === 'status') {
     const strategy = loadPromotedStrategy(stateHome)
+    const experiment = loadExperiment(stateHome)
     const runsDir = evolutionRunsDir(stateHome)
     const runs = fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter(name => name.endsWith('.json')) : []
     console.log(JSON.stringify({
       promoted: strategy !== null,
-      strategy,
+      experiment,
       runReports: runs.length,
     }, null, 2))
     return

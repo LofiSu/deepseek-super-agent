@@ -31,7 +31,7 @@ export function writeJsonAtomic(filePath: string, value: unknown): void {
 export async function isolatedEvaluateSplit(
   workDir: string,
   strategy: DeliverGateStrategyV1,
-  splitName: 'train' | 'validation' | 'holdout',
+  splitName: 'train' | 'validation',
   cases: EvolutionEvalCase[],
   budget: Pick<EvolutionBudget, 'evalTimeoutMs'>,
 ): Promise<IsolatedEvalResult> {

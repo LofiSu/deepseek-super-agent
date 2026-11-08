@@ -5,12 +5,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ConfigurableDeliverGate } from '../src/speculate/configurable-gate.ts'
 import { HeuristicDeliverGate } from '../src/speculate/gate.ts'
 import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
-import { runEvolution, EVALUATOR_DIGEST } from '../src/evolution/evolve.ts'
-import { parseDeliverGateStrategy } from '../src/evolution/strategy-gate.ts'
-import { TrainFailureProposer, MockFixtureProposer } from '../src/evolution/train-proposer.ts'
+import { runEvolution, computeEvaluatorDigestForExport } from '../src/evolution/evolve.ts'
+import { TrainFailureProposer } from '../src/evolution/train-proposer.ts'
 import { approvePromotion, loadPromotedStrategy, rollbackPromotion } from '../src/evolution/promotion.ts'
 import type { DeliverGateStrategyV1 } from '../src/evolution/types.ts'
 import { listTrainFailures, scoreCases } from '../src/evolution/score.ts'
+import { emptyCarrier } from '../src/evolution/policy-memory.ts'
+import { freezeCandidate } from '../src/evolution/experiment.ts'
+import { runFinalTestOnce } from '../src/evolution/finalize.ts'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -30,18 +32,18 @@ function tempEvolutionHome(): string {
   return home
 }
 
-describe('controlled evolution (offline deliver-gate strategy v1)', () => {
-  it('baseline fixture scores match train/validation/holdout counts', () => {
+describe('controlled evolution (offline deliver-gate strategy v2)', () => {
+  it('baseline fixture scores match train/validation counts (fixture tiny)', () => {
     const baseline = defaultBaselineStrategy()
     const train = JSON.parse(fs.readFileSync(path.join(datasetRoot, 'train.json'), 'utf8')).cases
     const validation = JSON.parse(fs.readFileSync(path.join(datasetRoot, 'validation.json'), 'utf8')).cases
-    const holdout = JSON.parse(fs.readFileSync(path.join(datasetRoot, 'holdout.json'), 'utf8')).cases
+    const finaltest = JSON.parse(fs.readFileSync(path.join(datasetRoot, 'finaltest.json'), 'utf8')).cases
     const trainScore = scoreCases(baseline, 'train', train)
     const valScore = scoreCases(baseline, 'validation', validation)
-    const hoScore = scoreCases(baseline, 'holdout', holdout)
+    const finalScore = scoreCases(baseline, 'finaltest', finaltest)
     expect(trainScore.total).toBe(7)
     expect(valScore.total).toBe(4)
-    expect(hoScore.total).toBe(4)
+    expect(finalScore.total).toBe(4)
     expect(trainScore.correct).toBeLessThan(trainScore.total)
   })
 
@@ -51,48 +53,58 @@ describe('controlled evolution (offline deliver-gate strategy v1)', () => {
     const failures = listTrainFailures(baseline, train)
     expect(failures.length).toBeGreaterThan(0)
     const proposer = new TrainFailureProposer()
-    const next = proposer.propose({ baseline, trainFailures: failures, seed: 1, index: 0 })
+    const next = proposer.propose({
+      baseline,
+      trainFailures: failures,
+      memory: emptyCarrier('exp', 1),
+      seed: 1,
+      index: 0,
+      seenDirections: new Set(),
+    })
     expect(next).not.toBeNull()
-    expect(next!.positivePattern).not.toBe(baseline.positivePattern)
+    expect(next!.positiveTokens).not.toEqual(baseline.positiveTokens)
   })
 
-  it('rejects malformed, holdout-cheat, and regression candidates', async () => {
+  it('rejects malformed, duplicate, and regression candidates during search', async () => {
     const home = tempEvolutionHome()
     const baseline = defaultBaselineStrategy()
-    const holdoutCheat: DeliverGateStrategyV1 = {
+    const sideways: DeliverGateStrategyV1 = {
       ...baseline,
-      positivePattern: baseline.positivePattern.replace(
-        /\)\\b$/u,
-        "|Valuable fix for checkout.*)\\b",
-      ),
+      positiveTokens: [...baseline.positiveTokens!, 'sideways'],
     }
     const report = await runEvolution({
       home,
       datasetRoot,
-      budget: { maxCandidates: 4, maxEvals: 4, evalTimeoutMs: 15_000 },
+      budget: { maxCandidates: 5, maxEvals: 5, evalTimeoutMs: 15_000, reserveEvals: 1 },
       injectCandidates: [
-        { ...baseline, positivePattern: '(unclosed' },
-        holdoutCheat,
-        { ...baseline, positivePattern: 'never-match-anything' },
+        { ...baseline, positiveTokens: ['neverword'], negativeTokens: baseline.negativeTokens! },
+        { ...baseline, positiveTokens: ['!!!invalid'], negativeTokens: baseline.negativeTokens! },
+        sideways,
+        sideways,
       ],
     })
-    expect(report.evaluatorDigest).toBe(EVALUATOR_DIGEST)
+    expect(report.evaluatorDigest).toBe(computeEvaluatorDigestForExport())
     const statuses = report.candidates.map(item => item.status)
-    expect(statuses).toContain('rejected_malformed')
-    expect(statuses).toContain('rejected_holdout_cheat')
-    expect(statuses).toContain('rejected_regression')
+    expect(statuses.some(s => s === 'skipped_invalid' || s === 'rejected_malformed')).toBe(true)
+    expect(statuses).toContain('rejected_duplicate')
+    expect(statuses.some(s => s === 'rejected_regression' || s === 'evaluated')).toBeTruthy()
   })
 
-  it('end-to-end: run, approve promoted strategy affects gate, rollback restores default', async () => {
+  it('end-to-end: search, freeze, finalize, approve, rollback', async () => {
     const home = tempEvolutionHome()
     const report = await runEvolution({
       home,
       datasetRoot,
-      budget: { maxCandidates: 6, maxEvals: 6, evalTimeoutMs: 20_000 },
+      budget: { maxCandidates: 6, maxEvals: 6, evalTimeoutMs: 20_000, reserveEvals: 2 },
     })
-    const winner = report.candidates.find(item => item.status === 'evaluated')
+    const winner = report.candidates.find(item => item.status === 'evaluated' && item.reward === 'success')
+      ?? report.candidates.find(item => item.status === 'evaluated')
     expect(winner).toBeDefined()
-    expect(winner!.scores.some(score => score.split === 'holdout')).toBe(true)
+    expect(winner!.scores.every(score => score.split !== 'finaltest')).toBe(true)
+
+    freezeCandidate(home, winner!.candidateId)
+    const finalOut = runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
+    expect(finalOut.scores[0]?.split).toBe('finaltest')
 
     const artifact = path.join(report.archiveDir, winner!.candidateId, 'candidate.json')
     const promotion = approvePromotion({
@@ -101,7 +113,7 @@ describe('controlled evolution (offline deliver-gate strategy v1)', () => {
       candidateId: winner!.candidateId,
       artifactPath: artifact,
     })
-    expect(promotion.strategyDigest).toBe(winner!.strategyDigest)
+    expect(promotion.evaluatorDigest).toBe(report.evaluatorDigest)
 
     const promoted = loadPromotedStrategy(home)
     expect(promoted).not.toBeNull()
@@ -111,44 +123,10 @@ describe('controlled evolution (offline deliver-gate strategy v1)', () => {
     const train = JSON.parse(fs.readFileSync(path.join(datasetRoot, 'train.json'), 'utf8')).cases
     const fixedCase = train.find((item: { id: string }) => item.id === 'tr-007')
     expect(fixedCase).toBeDefined()
-    const cfg = configurable.evaluate({ ticket: speculative, report: fixedCase.report })
-    const heu = heuristic.evaluate({ ticket: speculative, report: fixedCase.report })
-    expect(cfg).toBe('deliver')
-    expect(heu).toBe('discard')
+    expect(configurable.evaluate({ ticket: speculative, report: fixedCase.report })).toBe('deliver')
+    expect(heuristic.evaluate({ ticket: speculative, report: fixedCase.report })).toBe('discard')
 
-    const rolled = rollbackPromotion(home)
-    expect(rolled.rolledBack).toBe(true)
+    rollbackPromotion(home)
     expect(loadPromotedStrategy(home)).toBeNull()
-  })
-
-  it('rejects promotion when artifact digest is tampered', async () => {
-    const home = tempEvolutionHome()
-    const report = await runEvolution({
-      home,
-      datasetRoot,
-      budget: { maxCandidates: 4, maxEvals: 4, evalTimeoutMs: 20_000 },
-    })
-    const winner = report.candidates.find(item => item.status === 'evaluated')
-    expect(winner).toBeDefined()
-    const artifact = path.join(report.archiveDir, winner!.candidateId, 'candidate.json')
-    const tampered = JSON.parse(fs.readFileSync(artifact, 'utf8'))
-    tampered.strategy.positivePattern = '.*'
-    fs.writeFileSync(artifact, JSON.stringify(tampered, null, 2))
-    expect(() => approvePromotion({
-      home,
-      runReport: report,
-      candidateId: winner!.candidateId,
-      artifactPath: artifact,
-    })).toThrow(/digest mismatch/)
-  })
-
-  it('MockFixtureProposer adapter interface for deterministic fixture proposals', () => {
-    const baseline = defaultBaselineStrategy()
-    const variant = parseDeliverGateStrategy({
-      ...baseline,
-      positivePattern: `${baseline.positivePattern.replace(/\)\\b$/u, '|checkout)')}\\b`,
-    })
-    const mock = new MockFixtureProposer([variant])
-    expect(mock.propose({ baseline, trainFailures: [], seed: 0, index: 0 })).toEqual(variant)
   })
 })

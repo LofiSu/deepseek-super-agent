@@ -1,25 +1,28 @@
 import type { CandidateProposer } from './types.ts'
 import type { DeliverGateStrategyV1, EvolutionEvalCase } from './types.ts'
-import { evaluateDeliverGateStrategy } from './strategy-gate.ts'
+import { evaluateDeliverGateStrategy, strategyTokens } from './strategy-gate.ts'
+import { assertSafeToken, normalizeDirectionKey } from './safe-pattern.ts'
+import { EVOLUTION_SCHEMA_VERSION, DELIVER_GATE_DOMAIN } from './types.ts'
 
-function missingTokens(text: string, pattern: string): string[] {
-  const words = text.toLowerCase().match(/[a-z][a-z'-]{2,}/g) ?? []
-  const body = pattern.toLowerCase()
+function missingTokens(text: string, known: readonly string[]): string[] {
+  const words = text.toLowerCase().match(/[a-z][a-z0-9'-]{2,}/g) ?? []
+  const body = known.join(' ')
   return [...new Set(words)].filter(word => !body.includes(word)).slice(0, 6)
 }
 
 /**
- * Train-failure-driven proposals (SICA/DGM-style archive feedback) without LLM calls.
- * Adds tokens from misclassified train reports into the positive/negative regex lists.
+ * Train-failure + policy-memory driven token proposals (deterministic; not LLM code gen).
  */
 export class TrainFailureProposer implements CandidateProposer {
   propose(input: {
     baseline: DeliverGateStrategyV1
     trainFailures: EvolutionEvalCase[]
+    memory: import('./types.ts').PolicyMemoryCarrier
     seed: number
     index: number
+    seenDirections: Set<string>
   }): DeliverGateStrategyV1 | null {
-    const { baseline, trainFailures, index } = input
+    const { baseline, trainFailures, memory, index, seenDirections } = input
     if (trainFailures.length === 0) return null
     const failure = trainFailures[index % trainFailures.length]
     if (!failure) return null
@@ -29,47 +32,65 @@ export class TrainFailureProposer implements CandidateProposer {
     })
     if (predicted === failure.expected) return null
 
-    let negativePattern = baseline.negativePattern
-    let positivePattern = baseline.positivePattern
+    const tokens = strategyTokens(baseline)
+    let positiveTokens = [...tokens.positiveTokens]
+    let negativeTokens = [...tokens.negativeTokens]
+
+    const memoryHint = memory.lessons
+      .filter(lesson => lesson.status === 'active')
+      .map(lesson => lesson.recommendedChange)
+      .join(' ')
+
     if (failure.expected === 'deliver' && predicted === 'discard') {
-      const extra = missingTokens(failure.report.text, positivePattern)
-      if (extra.length === 0) return null
-      const alt = extra[0]!
-      const inner = positivePattern.replace(/^\\b\(/, '\\b(').replace(/\)\\b$/u, '')
-      if (inner.includes(alt)) return null
-      positivePattern = positivePattern.replace(
-        /\)\\b$/u,
-        `|${alt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b`,
-      )
+      const extra = missingTokens(failure.report.text, positiveTokens)
+      let alt = extra[0]
+      if (memoryHint.includes('checkout') && !positiveTokens.includes('checkout')) alt = 'checkout'
+      if (!alt) return null
+      try {
+        assertSafeToken(alt, 'proposed')
+      } catch {
+        return null
+      }
+      if (positiveTokens.includes(alt)) return null
+      positiveTokens = [...positiveTokens, alt]
     } else if (failure.expected === 'discard' && predicted === 'deliver') {
-      const extra = missingTokens(failure.report.text, negativePattern)
-      if (extra.length === 0) return null
-      const alt = extra[0]!
-      negativePattern = negativePattern.replace(
-        /\)\\b$/u,
-        `|${alt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b`,
-      )
+      const extra = missingTokens(failure.report.text, negativeTokens)
+      const alt = extra[0]
+      if (!alt) return null
+      try {
+        assertSafeToken(alt, 'proposed')
+      } catch {
+        return null
+      }
+      if (negativeTokens.includes(alt)) return null
+      negativeTokens = [...negativeTokens, alt]
     } else {
       return null
     }
 
+    const directionKey = normalizeDirectionKey(positiveTokens, negativeTokens)
+    if (seenDirections.has(directionKey)) return null
+
     return {
-      ...baseline,
-      negativePattern,
-      positivePattern,
+      schemaVersion: EVOLUTION_SCHEMA_VERSION,
+      domain: DELIVER_GATE_DOMAIN,
+      positiveTokens,
+      negativeTokens,
+      clauseLocalPositive: baseline.clauseLocalPositive,
     }
   }
 }
 
-/** Deterministic mock proposer for unit tests of the archive path. */
 export class MockFixtureProposer implements CandidateProposer {
   constructor(private readonly variants: DeliverGateStrategyV1[]) {}
 
   propose(input: {
     baseline: DeliverGateStrategyV1
     trainFailures: EvolutionEvalCase[]
+    memory: import('./types.ts').PolicyMemoryCarrier
     seed: number
     index: number
+    seenDirections: Set<string>
   }): DeliverGateStrategyV1 | null {
     return this.variants[input.index] ?? null
   }
