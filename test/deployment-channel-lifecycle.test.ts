@@ -119,6 +119,60 @@ describe('deployment resident channel lifecycle', () => {
     await rt.finish()
   })
 
+  it('feishu loop does not advance cursor when ingress aborts under saturation', async () => {
+    const rt = Runtime.create({
+      home: tempHome(),
+      model: new MockModel(),
+      jobDelayMs: 0,
+      watchdogIntervalMs: 60_000,
+      env: {
+        ...process.env,
+        DS_AGENT_ALLOW_MOCK_FIXTURE: '1',
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_test',
+        DS_AGENT_RESIDENT_INGRESS_LIMIT: '1',
+      },
+    })
+    rt.start()
+    const batch = [
+      feishuTrigger('hold', 1_761_958_800_000),
+      feishuTrigger('lost', 1_761_958_801_000),
+    ]
+    const ingested: string[] = []
+    let release!: () => void
+    const holdFirst = new Promise<void>(resolve => { release = resolve })
+    const base = rt.ingestAsync.bind(rt)
+    rt.ingestAsync = async (t: Trigger) => {
+      ingested.push(t.id)
+      if (t.id === 'feishu_hold') await holdFirst
+      return base(t)
+    }
+    const source = new CountingFeishuSource(batch)
+    const controller = new AbortController()
+    const loop = runFeishuLoop({
+      runtime: rt,
+      chatId: 'oc_test',
+      client: noNetworkFeishu(),
+      createSource: () => source,
+      intervalMs: 5,
+      signal: controller.signal,
+    })
+    const deadline = Date.now() + 2_000
+    while (!ingested.includes('feishu_hold') && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 10))
+    }
+    expect(ingested).toContain('feishu_hold')
+    controller.abort()
+    release()
+    await Promise.race([
+      loop,
+      new Promise<never>((_r, reject) => setTimeout(() => reject(new Error('loop hang')), 5_000)),
+    ])
+    expect(ingested).toEqual(['feishu_hold'])
+    const cursor = rt.store.getDoc<{ chatId: string; lastCreateTimeMs: number }>('feishu_cursor', 'cursor')
+    expect(cursor).toBeUndefined()
+    await rt.finish()
+  })
+
   it('feishu loop logs poll errors and exits cleanly on abort', async () => {
     const rt = runtime()
     rt.start()
