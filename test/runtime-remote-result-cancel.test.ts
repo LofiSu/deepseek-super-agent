@@ -3,16 +3,19 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
-import { recordRemoteResult } from '../src/harness/remote-results.ts'
+import { recordRemoteResult, remoteResultSeen } from '../src/harness/remote-results.ts'
 import type { WorkerReport } from '../src/shared/ports.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
-import { field, lastPrompt, ScriptedModel } from './scripted-model.ts'
+import { silentModel } from './scripted-model.ts'
 
 const HOST = 'cancel-host'
+const REMOTE_NODE_ID = 'cancel-remote-node'
+const WORKER_PEER = 'worker'
+const SECRET = 'cancel-remote-result-secret-0123456789abcdef'
 
 describe('Runtime remote result idempotence after cancel', () => {
-  it('applyRemoteAssignmentResult is idempotent and no-ops when ticket already ended', async () => {
+  it('is idempotent and records after ticket end for the assigned remote peer', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-'))
     const runtime = freshRuntime({
       home,
@@ -21,21 +24,14 @@ describe('Runtime remote result idempotence after cancel', () => {
       singleSession: true,
       jobDelayMs: 0,
       env: { ...process.env, DS_AGENT_ALLOW_MOCK_FIXTURE: '1', DS_AGENT_INSTANCE_ID: HOST },
-      model: new ScriptedModel(async request => {
-        if (request.role !== 'worker') return { text: 'ok' }
-        const ticketId = field(lastPrompt(request), 'ticketId')
-        const reported = request.messages.some(m => m.role === 'tool' && m.name === 'report_to_router')
-        if (!reported) {
-          return {
-            toolCalls: [{
-              id: 'r1',
-              name: 'report_to_router',
-              args: { ticketId, text: 'ready: ok', deliver: false, kind: 'ready' },
-            }],
-          }
-        }
-        return { text: 'done' }
-      }),
+      model: silentModel(),
+    })
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
     })
     runtime.start({ assessPending: false })
     runtime.engine.receive(
@@ -44,34 +40,46 @@ describe('Runtime remote result idempotence after cancel', () => {
     )
     const ticketId = runtime.engine.evaluateDue()[0]?.ticketId ?? ''
     expect(ticketId).toBeTruthy()
-    await runtime.harness.launch(runtime.store.getDoc<Ticket>('ticket', ticketId)!)
-    await runtime.jobsSettled()
+    const assignmentId = runtime.store.getDoc<Ticket>('ticket', ticketId)!.assignments.at(-1)!.id
+    // The Harness chose this registered remote node for the ticket, and the
+    // ticket then ended (cancel) before the worker's result arrived.
+    runtime.engine.assignmentStarted(ticketId, assignmentId, `sess-${ticketId}`)
+    runtime.engine.assignmentPlaced(ticketId, assignmentId, REMOTE_NODE_ID)
+    runtime.engine.report(ticketId, { kind: 'ready', text: 'done locally', deliver: false })
     expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.ended).toBeDefined()
 
-    const assignmentId = runtime.store.getDoc<Ticket>('ticket', ticketId)!.assignments.at(-1)!.id
     const report: WorkerReport = { kind: 'ready', text: 'late remote', deliver: false }
     const deliveryKey = `deliv-cancel-${ticketId}`
+    // Simulate a result that was already accepted before the cancel.
     recordRemoteResult(runtime.store, { ticketId, assignmentId, report, deliveryKey })
 
     runtime.applyRemoteAssignmentResult({
-      peerId: 'worker',
+      peerId: WORKER_PEER,
       ticketId,
       assignmentId,
       report,
       deliveryKey,
-      envelope: { from: 'worker', to: HOST, body: {} },
+      envelope: { from: WORKER_PEER, to: HOST, body: {} },
     })
     expect(runtime.log.text()).toContain('remote result duplicate deliveryKey')
 
+    const lateKey = `deliv-cancel-${ticketId}-late`
     runtime.applyRemoteAssignmentResult({
-      peerId: 'worker',
+      peerId: WORKER_PEER,
       ticketId,
       assignmentId,
       report: { kind: 'ready', text: 'after end', deliver: false },
-      deliveryKey: `deliv-cancel-${ticketId}-late`,
-      envelope: { from: 'worker', to: HOST, body: {} },
+      deliveryKey: lateKey,
+      envelope: { from: WORKER_PEER, to: HOST, body: {} },
     })
     expect(runtime.log.text()).toContain('remote result after ticket end')
+    // The authorized late result is recorded for idempotency without rewriting
+    // the already-ended ticket.
+    expect(remoteResultSeen(runtime.store, lateKey)).toBe(true)
+    const after = runtime.store.getDoc<Ticket>('ticket', ticketId)!
+    expect(after.ended).toBeDefined()
+    expect(after.assignments.at(-1)?.report?.text).toBe('done locally')
+
     await shutdown(runtime)
     fs.rmSync(home, { recursive: true, force: true })
   })

@@ -980,6 +980,28 @@ export class Runtime {
       this.log.info(`[mesh] remote result ignored ticketId=${event.ticketId} reason=bad-report`)
       return
     }
+    // An authenticated peer may only answer for the assignment it was given.
+    // Consuming the global deliveryKey before this check would let any peer
+    // squat the key of a ticket it does not own, so unauthorized and stale
+    // results are dropped before `recordRemoteResult`.
+    const ticket = this.store.getDoc<Ticket>('ticket', event.ticketId)
+    const assignment = ticket?.assignments.at(-1)
+    const node = assignment?.node
+    const reason = !ticket
+      ? 'missing-ticket'
+      : !assignment || assignment.id !== event.assignmentId
+        ? 'stale-assignment'
+        : !node || !this.placement.isRemote(node)
+          ? 'not-remote'
+          : this.placement.remote?.get(node)?.peerId !== event.peerId
+            ? 'peer-mismatch'
+            : undefined
+    if (!ticket || reason) {
+      this.log.info(
+        `[mesh] remote result ignored ticketId=${event.ticketId} assignmentId=${event.assignmentId} peerId=${event.peerId} reason=unauthorized-or-stale detail=${reason}`,
+      )
+      return
+    }
     const applied = recordRemoteResult(this.store, {
       ticketId: event.ticketId,
       assignmentId: event.assignmentId,
@@ -992,8 +1014,7 @@ export class Runtime {
       return
     }
     this.remoteResultWait?.clear(event.ticketId)
-    const ticket = this.store.getDoc<Ticket>('ticket', event.ticketId)
-    if (ticket?.ended) {
+    if (ticket.ended) {
       this.log.info(
         `[mesh] remote result after ticket end ticketId=${event.ticketId} outcome=${ticket.ended.outcome}`,
       )
