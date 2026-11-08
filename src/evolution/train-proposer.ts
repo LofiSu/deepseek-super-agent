@@ -3,6 +3,7 @@ import type { DeliverGateStrategyV1, EvolutionEvalCase } from './types.ts'
 import { evaluateDeliverGateStrategy, strategyTokens } from './strategy-gate.ts'
 import { assertSafeToken, normalizeDirectionKey } from './safe-pattern.ts'
 import { EVOLUTION_SCHEMA_VERSION, DELIVER_GATE_DOMAIN } from './types.ts'
+import { applyMemoryLessons } from './policy-memory.ts'
 
 function missingTokens(text: string, known: readonly string[]): string[] {
   const words = text.toLowerCase().match(/[a-z][a-z0-9'-]{2,}/g) ?? []
@@ -10,41 +11,52 @@ function missingTokens(text: string, known: readonly string[]): string[] {
   return [...new Set(words)].filter(word => !body.includes(word)).slice(0, 6)
 }
 
-/**
- * Train-failure + policy-memory driven token proposals (deterministic; not LLM code gen).
- */
+function pickToken(input: {
+  failure: EvolutionEvalCase
+  positiveTokens: string[]
+  useMemory: boolean
+  memory: import('./types.ts').PolicyMemoryCarrier
+}): string | null {
+  const { failure, positiveTokens, useMemory, memory } = input
+  if (useMemory) {
+    const fromLesson = applyMemoryLessons(memory, failure, positiveTokens)
+    if (fromLesson) return fromLesson
+  }
+  const extra = missingTokens(failure.report.text, positiveTokens)
+  return extra[0] ?? null
+}
+
+/** Deterministic train-failure proposals; optional policy-memory lesson fields (no fixture literals). */
 export class TrainFailureProposer implements CandidateProposer {
+  constructor(private readonly useMemory = true) {}
+
   propose(input: {
     baseline: DeliverGateStrategyV1
+    parentStrategy: DeliverGateStrategyV1
     trainFailures: EvolutionEvalCase[]
     memory: import('./types.ts').PolicyMemoryCarrier
     seed: number
-    index: number
+    failureCaseId: string
     seenDirections: Set<string>
+    useMemory?: boolean
   }): DeliverGateStrategyV1 | null {
-    const { baseline, trainFailures, memory, index, seenDirections } = input
-    if (trainFailures.length === 0) return null
-    const failure = trainFailures[index % trainFailures.length]
+    const { parentStrategy, trainFailures, memory, failureCaseId, seenDirections } = input
+    const useMem = input.useMemory ?? this.useMemory
+    const failure = trainFailures.find(item => item.id === failureCaseId)
+      ?? trainFailures[0]
     if (!failure) return null
-    const predicted = evaluateDeliverGateStrategy(baseline, {
+    const predicted = evaluateDeliverGateStrategy(parentStrategy, {
       speculative: failure.speculative,
       report: failure.report,
     })
     if (predicted === failure.expected) return null
 
-    const tokens = strategyTokens(baseline)
+    const tokens = strategyTokens(parentStrategy)
     let positiveTokens = [...tokens.positiveTokens]
     let negativeTokens = [...tokens.negativeTokens]
 
-    const memoryHint = memory.lessons
-      .filter(lesson => lesson.status === 'active')
-      .map(lesson => lesson.recommendedChange)
-      .join(' ')
-
     if (failure.expected === 'deliver' && predicted === 'discard') {
-      const extra = missingTokens(failure.report.text, positiveTokens)
-      let alt = extra[0]
-      if (memoryHint.includes('checkout') && !positiveTokens.includes('checkout')) alt = 'checkout'
+      const alt = pickToken({ failure, positiveTokens, useMemory: useMem, memory })
       if (!alt) return null
       try {
         assertSafeToken(alt, 'proposed')
@@ -76,7 +88,7 @@ export class TrainFailureProposer implements CandidateProposer {
       domain: DELIVER_GATE_DOMAIN,
       positiveTokens,
       negativeTokens,
-      clauseLocalPositive: baseline.clauseLocalPositive,
+      clauseLocalPositive: parentStrategy.clauseLocalPositive,
     }
   }
 }
@@ -86,12 +98,14 @@ export class MockFixtureProposer implements CandidateProposer {
 
   propose(input: {
     baseline: DeliverGateStrategyV1
+    parentStrategy: DeliverGateStrategyV1
     trainFailures: EvolutionEvalCase[]
     memory: import('./types.ts').PolicyMemoryCarrier
     seed: number
-    index: number
+    failureCaseId: string
     seenDirections: Set<string>
   }): DeliverGateStrategyV1 | null {
-    return this.variants[input.index] ?? null
+    const idx = input.trainFailures.findIndex(item => item.id === input.failureCaseId)
+    return this.variants[idx >= 0 ? idx : 0] ?? null
   }
 }

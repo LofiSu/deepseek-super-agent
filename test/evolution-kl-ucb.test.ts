@@ -10,9 +10,9 @@ describe('Bernoulli KL-UCB (original implementation)', () => {
     const arm = {
       id: 'a',
       observations: [
-        { reward: 1 as const },
-        { reward: 0 as const, skip: true },
-        { reward: 0 as const },
+        { id: 'o1', reward: 1 as const },
+        { id: 'o2', reward: 0 as const, skip: true },
+        { id: 'o3', reward: 0 as const },
       ],
     }
     expect(eligibleTrials(arm)).toBe(2)
@@ -21,18 +21,18 @@ describe('Bernoulli KL-UCB (original implementation)', () => {
 
   it('discover quota reserves unexplored arms', () => {
     const arms = [
-      { id: 'a', observations: [{ reward: 1 as const }] },
+      { id: 'a', observations: [{ id: 'o1', reward: 1 as const }] },
       { id: 'b', observations: [] },
     ]
-    expect(klUcbSelect(arms, 3, 2)).toBe('b')
+    expect(klUcbSelect(arms, 3, 2, 1)).toBe('b')
   })
 
   it('seeded tie breaks to first max arm id', () => {
     const arms = [
-      { id: 'arm_a', observations: [{ reward: 1 as const }, { reward: 1 as const }] },
-      { id: 'arm_b', observations: [{ reward: 0 as const }, { reward: 0 as const }] },
+      { id: 'arm_a', observations: [{ id: 'o1', reward: 1 as const }, { id: 'o2', reward: 1 as const }] },
+      { id: 'arm_b', observations: [{ id: 'o3', reward: 0 as const }, { id: 'o4', reward: 0 as const }] },
     ]
-    const pick = klUcbSelect(arms, 20, 0)
+    const pick = klUcbSelect(arms, 20, 0, 7)
     expect(['arm_a', 'arm_b']).toContain(pick)
   })
 })

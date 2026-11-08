@@ -36,8 +36,8 @@ async function winningPipeline(home: string) {
   const winner = report.candidates.find(item => item.status === 'evaluated' && item.reward === 'success')
     ?? report.candidates.find(item => item.status === 'evaluated')
   expect(winner).toBeDefined()
-  freezeCandidate(home, winner!.candidateId)
-  runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
+  freezeCandidate({ home, candidateId: winner!.candidateId, runReport: report })
+  await runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
   return { report, winner: winner! }
 }
 
@@ -63,14 +63,14 @@ describe('evolution security and ABC final test', () => {
   it('rejects second final test and search after finalize', async () => {
     const home = tempHome()
     const { winner } = await winningPipeline(home)
-    expect(() => runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId }))
-      .toThrow(/duplicate|finalized|already/)
+    await expect(runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId }))
+      .rejects.toThrow(/duplicate|finalized|already/)
     await expect(runEvolution({ home, datasetRoot })).rejects.toThrow(/search refused|finalized/)
   })
 
   it('rejects promotion without finalized receipt', async () => {
     const home = tempHome()
-    const report = await runEvolution({ home, datasetRoot, budget: { maxCandidates: 4, maxEvals: 4, evalTimeoutMs: 15_000, reserveEvals: 1 } })
+    const report = await runEvolution({ home, datasetRoot, budget: { maxCandidates: 4, maxEvals: 12, evalTimeoutMs: 15_000, reserveEvals: 2 } })
     const winner = report.candidates.find(item => item.status === 'evaluated')
     expect(winner).toBeDefined()
     expect(() => approvePromotion({
@@ -115,8 +115,9 @@ describe('evolution security and ABC final test', () => {
 
   it('two search rounds differ after policy memory (fixture)', async () => {
     const home = tempHome()
-    const r1 = await runEvolution({ home, datasetRoot, round: 1, budget: { maxCandidates: 3, maxEvals: 3, evalTimeoutMs: 15_000, reserveEvals: 1 } })
-    const r2 = await runEvolution({ home, datasetRoot, round: 2, budget: { maxCandidates: 3, maxEvals: 3, evalTimeoutMs: 15_000, reserveEvals: 1 } })
+    const roundBudget = { maxCandidates: 3, maxEvals: 12, evalTimeoutMs: 15_000, reserveEvals: 2 }
+    const r1 = await runEvolution({ home, datasetRoot, round: 1, budget: roundBudget })
+    const r2 = await runEvolution({ home, datasetRoot, round: 2, budget: roundBudget })
     const exp = loadExperiment(home)
     expect(exp?.seenDirections.length).toBeGreaterThanOrEqual(1)
     expect(r2.round).toBeGreaterThanOrEqual(2)

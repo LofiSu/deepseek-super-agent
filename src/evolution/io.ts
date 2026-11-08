@@ -8,9 +8,18 @@ export function writeJsonAtomic(filePath: string, value: unknown): void {
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`
   fs.writeFileSync(tmp, body, 'utf8')
   fs.renameSync(tmp, filePath)
-  fs.writeFileSync(`${filePath}.sha256`, body.length.toString(), 'utf8')
 }
 
 export function readJsonFile<T>(filePath: string): T {
   return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T
+}
+
+/** Resolve path and ensure it stays under expectedDir (symlink-safe). */
+export function resolveInsideDir(expectedDir: string, candidatePath: string): string {
+  const root = fs.realpathSync(expectedDir)
+  const resolved = fs.realpathSync(path.resolve(candidatePath))
+  if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+    throw new Error(`path escapes evolution home: ${candidatePath}`)
+  }
+  return resolved
 }

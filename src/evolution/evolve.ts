@@ -2,8 +2,14 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { candidateLineageHash, writeCandidateArchive, writeRunReport, evolutionArchiveRoot, evolutionRunsDir } from './archive.ts'
-import { defaultBaselineStrategy, loadEvolutionDataset } from './dataset.ts'
+import {
+  candidateLineageHash,
+  writeCandidateArchive,
+  writeRunReport,
+  evolutionArchiveRoot,
+  evolutionRunsDir,
+} from './archive.ts'
+import { defaultBaselineStrategy, loadSearchDatasetOnly } from './dataset.ts'
 import { stableJsonDigest } from './digest.ts'
 import { isolatedEvaluateSplit } from './isolate-eval.ts'
 import { parseDeliverGateStrategy } from './strategy-gate.ts'
@@ -11,15 +17,21 @@ import { scoreCases, listTrainFailures } from './score.ts'
 import { TrainFailureProposer } from './train-proposer.ts'
 import { computeEvaluatorDigest } from './evaluator-identity.ts'
 import {
-  assertBudget,
   assertSearchAllowed,
   createExperiment,
   loadExperiment,
   saveExperiment,
+  BASELINE_PARENT_ID,
 } from './experiment.ts'
 import { loadPolicyMemory, updatePolicyMemoryFromRound } from './policy-memory.ts'
 import { normalizeDirectionKey } from './safe-pattern.ts'
-import { klUcbSelect, type KlUcbArm } from './kl-ucb.ts'
+import { klUcbSelect, recordObservation, type KlUcbArm } from './kl-ucb.ts'
+import {
+  EVAL_CALLS_PER_SEARCH_CANDIDATE,
+  assertBudgetFrozen,
+  reserveBaselineSearchUnits,
+  reserveEvalUnits,
+} from './budget-ledger.ts'
 import type {
   CandidateProposer,
   DeliverGateStrategyV1,
@@ -34,19 +46,12 @@ export function computeEvaluatorDigestForExport(): string {
   return computeEvaluatorDigest()
 }
 
-async function scoreSplitIsolated(
-  workDir: string,
-  strategy: DeliverGateStrategyV1,
-  split: 'train' | 'validation',
-  cases: import('./types.ts').EvolutionEvalCase[],
-  budget: EvolutionBudget,
-): Promise<{ scores: SplitScore[]; status: EvolutionCandidateRecord['status']; reason?: string }> {
-  const result = await isolatedEvaluateSplit(workDir, strategy, split, cases, budget)
-  if (result.timedOut) return { scores: [], status: 'rejected_timeout', reason: 'eval_timeout' }
-  if (!result.ok || !result.score) {
-    return { scores: [], status: 'rejected_eval_error', reason: result.error ?? 'eval_failed' }
-  }
-  return { scores: [result.score], status: 'evaluated' }
+function deserializeArms(snapshot: import('./types.ts').KlArmSnapshot[]): KlUcbArm[] {
+  return snapshot.map(arm => ({ id: arm.id, observations: [...arm.observations] }))
+}
+
+function serializeArms(arms: KlUcbArm[]): import('./types.ts').KlArmSnapshot[] {
+  return arms.map(arm => ({ id: arm.id, observations: [...arm.observations] }))
 }
 
 async function evaluateCandidateSearch(
@@ -75,16 +80,16 @@ async function evaluateCandidateSearch(
     ['train', train],
     ['validation', validation],
   ] as const) {
-    const part = await scoreSplitIsolated(workDir, strategy, split, cases, budget)
-    if (part.status === 'rejected_timeout') {
+    const result = await isolatedEvaluateSplit(workDir, strategy, split, cases, budget)
+    if (result.timedOut) {
       onTimeout()
-      return { status: 'rejected_timeout', scores: [], reason: part.reason, reward: 'skip' }
+      return { status: 'rejected_timeout', scores: [], reason: 'eval_timeout', reward: 'skip' }
     }
-    if (part.status !== 'evaluated') {
+    if (!result.ok || !result.score) {
       onError()
-      return { status: part.status, scores: [], reason: part.reason, reward: 'skip' }
+      return { status: 'rejected_eval_error', scores: [], reason: result.error ?? 'eval_failed', reward: 'skip' }
     }
-    scores.push(...part.scores)
+    scores.push(result.score)
   }
 
   const baseVal = baselineScores.find(item => item.split === 'validation')?.accuracy ?? 0
@@ -108,9 +113,11 @@ export interface EvolveRunInput {
   round?: number
 }
 
+const DISCOVER_QUOTA = 2
+
 export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunReport> {
   const budget = input.budget ?? DEFAULT_EVOLUTION_BUDGET
-  const dataset = loadEvolutionDataset(input.datasetRoot)
+  const dataset = loadSearchDatasetOnly(input.datasetRoot)
   const evaluatorDigest = computeEvaluatorDigest()
   let experiment = loadExperiment(input.home)
   if (!experiment) {
@@ -131,6 +138,9 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
         providerCalls: 0,
       },
     })
+  } else {
+    assertSearchAllowed(experiment)
+    assertBudgetFrozen(experiment, budget)
   }
   assertSearchAllowed(experiment)
   if (experiment.datasetDigest !== dataset.datasetDigest) {
@@ -140,89 +150,113 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     throw new Error('evaluator digest mismatch for experiment')
   }
 
-  const round = input.round ?? (experiment.seenDirections.length === 0 ? 1 : experiment.seenDirections.length + 1)
+  const round = input.round ?? Math.max(1, experiment.seenDirections.length > 0 ? 2 : 1)
   const baseline = defaultBaselineStrategy()
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-evolution-'))
   const archiveDir = evolutionArchiveRoot(input.home)
   const runsDir = evolutionRunsDir(input.home)
   fs.mkdirSync(archiveDir, { recursive: true })
 
-  const baselineScores: SplitScore[] = []
-  for (const [split, cases] of [
-    ['train', dataset.train],
-    ['validation', dataset.validation],
-  ] as const) {
-    baselineScores.push(scoreCases(baseline, split, cases))
-  }
+  reserveBaselineSearchUnits(input.home)
+  experiment = loadExperiment(input.home)!
+
+  const baselineScores: SplitScore[] = [
+    scoreCases(baseline, 'train', dataset.train),
+    scoreCases(baseline, 'validation', dataset.validation),
+  ]
 
   const trainFailures = listTrainFailures(baseline, dataset.train)
   const memory = loadPolicyMemory(input.home, experiment.experimentId)
-  const proposer = input.proposer ?? new TrainFailureProposer()
+  const useMemory = input.selector !== 'simplified-greedy'
+  const proposer = input.proposer ?? new TrainFailureProposer(useMemory)
   const seenDirections = new Set(experiment.seenDirections)
   const candidates: EvolutionCandidateRecord[] = []
   const selector = input.selector ?? 'kl-ucb'
-  const arms: KlUcbArm[] = []
 
-  const proposeList: (DeliverGateStrategyV1 | null)[] = []
-  for (let index = 0; index < budget.maxCandidates; index += 1) {
-    if (input.injectCandidates?.[index]) {
-      proposeList.push(input.injectCandidates[index]!)
-      continue
-    }
-    let failureIndex = index
-    if (selector === 'kl-ucb' && trainFailures.length > 0) {
-      const armIds = trainFailures.map((_f, i) => `fail_${i}`)
-      for (const id of armIds) {
-        if (!arms.find(arm => arm.id === id)) arms.push({ id, observations: [] })
+  let arms: KlUcbArm[] = deserializeArms(experiment.klArms)
+  for (const failure of trainFailures) {
+    const id = `fail_${failure.id}`
+    if (!arms.find(arm => arm.id === id)) arms.push({ id, observations: [] })
+  }
+
+  let parentStrategy = baseline
+  let parentId: string | null = BASELINE_PARENT_ID
+  const lastSuccess = experiment.frozenSelection?.candidateId
+  if (lastSuccess) {
+    parentId = lastSuccess
+    try {
+      const parentArtifact = path.join(archiveDir, lastSuccess, 'candidate.json')
+      if (fs.existsSync(parentArtifact)) {
+        parentStrategy = JSON.parse(fs.readFileSync(parentArtifact, 'utf8')).strategy as DeliverGateStrategyV1
       }
-      const pick = klUcbSelect(arms, experiment.budget.usedEvals + 1, 2)
-      failureIndex = Number(pick.replace('fail_', '')) || index
+    } catch {
+      parentStrategy = baseline
     }
-    proposeList.push(
-      proposer.propose({
+  }
+
+  const maxThisRound = budget.maxCandidates
+  let injectIndex = 0
+
+  for (let step = 0; step < maxThisRound; step += 1) {
+    if (experiment.totalCandidatesGenerated >= experiment.budget.maxCandidates) break
+
+    let strategy: DeliverGateStrategyV1 | null = null
+    let failureCaseId = trainFailures[0]?.id ?? 'none'
+    let selectedArmId = failureCaseId === 'none' ? 'fail_none' : `fail_${failureCaseId}`
+
+    const injectedThisStep = Boolean(input.injectCandidates?.[injectIndex])
+    if (injectedThisStep) {
+      strategy = input.injectCandidates![injectIndex]!
+      injectIndex += 1
+    } else if (trainFailures.length > 0) {
+      experiment.totalOpportunities += 1
+      if (selector === 'kl-ucb') {
+        selectedArmId = klUcbSelect(
+          arms,
+          experiment.totalOpportunities,
+          DISCOVER_QUOTA,
+          dataset.manifest.seed + experiment.totalOpportunities,
+        )
+      } else {
+        selectedArmId = arms[experiment.totalOpportunities % arms.length]?.id ?? `fail_${trainFailures[0]!.id}`
+      }
+      failureCaseId = selectedArmId.replace(/^fail_/, '')
+      strategy = proposer.propose({
         baseline,
+        parentStrategy,
         trainFailures,
         memory,
         seed: dataset.manifest.seed,
-        index: failureIndex,
+        failureCaseId,
         seenDirections,
-      }),
-    )
-  }
-
-  for (let index = 0; index < proposeList.length; index += 1) {
-    try {
-      assertBudget(experiment, 1)
-    } catch {
-      break
+        useMemory,
+      })
     }
-    const strategy = proposeList[index]
+
     if (!strategy) continue
 
     let directionKey = 'unknown'
     try {
-      const tokens = parseDeliverGateStrategy(strategy)
-      void tokens
-      const parsed = strategy.positiveTokens && strategy.negativeTokens
-        ? { p: strategy.positiveTokens, n: strategy.negativeTokens }
-        : null
-      if (parsed) directionKey = normalizeDirectionKey(parsed.p, parsed.n)
+      parseDeliverGateStrategy(strategy)
+      if (strategy.positiveTokens && strategy.negativeTokens) {
+        directionKey = normalizeDirectionKey(strategy.positiveTokens, strategy.negativeTokens)
+      }
     } catch {
-      directionKey = `invalid_${index}`
+      directionKey = `invalid_${step}`
     }
     if (seenDirections.has(directionKey)) {
       candidates.push({
-        candidateId: `cand_dup_${index}`,
-        parentId: candidates.at(-1)?.candidateId ?? null,
+        candidateId: `cand_dup_${round}_${step}`,
+        parentId,
         directionKey,
-        lineageHash: candidateLineageHash(null, 'dup'),
+        lineageHash: candidateLineageHash(parentId, 'dup'),
         strategy,
         strategyDigest: stableJsonDigest(strategy),
         artifactDigest: '',
         status: 'rejected_duplicate',
         scores: [],
         reward: 'skip',
-        proposedFrom: 'train_failures',
+        proposedFrom: useMemory ? 'policy_memory' : 'train_failures',
         rejectionReason: 'duplicate direction',
         round,
         createdAt: new Date().toISOString(),
@@ -230,10 +264,17 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
       continue
     }
 
-    experiment.budget.usedEvals += 1
+    experiment.totalCandidatesGenerated += 1
     const strategyDigest = stableJsonDigest(strategy)
-    const candidateId = `cand_${round}_${index}_${strategyDigest.slice(0, 8)}`
-    const parentId = candidates.filter(c => c.status === 'evaluated').at(-1)?.candidateId ?? null
+    const candidateId = `cand_${round}_${step}_${strategyDigest.slice(0, 8)}`
+    const actionId = stableJsonDigest({
+      experimentId: experiment.experimentId,
+      opportunity: experiment.totalOpportunities,
+      candidateId,
+    })
+
+    reserveEvalUnits(input.home, EVAL_CALLS_PER_SEARCH_CANDIDATE, 'candidate_child_eval')
+    experiment = loadExperiment(input.home)!
 
     const outcome = await evaluateCandidateSearch(
       workDir,
@@ -242,8 +283,8 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
       dataset.validation,
       baselineScores,
       budget,
-      () => { experiment!.budget.timeouts += 1 },
-      () => { experiment!.budget.errors += 1 },
+      () => { experiment!.budget.timeouts += 1; saveExperiment(input.home, experiment!) },
+      () => { experiment!.budget.errors += 1; saveExperiment(input.home, experiment!) },
     )
 
     const record: EvolutionCandidateRecord = {
@@ -257,32 +298,36 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
       status: outcome.status,
       scores: outcome.scores,
       reward: outcome.reward,
-      proposedFrom: 'train_failures',
+      proposedFrom: useMemory ? 'policy_memory' : 'train_failures',
       ...(outcome.reason ? { rejectionReason: outcome.reason } : {}),
       round,
       createdAt: new Date().toISOString(),
     }
     const archived = writeCandidateArchive(archiveDir, record)
     record.artifactDigest = archived.artifactDigest
-    candidates.push({ ...record, artifactDigest: archived.artifactDigest })
+    candidates.push(record)
     seenDirections.add(directionKey)
 
-    if (selector === 'kl-ucb') {
-      const arm = arms.find(item => item.id === `fail_${index % Math.max(trainFailures.length, 1)}`)
-      if (arm) {
-        arm.observations.push({
-          reward: outcome.reward === 'success' ? 1 : 0,
-          skip: outcome.reward === 'skip',
-        })
-      }
+    if (arms.length > 0 && !injectedThisStep) {
+      recordObservation(arms, selectedArmId, {
+        id: actionId,
+        reward: outcome.reward === 'success' ? 1 : 0,
+        skip: outcome.reward === 'skip',
+      })
     }
 
-    if (outcome.status === 'evaluated' && outcome.reward === 'success') break
+    experiment.klArms = serializeArms(arms)
+    experiment.seenDirections = [...seenDirections]
+    saveExperiment(input.home, experiment)
+
+    if (outcome.status === 'evaluated' && outcome.reward === 'success') {
+      parentStrategy = strategy
+      parentId = candidateId
+      break
+    }
   }
 
-  experiment.seenDirections = [...seenDirections]
-  saveExperiment(input.home, experiment)
-
+  experiment = loadExperiment(input.home)!
   updatePolicyMemoryFromRound({
     home: input.home,
     experimentId: experiment.experimentId,
@@ -291,7 +336,6 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     completed: candidates,
   })
 
-  const ledger: EvolutionRunReport['budget'] = { ...experiment.budget }
   const report: EvolutionRunReport = {
     schemaVersion: 2,
     domain: dataset.manifest.domain,
@@ -304,7 +348,7 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     archiveDir,
     baseline: baselineScores,
     candidates,
-    budget: ledger,
+    budget: { ...experiment.budget },
     selector,
   }
   writeRunReport(runsDir, report)

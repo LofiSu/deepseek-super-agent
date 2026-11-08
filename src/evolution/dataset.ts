@@ -9,15 +9,33 @@ import type {
 } from './types.ts'
 import { DELIVER_GATE_DOMAIN, EVOLUTION_SCHEMA_VERSION } from './types.ts'
 
-export interface LoadedEvolutionDataset {
+export interface LoadedSearchDataset {
   root: string
   manifest: EvolutionSplitManifest
   train: EvolutionEvalCase[]
   validation: EvolutionEvalCase[]
-  /** Sealed split C — never load into search/proposer/memory */
-  finaltest: EvolutionEvalCase[]
   datasetDigest: string
+  /** From manifest only — finaltest file not read during search. */
   finaltestDigest: string
+}
+
+export interface LoadedEvolutionDataset extends LoadedSearchDataset {
+  finaltest: EvolutionEvalCase[]
+}
+
+function readManifest(datasetRoot: string): EvolutionSplitManifest {
+  const manifestPath = path.join(datasetRoot, 'manifest.json')
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as EvolutionSplitManifest
+  if (manifest.schemaVersion !== EVOLUTION_SCHEMA_VERSION && manifest.schemaVersion !== 1) {
+    throw new Error(`unsupported dataset schemaVersion ${manifest.schemaVersion}`)
+  }
+  if (manifest.domain !== DELIVER_GATE_DOMAIN) {
+    throw new Error(`unsupported dataset domain ${manifest.domain}`)
+  }
+  if (!manifest.splitDigests?.finaltest) {
+    throw new Error('manifest missing splitDigests.finaltest')
+  }
+  return manifest
 }
 
 function readSplit(root: string, rel: string): EvolutionEvalCase[] {
@@ -27,38 +45,53 @@ function readSplit(root: string, rel: string): EvolutionEvalCase[] {
   return parsed.cases
 }
 
-export function loadEvolutionDataset(datasetRoot: string): LoadedEvolutionDataset {
+function datasetDigestFromManifest(datasetRoot: string, manifest: EvolutionSplitManifest): string {
   const manifestPath = path.join(datasetRoot, 'manifest.json')
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as EvolutionSplitManifest
-  if (manifest.schemaVersion !== EVOLUTION_SCHEMA_VERSION && manifest.schemaVersion !== 1) {
-    throw new Error(`unsupported dataset schemaVersion ${manifest.schemaVersion}`)
-  }
-  if (manifest.domain !== DELIVER_GATE_DOMAIN) {
-    throw new Error(`unsupported dataset domain ${manifest.domain}`)
-  }
-  const train = readSplit(datasetRoot, manifest.splits.train)
-  const validation = readSplit(datasetRoot, manifest.splits.validation)
-  const finalRel = manifest.splits.finaltest
-  const finaltest = readSplit(datasetRoot, finalRel)
   const parts = [
     sha256File(manifestPath),
     sha256File(path.join(datasetRoot, manifest.splits.train)),
     sha256File(path.join(datasetRoot, manifest.splits.validation)),
-    sha256File(path.join(datasetRoot, finalRel)),
+    manifest.splitDigests.finaltest,
   ]
-  const datasetDigest = stableJsonDigest(parts)
-  const finaltestDigest = sha256File(path.join(datasetRoot, finalRel))
-  return { root: datasetRoot, manifest, train, validation, finaltest, datasetDigest, finaltestDigest }
+  return stableJsonDigest(parts)
 }
 
-/** Search-visible dataset only (no finaltest labels). */
-export function loadSearchDataset(datasetRoot: string): Omit<LoadedEvolutionDataset, 'finaltest' | 'finaltestDigest'> & {
-  finaltest: never
-  finaltestDigest: never
-} {
-  const full = loadEvolutionDataset(datasetRoot)
-  const { finaltest: _omit, finaltestDigest: _o2, ...rest } = full
-  return { ...rest, finaltest: undefined as never, finaltestDigest: undefined as never }
+/** Search phase: never reads finaltest.json. */
+export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset {
+  const manifest = readManifest(datasetRoot)
+  const train = readSplit(datasetRoot, manifest.splits.train)
+  const validation = readSplit(datasetRoot, manifest.splits.validation)
+  const datasetDigest = datasetDigestFromManifest(datasetRoot, manifest)
+  return {
+    root: datasetRoot,
+    manifest,
+    train,
+    validation,
+    datasetDigest,
+    finaltestDigest: manifest.splitDigests.finaltest,
+  }
+}
+
+/** Finalization only: loads sealed split C after claim. */
+export function loadFinaltestSplit(datasetRoot: string): EvolutionEvalCase[] {
+  const manifest = readManifest(datasetRoot)
+  const file = path.join(datasetRoot, manifest.splits.finaltest)
+  const digest = sha256File(file)
+  if (digest !== manifest.splitDigests.finaltest) {
+    throw new Error('finaltest file digest mismatch vs manifest')
+  }
+  return readSplit(datasetRoot, manifest.splits.finaltest)
+}
+
+export function loadEvolutionDataset(datasetRoot: string): LoadedEvolutionDataset {
+  const search = loadSearchDatasetOnly(datasetRoot)
+  const finaltest = loadFinaltestSplit(datasetRoot)
+  return { ...search, finaltest }
+}
+
+/** @deprecated use loadSearchDatasetOnly */
+export function loadSearchDataset(datasetRoot: string) {
+  return loadSearchDatasetOnly(datasetRoot)
 }
 
 export function defaultBaselineStrategy(): DeliverGateStrategyV1 {

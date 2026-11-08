@@ -55,10 +55,11 @@ describe('controlled evolution (offline deliver-gate strategy v2)', () => {
     const proposer = new TrainFailureProposer()
     const next = proposer.propose({
       baseline,
+      parentStrategy: baseline,
       trainFailures: failures,
       memory: emptyCarrier('exp', 1),
       seed: 1,
-      index: 0,
+      failureCaseId: failures[0]!.id,
       seenDirections: new Set(),
     })
     expect(next).not.toBeNull()
@@ -75,7 +76,7 @@ describe('controlled evolution (offline deliver-gate strategy v2)', () => {
     const report = await runEvolution({
       home,
       datasetRoot,
-      budget: { maxCandidates: 5, maxEvals: 5, evalTimeoutMs: 15_000, reserveEvals: 1 },
+      budget: { maxCandidates: 5, maxEvals: 14, evalTimeoutMs: 15_000, reserveEvals: 2 },
       injectCandidates: [
         { ...baseline, positiveTokens: ['neverword'], negativeTokens: baseline.negativeTokens! },
         { ...baseline, positiveTokens: ['!!!invalid'], negativeTokens: baseline.negativeTokens! },
@@ -102,8 +103,8 @@ describe('controlled evolution (offline deliver-gate strategy v2)', () => {
     expect(winner).toBeDefined()
     expect(winner!.scores.every(score => score.split !== 'finaltest')).toBe(true)
 
-    freezeCandidate(home, winner!.candidateId)
-    const finalOut = runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
+    freezeCandidate({ home, candidateId: winner!.candidateId, runReport: report })
+    const finalOut = await runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
     expect(finalOut.scores[0]?.split).toBe('finaltest')
 
     const artifact = path.join(report.archiveDir, winner!.candidateId, 'candidate.json')

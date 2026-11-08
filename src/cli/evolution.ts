@@ -22,13 +22,31 @@ function loadRunReport(home: string, runId: string): EvolutionRunReport {
   return JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionRunReport
 }
 
+function findRunReportForCandidate(home: string, candidateId: string): EvolutionRunReport {
+  const runIndex = restArgvRunFiles(home)
+  for (const file of runIndex) {
+    const report = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionRunReport
+    if (report.candidates.some(item => item.candidateId === candidateId)) return report
+  }
+  throw new Error(`no run report contains candidate ${candidateId}`)
+}
+
+function restArgvRunFiles(home: string): string[] {
+  const runsDir = evolutionRunsDir(home)
+  if (!fs.existsSync(runsDir)) return []
+  return fs.readdirSync(runsDir)
+    .filter(name => name.endsWith('.json'))
+    .map(name => path.join(runsDir, name))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+}
+
 export async function runEvolutionCommand(home: string, argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub || sub === 'help' || sub === '--help') {
     console.log(`ds-agent evolution — offline controlled self-evolution (strategy tokens v2)
 
   pnpm ds-agent evolution run [--home <dir>] [--dataset <dir>] [--selector kl-ucb|simplified-greedy]
-  pnpm ds-agent evolution freeze <candidateId> [--home <dir>]
+  pnpm ds-agent evolution freeze <candidateId> [--home <dir>] [--run <runId>]
   pnpm ds-agent evolution finalize <candidateId> [--home <dir>] [--dataset <dir>]
   pnpm ds-agent evolution approve <runId> <candidateId> [--artifact <path>] [--home <dir>]
   pnpm ds-agent evolution rollback [--home <dir>]
@@ -83,7 +101,12 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
   if (sub === 'freeze') {
     const candidateId = rest[0]
     if (!candidateId) throw new Error('usage: evolution freeze <candidateId>')
-    const state = freezeCandidate(stateHome, candidateId)
+    const runIndex = rest.indexOf('--run')
+    const runId = runIndex >= 0 ? rest[runIndex + 1] : undefined
+    const runReport = runId
+      ? loadRunReport(stateHome, runId)
+      : findRunReportForCandidate(stateHome, candidateId)
+    const state = freezeCandidate({ home: stateHome, candidateId, runReport })
     console.log(JSON.stringify({ frozen: true, selectedCandidateId: state.selectedCandidateId, phase: state.phase }, null, 2))
     return
   }
@@ -91,7 +114,7 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
   if (sub === 'finalize') {
     const candidateId = rest[0]
     if (!candidateId) throw new Error('usage: evolution finalize <candidateId>')
-    const outcome = runFinalTestOnce({ home: stateHome, datasetRoot: datasetRoot(), candidateId })
+    const outcome = await runFinalTestOnce({ home: stateHome, datasetRoot: datasetRoot(), candidateId })
     console.log(JSON.stringify({ finalized: true, ...outcome }, null, 2))
     return
   }

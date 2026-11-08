@@ -60,12 +60,12 @@ async function main(): Promise<void> {
   if (!pick) throw new Error('no winner in demo')
   const { report: winReport, winner } = pick
 
-  freezeCandidate(home, winner.candidateId)
-  const fin = runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId })
+  freezeCandidate({ home, candidateId: winner.candidateId, runReport: winReport })
+  const fin = await runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId })
   log.push({ step: 'finalize', ledgerId: fin.ledgerId, finaltest: fin.scores })
 
   try {
-    runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId })
+    await runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId })
   } catch (error) {
     log.push({ step: 'finalize_retry_rejected', error: error instanceof Error ? error.message : String(error) })
   }

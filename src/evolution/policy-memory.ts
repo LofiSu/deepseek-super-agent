@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { EvolutionCandidateRecord, PolicyLesson, PolicyMemoryCarrier } from './types.ts'
+import type { EvolutionCandidateRecord, EvolutionEvalCase, PolicyLesson, PolicyMemoryCarrier } from './types.ts'
 import { writeJsonAtomic } from './io.ts'
 
 export const POLICY_MEMORY_MAX_CHARS = 8192
@@ -13,6 +13,24 @@ export function serializeCarrier(carrier: PolicyMemoryCarrier): string {
   return JSON.stringify(carrier, null, 2)
 }
 
+export function validatePolicyMemoryCarrier(carrier: PolicyMemoryCarrier): void {
+  if (serializeCarrier(carrier).length > POLICY_MEMORY_MAX_CHARS * 4) {
+    throw new Error('policy memory exceeds bounded load')
+  }
+  for (const lesson of carrier.lessons) {
+    for (const target of lesson.targets) {
+      if (!/^(tr|va)-/.test(target)) {
+        throw new Error('memory target must be train/validation id only')
+      }
+    }
+    for (const source of lesson.sources) {
+      if (/^(ho|ft)-/i.test(source)) {
+        throw new Error('memory source cannot reference final test ids')
+      }
+    }
+  }
+}
+
 export function loadPolicyMemory(home: string, experimentId: string): PolicyMemoryCarrier {
   const file = policyMemoryPath(home)
   if (!fs.existsSync(file)) {
@@ -20,6 +38,7 @@ export function loadPolicyMemory(home: string, experimentId: string): PolicyMemo
   }
   const carrier = JSON.parse(fs.readFileSync(file, 'utf8')) as PolicyMemoryCarrier
   if (carrier.experimentId !== experimentId) return emptyCarrier(experimentId, carrier.round)
+  validatePolicyMemoryCarrier(carrier)
   return carrier
 }
 
@@ -45,6 +64,22 @@ function buildSnapshot(carrier: PolicyMemoryCarrier): string {
   return body.slice(0, carrier.maxChars)
 }
 
+export function applyMemoryLessons(
+  memory: PolicyMemoryCarrier,
+  failure: EvolutionEvalCase,
+  positiveTokens: string[],
+): string | null {
+  for (const lesson of memory.lessons) {
+    if (lesson.status !== 'active') continue
+    if (lesson.preferredToken && !positiveTokens.includes(lesson.preferredToken)) {
+      if (lesson.targets.length === 0 || lesson.targets.includes(failure.id)) {
+        return lesson.preferredToken
+      }
+    }
+  }
+  return null
+}
+
 export function updatePolicyMemoryFromRound(input: {
   home: string
   experimentId: string
@@ -56,10 +91,13 @@ export function updatePolicyMemoryFromRound(input: {
   const lessons = [...prior.lessons]
   for (const record of input.completed) {
     if (record.reward === 'skip') continue
-    const id = `lesson_${record.candidateId}`
-    const existing = lessons.find(item => item.id === id)
+    const dir = record.directionKey
+    const existingIdx = lessons.findIndex(item => item.directionKey === dir)
+    const preferred = record.strategy.positiveTokens?.find(
+      token => !prior.lessons.some(l => l.preferredToken === token),
+    )
     const lesson: PolicyLesson = {
-      id,
+      id: existingIdx >= 0 ? lessons[existingIdx]!.id : `lesson_${record.candidateId}`,
       appliesWhen: record.reward === 'failure'
         ? 'validation regression or invalid direction'
         : 'train misclassification on ready reports',
@@ -67,16 +105,23 @@ export function updatePolicyMemoryFromRound(input: {
         ? 'missing positive token in bounded list'
         : 'token addition hurt validation',
       recommendedChange: record.reward === 'success'
-        ? `keep direction ${record.directionKey}`
-        : `retire direction ${record.directionKey}`,
-      targets: record.proposedFrom === 'train_failures' ? input.trainFailureIds.slice(0, 3) : [],
+        ? `add token for direction ${dir}`
+        : `retire direction ${dir}`,
+      preferredToken: record.reward === 'success' ? preferred : undefined,
+      targets: input.trainFailureIds.filter(id => /^(tr|va)-/.test(id)).slice(0, 3),
       sources: [record.candidateId],
       status: record.reward === 'success' ? 'active' : 'retired',
-      successfulPattern: record.reward === 'success' ? record.directionKey : undefined,
-      failurePattern: record.reward === 'failure' ? record.directionKey : undefined,
+      directionKey: dir,
+      successfulPattern: record.reward === 'success' ? dir : undefined,
+      failurePattern: record.reward === 'failure' ? dir : undefined,
     }
-    if (existing) {
-      Object.assign(existing, lesson)
+    if (existingIdx >= 0) {
+      const existing = lessons[existingIdx]!
+      if (existing.status === 'active' && lesson.status === 'retired') {
+        Object.assign(existing, lesson)
+      } else if (lesson.status === 'active') {
+        Object.assign(existing, lesson)
+      }
     } else {
       lessons.push(lesson)
     }
@@ -90,17 +135,7 @@ export function updatePolicyMemoryFromRound(input: {
     snapshot: '',
   }
   carrier.snapshot = buildSnapshot(carrier)
-  if (serializeCarrier(carrier).length > POLICY_MEMORY_MAX_CHARS * 2) {
-    throw new Error('policy memory exceeds bounded carrier')
-  }
+  validatePolicyMemoryCarrier(carrier)
   writeJsonAtomic(policyMemoryPath(input.home), carrier)
   return carrier
-}
-
-/** Final-test evidence must never enter memory. */
-export function assertMemoryFreeOfFinalTest(carrier: PolicyMemoryCarrier): void {
-  const blob = serializeCarrier(carrier).toLowerCase()
-  if (blob.includes('ho-001') || blob.includes('finaltest')) {
-    throw new Error('policy memory must not contain final test evidence')
-  }
 }

@@ -19,6 +19,7 @@ export interface EvolutionSplitManifest {
   schemaVersion: number
   domain: string
   splits: { train: string; validation: string; finaltest: string }
+  splitDigests: { train?: string; validation?: string; finaltest: string }
   seed: number
 }
 
@@ -71,6 +72,13 @@ export interface EvolutionCandidateRecord {
   createdAt: string
 }
 
+export interface BudgetReservation {
+  units: number
+  reason: string
+  at: string
+  consumed: boolean
+}
+
 export interface BudgetLedger {
   maxCandidates: number
   maxEvals: number
@@ -81,6 +89,11 @@ export interface BudgetLedger {
   errors: number
   timeouts: number
   providerCalls: number
+  reservations?: BudgetReservation[]
+  finaltestReserved?: boolean
+  baselineSearchReserved?: boolean
+  totalWallDeadlineMs?: number
+  wallStartedAt?: string
 }
 
 export interface EvolutionRunReport {
@@ -112,6 +125,31 @@ export interface ExperimentFinalTestRecord {
 
 export type ExperimentPhase = 'search' | 'frozen' | 'finalized'
 
+export interface FrozenSelection {
+  candidateId: string
+  artifactDigest: string
+  strategyDigest: string
+  runId: string
+  artifactPath: string
+  frozenAt: string
+}
+
+export type FinalTestClaimState = 'CLAIMED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN'
+
+export interface FinalTestClaim {
+  claimId: string
+  state: FinalTestClaimState
+  openedAt: string
+  closedAt?: string
+  candidateId: string
+  strategyDigest: string
+}
+
+export interface KlArmSnapshot {
+  id: string
+  observations: { id: string; reward: 0 | 1; skip?: boolean }[]
+}
+
 export interface ExperimentState {
   experimentId: string
   phase: ExperimentPhase
@@ -119,11 +157,17 @@ export interface ExperimentState {
   evaluatorDigest: string
   seed: number
   selectedCandidateId: string | null
+  frozenSelection: FrozenSelection | null
   frozenAt: string | null
   finalizedAt: string | null
   finalTest: ExperimentFinalTestRecord | null
+  finalTestClaim: FinalTestClaim | null
   budget: BudgetLedger
   seenDirections: string[]
+  totalCandidatesGenerated: number
+  totalOpportunities: number
+  klArms: KlArmSnapshot[]
+  frozenRunReceipt: EvolutionRunReport | null
 }
 
 export interface EvolutionBudget {
@@ -147,9 +191,12 @@ export interface PolicyLesson {
   appliesWhen: string
   mechanismHypothesis: string
   recommendedChange: string
+  /** Token to try on train miss (structured; no fixture literals). */
+  preferredToken?: string
   targets: string[]
   sources: string[]
   status: 'active' | 'retired'
+  directionKey?: string
   successfulPattern?: string
   failurePattern?: string
 }
@@ -166,11 +213,13 @@ export interface PolicyMemoryCarrier {
 export interface CandidateProposer {
   propose(input: {
     baseline: DeliverGateStrategyV1
+    parentStrategy: DeliverGateStrategyV1
     trainFailures: EvolutionEvalCase[]
     memory: PolicyMemoryCarrier
     seed: number
-    index: number
+    failureCaseId: string
     seenDirections: Set<string>
+    useMemory?: boolean
   }): DeliverGateStrategyV1 | null
 }
 
