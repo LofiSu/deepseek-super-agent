@@ -266,6 +266,80 @@ describe('restart recovery', () => {
     }
   })
 
+  it('keeps an earlier ticket relaunch_scheduled when a later async launch fails', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_ok', runningTicket('ticket_ok'))
+    runtime.store.putDoc('ticket', 'ticket_rejects', runningTicket('ticket_rejects'))
+    const launched: string[] = []
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(ticket => {
+      launched.push(ticket.id)
+      return launched.length === 2
+        ? Promise.reject(new Error('second launch boom'))
+        : Promise.resolve()
+    })
+
+    runtime.start({ assessPending: false })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(launched).toHaveLength(2)
+    const boundary = runtime.recoveryBoundary()!
+    expect(boundary.tickets.find(t => t.ticketId === launched[0])?.transition).toBe('relaunch_scheduled')
+    expect(boundary.tickets.find(t => t.ticketId === launched[1])?.transition).toBe('launch_failed')
+  })
+
+  it('does not revert a later ticket relaunch_scheduled when an earlier async launch fails', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_early_fail', runningTicket('ticket_early_fail'))
+    runtime.store.putDoc('ticket', 'ticket_later_ok', runningTicket('ticket_later_ok'))
+    const launched: string[] = []
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(ticket => {
+      launched.push(ticket.id)
+      return launched.length === 1
+        ? Promise.reject(new Error('first launch boom'))
+        : Promise.resolve()
+    })
+
+    runtime.start({ assessPending: false })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(launched).toHaveLength(2)
+    const boundary = runtime.recoveryBoundary()!
+    expect(boundary.tickets.find(t => t.ticketId === launched[0])?.transition).toBe('launch_failed')
+    expect(boundary.tickets.find(t => t.ticketId === launched[1])?.transition).toBe('relaunch_scheduled')
+  })
+
+  it('keeps launch_failed persisted after start() when harness.launch throws synchronously', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_sync_only', runningTicket('ticket_sync_only'))
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(() => {
+      throw new Error('sync launch boom')
+    })
+
+    runtime.start({ assessPending: false })
+
+    const boundary = runtime.recoveryBoundary()!
+    expect(boundary.tickets.find(t => t.ticketId === 'ticket_sync_only')?.transition).toBe('launch_failed')
+  })
+
+  it('records every async launch failure instead of the last snapshot winning', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_fail_a', runningTicket('ticket_fail_a'))
+    runtime.store.putDoc('ticket', 'ticket_fail_b', runningTicket('ticket_fail_b'))
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.reject(new Error('launch boom')))
+
+    runtime.start({ assessPending: false })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    const boundary = runtime.recoveryBoundary()!
+    for (const id of ['ticket_fail_a', 'ticket_fail_b']) {
+      expect(boundary.tickets.find(t => t.ticketId === id)?.transition).toBe('launch_failed')
+    }
+  })
+
   it('relaunches a pending replacement left by a crash before launch without duplicating state', () => {
     const home = tempHome()
     const runtime = createRuntime(home)

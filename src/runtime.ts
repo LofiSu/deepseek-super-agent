@@ -1065,6 +1065,14 @@ export class Runtime {
       'completed',
       recovered,
     )
+    // One live record for this scan. `boundary` is reassigned by both the
+    // scheduled and failed transitions, so a launch callback never writes a
+    // snapshot captured before later tickets were scheduled. The post-loop
+    // persist therefore cannot revert a synchronous launch_failed.
+    const recordFailure = (ticketId: string): void => {
+      boundary = recordLaunchFailed(boundary, ticketId)
+      this.persistRecoveryBoundary(boundary)
+    }
     for (const outcome of recovered) {
       const ticket = this.store.getDoc<Ticket>('ticket', outcome.ticketId)
       if (!ticket || ticket.ended) continue
@@ -1074,7 +1082,10 @@ export class Runtime {
         `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',') || '-'} replacementId=${outcome.replacementAssignmentId} mode=${outcome.relaunchOnly ? 'pending' : 'recovered'}`,
       )
       boundary = recordLaunchScheduled(boundary, outcome.ticketId)
-      this.launchRecovered(outcome.ticketId, ticket, boundary)
+      // Persist the scheduled record before launching: an async harness
+      // rejection must extend the store's latest record, not a closure copy.
+      this.persistRecoveryBoundary(boundary)
+      this.launchRecovered(outcome.ticketId, ticket, recordFailure)
     }
     this.persistRecoveryBoundary(boundary)
   }
@@ -1083,17 +1094,19 @@ export class Runtime {
    * Relaunch one recovered Ticket without letting a failure abort the others
    * or surface as an unhandled rejection. A launch failure changes no state:
    * the replacement stays `pending`, so a later restart can relaunch it.
+   * `recordFailure` applies the transition to the scan's live record, never to
+   * a snapshot of the boundary as it stood when this Ticket was scheduled.
    */
   private launchRecovered(
     ticketId: string,
     ticket: Ticket,
-    boundary: RecoveryBoundaryRecord,
+    recordFailure: (ticketId: string) => void,
   ): void {
     const failed = (error: unknown): void => {
       this.log.info(
         `[recovery] launch failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
       )
-      this.persistRecoveryBoundary(recordLaunchFailed(boundary, ticketId))
+      recordFailure(ticketId)
     }
     try {
       void this.harness.launch(ticket).catch(failed)
