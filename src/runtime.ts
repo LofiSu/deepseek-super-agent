@@ -611,6 +611,46 @@ export class Runtime {
         placement.release(ticketId)
       }
     })
+    const notifyHarnessReleased = (ticketId: string): void => {
+      try {
+        late.harness?.release(ticketId)
+      } catch (error) {
+        log.info(`[hook] hook=harness-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    /**
+     * Free one ticket's Worker slot, then let the scheduler pump.
+     *
+     * A local slot is free synchronously, so `release` can pump immediately.
+     * A remote slot is only free after `cancelRemote` settles: `dispatchCancel`
+     * awaits the HTTP send and `WorkerPlacement.cancelRemote` releases the
+     * registry assignment in its `finally`. Pumping before that settles sees a
+     * still-full mesh, parks the head of the queue, and nothing would pump again
+     * once the cancel frees capacity. Notify after the cancel settles instead.
+     *
+     * Extra pumps are harmless: `Harness.release` skips a ticket whose Worker
+     * turn is still active, and `pump` reserves a slot before starting a turn.
+     */
+    const releaseSlot = (ticketId: string): void => {
+      try {
+        const ticket = store.getDoc<Ticket>('ticket', ticketId)
+        const assignmentId = ticket?.assignments.at(-1)?.id
+        if (assignmentId && placement.remoteHasTicket(ticketId)) {
+          void placement.cancelRemote(ticketId, assignmentId)
+            .catch(error => {
+              log.info(
+                `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+              )
+            })
+            .finally(() => notifyHarnessReleased(ticketId))
+          return
+        }
+        placement.release(ticketId)
+      } catch (error) {
+        log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
+      }
+      notifyHarnessReleased(ticketId)
+    }
     /**
      * Engine.report runs inside `Store.atomic`; the Ticket document is written
      * just before the hook, but the Store snapshot only becomes observable to
@@ -621,28 +661,7 @@ export class Runtime {
      */
     const releaseMesh = (ticketId: string): void => {
       late.remoteResultWait?.clear(ticketId)
-      queueMicrotask(() => {
-        try {
-          const ticket = store.getDoc<Ticket>('ticket', ticketId)
-          const assignmentId = ticket?.assignments.at(-1)?.id
-          if (assignmentId && placement.remoteHasTicket(ticketId)) {
-            void placement.cancelRemote(ticketId, assignmentId).catch(error => {
-              log.info(
-                `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-              )
-            })
-          } else {
-            placement.release(ticketId)
-          }
-        } catch (error) {
-          log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
-        }
-        try {
-          late.harness?.release(ticketId)
-        } catch (error) {
-          log.info(`[hook] hook=harness-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
-        }
-      })
+      queueMicrotask(() => releaseSlot(ticketId))
     }
     const host: Host = {
       repo: store,
@@ -835,19 +854,7 @@ export class Runtime {
         late.remoteResultWait?.arm(ticket.id, assignment.id)
       },
       queueLimit: meshQueue,
-      releaseNode: ticketId => {
-        const ticket = store.getDoc<Ticket>('ticket', ticketId)
-        const assignmentId = ticket?.assignments.at(-1)?.id
-        if (assignmentId && placement.remoteHasTicket(ticketId)) {
-          void placement.cancelRemote(ticketId, assignmentId).catch(error => {
-            log.info(
-              `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-            )
-          })
-        } else {
-          placement.release(ticketId)
-        }
-      },
+      releaseNode: ticketId => releaseSlot(ticketId),
       repliedTo: ticketId => store.listReplies().some(
         reply => reply.ticketId === ticketId && reply.channel === 'imessage',
       ),
