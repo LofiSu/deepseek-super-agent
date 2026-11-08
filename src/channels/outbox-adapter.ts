@@ -128,6 +128,10 @@ export class Outbox {
           const delay = Math.min(60_000, 1_000 * 2 ** attempts)
           const nextAttemptAt = new Date(Date.now() + delay).toISOString()
           this.store.markOutboxRetry(row.id, message, nextAttemptAt, attempts)
+          // The throw is a known failed attempt, not an interrupted in-flight
+          // send: close the started op so restart recovery does not treat it
+          // as unknown_outcome. The next due flush records a new start.
+          finishOutboxSendOperation(this.store, row, 'failed', now, message)
           this.log(
             `[outbox] retry outboxId=${row.id} channel=${row.channel} attempts=${attempts} next=${nextAttemptAt} error=${message}`,
           )
