@@ -996,9 +996,20 @@ export class Runtime {
           : this.placement.remote?.get(node)?.peerId !== event.peerId
             ? 'peer-mismatch'
             : undefined
-    if (!ticket || reason) {
+    if (!ticket || !assignment || reason) {
       this.log.info(
         `[mesh] remote result ignored ticketId=${event.ticketId} assignmentId=${event.assignmentId} peerId=${event.peerId} reason=unauthorized-or-stale detail=${reason}`,
+      )
+      return
+    }
+    // A timeout (or a cancel) ends the Assignment without ending the Ticket, so
+    // the same Ticket can retry later. A late result for that ended Assignment
+    // must not be accepted: it would consume the deliveryKey, overwrite the
+    // terminal report, and a `ready`/`deliver` result could even end the Ticket.
+    // The Ticket-ended path below stays idempotent for already-closed work.
+    if (!ticket.ended && assignment.state === 'ended') {
+      this.log.info(
+        `[mesh] remote result ignored ticketId=${event.ticketId} assignmentId=${event.assignmentId} peerId=${event.peerId} reason=ended-assignment`,
       )
       return
     }
