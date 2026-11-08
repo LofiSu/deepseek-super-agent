@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "id": "va-001",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Found the auth regression; fixed and passing." },
+      "expected": "deliver"
+    },
+    {
+      "id": "va-002",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "No change required; wontfix." },
+      "expected": "discard"
+    },
+    {
+      "id": "va-003",
+      "speculative": true,
+      "report": { "kind": "dropped", "text": "cancelled" },
+      "expected": "discard"
+    },
+    {
+      "id": "va-004",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Ready for review.", "deliver": true },
+      "expected": "deliver"
+    }
+  ]
+}

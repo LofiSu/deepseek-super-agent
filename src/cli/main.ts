@@ -29,6 +29,7 @@ import { runUi } from './ui.ts'
 import { runProfileCommand, runWireCommand } from './wiring.ts'
 import { runSetupCommand } from './setup.ts'
 import { readPackageVersion } from './version.ts'
+import { runEvolutionCommand } from './evolution.ts'
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`)
@@ -153,6 +154,7 @@ function help(): void {
   pnpm ds-agent agents [--json]  # local specialist agents configured for delegation
   pnpm ds-agent skills [--json]  # owner-authored playbooks the agent can load
   pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
+  pnpm ds-agent evolution run|approve|rollback|status  # offline deliver-gate strategy evolution (fixture dataset)
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -938,6 +940,10 @@ async function main(): Promise<void> {
       const description = agent.description ? `  ${agent.description}` : ''
       console.log(`${agent.id.padEnd(14)}${agent.command}${description}`)
     }
+    return
+  }
+  if (cmd === 'evolution') {
+    await runEvolutionCommand(home, process.argv.slice(3))
     return
   }
   throw new Error(`unknown command ${cmd}`)

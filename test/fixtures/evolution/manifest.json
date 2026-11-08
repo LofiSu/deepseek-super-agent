@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "domain": "deliver-gate-v1",
+  "splits": {
+    "train": "train.json",
+    "validation": "validation.json",
+    "holdout": "holdout.json"
+  },
+  "seed": 20260308
+}
