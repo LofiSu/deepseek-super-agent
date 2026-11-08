@@ -45,8 +45,10 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
   if (!sub || sub === 'help' || sub === '--help') {
     console.log(`ds-agent evolution — offline controlled self-evolution (strategy tokens v2)
 
-  pnpm ds-agent evolution run [--home <dir>] [--dataset <dir>] [--selector kl-ucb|simplified-greedy]
-    kl-ucb: KL-UCB arms + policy memory lessons | simplified-greedy: round-robin arms, memory OFF
+  pnpm ds-agent evolution run [--home <dir>] [--dataset <dir>] [--selector kl-ucb|policy-memory|simplified-greedy]
+    [--no-stop-on-success] [--max-candidates-this-run N]
+    kl-ucb: statistical arms only, memory OFF | policy-memory: lesson-guided arms, KL OFF
+    simplified-greedy: round-robin arms, memory OFF
   pnpm ds-agent evolution freeze <candidateId> [--home <dir>] [--run <runId>]
   pnpm ds-agent evolution finalize <candidateId> [--home <dir>] [--dataset <dir>]
   pnpm ds-agent evolution approve <runId> <candidateId> [--artifact <path>] [--home <dir>]
@@ -73,10 +75,22 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
 
   if (sub === 'run') {
     const selIndex = rest.indexOf('--selector')
-    const selector = selIndex >= 0 && rest[selIndex + 1] === 'simplified-greedy'
-      ? 'simplified-greedy' as const
-      : 'kl-ucb' as const
-    const report = await runEvolution({ home: stateHome, datasetRoot: datasetRoot(), selector })
+    const selVal = selIndex >= 0 ? rest[selIndex + 1] : 'kl-ucb'
+    const selector = (selVal === 'policy-memory' || selVal === 'simplified-greedy')
+      ? selVal
+      : 'kl-ucb'
+    const maxRunIndex = rest.indexOf('--max-candidates-this-run')
+    const maxRun = maxRunIndex >= 0 ? Number(rest[maxRunIndex + 1]) : undefined
+    const noStop = rest.includes('--no-stop-on-success')
+    const report = await runEvolution({
+      home: stateHome,
+      datasetRoot: datasetRoot(),
+      selector,
+      stopOnFirstSuccess: !noStop,
+      budget: maxRun && Number.isFinite(maxRun)
+        ? { maxCandidates: 8, maxEvals: 64, evalTimeoutMs: 30_000, maxCandidatesThisRun: maxRun }
+        : undefined,
+    })
     console.log(JSON.stringify({
       runId: report.runId,
       experimentId: report.experimentId,
@@ -94,6 +108,8 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
         rejectionReason: item.rejectionReason,
         strategyDigest: item.strategyDigest,
         directionKey: item.directionKey,
+        failureCaseId: item.failureCaseId,
+        selectionReason: item.selectionReason,
       })),
     }, null, 2))
     return

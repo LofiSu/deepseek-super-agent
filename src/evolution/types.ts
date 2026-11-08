@@ -69,6 +69,7 @@ export interface EvolutionCandidateRecord {
   proposedFrom: 'baseline' | 'train_failures' | 'policy_memory'
   /** Train arm that motivated this candidate (search only). */
   failureCaseId?: string
+  selectionReason?: string
   rejectionReason?: string
   round: number
   createdAt: string
@@ -111,7 +112,7 @@ export interface EvolutionRunReport {
   baseline: SplitScore[]
   candidates: EvolutionCandidateRecord[]
   budget: BudgetLedger
-  selector: 'kl-ucb' | 'simplified-greedy'
+  selector: 'kl-ucb' | 'policy-memory' | 'simplified-greedy'
 }
 
 export interface ExperimentFinalTestRecord {
@@ -178,6 +179,8 @@ export interface EvolutionBudget {
   evalTimeoutMs: number
   maxOutputBytes?: number
   reserveEvals?: number
+  /** Cap candidates evaluated in this run only (experiment cumulative unchanged). */
+  maxCandidatesThisRun?: number
 }
 
 export const DEFAULT_EVOLUTION_BUDGET: EvolutionBudget = {

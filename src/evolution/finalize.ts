@@ -20,6 +20,7 @@ import { parseDeliverGateStrategy } from './strategy-gate.ts'
 import { isolatedEvaluateSplit } from './isolate-eval.ts'
 import { sealArtifactDigest } from './archive.ts'
 import { stableJsonDigest } from './digest.ts'
+import { assertEvolutionTestFault } from './test-fault.ts'
 
 export function loadCandidateArtifact(home: string, candidateId: string): EvolutionCandidateRecord {
   if (!/^[a-zA-Z0-9_.-]+$/.test(candidateId)) throw new Error('invalid candidate id')
@@ -60,6 +61,7 @@ export async function runFinalTestOnce(input: {
     }
 
     reserveFinalTestUnits(input.home)
+    assertEvolutionTestFault(input.home, 'hang_after_claim')
 
     let artifact: EvolutionCandidateRecord
     try {

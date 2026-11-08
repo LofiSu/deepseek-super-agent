@@ -27,10 +27,17 @@ import { loadPolicyMemory, updatePolicyMemoryFromRound } from './policy-memory.t
 import { normalizeDirectionKey } from './safe-pattern.ts'
 import {
   DISCOVER_MIN_COLD_ARMS,
-  klUcbSelect,
   recordObservation,
   type KlUcbArm,
 } from './kl-ucb.ts'
+import {
+  collectRetiredFailureIds,
+  NEW_DIRECTION_QUOTA_PER_RUN,
+  selectArmId,
+  selectorUsesKlUcb,
+  selectorUsesMemory,
+  type EvolutionSelectorMode,
+} from './search-selector.ts'
 import {
   EVAL_CALLS_PER_SEARCH_CANDIDATE,
   assertBudgetFrozen,
@@ -114,8 +121,10 @@ export interface EvolveRunInput {
   budget?: EvolutionBudget
   proposer?: CandidateProposer
   injectCandidates?: DeliverGateStrategyV1[]
-  selector?: 'kl-ucb' | 'simplified-greedy'
+  selector?: EvolutionSelectorMode
   round?: number
+  stopOnFirstSuccess?: boolean
+  novelDirectionsQuotaPerRun?: number
 }
 
 export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunReport> {
@@ -170,42 +179,40 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
 
   const trainFailures = listTrainFailures(baseline, dataset.train)
   const memory = loadPolicyMemory(input.home, experiment.experimentId)
-  const useMemory = input.selector !== 'simplified-greedy'
+  const selector: EvolutionSelectorMode = input.selector ?? 'kl-ucb'
+  const useMemory = selectorUsesMemory(selector)
   const proposer = input.proposer ?? new TrainFailureProposer(useMemory)
   const seenDirections = new Set(experiment.seenDirections)
   const candidates: EvolutionCandidateRecord[] = []
-  const selector = input.selector ?? 'kl-ucb'
+  const stopOnFirstSuccess = input.stopOnFirstSuccess !== false
+  const novelQuota = input.novelDirectionsQuotaPerRun ?? NEW_DIRECTION_QUOTA_PER_RUN
+  let roundNovelAttempted = 0
+  let trialsThisRun = 0
+  const maxTrialsThisRun = budget.maxCandidatesThisRun ?? budget.maxCandidates
 
   let arms: KlUcbArm[] = deserializeArms(experiment.klArms)
-  for (const failure of trainFailures) {
-    const id = `fail_${failure.id}`
-    if (!arms.find(arm => arm.id === id)) arms.push({ id, observations: [] })
+  if (selectorUsesKlUcb(selector)) {
+    for (const failure of trainFailures) {
+      const id = `fail_${failure.id}`
+      if (!arms.find(arm => arm.id === id)) arms.push({ id, observations: [] })
+    }
   }
 
   let parentStrategy = baseline
   let parentId: string | null = BASELINE_PARENT_ID
-  const lastSuccess = experiment.frozenSelection?.candidateId
-  if (lastSuccess) {
-    parentId = lastSuccess
-    try {
-      const parentArtifact = path.join(archiveDir, lastSuccess, 'candidate.json')
-      if (fs.existsSync(parentArtifact)) {
-        parentStrategy = JSON.parse(fs.readFileSync(parentArtifact, 'utf8')).strategy as DeliverGateStrategyV1
-      }
-    } catch {
-      parentStrategy = baseline
-    }
-  }
 
   const maxThisRound = budget.maxCandidates
   let injectIndex = 0
+  const retiredFailureIds = collectRetiredFailureIds(memory)
 
   for (let step = 0; step < maxThisRound; step += 1) {
     if (experiment.totalCandidatesGenerated >= experiment.budget.maxCandidates) break
+    if (trialsThisRun >= maxTrialsThisRun) break
 
     let strategy: DeliverGateStrategyV1 | null = null
     let failureCaseId = trainFailures[0]?.id ?? 'none'
     let selectedArmId = failureCaseId === 'none' ? 'fail_none' : `fail_${failureCaseId}`
+    let selectionReason = 'inject'
 
     const injectedThisStep = Boolean(input.injectCandidates?.[injectIndex])
     if (injectedThisStep) {
@@ -213,17 +220,22 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
       injectIndex += 1
     } else if (trainFailures.length > 0) {
       experiment.totalOpportunities += 1
-      if (selector === 'kl-ucb') {
-        selectedArmId = klUcbSelect(
-          arms,
-          experiment.totalOpportunities,
-          DISCOVER_MIN_COLD_ARMS,
-          dataset.manifest.seed + experiment.totalOpportunities,
-        )
-      } else {
-        selectedArmId = arms[experiment.totalOpportunities % arms.length]?.id ?? `fail_${trainFailures[0]!.id}`
-      }
-      failureCaseId = selectedArmId.replace(/^fail_/, '')
+      const pick = selectArmId({
+        mode: selector,
+        arms,
+        trainFailures,
+        memory,
+        seenDirections,
+        retiredFailureIds,
+        totalOpportunities: experiment.totalOpportunities,
+        roundNovelAttempted,
+        novelQuota,
+        seed: dataset.manifest.seed,
+        discoverMinColdArms: DISCOVER_MIN_COLD_ARMS,
+      })
+      selectedArmId = pick.armId
+      failureCaseId = pick.failureCaseId
+      selectionReason = pick.selectionReason
       strategy = proposer.propose({
         baseline,
         parentStrategy,
@@ -236,7 +248,26 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
       })
     }
 
-    if (!strategy) continue
+    if (!strategy) {
+      candidates.push({
+        candidateId: `cand_none_${round}_${step}`,
+        parentId,
+        directionKey: 'none',
+        lineageHash: candidateLineageHash(parentId, 'none'),
+        strategy: baseline,
+        strategyDigest: stableJsonDigest(baseline),
+        artifactDigest: '',
+        status: 'skipped_invalid',
+        scores: [],
+        reward: 'skip',
+        proposedFrom: useMemory ? 'policy_memory' : 'train_failures',
+        failureCaseId,
+        selectionReason: `${selectionReason};no_proposal`,
+        round,
+        createdAt: new Date().toISOString(),
+      })
+      continue
+    }
 
     let directionKey = 'unknown'
     try {
@@ -247,6 +278,7 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     } catch {
       directionKey = `invalid_${step}`
     }
+    const isNovel = !seenDirections.has(directionKey)
     if (seenDirections.has(directionKey)) {
       candidates.push({
         candidateId: `cand_dup_${round}_${step}`,
@@ -260,6 +292,8 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
         scores: [],
         reward: 'skip',
         proposedFrom: useMemory ? 'policy_memory' : 'train_failures',
+        failureCaseId,
+        selectionReason,
         rejectionReason: 'duplicate direction',
         round,
         createdAt: new Date().toISOString(),
@@ -268,6 +302,8 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     }
 
     experiment.totalCandidatesGenerated += 1
+    trialsThisRun += 1
+    if (isNovel) roundNovelAttempted += 1
     const strategyDigest = stableJsonDigest(strategy)
     const candidateId = `cand_${round}_${step}_${strategyDigest.slice(0, 8)}`
     const actionId = stableJsonDigest({
@@ -301,8 +337,9 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
       status: outcome.status,
       scores: outcome.scores,
       reward: outcome.reward,
-      proposedFrom: useMemory ? 'policy_memory' : 'train_failures',
+      proposedFrom: useMemory ? 'policy_memory' : selectorUsesKlUcb(selector) ? 'train_failures' : 'train_failures',
       failureCaseId,
+      selectionReason,
       ...(outcome.reason ? { rejectionReason: outcome.reason } : {}),
       round,
       createdAt: new Date().toISOString(),
@@ -312,7 +349,7 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     candidates.push(record)
     seenDirections.add(directionKey)
 
-    if (arms.length > 0 && !injectedThisStep) {
+    if (selectorUsesKlUcb(selector) && arms.length > 0 && !injectedThisStep) {
       recordObservation(arms, selectedArmId, {
         id: actionId,
         reward: outcome.reward === 'success' ? 1 : 0,
@@ -324,7 +361,7 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     experiment.seenDirections = [...seenDirections]
     saveExperiment(input.home, experiment)
 
-    if (outcome.status === 'evaluated' && outcome.reward === 'success') {
+    if (stopOnFirstSuccess && outcome.status === 'evaluated' && outcome.reward === 'success') {
       parentStrategy = strategy
       parentId = candidateId
       break

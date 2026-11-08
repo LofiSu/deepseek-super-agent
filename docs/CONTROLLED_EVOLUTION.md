@@ -19,7 +19,11 @@ strategy** for speculative **DeliverGate** (`deliver-gate-v1`). Runtime compiles
 
 - **Lineage**: search children mutate from **baseline parent** unless a prior frozen artifact exists; not a multi-hop on-disk parent chain within one experiment session.
 - **Discover**: `DISCOVER_MIN_COLD_ARMS` minimum distinct tried arms — not AgentPilot fixed quota per window.
-- **Selectors**: `--selector kl-ucb` enables KL-UCB + policy-memory lessons; `simplified-greedy` uses round-robin arms with **memory disabled** (counterfactual).
+- **Per-run novel quota**: `NEW_DIRECTION_QUOTA_PER_RUN` (default 1) forces at least one cold/novel arm attempt per evolution run (KL cold pick; policy-memory tags `policy_memory:novel_quota`).
+- **Selectors** (memory is **not** shared):
+  - `kl-ucb` — statistical arms only; **policy memory OFF**.
+  - `policy-memory` — lesson-filtered failure arms + parent→child token deltas; **KL OFF**; after retirement skips contradicted train ids (e.g. glimmer trap → next train miss `orbit`).
+  - `simplified-greedy` — round-robin arms; memory OFF (counterfactual baseline).
 - **Final test claim**: OS `wx` lock file + consumed marker under trusted `DS_AGENT_HOME/evolution/` (same-local-user threat model).
 - **No LLM** policy memory: `policy-memory.json` stores parent→child token deltas tied to exact train case ids.
 - **Frozen model**: proposals are train-failure token additions (deterministic).
@@ -29,7 +33,7 @@ strategy** for speculative **DeliverGate** (`deliver-gate-v1`). Runtime compiles
 ## Pipeline
 
 1. **Search (A+B)** — train + validation via isolated child; budget ledger with reserve.
-2. **Propose** — `TrainFailureProposer` + policy lessons; KL-UCB arm pick (`--selector kl-ucb`).
+2. **Propose** — `TrainFailureProposer`; arm pick via `--selector kl-ucb` | `policy-memory` | `simplified-greedy` (`search-selector.ts`).
 3. **Freeze** — `evolution freeze <candidateId>`.
 4. **Final test (C)** — one-shot `evolution finalize`; sealed ledger; refuses repeat.
 5. **Promote** — digest binds artifact + dataset + evaluator **source hashes** + final test ledger.
@@ -45,7 +49,7 @@ pnpm ds-agent evolution finalize <candidateId> --home "$DS_AGENT_HOME"
 pnpm ds-agent evolution approve <runId> <candidateId> --home "$DS_AGENT_HOME"
 pnpm ds-agent evolution rollback --home "$DS_AGENT_HOME"
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm exec tsx scripts/evolution-rounds-demo.ts
-node scripts/evolution-two-cli-rounds.mjs   # two OS CLI processes; log under /tmp/
+CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm exec tsx scripts/evolution-two-cli-rounds.ts   # two OS CLI processes; LABEL synth; log under /tmp/
 ```
 
 Automatic merge/deploy is **disabled by design**.

@@ -150,7 +150,11 @@ export function updatePolicyMemoryFromRound(input: {
       }
     }
 
-    const targets = failureId && /^(tr|va)-/.test(failureId) ? [failureId] : []
+    const targets = failureId && /^(tr|va)-/.test(failureId)
+      ? [failureId]
+      : record.reward === 'failure' && record.failureCaseId && /^(tr|va)-/.test(record.failureCaseId)
+        ? [record.failureCaseId]
+        : []
 
     const lesson: PolicyLesson = {
       id: existingIdx >= 0 ? lessons[existingIdx]!.id : `lesson_${record.candidateId}`,
