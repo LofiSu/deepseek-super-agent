@@ -26,7 +26,7 @@ async function main(): Promise<void> {
     home,
     datasetRoot,
     round: 1,
-    budget: { maxCandidates: 4, maxEvals: 4, evalTimeoutMs: 15_000, reserveEvals: 2 },
+    budget: { maxCandidates: 4, maxEvals: 20, evalTimeoutMs: 15_000, reserveEvals: 2 },
   })
   log.push({ step: 'round1', candidates: r1.candidates.length, budget: r1.budget })
 
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
     home,
     datasetRoot,
     round: 2,
-    budget: { maxCandidates: 4, maxEvals: 4, evalTimeoutMs: 15_000, reserveEvals: 2 },
+    budget: { maxCandidates: 4, maxEvals: 20, evalTimeoutMs: 15_000, reserveEvals: 2 },
   })
   const mem = loadPolicyMemory(home, r2.experimentId)
   log.push({
@@ -60,7 +60,7 @@ async function main(): Promise<void> {
   if (!pick) throw new Error('no winner in demo')
   const { report: winReport, winner } = pick
 
-  freezeCandidate({ home, candidateId: winner.candidateId, runReport: winReport })
+  freezeCandidate({ home, candidateId: winner.candidateId, runId: winReport.runId, runReport: winReport })
   const fin = await runFinalTestOnce({ home, datasetRoot, candidateId: winner.candidateId })
   log.push({ step: 'finalize', ledgerId: fin.ledgerId, finaltest: fin.scores })
 

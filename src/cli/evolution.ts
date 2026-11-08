@@ -46,6 +46,7 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
     console.log(`ds-agent evolution — offline controlled self-evolution (strategy tokens v2)
 
   pnpm ds-agent evolution run [--home <dir>] [--dataset <dir>] [--selector kl-ucb|simplified-greedy]
+    kl-ucb: KL-UCB arms + policy memory lessons | simplified-greedy: round-robin arms, memory OFF
   pnpm ds-agent evolution freeze <candidateId> [--home <dir>] [--run <runId>]
   pnpm ds-agent evolution finalize <candidateId> [--home <dir>] [--dataset <dir>]
   pnpm ds-agent evolution approve <runId> <candidateId> [--artifact <path>] [--home <dir>]
@@ -106,7 +107,7 @@ export async function runEvolutionCommand(home: string, argv: string[]): Promise
     const runReport = runId
       ? loadRunReport(stateHome, runId)
       : findRunReportForCandidate(stateHome, candidateId)
-    const state = freezeCandidate({ home: stateHome, candidateId, runReport })
+    const state = freezeCandidate({ home: stateHome, candidateId, runId: runReport.runId, runReport })
     console.log(JSON.stringify({ frozen: true, selectedCandidateId: state.selectedCandidateId, phase: state.phase }, null, 2))
     return
   }

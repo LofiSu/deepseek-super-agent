@@ -13,11 +13,15 @@ strategy** for speculative **DeliverGate** (`deliver-gate-v1`). Runtime compiles
 | [GEPA](https://arxiv.org/abs/2507.19457) ([repo](https://github.com/gepa-ai/gepa)) | Jul 2025 (v2 Feb 2026) | MIT | Train/validation/**final** split discipline | Here: token mutation not LLM prompts |
 | [OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve) | May 2025 | Apache-2.0 | Archive + evaluator feedback | Benchmark ceilings |
 | [AdaEvolve](https://arxiv.org/abs/2602.20133) ([repo](https://github.com/skydiscover-ai/skydiscover)) | Mar 12 2026 | Apache-2.0 | Generate/Evaluate/Select modules; bounded budget | Limited numerical evidence |
-| [AgentPilot](https://github.com/HKUDS/AgentPilot) @ 534ccaf | 2026-03-24 (pushed 2026-11-06) | MIT | ABC eval, KL-UCB arms, discover quota, bounded policy-memory carrier, SKIP≠failure | **Simplified**: deterministic rule memory, fixture dataset, no upstream code copy |
+| [AgentPilot](https://github.com/HKUDS/AgentPilot) @ 534ccaf | 2026-03-24 (pushed 2026-11-06) | MIT | ABC eval, KL-UCB arms, discover quota, bounded policy-memory carrier, SKIP≠failure | **Simplified**: minimum-cold-arms discover (not fixed quota), deterministic rule memory, fixture dataset, no upstream code copy |
 
 ## Simplified scope vs AgentPilot
 
-- **No LLM** policy memory: `policy-memory.json` is rule/lesson text from train+validation outcomes only.
+- **Lineage**: search children mutate from **baseline parent** unless a prior frozen artifact exists; not a multi-hop on-disk parent chain within one experiment session.
+- **Discover**: `DISCOVER_MIN_COLD_ARMS` minimum distinct tried arms — not AgentPilot fixed quota per window.
+- **Selectors**: `--selector kl-ucb` enables KL-UCB + policy-memory lessons; `simplified-greedy` uses round-robin arms with **memory disabled** (counterfactual).
+- **Final test claim**: OS `wx` lock file + consumed marker under trusted `DS_AGENT_HOME/evolution/` (same-local-user threat model).
+- **No LLM** policy memory: `policy-memory.json` stores parent→child token deltas tied to exact train case ids.
 - **Frozen model**: proposals are train-failure token additions (deterministic).
 - **Tiny fixture** (`test/fixtures/evolution/`): **LABEL** — no general quality guarantee.
 - **Split C (`finaltest.json`)**: loaded only at `evolution finalize` once; never in search/proposer/leak checks.
@@ -41,6 +45,7 @@ pnpm ds-agent evolution finalize <candidateId> --home "$DS_AGENT_HOME"
 pnpm ds-agent evolution approve <runId> <candidateId> --home "$DS_AGENT_HOME"
 pnpm ds-agent evolution rollback --home "$DS_AGENT_HOME"
 CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 pnpm exec tsx scripts/evolution-rounds-demo.ts
+node scripts/evolution-two-cli-rounds.mjs   # two OS CLI processes; log under /tmp/
 ```
 
 Automatic merge/deploy is **disabled by design**.

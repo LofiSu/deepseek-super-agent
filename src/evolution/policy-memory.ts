@@ -1,12 +1,21 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { EvolutionCandidateRecord, EvolutionEvalCase, PolicyLesson, PolicyMemoryCarrier } from './types.ts'
-import { writeJsonAtomic } from './io.ts'
+import type {
+  DeliverGateStrategyV1,
+  EvolutionCandidateRecord,
+  PolicyLesson,
+  PolicyMemoryCarrier,
+} from './types.ts'
+import { writeJsonAtomic, resolveTrustedEvolutionRoot } from './io.ts'
+import { BASELINE_PARENT_ID } from './experiment.ts'
+import { defaultBaselineStrategy } from './dataset.ts'
+import { evolutionArchiveRoot } from './archive.ts'
+import { readJsonFile } from './io.ts'
 
 export const POLICY_MEMORY_MAX_CHARS = 8192
 
 export function policyMemoryPath(home: string): string {
-  return path.join(home, 'evolution', 'policy-memory.json')
+  return path.join(resolveTrustedEvolutionRoot(home), 'policy-memory.json')
 }
 
 export function serializeCarrier(carrier: PolicyMemoryCarrier): string {
@@ -36,7 +45,8 @@ export function loadPolicyMemory(home: string, experimentId: string): PolicyMemo
   if (!fs.existsSync(file)) {
     return emptyCarrier(experimentId, 0)
   }
-  const carrier = JSON.parse(fs.readFileSync(file, 'utf8')) as PolicyMemoryCarrier
+  const root = resolveTrustedEvolutionRoot(home)
+  const carrier = readJsonFile<PolicyMemoryCarrier>(file, root)
   if (carrier.experimentId !== experimentId) return emptyCarrier(experimentId, carrier.round)
   validatePolicyMemoryCarrier(carrier)
   return carrier
@@ -64,63 +74,116 @@ function buildSnapshot(carrier: PolicyMemoryCarrier): string {
   return body.slice(0, carrier.maxChars)
 }
 
+export function strategyTokenDelta(
+  parent: DeliverGateStrategyV1,
+  child: DeliverGateStrategyV1,
+): { addedPositive: string[]; addedNegative: string[]; removedPositive: string[]; removedNegative: string[] } {
+  const pPos = new Set(parent.positiveTokens ?? [])
+  const cPos = new Set(child.positiveTokens ?? [])
+  const pNeg = new Set(parent.negativeTokens ?? [])
+  const cNeg = new Set(child.negativeTokens ?? [])
+  return {
+    addedPositive: [...cPos].filter(t => !pPos.has(t)),
+    addedNegative: [...cNeg].filter(t => !pNeg.has(t)),
+    removedPositive: [...pPos].filter(t => !cPos.has(t)),
+    removedNegative: [...pNeg].filter(t => !cNeg.has(t)),
+  }
+}
+
 export function applyMemoryLessons(
   memory: PolicyMemoryCarrier,
-  failure: EvolutionEvalCase,
+  failureId: string,
   positiveTokens: string[],
-): string | null {
+  negativeTokens: string[],
+): { token: string; side: 'positive' | 'negative' } | null {
   for (const lesson of memory.lessons) {
     if (lesson.status !== 'active') continue
-    if (lesson.preferredToken && !positiveTokens.includes(lesson.preferredToken)) {
-      if (lesson.targets.length === 0 || lesson.targets.includes(failure.id)) {
-        return lesson.preferredToken
+    if (lesson.targets.length > 0 && !lesson.targets.includes(failureId)) continue
+    if (lesson.preferredToken) {
+      if (lesson.recommendedChange.includes('negative') || lesson.failurePattern) {
+        if (!negativeTokens.includes(lesson.preferredToken)) {
+          return { token: lesson.preferredToken, side: 'negative' }
+        }
+      } else if (!positiveTokens.includes(lesson.preferredToken)) {
+        return { token: lesson.preferredToken, side: 'positive' }
       }
     }
   }
   return null
 }
 
+function resolveParentStrategy(home: string, record: EvolutionCandidateRecord): DeliverGateStrategyV1 {
+  if (!record.parentId || record.parentId === BASELINE_PARENT_ID) {
+    return defaultBaselineStrategy()
+  }
+  const artifact = path.join(evolutionArchiveRoot(home), record.parentId, 'candidate.json')
+  if (!fs.existsSync(artifact)) return defaultBaselineStrategy()
+  const parsed = readJsonFile<{ strategy: DeliverGateStrategyV1 }>(artifact, evolutionArchiveRoot(home))
+  return parsed.strategy
+}
+
 export function updatePolicyMemoryFromRound(input: {
   home: string
   experimentId: string
   round: number
-  trainFailureIds: string[]
   completed: EvolutionCandidateRecord[]
 }): PolicyMemoryCarrier {
   const prior = loadPolicyMemory(input.home, input.experimentId)
   const lessons = [...prior.lessons]
   for (const record of input.completed) {
     if (record.reward === 'skip') continue
+    const parent = resolveParentStrategy(input.home, record)
+    const delta = strategyTokenDelta(parent, record.strategy)
     const dir = record.directionKey
+    const failureId = record.failureCaseId
     const existingIdx = lessons.findIndex(item => item.directionKey === dir)
-    const preferred = record.strategy.positiveTokens?.find(
-      token => !prior.lessons.some(l => l.preferredToken === token),
-    )
+
+    let preferredToken: string | undefined
+    let tokenSide: 'positive' | 'negative' = 'positive'
+    if (record.reward === 'success') {
+      if (delta.addedPositive[0]) {
+        preferredToken = delta.addedPositive[0]
+        tokenSide = 'positive'
+      } else if (delta.addedNegative[0]) {
+        preferredToken = delta.addedNegative[0]
+        tokenSide = 'negative'
+      }
+    }
+
+    const targets = failureId && /^(tr|va)-/.test(failureId) ? [failureId] : []
+
     const lesson: PolicyLesson = {
       id: existingIdx >= 0 ? lessons[existingIdx]!.id : `lesson_${record.candidateId}`,
       appliesWhen: record.reward === 'failure'
         ? 'validation regression or invalid direction'
-        : 'train misclassification on ready reports',
+        : `train miss on ${failureId ?? 'unknown'}`,
       mechanismHypothesis: record.reward === 'success'
-        ? 'missing positive token in bounded list'
+        ? `bounded ${tokenSide} token closes train gap`
         : 'token addition hurt validation',
       recommendedChange: record.reward === 'success'
-        ? `add token for direction ${dir}`
+        ? `reuse ${tokenSide} token from parent→child delta`
         : `retire direction ${dir}`,
-      preferredToken: record.reward === 'success' ? preferred : undefined,
-      targets: input.trainFailureIds.filter(id => /^(tr|va)-/.test(id)).slice(0, 3),
+      preferredToken: record.reward === 'success' ? preferredToken : undefined,
+      targets,
       sources: [record.candidateId],
       status: record.reward === 'success' ? 'active' : 'retired',
       directionKey: dir,
       successfulPattern: record.reward === 'success' ? dir : undefined,
       failurePattern: record.reward === 'failure' ? dir : undefined,
     }
+
     if (existingIdx >= 0) {
       const existing = lessons[existingIdx]!
-      if (existing.status === 'active' && lesson.status === 'retired') {
+      if (lesson.status === 'retired' && existing.status === 'active') {
         Object.assign(existing, lesson)
       } else if (lesson.status === 'active') {
-        Object.assign(existing, lesson)
+        if (existing.preferredToken && lesson.preferredToken
+          && existing.preferredToken !== lesson.preferredToken) {
+          existing.status = 'retired'
+          lessons.push({ ...lesson, id: `lesson_${record.candidateId}_rev` })
+        } else {
+          Object.assign(existing, lesson)
+        }
       }
     } else {
       lessons.push(lesson)

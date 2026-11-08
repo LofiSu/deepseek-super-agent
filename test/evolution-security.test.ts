@@ -36,7 +36,7 @@ async function winningPipeline(home: string) {
   const winner = report.candidates.find(item => item.status === 'evaluated' && item.reward === 'success')
     ?? report.candidates.find(item => item.status === 'evaluated')
   expect(winner).toBeDefined()
-  freezeCandidate({ home, candidateId: winner!.candidateId, runReport: report })
+  freezeCandidate({ home, candidateId: winner!.candidateId, runId: report.runId, runReport: report })
   await runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
   return { report, winner: winner! }
 }

@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { klUcbMaxq, klUcbSelect } from '../src/evolution/kl-ucb.ts'
+import { bernoulliKl, klUcbMaxq, klUcbSelect } from '../src/evolution/kl-ucb.ts'
 import { loadSearchDatasetOnly } from '../src/evolution/dataset.ts'
 import { TrainFailureProposer } from '../src/evolution/train-proposer.ts'
 import { emptyCarrier, validatePolicyMemoryCarrier } from '../src/evolution/policy-memory.ts'
@@ -16,6 +16,10 @@ const datasetRoot = path.join(repoRoot, 'test/fixtures/evolution')
 
 describe('regression: reviewer blockers (PR168)', () => {
   describe('A KL-UCB', () => {
+    it('p=0 q=1 KL is Infinity', () => {
+      expect(bernoulliKl(0, 1)).toBe(Infinity)
+    })
+
     it('s=0 n=1 T=1 c=0 yields index 0.5 (not 0)', () => {
       const index = klUcbMaxq(0, 1, 1, 0)
       expect(index).toBeCloseTo(0.5, 5)

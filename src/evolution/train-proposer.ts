@@ -14,16 +14,17 @@ function missingTokens(text: string, known: readonly string[]): string[] {
 function pickToken(input: {
   failure: EvolutionEvalCase
   positiveTokens: string[]
+  negativeTokens: string[]
   useMemory: boolean
   memory: import('./types.ts').PolicyMemoryCarrier
-}): string | null {
-  const { failure, positiveTokens, useMemory, memory } = input
+}): { token: string; side: 'positive' | 'negative' } | null {
+  const { failure, positiveTokens, negativeTokens, useMemory, memory } = input
   if (useMemory) {
-    const fromLesson = applyMemoryLessons(memory, failure, positiveTokens)
+    const fromLesson = applyMemoryLessons(memory, failure.id, positiveTokens, negativeTokens)
     if (fromLesson) return fromLesson
   }
   const extra = missingTokens(failure.report.text, positiveTokens)
-  return extra[0] ?? null
+  return extra[0] ? { token: extra[0], side: 'positive' } : null
 }
 
 /** Deterministic train-failure proposals; optional policy-memory lesson fields (no fixture literals). */
@@ -56,18 +57,33 @@ export class TrainFailureProposer implements CandidateProposer {
     let negativeTokens = [...tokens.negativeTokens]
 
     if (failure.expected === 'deliver' && predicted === 'discard') {
-      const alt = pickToken({ failure, positiveTokens, useMemory: useMem, memory })
-      if (!alt) return null
-      try {
-        assertSafeToken(alt, 'proposed')
-      } catch {
-        return null
+      const picked = pickToken({ failure, positiveTokens, negativeTokens, useMemory: useMem, memory })
+      if (!picked || picked.side !== 'positive') {
+        const extra = missingTokens(failure.report.text, positiveTokens)
+        const alt = extra[0]
+        if (!alt) return null
+        try {
+          assertSafeToken(alt, 'proposed')
+        } catch {
+          return null
+        }
+        if (positiveTokens.includes(alt)) return null
+        positiveTokens = [...positiveTokens, alt]
+      } else {
+        const alt = picked.token
+        try {
+          assertSafeToken(alt, 'proposed')
+        } catch {
+          return null
+        }
+        if (positiveTokens.includes(alt)) return null
+        positiveTokens = [...positiveTokens, alt]
       }
-      if (positiveTokens.includes(alt)) return null
-      positiveTokens = [...positiveTokens, alt]
     } else if (failure.expected === 'discard' && predicted === 'deliver') {
-      const extra = missingTokens(failure.report.text, negativeTokens)
-      const alt = extra[0]
+      const picked = useMem
+        ? applyMemoryLessons(memory, failure.id, positiveTokens, negativeTokens)
+        : null
+      const alt = picked?.side === 'negative' ? picked.token : missingTokens(failure.report.text, negativeTokens)[0]
       if (!alt) return null
       try {
         assertSafeToken(alt, 'proposed')

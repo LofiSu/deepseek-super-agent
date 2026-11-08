@@ -103,7 +103,7 @@ describe('controlled evolution (offline deliver-gate strategy v2)', () => {
     expect(winner).toBeDefined()
     expect(winner!.scores.every(score => score.split !== 'finaltest')).toBe(true)
 
-    freezeCandidate({ home, candidateId: winner!.candidateId, runReport: report })
+    freezeCandidate({ home, candidateId: winner!.candidateId, runId: report.runId, runReport: report })
     const finalOut = await runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
     expect(finalOut.scores[0]?.split).toBe('finaltest')
 

@@ -25,7 +25,12 @@ import {
 } from './experiment.ts'
 import { loadPolicyMemory, updatePolicyMemoryFromRound } from './policy-memory.ts'
 import { normalizeDirectionKey } from './safe-pattern.ts'
-import { klUcbSelect, recordObservation, type KlUcbArm } from './kl-ucb.ts'
+import {
+  DISCOVER_MIN_COLD_ARMS,
+  klUcbSelect,
+  recordObservation,
+  type KlUcbArm,
+} from './kl-ucb.ts'
 import {
   EVAL_CALLS_PER_SEARCH_CANDIDATE,
   assertBudgetFrozen,
@@ -112,8 +117,6 @@ export interface EvolveRunInput {
   selector?: 'kl-ucb' | 'simplified-greedy'
   round?: number
 }
-
-const DISCOVER_QUOTA = 2
 
 export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunReport> {
   const budget = input.budget ?? DEFAULT_EVOLUTION_BUDGET
@@ -214,7 +217,7 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
         selectedArmId = klUcbSelect(
           arms,
           experiment.totalOpportunities,
-          DISCOVER_QUOTA,
+          DISCOVER_MIN_COLD_ARMS,
           dataset.manifest.seed + experiment.totalOpportunities,
         )
       } else {
@@ -299,6 +302,7 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
       scores: outcome.scores,
       reward: outcome.reward,
       proposedFrom: useMemory ? 'policy_memory' : 'train_failures',
+      failureCaseId,
       ...(outcome.reason ? { rejectionReason: outcome.reason } : {}),
       round,
       createdAt: new Date().toISOString(),
@@ -332,7 +336,6 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
     home: input.home,
     experimentId: experiment.experimentId,
     round,
-    trainFailureIds: trainFailures.map(item => item.id),
     completed: candidates,
   })
 

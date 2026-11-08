@@ -5,7 +5,7 @@ import { sha256File, stableJsonDigest } from './digest.ts'
 import { sealArtifactDigest } from './archive.ts'
 import type { EvolutionCandidateRecord, EvolutionRunReport, PromotionRecord } from './types.ts'
 import { writeJsonAtomic } from './io.ts'
-import { loadExperiment } from './experiment.ts'
+import { loadExperiment, loadFrozenRunReceipt, loadPersistedRunReport } from './experiment.ts'
 import { computeEvaluatorDigest } from './evaluator-identity.ts'
 export { loadPromotedStrategy } from './promotion-load.ts'
 
@@ -47,16 +47,24 @@ export function approvePromotion(input: {
   if (experiment.finalTest.candidateId !== input.candidateId) {
     throw new Error('final test candidate mismatch')
   }
+  const runReport = loadPersistedRunReport(input.home, input.runReport.runId)
   const evaluatorDigest = computeEvaluatorDigest()
   if (evaluatorDigest !== experiment.evaluatorDigest
-    || evaluatorDigest !== input.runReport.evaluatorDigest) {
+    || evaluatorDigest !== runReport.evaluatorDigest) {
     throw new Error('evaluator digest mismatch')
   }
-  if (input.runReport.datasetDigest !== experiment.datasetDigest) {
+  if (stableJsonDigest(runReport) !== stableJsonDigest(input.runReport)) {
+    throw new Error('run report does not match persisted artifact')
+  }
+  if (runReport.datasetDigest !== experiment.datasetDigest) {
     throw new Error('dataset digest mismatch')
   }
+  const frozenReceipt = loadFrozenRunReceipt(input.home)
+  if (!frozenReceipt || frozenReceipt.runId !== runReport.runId) {
+    throw new Error('frozen run receipt missing or mismatched')
+  }
 
-  const candidate = input.runReport.candidates.find(item => item.candidateId === input.candidateId)
+  const candidate = runReport.candidates.find(item => item.candidateId === input.candidateId)
   if (!candidate) throw new Error(`unknown candidate ${input.candidateId}`)
   if (candidate.status !== 'evaluated') {
     throw new Error(`candidate ${input.candidateId} status=${candidate.status}; cannot promote`)
@@ -92,7 +100,7 @@ export function approvePromotion(input: {
     datasetDigest: experiment.datasetDigest,
     evaluatorDigest,
     artifactPath: resolvedArtifact,
-    runId: input.runReport.runId,
+    runId: runReport.runId,
     candidateId: candidate.candidateId,
     experimentId: experiment.experimentId,
     finalTestLedgerId: experiment.finalTest.ledgerId,

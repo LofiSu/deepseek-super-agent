@@ -67,6 +67,8 @@ export interface EvolutionCandidateRecord {
   scores: SplitScore[]
   reward: 'success' | 'failure' | 'skip'
   proposedFrom: 'baseline' | 'train_failures' | 'policy_memory'
+  /** Train arm that motivated this candidate (search only). */
+  failureCaseId?: string
   rejectionReason?: string
   round: number
   createdAt: string

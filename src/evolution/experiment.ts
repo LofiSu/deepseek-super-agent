@@ -8,20 +8,26 @@ import type {
   EvolutionRunReport,
   FrozenSelection,
 } from './types.ts'
-import { writeJsonAtomic, readJsonFile, resolveInsideDir } from './io.ts'
+import { writeJsonAtomic, readJsonFile, resolveInsideDir, resolveTrustedEvolutionRoot } from './io.ts'
 import { DEFAULT_EVOLUTION_BUDGET } from './types.ts'
-import { evolutionArchiveRoot } from './archive.ts'
+import { evolutionArchiveRoot, evolutionRunsDir } from './archive.ts'
 import { sealArtifactDigest } from './archive.ts'
+import { stableJsonDigest } from './digest.ts'
 import type { EvolutionCandidateRecord } from './types.ts'
+import {
+  acquireFinalTestClaimLock,
+  markFinalTestClaimConsumed,
+  releaseFinalTestClaimLock,
+} from './final-test-claim-lock.ts'
 
 export const BASELINE_PARENT_ID = 'baseline_immutable'
 
 export function experimentPath(home: string): string {
-  return path.join(home, 'evolution', 'experiment.json')
+  return path.join(resolveTrustedEvolutionRoot(home), 'experiment.json')
 }
 
 export function runReceiptPath(home: string): string {
-  return path.join(home, 'evolution', 'frozen-run-receipt.json')
+  return path.join(resolveTrustedEvolutionRoot(home), 'frozen-run-receipt.json')
 }
 
 export function defaultBudgetLedger(overrides?: Partial<BudgetLedger>): BudgetLedger {
@@ -44,17 +50,29 @@ export function defaultBudgetLedger(overrides?: Partial<BudgetLedger>): BudgetLe
 export function loadExperiment(home: string): ExperimentState | null {
   const file = experimentPath(home)
   if (!fs.existsSync(file)) return null
-  return readJsonFile<ExperimentState>(file)
+  const root = resolveTrustedEvolutionRoot(home)
+  return readJsonFile<ExperimentState>(file, root)
 }
 
 export function saveExperiment(home: string, state: ExperimentState): void {
   writeJsonAtomic(experimentPath(home), state)
 }
 
+export function loadPersistedRunReport(home: string, runId: string): EvolutionRunReport {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(runId)) {
+    throw new Error('invalid run id')
+  }
+  const evolutionRoot = resolveTrustedEvolutionRoot(home)
+  const file = path.join(evolutionRunsDir(home), `${runId}.json`)
+  const resolved = resolveInsideDir(evolutionRoot, file)
+  return readJsonFile<EvolutionRunReport>(resolved, evolutionRoot)
+}
+
 export function loadFrozenRunReceipt(home: string): EvolutionRunReport | null {
   const file = runReceiptPath(home)
   if (!fs.existsSync(file)) return null
-  return readJsonFile<EvolutionRunReport>(file)
+  const root = resolveTrustedEvolutionRoot(home)
+  return readJsonFile<EvolutionRunReport>(file, root)
 }
 
 export function createExperiment(input: {
@@ -102,13 +120,6 @@ export function assertSearchAllowed(state: ExperimentState): void {
   }
 }
 
-export function assertBudget(state: ExperimentState, evalCost: number): void {
-  const searchPool = state.budget.maxEvals - state.budget.reserveEvals
-  if (state.budget.usedEvals + evalCost > searchPool) {
-    throw new Error('budget exhausted (reserve held for final test)')
-  }
-}
-
 function loadArtifactRecord(home: string, candidateId: string): EvolutionCandidateRecord {
   if (!/^[a-zA-Z0-9_.-]+$/.test(candidateId)) {
     throw new Error('invalid candidate id')
@@ -116,32 +127,55 @@ function loadArtifactRecord(home: string, candidateId: string): EvolutionCandida
   const archiveRoot = evolutionArchiveRoot(home)
   const artifact = path.join(archiveRoot, candidateId, 'candidate.json')
   const resolved = resolveInsideDir(archiveRoot, artifact)
-  return readJsonFile<EvolutionCandidateRecord>(resolved)
+  const record = readJsonFile<EvolutionCandidateRecord>(resolved, archiveRoot)
+  const digest = sealArtifactDigest(record)
+  if (record.artifactDigest !== digest) {
+    throw new Error('artifact content digest mismatch at load')
+  }
+  return record
 }
 
 export function freezeCandidate(input: {
   home: string
   candidateId: string
-  runReport: EvolutionRunReport
+  runId?: string
+  runReport?: EvolutionRunReport
 }): ExperimentState {
   const state = loadExperiment(input.home)
   if (!state) throw new Error('no experiment')
   assertSearchAllowed(state)
-  const candidate = input.runReport.candidates.find(item => item.candidateId === input.candidateId)
+
+  const runId = input.runId ?? input.runReport?.runId
+  if (!runId) throw new Error('freeze requires persisted runId')
+  const runReport = loadPersistedRunReport(input.home, runId)
+
+  if (runReport.experimentId !== state.experimentId) {
+    throw new Error('run report experiment mismatch')
+  }
+  if (runReport.datasetDigest !== state.datasetDigest) {
+    throw new Error('run report dataset mismatch')
+  }
+  if (runReport.evaluatorDigest !== state.evaluatorDigest) {
+    throw new Error('run report evaluator mismatch')
+  }
+  if (input.runReport && stableJsonDigest(input.runReport) !== stableJsonDigest(runReport)) {
+    throw new Error('run report forgery vs persisted runs artifact')
+  }
+
+  const candidate = runReport.candidates.find(item => item.candidateId === input.candidateId)
   if (!candidate || candidate.status !== 'evaluated') {
-    throw new Error('freeze requires evaluated candidate from this run')
+    throw new Error('freeze requires evaluated candidate from persisted run')
   }
   const artifact = loadArtifactRecord(input.home, input.candidateId)
-  const digest = sealArtifactDigest(artifact)
-  if (artifact.artifactDigest !== digest) {
-    throw new Error('artifact digest mismatch at freeze')
+  if (artifact.strategyDigest !== candidate.strategyDigest) {
+    throw new Error('candidate strategy digest mismatch vs archive')
   }
   const artifactPath = path.join(evolutionArchiveRoot(input.home), input.candidateId, 'candidate.json')
   const selection: FrozenSelection = {
     candidateId: input.candidateId,
     artifactDigest: artifact.artifactDigest,
     strategyDigest: candidate.strategyDigest,
-    runId: input.runReport.runId,
+    runId: runReport.runId,
     artifactPath,
     frozenAt: new Date().toISOString(),
   }
@@ -149,8 +183,8 @@ export function freezeCandidate(input: {
   state.selectedCandidateId = input.candidateId
   state.frozenSelection = selection
   state.frozenAt = selection.frozenAt
-  state.frozenRunReceipt = input.runReport
-  writeJsonAtomic(runReceiptPath(input.home), input.runReport)
+  state.frozenRunReceipt = runReport
+  writeJsonAtomic(runReceiptPath(input.home), runReport)
   saveExperiment(input.home, state)
   return state
 }
@@ -189,27 +223,40 @@ export function openFinalTestLedger(candidateId: string, digests: {
   }
 }
 
-/** Exclusive claim before reading finaltest.json (fail-closed on concurrent second claim). */
-export function claimFinalTest(home: string, candidateId: string): ExperimentState {
-  const state = loadExperiment(home)
-  if (!state) throw new Error('no experiment')
-  if (state.phase !== 'frozen' || !state.frozenSelection) throw new Error('must freeze before final test claim')
-  if (state.frozenSelection.candidateId !== candidateId) {
-    throw new Error('candidate not frozen selection')
+/** Exclusive OS lock + experiment claim before reading finaltest.json. */
+export function claimFinalTest(home: string, candidateId: string): {
+  state: ExperimentState
+  lockToken: string
+} {
+  const lock = acquireFinalTestClaimLock(home, candidateId)
+  try {
+    const state = loadExperiment(home)
+    if (!state) throw new Error('no experiment')
+    if (state.phase !== 'frozen' || !state.frozenSelection) throw new Error('must freeze before final test claim')
+    if (state.frozenSelection.candidateId !== candidateId) {
+      throw new Error('candidate not frozen selection')
+    }
+    if (state.finalTest !== null) throw new Error('final test already finalized')
+    if (state.finalTestClaim) {
+      throw new Error(`final test claim already ${state.finalTestClaim.state}`)
+    }
+    state.finalTestClaim = {
+      claimId: lock.claimToken,
+      state: 'CLAIMED',
+      openedAt: lock.openedAt,
+      candidateId,
+      strategyDigest: state.frozenSelection.strategyDigest,
+    }
+    saveExperiment(home, state)
+    return { state, lockToken: lock.claimToken }
+  } catch (error) {
+    try {
+      releaseFinalTestClaimLock(home, lock.claimToken)
+    } catch {
+      /* ignore */
+    }
+    throw error
   }
-  if (state.finalTest !== null) throw new Error('final test already finalized')
-  if (state.finalTestClaim) {
-    throw new Error(`final test claim already ${state.finalTestClaim.state}`)
-  }
-  state.finalTestClaim = {
-    claimId: randomUUID(),
-    state: 'CLAIMED',
-    openedAt: new Date().toISOString(),
-    candidateId,
-    strategyDigest: state.frozenSelection.strategyDigest,
-  }
-  saveExperiment(home, state)
-  return state
 }
 
 export function markFinalTestRunning(home: string): void {
@@ -219,7 +266,24 @@ export function markFinalTestRunning(home: string): void {
   saveExperiment(home, state)
 }
 
-export function markFinalTestConsumed(home: string, ok: boolean): void {
+export function abortFinalTestClaim(home: string, lockToken: string, reason: string): never {
+  const state = loadExperiment(home)
+  if (!state?.finalTestClaim) {
+    markFinalTestClaimConsumed(home, lockToken, 'FAILED')
+    throw new Error(reason)
+  }
+  state.finalTestClaim.state = 'FAILED'
+  state.finalTestClaim.closedAt = new Date().toISOString()
+  if (!state.finalTest) {
+    state.phase = 'finalized'
+    state.finalizedAt = state.finalTestClaim.closedAt
+  }
+  saveExperiment(home, state)
+  markFinalTestClaimConsumed(home, lockToken, 'FAILED')
+  throw new Error(reason)
+}
+
+export function markFinalTestConsumed(home: string, ok: boolean, lockToken?: string): void {
   const state = loadExperiment(home)
   if (!state?.finalTestClaim) return
   state.finalTestClaim.state = ok ? 'SUCCEEDED' : 'FAILED'
@@ -229,4 +293,7 @@ export function markFinalTestConsumed(home: string, ok: boolean): void {
     state.finalizedAt = state.finalTestClaim.closedAt
   }
   saveExperiment(home, state)
+  if (lockToken) {
+    markFinalTestClaimConsumed(home, lockToken, ok ? 'SUCCEEDED' : 'FAILED')
+  }
 }
