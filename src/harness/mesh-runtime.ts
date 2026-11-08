@@ -103,6 +103,13 @@ export class WorkerPlacement {
   }
 
   pickNode(ticketId: string, requiredCapabilities: readonly string[] = []): string | undefined {
+    if (requiredCapabilities.length > 0) {
+      // The in-process local node advertises no capabilities, so it can never
+      // satisfy a non-empty requirement. Drop any sticky local assignment for
+      // this ticket before asking a remote that matches.
+      this.local.release(ticketId)
+      return this.remote?.pick(ticketId, undefined, requiredCapabilities)?.id
+    }
     const localNode = this.local.pickNode(ticketId)
     if (localNode) return localNode.id
     return this.remote?.pick(ticketId, undefined, requiredCapabilities)?.id
