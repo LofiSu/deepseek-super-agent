@@ -249,6 +249,17 @@ export class Assignments {
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     const existing = ticket.assignments.find(item => item.state === 'pending')
     const replacement = existing ?? this.retry(ticket.id, 'restart-recovery')
+    // Recovery ends the interrupted Assignment outside the normal report path,
+    // so notify observers here as well: a live Runtime must clear its remote
+    // result wait and release mesh capacity. Startup recovery has no armed
+    // timers and an empty in-memory placement, so this is a no-op there.
+    try {
+      this.host.onAssignmentEnded?.(ticket.id)
+    } catch (error) {
+      this.host.log(
+        `[hook] hook=assignment-ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
     this.host.log(
       `[engine] Assignments.recover ticketId=${ticket.id} interrupted=${interruptedAssignmentIds.join(',')} replacementId=${replacement.id}`,
     )

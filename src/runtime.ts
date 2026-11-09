@@ -598,6 +598,34 @@ export class Runtime {
       log.info(
         `[mesh] remote result timeout ticketId=${ticketId} assignmentId=${assignmentId} timeoutMs=${remoteResultTimeoutMs}`,
       )
+      // The timer belongs to the Assignment captured when it was armed. Every
+      // report path mutates the *latest* Assignment, so recovering or ending
+      // that Assignment can leave this timer pointing at a replacement. Failing
+      // the replacement for the old Assignment's missing result would be wrong.
+      const ticket = store.getDoc<Ticket>('ticket', ticketId)
+      const armed = ticket?.assignments.find(item => item.id === assignmentId)
+      const latest = ticket?.assignments.at(-1)
+      const staleReason = !ticket
+        ? 'missing-ticket'
+        : ticket.ended
+          ? 'ticket-ended'
+          : !armed
+            ? 'missing-assignment'
+            : armed.state === 'ended'
+              ? 'assignment-ended'
+              : latest?.id !== assignmentId
+                ? 'assignment-replaced'
+                : undefined
+      if (staleReason) {
+        log.info(
+          `[mesh] remote result timeout ignored ticketId=${ticketId} assignmentId=${assignmentId} reason=${staleReason}`,
+        )
+        // Recovery can end the Assignment without going through `releaseMesh`.
+        // Free any capacity it left reserved; do not invent another way to end
+        // the Assignment or the Ticket.
+        placement.release(ticketId)
+        return
+      }
       try {
         engine.report(ticketId, {
           kind: 'failed',
@@ -866,6 +894,29 @@ export class Runtime {
           }
           placement.release(ticket.id)
           late.remoteResultWait?.clear(ticket.id)
+          return
+        }
+        // Dispatch is asynchronous. A result may have been applied while the
+        // send was awaiting, or recovery may have replaced the Assignment.
+        // Arming now would later time out work that already finished (or a
+        // different, later Assignment), so re-read the committed state first.
+        const current = store.getDoc<Ticket>('ticket', ticket.id)
+        const armed = current?.assignments.find(item => item.id === assignment.id)
+        const latest = current?.assignments.at(-1)
+        const skipReason = !current
+          ? 'missing-ticket'
+          : current.ended
+            ? 'ticket-ended'
+            : latest?.id !== assignment.id
+              ? 'assignment-replaced'
+              : armed?.state === 'ended'
+                ? 'assignment-ended'
+                : undefined
+        if (skipReason) {
+          log.info(
+            `[mesh] remote result wait skipped ticketId=${ticket.id} assignmentId=${assignment.id} reason=${skipReason}`,
+          )
+          placement.release(ticket.id)
           return
         }
         late.remoteResultWait?.arm(ticket.id, assignment.id)
