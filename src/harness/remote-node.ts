@@ -468,7 +468,15 @@ export class RemoteMeshRegistry {
 
   /**
    * Propagate ticket end / local cancel to the assigned remote worker inbox.
-   * Keeps the in-flight slot when `delivered`; caller should `release` after ack.
+   *
+   * `delivered` keeps the in-flight assignment. Any outcome after the send
+   * settles, including `unroutable`, `failed`, a thrown transport, or an
+   * invalid delivery, also keeps it: the caller owns the decision because the
+   * ticket may already have moved on to a live replacement Assignment. Callers
+   * must `release` when the failed cancel should free the slot. Only a
+   * stale/offline/unknown target or a transport factory failure before the send
+   * drops the reservation. No transport error is ever thrown; the returned
+   * delivery never carries peer-supplied error text or a secret.
    */
   async dispatchCancel(ticketId: string, assignmentId: string): Promise<A2ADelivery | undefined> {
     if (!nonEmptyString(ticketId) || !nonEmptyString(assignmentId)) return undefined
@@ -498,16 +506,15 @@ export class RemoteMeshRegistry {
     try {
       delivery = await transport.send(envelope)
     } catch {
-      this.assignments.delete(ticketId)
+      // A remote transport may throw arbitrary text; never surface it.
+      // The send settled: keep the sticky reservation so the caller can tell
+      // a genuine failure from a late cancel for a replaced Assignment.
       return failedDelivery(envelope)
     }
     if (!isDelivery(delivery)) {
-      this.assignments.delete(ticketId)
       return failedDelivery(envelope)
     }
 
-    if (delivery.status === 'delivered') return safeDelivery(delivery)
-    this.assignments.delete(ticketId)
     return safeDelivery(delivery)
   }
 

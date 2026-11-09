@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { A2AEnvelope } from '../src/channels/a2a.ts'
 import { WorkerMeshRegistry } from '../src/harness/mesh.ts'
 import { WorkerPlacement } from '../src/harness/mesh-runtime.ts'
 import { RemoteMeshRegistry } from '../src/harness/remote-node.ts'
@@ -130,6 +131,49 @@ describe('WorkerPlacement', () => {
     expect(remote.inFlight('remote-a')).toBe(0)
     expect(remote.hasTicketAssignment('t-remote')).toBe(false)
     expect(local.inFlight(placement.localNodeId)).toBe(0)
+  })
+
+  it('keeps the remote sticky slot when cancelRemote opts out of release', async () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const sent: A2AEnvelope[] = []
+    const remote = new RemoteMeshRegistry({
+      localPeerId: 'host',
+      transportFactory: () => ({
+        send: envelope => {
+          sent.push(envelope)
+          return { envelope, status: 'delivered', delivered: 1, persisted: false }
+        },
+      }),
+    })
+    remote.register({
+      id: 'remote-a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'worker-a',
+      secret: 'a'.repeat(32),
+      capacity: 1,
+    })
+    const placement = new WorkerPlacement('local', local, remote)
+    expect(placement.pickNode('filler')).toBe('local')
+    expect(placement.pickNode('t-remote')).toBe('remote-a')
+    placement.release('filler')
+
+    await placement.cancelRemote('t-remote', 'asg_keep', { release: false })
+
+    // The ended remote worker is told to stop, but the sticky reservation that
+    // a live replacement may already own is not stolen.
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.body).toMatchObject({
+      kind: 'assignment_cancel',
+      ticketId: 't-remote',
+      assignmentId: 'asg_keep',
+    })
+    expect(remote.hasTicketAssignment('t-remote')).toBe(true)
+    expect(remote.inFlight('remote-a')).toBe(1)
+
+    // The default cancel contract still releases.
+    await placement.cancelRemote('t-remote', 'asg_keep')
+    expect(remote.hasTicketAssignment('t-remote')).toBe(false)
+    expect(remote.inFlight('remote-a')).toBe(0)
   })
 
   it('falls back to local when the sticky remote node goes offline', () => {

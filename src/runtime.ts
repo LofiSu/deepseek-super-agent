@@ -696,8 +696,36 @@ export class Runtime {
     const releaseSlot = (ticketId: string): void => {
       try {
         const ticket = store.getDoc<Ticket>('ticket', ticketId)
-        const assignmentId = ticket?.assignments.at(-1)?.id
+        const latest = ticket?.assignments.at(-1)
+        const assignmentId = latest?.id
         if (assignmentId && placement.remoteHasTicket(ticketId)) {
+          // `releaseSlot` is also reached from `releaseNode` while the only
+          // Assignment is still the live running one (the Worker failed before
+          // it started). A newer open Assignment alone is therefore not proof
+          // of a replacement: require a prior ended Assignment it superseded.
+          const ended = ticket?.assignments.slice(0, -1).reverse().find(item => item.state === 'ended')
+          const liveReplacement = ticket !== undefined
+            && !ticket.ended
+            && latest !== undefined
+            && latest.state !== 'ended'
+            && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+            && ended !== undefined
+            && placement.remoteHasTicket(ticketId)
+          if (liveReplacement && ended) {
+            log.info(
+              `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${ended.id} replacementId=${latest?.id} reason=live-replacement`,
+            )
+            // Still tell the ended remote worker to stop, but keep the sticky
+            // reservation so the live replacement does not lose its slot.
+            void placement.cancelRemote(ticketId, ended.id, { release: false })
+              .catch(error => {
+                log.info(
+                  `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+                )
+              })
+              .finally(() => notifyHarnessReleased(ticketId))
+            return
+          }
           void placement.cancelRemote(ticketId, assignmentId)
             .catch(error => {
               log.info(

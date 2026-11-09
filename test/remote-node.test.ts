@@ -526,6 +526,57 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(mesh.release('t3')).toBe(true)
     expect(mesh.pick('t4', NOW)?.id).toBe('a')
   })
+  it('keeps the sticky reservation on unroutable/failed/throwing/invalid cancel deliveries without leaking peer text', async () => {
+    let mode: 'unroutable' | 'failed' | 'throw' | 'invalid' = 'unroutable'
+    const factory = (_options: A2AHttpTransportOptions): A2ATransport => ({
+      send: async (envelope: A2AEnvelope): Promise<A2ADelivery> => {
+        if (mode === 'throw') throw new Error(`peer text ${SECRET}`)
+        if (mode === 'invalid') return null as unknown as A2ADelivery
+        if (mode === 'unroutable') {
+          return { envelope, status: 'unroutable', delivered: 0, persisted: false }
+        }
+        return {
+          envelope,
+          status: 'failed',
+          delivered: 0,
+          persisted: false,
+          error: `peer text ${SECRET}`,
+        }
+      },
+    })
+    let now = NOW
+    const mesh = new RemoteMeshRegistry({
+      localPeerId: LOCAL,
+      now: () => now,
+      transportFactory: factory,
+    })
+    mesh.register({ id: 'a', url: 'http://127.0.0.1:9/a2a', peerId: PEER, secret: SECRET, capacity: 1 })
+
+    const modes = ['unroutable', 'failed', 'throw', 'invalid'] as const
+    for (const [index, next] of modes.entries()) {
+      mode = next
+      const ticketId = `t${index + 1}`
+      expect(mesh.pick(ticketId, now)?.id).toBe('a')
+      const result = await mesh.dispatchCancel(ticketId, `asg_${index + 1}`)
+      expect(result?.status).toBe(next === 'unroutable' ? 'unroutable' : 'failed')
+      expect(JSON.stringify(result)).not.toContain('peer text')
+      expect(JSON.stringify(result)).not.toContain(SECRET)
+      // A send that settled keeps the sticky reservation: the caller owns the
+      // release decision so a late cancel cannot steal a live replacement's
+      // slot. Compare with the dispatch contract above.
+      expect(mesh.hasTicketAssignment(ticketId)).toBe(true)
+      expect(mesh.inFlight('a')).toBe(1)
+      expect(mesh.release(ticketId)).toBe(true)
+    }
+
+    // A stale target still drops the reservation before any send.
+    mode = 'unroutable'
+    expect(mesh.pick('stale', now)?.id).toBe('a')
+    now += DEFAULT_REMOTE_STALE_MS + 1
+    expect(await mesh.dispatchCancel('stale', 'asg_stale')).toBeUndefined()
+    expect(mesh.hasTicketAssignment('stale')).toBe(false)
+    expect(mesh.inFlight('a')).toBe(0)
+  })
 })
 
 describe('RemoteMeshRegistry secret hygiene', () => {

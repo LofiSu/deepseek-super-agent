@@ -209,4 +209,116 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await settleWithDeadline(runtime, 10_000).catch(() => undefined)
     await shutdown(runtime)
   }, 60_000)
+
+  it('keeps a live replacement slot when the cancel releases an ended Assignment', async () => {
+    const assignments: RemoteMeshAssignmentEvent[] = []
+    const cancels: RemoteMeshAssignmentCancelEvent[] = []
+    const workerHandler = createRemoteMeshHandler({
+      localPeerId: WORKER_PEER,
+      replayCache: createA2AReplayCache(),
+      resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+      onAssignment: (event) => {
+        assignments.push(event)
+        return undefined
+      },
+      onAssignmentCancel: (event) => {
+        cancels.push(event)
+        return undefined
+      },
+    })
+    const server = createServer(workerHandler)
+    servers.push(server)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = server.address()
+    if (typeof address !== 'object' || address === null) throw new Error('worker bind failed')
+    const workerUrl = `http://127.0.0.1:${address.port}/a2a`
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-live-replacement-'))
+    homes.push(home)
+    const runtime = runtimeFor(home, holdingModel(new Map()))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    // Occupy the only local slot so placement must choose the remote node.
+    expect(runtime.placement.local.pickNode('slot-blocker')?.id).toBe(HOST_PEER)
+
+    const ticketId = createTicket(runtime, 'cancel_live_replacement')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'ticket to reach the remote inbox',
+    )
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    const current = loadTicket(runtime, ticketId)
+    const armed = current.assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+
+    // End the armed Assignment through the normal report path. `onAssignmentEnded`
+    // queues the cancel/release microtask.
+    const failed = runtime.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'remote worker result timeout',
+      deliver: false,
+    })
+    expect(failed.surfaced).toBe(false)
+    const afterReport = loadTicket(runtime, ticketId)
+    const ended = afterReport.assignments.at(-1)!
+    expect(ended.id).toBe(armed.id)
+    expect(ended.state).toBe('ended')
+
+    // Before the release microtask runs, commit a replacement that already
+    // claimed the same remote node and started. The sticky reservation stays,
+    // so the replacement owns the ticket's remote slot.
+    const replacementAssignment = {
+      id: 'asg_cancel_live_replacement',
+      state: 'running' as const,
+      speculative: false,
+      node: REMOTE_NODE_ID,
+      startedAt: new Date().toISOString(),
+    }
+    runtime.store.putDoc('ticket', ticketId, {
+      ...afterReport,
+      assignments: [...afterReport.assignments, replacementAssignment],
+    })
+
+    await waitFor(
+      () => cancels.some(event => event.ticketId === ticketId),
+      5_000,
+      'inbox to receive the cancel for the ended Assignment',
+    )
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${armed.id} replacementId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'late cancel to keep the live replacement slot',
+    )
+
+    // The ended remote worker is still told to stop; the live replacement is
+    // neither cancelled nor touched.
+    expect(cancels.find(event => event.ticketId === ticketId)?.assignmentId).toBe(armed.id)
+    const after = loadTicket(runtime, ticketId)
+    const latest = after.assignments.at(-1)!
+    expect(latest.id).toBe(replacementAssignment.id)
+    expect(latest.state).toBe('running')
+    expect(latest.report).toBeUndefined()
+    expect(after.ended).toBeUndefined()
+    // The cancel must not steal the live replacement's mesh capacity.
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    await shutdown(runtime)
+  }, 60_000)
 })

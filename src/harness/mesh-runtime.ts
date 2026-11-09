@@ -147,11 +147,19 @@ export class WorkerPlacement {
   }
 
   /**
-   * Authenticated HTTP cancel to the child runtime; releases mesh capacity after send.
+   * Authenticated HTTP cancel to the child runtime; releases mesh capacity after
+   * send. Pass `{ release: false }` to tell the remote worker to stop without
+   * clearing the sticky reservation, so a live replacement that already owns
+   * the ticket's remote slot keeps its capacity.
    */
-  async cancelRemote(ticketId: string, assignmentId: string): Promise<void> {
+  async cancelRemote(
+    ticketId: string,
+    assignmentId: string,
+    opts?: { release?: boolean },
+  ): Promise<void> {
+    const release = opts?.release ?? true
     if (!this.remote?.hasTicketAssignment(ticketId)) {
-      this.release(ticketId)
+      if (release) this.release(ticketId)
       return
     }
     try {
@@ -159,7 +167,7 @@ export class WorkerPlacement {
     } finally {
       // Release both registries: a leftover local sticky from a prior race must
       // not leak local capacity after the remote assignment is cancelled.
-      this.release(ticketId)
+      if (release) this.release(ticketId)
     }
   }
 }
