@@ -206,6 +206,16 @@ describe('Runtime stale remote result timeout', () => {
     const ticketId = await dispatchToRemote(runtime, inbox, 'replaced_stale')
     const current = loadTicket(runtime, ticketId)
     const armed = current.assignments.at(-1)!
+    // The dispatch send may still be awaiting its response when the inbox
+    // accepts the assignment. Arm the result wait first: committing the
+    // replacement earlier would make the late dispatch skip arming entirely.
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${armed.id}`,
+      ),
+      5_000,
+      'remote result wait to arm before the replacement is committed',
+    )
 
     // Simulate recovery that committed the end + replacement directly, with no
     // onAssignmentEnded: the timer stays armed for the old Assignment id.
@@ -245,6 +255,17 @@ describe('Runtime stale remote result timeout', () => {
     expect(armed.state).toBe('running')
     expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
     expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    // The inbox accepting the assignment does not mean the host has finished
+    // its dispatch await. Wait for the result wait to actually arm for the
+    // original Assignment before committing the live replacement; otherwise the
+    // late dispatch skips arming and no stale timeout ever fires.
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${armed.id}`,
+      ),
+      5_000,
+      'remote result wait to arm before the live replacement is committed',
+    )
 
     // Simulate recovery that committed the end + replacement directly, with no
     // onAssignmentEnded: the timer stays armed for the old Assignment id, while

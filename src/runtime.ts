@@ -1036,6 +1036,11 @@ export class Runtime {
           placement.release(ticket.id)
           return
         }
+        if (remoteResultTimeoutMs > 0) {
+          log.info(
+            `[mesh] remote result wait armed ticketId=${ticket.id} assignmentId=${assignment.id}`,
+          )
+        }
         late.remoteResultWait?.arm(ticket.id, assignment.id)
       },
       queueLimit: meshQueue,
