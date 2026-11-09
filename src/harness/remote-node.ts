@@ -900,12 +900,14 @@ export class MeshInbox {
     if (!nonEmptyString(body.ticketId)) throw new Error('mesh assignment_result requires a ticketId')
     if (!nonEmptyString(body.assignmentId)) throw new Error('mesh assignment_result requires an assignmentId')
     if (!hasOwn(body, 'report')) throw new Error('mesh assignment_result requires a report')
-    const deliveryKey = nonEmptyString(body.deliveryKey)
-      ? body.deliveryKey
-      : nonEmptyString(envelope.id)
-        ? envelope.id
-        : ''
-    if (!deliveryKey) throw new Error('mesh assignment_result requires a deliveryKey')
+    // The transport mints a fresh envelope id on every send, so it cannot be an
+    // idempotence key: a retry would look like a new result. Require the worker
+    // to send the same `deliveryKey` on retries and a distinct key per logical
+    // result.
+    if (!nonEmptyString(body.deliveryKey)) {
+      throw new Error('mesh assignment_result requires a deliveryKey')
+    }
+    const deliveryKey = body.deliveryKey
     const event: RemoteMeshAssignmentResultEvent = {
       peerId,
       ticketId: body.ticketId,
