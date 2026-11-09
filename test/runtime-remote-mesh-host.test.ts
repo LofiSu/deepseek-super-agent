@@ -202,7 +202,7 @@ describe('Runtime remote mesh host queue', () => {
     await settleWithDeadline(runtime, 45_000)
 
     const assignmentId = loadTicket(runtime, remoteId).assignments.at(-1)?.id ?? ''
-    expect(remoteResultSeen(runtime.store, `deliv-os-${remoteId}-${assignmentId}`)).toBe(true)
+    expect(remoteResultSeen(runtime.store, WORKER_PEER, `deliv-os-${remoteId}-${assignmentId}`)).toBe(true)
     expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(0)
     expect(runtime.log.text()).toContain('[mesh] remote result applied')
 

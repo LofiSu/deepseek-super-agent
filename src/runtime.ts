@@ -977,7 +977,7 @@ export class Runtime {
 
   /**
    * Apply an authenticated inbound mesh worker result. Idempotent on
-   * `deliveryKey`. Does not start a listener; operators mount
+   * `(peerId, deliveryKey)`. Does not start a listener; operators mount
    * `createRemoteMeshHandler` themselves.
    */
   applyRemoteAssignmentResult(event: RemoteMeshAssignmentResultEvent): void {
@@ -988,9 +988,9 @@ export class Runtime {
       return
     }
     // An authenticated peer may only answer for the assignment it was given.
-    // Consuming the global deliveryKey before this check would let any peer
-    // squat the key of a ticket it does not own, so unauthorized and stale
-    // results are dropped before `recordRemoteResult`.
+    // Consuming the deliveryKey before this check would let any peer squat the
+    // key of a ticket it does not own, so unauthorized and stale results are
+    // dropped before `recordRemoteResult`.
     const ticket = this.store.getDoc<Ticket>('ticket', event.ticketId)
     const assignment = ticket?.assignments.at(-1)
     const node = assignment?.node
@@ -1025,6 +1025,7 @@ export class Runtime {
       assignmentId: event.assignmentId,
       report,
       deliveryKey: event.deliveryKey,
+      peerId: event.peerId,
     })
     if (!applied) {
       this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)

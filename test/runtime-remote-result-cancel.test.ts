@@ -51,7 +51,7 @@ describe('Runtime remote result idempotence after cancel', () => {
     const report: WorkerReport = { kind: 'ready', text: 'late remote', deliver: false }
     const deliveryKey = `deliv-cancel-${ticketId}`
     // Simulate a result that was already accepted before the cancel.
-    recordRemoteResult(runtime.store, { ticketId, assignmentId, report, deliveryKey })
+    recordRemoteResult(runtime.store, { ticketId, assignmentId, report, deliveryKey, peerId: WORKER_PEER })
 
     runtime.applyRemoteAssignmentResult({
       peerId: WORKER_PEER,
@@ -75,7 +75,7 @@ describe('Runtime remote result idempotence after cancel', () => {
     expect(runtime.log.text()).toContain('remote result after ticket end')
     // The authorized late result is recorded for idempotency without rewriting
     // the already-ended ticket.
-    expect(remoteResultSeen(runtime.store, lateKey)).toBe(true)
+    expect(remoteResultSeen(runtime.store, WORKER_PEER, lateKey)).toBe(true)
     const after = runtime.store.getDoc<Ticket>('ticket', ticketId)!
     expect(after.ended).toBeDefined()
     expect(after.assignments.at(-1)?.report?.text).toBe('done locally')

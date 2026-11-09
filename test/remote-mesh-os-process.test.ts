@@ -148,12 +148,14 @@ describe('remote mesh OS process boundary (loopback)', () => {
         assignmentId,
         report,
         deliveryKey: results[0]!.deliveryKey,
+        peerId: WORKER_PEER,
       })).toBe(true)
       expect(recordRemoteResult(hostStore, {
         ticketId,
         assignmentId,
         report,
         deliveryKey: results[0]!.deliveryKey,
+        peerId: WORKER_PEER,
       })).toBe(false)
     } finally {
       hostStore.close()

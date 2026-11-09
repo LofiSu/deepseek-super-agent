@@ -84,7 +84,7 @@ describe('Runtime remote result after assignment end', () => {
 
     // The result is rejected before recordRemoteResult: no key consumed, no
     // report overwrite, and no ticket end.
-    expect(remoteResultSeen(runtime.store, deliveryKey)).toBe(false)
+    expect(remoteResultSeen(runtime.store, WORKER_PEER, deliveryKey)).toBe(false)
     expect(runtime.log.text()).toContain('reason=ended-assignment')
     const after = runtime.store.getDoc<Ticket>('ticket', ticketId)!
     expect(after.ended).toBeUndefined()
@@ -104,7 +104,7 @@ describe('Runtime remote result after assignment end', () => {
       envelope: { from: WORKER_PEER, to: HOST, body: {} },
     })
 
-    expect(remoteResultSeen(runtime.store, deliveryKey)).toBe(true)
+    expect(remoteResultSeen(runtime.store, WORKER_PEER, deliveryKey)).toBe(true)
     expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.assignments.at(-1)?.report?.text).toBe('live-result')
     expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.ended).toBeDefined()
   })

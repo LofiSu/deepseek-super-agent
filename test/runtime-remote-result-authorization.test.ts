@@ -88,7 +88,8 @@ describe('Runtime remote assignment result authorization', () => {
 
     runtime.applyRemoteAssignmentResult(result(ticketId, assignmentId, PEER_B, deliveryKey, 'from-worker-b'))
 
-    expect(remoteResultSeen(runtime.store, deliveryKey)).toBe(false)
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(false)
+    expect(remoteResultSeen(runtime.store, PEER_B, deliveryKey)).toBe(false)
     expect(runtime.log.text()).toContain('reason=unauthorized-or-stale')
     const ignored = runtime.store.getDoc<Ticket>('ticket', ticketId)!
     expect(ignored.ended).toBeUndefined()
@@ -97,7 +98,7 @@ describe('Runtime remote assignment result authorization', () => {
     // The genuine assigned peer can still use the same key.
     runtime.applyRemoteAssignmentResult(result(ticketId, assignmentId, PEER_A, deliveryKey, 'from-worker-a'))
 
-    expect(remoteResultSeen(runtime.store, deliveryKey)).toBe(true)
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(true)
     const applied = runtime.store.getDoc<Ticket>('ticket', ticketId)!
     expect(applied.ended).toBeDefined()
     expect(applied.assignments.at(-1)?.report?.text).toBe('from-worker-a')
@@ -110,7 +111,7 @@ describe('Runtime remote assignment result authorization', () => {
 
     runtime.applyRemoteAssignmentResult(result(ticketId, 'asg_stale', PEER_A, deliveryKey, 'stale'))
 
-    expect(remoteResultSeen(runtime.store, deliveryKey)).toBe(false)
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(false)
     expect(runtime.log.text()).toContain('reason=unauthorized-or-stale')
     expect(runtime.log.text()).toContain('detail=stale-assignment')
     const ignored = runtime.store.getDoc<Ticket>('ticket', ticketId)!
@@ -119,7 +120,7 @@ describe('Runtime remote assignment result authorization', () => {
 
     runtime.applyRemoteAssignmentResult(result(ticketId, assignmentId, PEER_A, deliveryKey, 'current'))
 
-    expect(remoteResultSeen(runtime.store, deliveryKey)).toBe(true)
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(true)
     expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.assignments.at(-1)?.report?.text).toBe('current')
   })
 
@@ -129,13 +130,43 @@ describe('Runtime remote assignment result authorization', () => {
 
     runtime.applyRemoteAssignmentResult(result(ticketId, assignmentId, PEER_A, 'deliv-local', 'from-peer'))
 
-    expect(remoteResultSeen(runtime.store, 'deliv-local')).toBe(false)
+    expect(remoteResultSeen(runtime.store, PEER_A, 'deliv-local')).toBe(false)
     expect(runtime.log.text()).toContain('detail=not-remote')
     expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.ended).toBeUndefined()
 
     runtime.applyRemoteAssignmentResult(result('ticket_missing', 'asg_missing', PEER_A, 'deliv-missing', 'ghost'))
 
-    expect(remoteResultSeen(runtime.store, 'deliv-missing')).toBe(false)
+    expect(remoteResultSeen(runtime.store, PEER_A, 'deliv-missing')).toBe(false)
     expect(runtime.log.text()).toContain('detail=missing-ticket')
+  })
+
+  it('scopes deliveryKey idempotence by peerId so two authorized peers can share a key', () => {
+    const runtime = authRuntime()
+    const a = placedTicket(runtime, 'shared_key_a', NODE_A)
+    const b = placedTicket(runtime, 'shared_key_b', NODE_B)
+    const deliveryKey = 'shared-delivery-key'
+
+    // Peer A applies its genuine result for ticket A under the shared key.
+    runtime.applyRemoteAssignmentResult(result(a.ticketId, a.assignmentId, PEER_A, deliveryKey, 'from-worker-a'))
+
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(true)
+    expect(remoteResultSeen(runtime.store, PEER_B, deliveryKey)).toBe(false)
+    expect(runtime.store.getDoc<Ticket>('ticket', a.ticketId)?.assignments.at(-1)?.report?.text).toBe('from-worker-a')
+
+    // Peer B's authorized result for a different ticket uses the same wire key
+    // and must still apply: idempotence is scoped per peer now.
+    runtime.applyRemoteAssignmentResult(result(b.ticketId, b.assignmentId, PEER_B, deliveryKey, 'from-worker-b'))
+
+    expect(remoteResultSeen(runtime.store, PEER_B, deliveryKey)).toBe(true)
+    expect(runtime.store.getDoc<Ticket>('ticket', b.ticketId)?.assignments.at(-1)?.report?.text).toBe('from-worker-b')
+    expect(runtime.store.getDoc<Ticket>('ticket', a.ticketId)?.assignments.at(-1)?.report?.text).toBe('from-worker-a')
+    expect(runtime.log.text()).not.toContain('remote result duplicate deliveryKey')
+
+    // The same peer replaying the same key is still a duplicate and must not
+    // overwrite the applied report.
+    runtime.applyRemoteAssignmentResult(result(b.ticketId, b.assignmentId, PEER_B, deliveryKey, 'rewritten'))
+
+    expect(runtime.log.text()).toContain('remote result duplicate deliveryKey')
+    expect(runtime.store.getDoc<Ticket>('ticket', b.ticketId)?.assignments.at(-1)?.report?.text).toBe('from-worker-b')
   })
 })

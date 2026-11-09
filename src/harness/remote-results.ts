@@ -8,19 +8,23 @@ export interface RemoteAssignmentResult {
   assignmentId: string
   report: WorkerReport
   deliveryKey: string
+  peerId: string
 }
 
-function docId(deliveryKey: string): string {
-  return `${DOC_PREFIX}${deliveryKey}`
+function docId(peerId: string, deliveryKey: string): string {
+  return `${DOC_PREFIX}${peerId}:${deliveryKey}`
 }
 
-/** Idempotent apply: duplicate deliveryKey is ignored. Returns whether this call applied. */
+/**
+ * Idempotent apply: a duplicate (peerId, deliveryKey) pair is ignored.
+ * Returns whether this call applied.
+ */
 export function recordRemoteResult(
   store: Store,
   result: RemoteAssignmentResult,
 ): boolean {
   if (!store.isOpen) return false
-  const id = docId(result.deliveryKey)
+  const id = docId(result.peerId, result.deliveryKey)
   if (store.getDoc('mesh', id)) return false
   store.putDoc('mesh', id, {
     ...result,
@@ -29,6 +33,6 @@ export function recordRemoteResult(
   return true
 }
 
-export function remoteResultSeen(store: Store, deliveryKey: string): boolean {
-  return !!store.getDoc('mesh', docId(deliveryKey))
+export function remoteResultSeen(store: Store, peerId: string, deliveryKey: string): boolean {
+  return !!store.getDoc('mesh', docId(peerId, deliveryKey))
 }

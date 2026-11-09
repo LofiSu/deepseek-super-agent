@@ -99,12 +99,14 @@ describe('remote mesh runtime e2e (loopback)', () => {
         assignmentId: 'asg_e2e',
         report,
         deliveryKey: 'deliv-e2e-1',
+        peerId: WORKER,
       })).toBe(true)
       expect(recordRemoteResult(store, {
         ticketId: 'ticket_e2e',
         assignmentId: 'asg_e2e',
         report,
         deliveryKey: 'deliv-e2e-1',
+        peerId: WORKER,
       })).toBe(false)
     } finally {
       store.close()
