@@ -1114,7 +1114,22 @@ export class Runtime {
     // must never rewrite the terminal outcome.
     if (remoteResultSeen(this.store, event.peerId, event.deliveryKey)) {
       this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
-      this.remoteResultWait?.clear(event.ticketId)
+      // A duplicate is idempotent for the report, but it must not disarm a wait
+      // for work that is still running: replaying an at-least-once `progress`
+      // heartbeat would otherwise leave a hung Assignment with no timeout
+      // recovery and its mesh slot held forever. Match the live path: only
+      // finished remote work (ticket ended, assignment ended, or a pause-held
+      // terminal verdict) may clear the wait.
+      const recordedKind = assignment.report?.kind ?? report.kind
+      const heldTerminal = REMOTE_ENDING_REPORT_KINDS.has(recordedKind) && ticket.speculative !== true
+      const remoteWorkDone = Boolean(ticket.ended) || assignment.state === 'ended' || heldTerminal
+      if (remoteWorkDone) {
+        this.remoteResultWait?.clear(event.ticketId)
+      } else {
+        this.log.info(
+          `[mesh] remote result duplicate kept wait ticketId=${event.ticketId} assignmentId=${event.assignmentId}`,
+        )
+      }
       return
     }
     // An already-ended Ticket has no live Assignment to report to. Keep

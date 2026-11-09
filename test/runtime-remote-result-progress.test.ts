@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
+import type { RemoteMeshAssignmentResultEvent } from '../src/harness/remote-node.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import type { Runtime } from '../src/runtime.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
@@ -110,6 +111,42 @@ describe('Runtime remote progress result', () => {
       const ticket = runtime.store.getDoc<Ticket>('ticket', ticketId)
       return ticket?.assignments.at(-1)?.state === 'ended'
     }, RESULT_TIMEOUT_MS + 400, 'timeout after progress')
+
+    const timedOut = runtime.store.getDoc<Ticket>('ticket', ticketId)!
+    expect(timedOut.assignments.at(-1)?.report?.kind).toBe('failed')
+    expect(timedOut.assignments.at(-1)?.report?.text).toContain('remote worker result timeout')
+  })
+
+  it('keeps the result wait when a duplicate progress deliveryKey is replayed', async () => {
+    const runtime = progressRuntime()
+    const { ticketId, assignmentId } = placedTicket(runtime, 'progress_duplicate')
+    armWait(runtime, ticketId, assignmentId)
+
+    const event: RemoteMeshAssignmentResultEvent = {
+      peerId: PEER_A,
+      ticketId,
+      assignmentId,
+      report: { kind: 'progress', text: 'still working remotely', deliver: false },
+      deliveryKey: `deliv-progress-dup-${ticketId}`,
+      envelope: { from: PEER_A, to: HOST, body: {} },
+    }
+
+    runtime.applyRemoteAssignmentResult(event)
+    expect(runtime.placement.remoteHasTicket(ticketId)).toBe(true)
+
+    // At-least-once delivery may replay the same heartbeat. The duplicate is
+    // idempotent for the report, but the Assignment is still running, so the
+    // timeout and the mesh slot must survive.
+    runtime.applyRemoteAssignmentResult(event)
+
+    expect(runtime.log.text()).toContain('remote result duplicate kept wait')
+    expect(runtime.placement.remoteHasTicket(ticketId)).toBe(true)
+    expect(runtime.store.getDoc<Ticket>('ticket', ticketId)!.assignments.at(-1)?.state).toBe('running')
+
+    await waitFor(() => {
+      const ticket = runtime.store.getDoc<Ticket>('ticket', ticketId)
+      return ticket?.assignments.at(-1)?.state === 'ended'
+    }, RESULT_TIMEOUT_MS + 400, 'timeout after duplicate progress')
 
     const timedOut = runtime.store.getDoc<Ticket>('ticket', ticketId)!
     expect(timedOut.assignments.at(-1)?.report?.kind).toBe('failed')
