@@ -234,6 +234,57 @@ describe('Runtime stale remote result timeout', () => {
     await shutdown(runtime)
   }, 60_000)
 
+  it('defers a pause-held timeout, keeps the remote slot, and recovers after resume', async () => {
+    const inbox = await startInbox()
+    const runtime = startHost(inbox)
+    const ticketId = await dispatchToRemote(runtime, inbox, 'paused_timeout')
+    const armedId = loadTicket(runtime, ticketId).assignments.at(-1)!.id
+
+    // Pause before the result wait fires. `Assignments.report` then holds the
+    // failed verdict on the Assignment instead of ending it.
+    runtime.engine.pause(ticketId, { reason: 'owner review' })
+    const deferredLine =
+      `[mesh] remote result timeout deferred ticketId=${ticketId} assignmentId=${armedId}`
+    const deferredCount = (): number => runtime.log.text().split(deferredLine).length - 1
+
+    await waitFor(() => deferredCount() >= 1, 5_000, 'first deferred timeout log')
+    const paused = loadTicket(runtime, ticketId)
+    const held = paused.assignments.at(-1)!
+    expect(held.id).toBe(armedId)
+    expect(held.state).not.toBe('ended')
+    expect(held.report?.kind).toBe('failed')
+    expect(held.report?.verdict).toBe('hold')
+    expect(paused.ended).toBeUndefined()
+    // The slot stays reserved while the held report waits for resume.
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    // No terminal timeout failure was applied.
+    expect(runtime.log.text()).not.toContain('remote worker result timeout')
+
+    // A second window proves the timer was re-armed instead of dropped.
+    await waitFor(() => deferredCount() >= 2, 5_000, 'second deferred timeout log')
+    expect(loadTicket(runtime, ticketId).assignments.at(-1)!.state).not.toBe('ended')
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+
+    // Resume clears the pause. The next timeout now applies the failed report,
+    // ends the Assignment, and frees the reserved slot.
+    runtime.engine.resume(ticketId, { reason: 'owner resumed' })
+    await waitFor(
+      () => loadTicket(runtime, ticketId).assignments.at(-1)!.state === 'ended',
+      5_000,
+      'assignment to end after resume',
+    )
+    expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
+    await waitFor(
+      () => runtime.placement.remote?.hasTicketAssignment(ticketId) === false,
+      5_000,
+      'remote slot to be released after resume',
+    )
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(0)
+
+    await shutdown(runtime)
+  }, 60_000)
+
   it('does not arm a result wait when the Assignment is replaced while dispatch awaits', async () => {
     let releaseDelivery!: () => void
     const deliveryGate = new Promise<void>(resolve => { releaseDelivery = resolve })

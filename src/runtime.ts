@@ -637,6 +637,21 @@ export class Runtime {
           `[mesh] remote timeout report failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
         )
         placement.release(ticketId)
+        return
+      }
+      // `report` may hold instead of ending, for example while the Ticket is
+      // paused: the failed verdict is persisted on the Assignment and only
+      // applied on resume. The timer deleted itself before firing, so without
+      // re-arming this Ticket would never time out again and its mesh slot
+      // would stay reserved forever. Check the post-report Assignment state
+      // rather than only `collab.paused` so every hold path is covered.
+      const reported = store.getDoc<Ticket>('ticket', ticketId)
+      const armedAfterReport = reported?.assignments.find(item => item.id === assignmentId)
+      if (reported && !reported.ended && armedAfterReport && armedAfterReport.state !== 'ended') {
+        log.info(
+          `[mesh] remote result timeout deferred ticketId=${ticketId} assignmentId=${assignmentId} reason=assignment-still-open`,
+        )
+        late.remoteResultWait?.arm(ticketId, assignmentId)
       }
     })
     const notifyHarnessReleased = (ticketId: string): void => {
