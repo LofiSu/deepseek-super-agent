@@ -472,19 +472,30 @@ export class RemoteMeshRegistry {
    * `delivered` keeps the in-flight assignment. Any outcome after the send
    * settles, including `unroutable`, `failed`, a thrown transport, or an
    * invalid delivery, also keeps it: the caller owns the decision because the
-   * ticket may already have moved on to a live replacement Assignment. Callers
-   * must `release` when the failed cancel should free the slot. Only a
-   * stale/offline/unknown target or a transport factory failure before the send
-   * drops the reservation. No transport error is ever thrown; the returned
-   * delivery never carries peer-supplied error text or a secret.
+   * ticket may already have moved on to a live replacement Assignment.
+   *
+   * By default (`release: true`), a stale/offline/unknown target or a transport
+   * factory failure before the send drops the reservation. Pass
+   * `{ release: false }` to keep the sticky assignment in those pre-send cases
+   * too: a keep-slot cancel must never steal capacity from a live replacement
+   * that already owns the ticket's slot, even when the old target is
+   * unreachable. No transport error is ever thrown; the returned delivery never
+   * carries peer-supplied error text or a secret.
    */
-  async dispatchCancel(ticketId: string, assignmentId: string): Promise<A2ADelivery | undefined> {
+  async dispatchCancel(
+    ticketId: string,
+    assignmentId: string,
+    opts?: { release?: boolean },
+  ): Promise<A2ADelivery | undefined> {
     if (!nonEmptyString(ticketId) || !nonEmptyString(assignmentId)) return undefined
+    const release = opts?.release ?? true
     const nodeId = this.assignments.get(ticketId)
     if (nodeId === undefined) return undefined
     const node = this.nodes.get(nodeId)
     if (!node || !this.eligible(node, this.clock())) {
-      this.assignments.delete(ticketId)
+      // A keep-slot cancel must leave the sticky map alone even when the
+      // assigned node is offline/stale/unknown.
+      if (release) this.assignments.delete(ticketId)
       return undefined
     }
 
@@ -498,7 +509,9 @@ export class RemoteMeshRegistry {
     try {
       transport = this.transportFor(node)
     } catch {
-      this.assignments.delete(ticketId)
+      // Same keep-assignment contract as the ineligible-target branch above:
+      // only a releasing cancel frees the slot before the send.
+      if (release) this.assignments.delete(ticketId)
       return failedDelivery(envelope)
     }
 

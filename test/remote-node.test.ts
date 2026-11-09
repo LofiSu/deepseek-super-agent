@@ -577,6 +577,42 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(mesh.hasTicketAssignment('stale')).toBe(false)
     expect(mesh.inFlight('a')).toBe(0)
   })
+  it('keeps the sticky reservation when dispatchCancel opts out of release on an ineligible target', async () => {
+    let now = NOW
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => now })
+    mesh.register({ id: 'a', url: 'http://127.0.0.1:9/a2a', peerId: PEER, secret: SECRET, capacity: 2 })
+
+    // Offline target: the keep-assignment cancel must not steal the slot that a
+    // live replacement already owns.
+    expect(mesh.pick('offline', now)?.id).toBe('a')
+    mesh.markOffline('a')
+    expect(await mesh.dispatchCancel('offline', 'asg_offline', { release: false })).toBeUndefined()
+    expect(mesh.hasTicketAssignment('offline')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    mesh.heartbeat('a', now)
+
+    // Stale target behaves the same when the caller opts out of release.
+    expect(mesh.pick('stale-keep', now)?.id).toBe('a')
+    now += DEFAULT_REMOTE_STALE_MS + 1
+    expect(await mesh.dispatchCancel('stale-keep', 'asg_stale', { release: false })).toBeUndefined()
+    expect(mesh.hasTicketAssignment('stale-keep')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(2)
+
+    // A transport factory failure before the send also keeps the reservation.
+    const factoryMesh = new RemoteMeshRegistry({
+      localPeerId: LOCAL,
+      transportFactory: () => {
+        throw new Error(`factory ${SECRET}`)
+      },
+    })
+    factoryMesh.register({ id: 'a', url: 'http://127.0.0.1:9/a2a', peerId: PEER, secret: SECRET, capacity: 1 })
+    expect(factoryMesh.pick('factory-fail', now)?.id).toBe('a')
+    const failed = await factoryMesh.dispatchCancel('factory-fail', 'asg_factory', { release: false })
+    expect(failed?.status).toBe('failed')
+    expect(JSON.stringify(failed)).not.toContain(SECRET)
+    expect(factoryMesh.hasTicketAssignment('factory-fail')).toBe(true)
+    expect(factoryMesh.inFlight('a')).toBe(1)
+  })
 })
 
 describe('RemoteMeshRegistry secret hygiene', () => {

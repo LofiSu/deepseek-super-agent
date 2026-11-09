@@ -176,6 +176,30 @@ describe('WorkerPlacement', () => {
     expect(remote.inFlight('remote-a')).toBe(0)
   })
 
+  it('keeps the remote sticky slot when a keep-slot cancel targets an offline node', async () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const remote = new RemoteMeshRegistry({ localPeerId: 'host' })
+    remote.register({
+      id: 'remote-a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'worker-a',
+      secret: 'a'.repeat(32),
+      capacity: 1,
+    })
+    const placement = new WorkerPlacement('local', local, remote)
+    expect(placement.pickNode('filler')).toBe('local')
+    expect(placement.pickNode('t-remote')).toBe('remote-a')
+    placement.release('filler')
+
+    remote.markOffline('remote-a')
+    await placement.cancelRemote('t-remote', 'asg_offline', { release: false })
+
+    // The offline target cannot receive the cancel, but the live replacement
+    // still owns the sticky slot: cancel must not free it behind our back.
+    expect(remote.hasTicketAssignment('t-remote')).toBe(true)
+    expect(remote.inFlight('remote-a')).toBe(1)
+  })
+
   it('falls back to local when the sticky remote node goes offline', () => {
     const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
     const remote = new RemoteMeshRegistry({ localPeerId: 'host' })
