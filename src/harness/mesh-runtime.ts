@@ -110,6 +110,19 @@ export class WorkerPlacement {
       this.local.release(ticketId)
       return this.remote?.pick(ticketId, undefined, requiredCapabilities)?.id
     }
+    if (this.remote?.hasTicketAssignment(ticketId)) {
+      // A ticket already placed on a remote peer stays there while that peer
+      // remains eligible, even if local capacity has since freed. Ask the
+      // remote registry first so a repeat pick cannot dual-assign it locally;
+      // an ineligible sticky is released there and this call still falls
+      // through to the local-then-remote search below.
+      const remoteNode = this.remote.pick(ticketId, undefined, requiredCapabilities)
+      if (remoteNode) {
+        // Heal any leftover local assignment from a prior race; no-op if clean.
+        this.local.release(ticketId)
+        return remoteNode.id
+      }
+    }
     const localNode = this.local.pickNode(ticketId)
     if (localNode) return localNode.id
     return this.remote?.pick(ticketId, undefined, requiredCapabilities)?.id

@@ -43,4 +43,48 @@ describe('WorkerPlacement', () => {
     expect(placement.local.inFlight(placement.localNodeId)).toBe(0)
     expect(remote.inFlight('remote-a')).toBe(1)
   })
+
+  it('keeps a remote sticky placement when local capacity frees', () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const remote = new RemoteMeshRegistry({ localPeerId: 'host' })
+    remote.register({
+      id: 'remote-a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'worker-a',
+      secret: 'a'.repeat(32),
+      capacity: 1,
+    })
+    const placement = new WorkerPlacement('local', local, remote)
+    // Local is full, so the ticket is placed on the remote peer.
+    expect(placement.pickNode('filler')).toBe('local')
+    expect(placement.pickNode('t-remote')).toBe('remote-a')
+    // Local capacity frees, but the remote sticky assignment must hold.
+    placement.release('filler')
+    expect(placement.pickNode('t-remote')).toBe('remote-a')
+    // The ticket occupies only the remote registry, never both.
+    expect(local.inFlight(placement.localNodeId)).toBe(0)
+    expect(remote.inFlight('remote-a')).toBe(1)
+  })
+
+  it('falls back to local when the sticky remote node goes offline', () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const remote = new RemoteMeshRegistry({ localPeerId: 'host' })
+    remote.register({
+      id: 'remote-a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'worker-a',
+      secret: 'a'.repeat(32),
+      capacity: 1,
+    })
+    const placement = new WorkerPlacement('local', local, remote)
+    expect(placement.pickNode('filler')).toBe('local')
+    expect(placement.pickNode('t-remote')).toBe('remote-a')
+    placement.release('filler')
+    remote.markOffline('remote-a')
+    // The ineligible remote sticky is released inside pickNode, so the same
+    // call falls through to local instead of over-sticking to a dead peer.
+    expect(placement.pickNode('t-remote')).toBe('local')
+    expect(remote.inFlight('remote-a')).toBe(0)
+    expect(local.inFlight(placement.localNodeId)).toBe(1)
+  })
 })
