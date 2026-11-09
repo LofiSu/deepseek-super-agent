@@ -438,7 +438,20 @@ export class Harness {
       return
     }
     // The queued launch resolves when this Worker turn settles, or on drain.
-    work.then(() => entry.resolve(), () => entry.resolve())
+    // A turn that rejects after it started must return the mesh slot `pump`
+    // reserved for it. `startWorkerTurn` clears the active marker and pumps in
+    // its `finally`, but at that point the failed turn still owns the slot, so
+    // that pump cannot dequeue anything. Release here, then pump again; without
+    // this the slot leaked and every later Worker stalled behind it forever.
+    work.then(
+      () => entry.resolve(),
+      error => {
+        this.opts.releaseNode?.(entry.ticketId)
+        this.opts.log(`[harness] queued worker failed ticketId=${entry.ticketId} error=${String(error)}`)
+        this.pump()
+        entry.resolve()
+      },
+    )
     this.track(work)
   }
 
