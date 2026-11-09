@@ -846,7 +846,24 @@ export class Runtime {
         }
         const delivery = await placement.dispatch(ticket.id, payload)
         if (delivery?.status !== 'delivered') {
-          log.info(`[mesh] remote dispatch failed ticketId=${ticket.id} node=${node} status=${delivery?.status ?? 'none'}`)
+          const status = delivery?.status ?? 'none'
+          log.info(`[mesh] remote dispatch failed ticketId=${ticket.id} node=${node} status=${status}`)
+          // The Harness already marked the Assignment started and placed. The
+          // transport released the mesh slot, but nothing will ever report a
+          // result, so end the Assignment here through the same path as the
+          // remote result timeout. `deliver: false` keeps the Ticket open so it
+          // can retry with a new Assignment.
+          try {
+            engine.report(ticket.id, {
+              kind: 'failed',
+              text: `remote dispatch failed status=${status}`,
+              deliver: false,
+            })
+          } catch (error) {
+            log.info(
+              `[mesh] remote dispatch report failed ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
           placement.release(ticket.id)
           late.remoteResultWait?.clear(ticket.id)
           return
