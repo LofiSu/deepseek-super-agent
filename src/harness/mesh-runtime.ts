@@ -157,7 +157,9 @@ export class WorkerPlacement {
     try {
       await this.remote.dispatchCancel(ticketId, assignmentId)
     } finally {
-      this.remote?.release(ticketId)
+      // Release both registries: a leftover local sticky from a prior race must
+      // not leak local capacity after the remote assignment is cancelled.
+      this.release(ticketId)
     }
   }
 }

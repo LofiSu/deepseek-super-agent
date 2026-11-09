@@ -66,6 +66,72 @@ describe('WorkerPlacement', () => {
     expect(remote.inFlight('remote-a')).toBe(1)
   })
 
+  it('releases a leftover local slot when the remote assignment is cancelled', async () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const remote = new RemoteMeshRegistry({
+      localPeerId: 'host',
+      transportFactory: () => ({
+        send: envelope => ({ envelope, status: 'delivered', delivered: 1, persisted: false }),
+      }),
+    })
+    remote.register({
+      id: 'remote-a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'worker-a',
+      secret: 'a'.repeat(32),
+      capacity: 1,
+    })
+    const placement = new WorkerPlacement('local', local, remote)
+    expect(placement.pickNode('filler')).toBe('local')
+    expect(placement.pickNode('t-dual')).toBe('remote-a')
+    placement.release('filler')
+
+    // Simulate residue from a prior race: the ticket is assigned both locally
+    // and remotely. pickNode exclusivity prevents this going forward, but a
+    // cancel must still heal leftovers. Reach the private map directly rather
+    // than adding a production seam only tests would use.
+    const residue = local as unknown as { assignments: Map<string, string> }
+    residue.assignments.set('t-dual', 'local')
+    expect(local.inFlight(placement.localNodeId)).toBe(1)
+    expect(remote.inFlight('remote-a')).toBe(1)
+
+    await placement.cancelRemote('t-dual', 'asg_x')
+
+    expect(local.inFlight(placement.localNodeId)).toBe(0)
+    expect(remote.inFlight('remote-a')).toBe(0)
+    expect(remote.hasTicketAssignment('t-dual')).toBe(false)
+    // The healed local capacity is usable again.
+    expect(placement.pickNode('t-next')).toBe('local')
+  })
+
+  it('cancels a clean remote-only assignment without touching local capacity', async () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const remote = new RemoteMeshRegistry({
+      localPeerId: 'host',
+      transportFactory: () => ({
+        send: envelope => ({ envelope, status: 'delivered', delivered: 1, persisted: false }),
+      }),
+    })
+    remote.register({
+      id: 'remote-a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'worker-a',
+      secret: 'a'.repeat(32),
+      capacity: 1,
+    })
+    const placement = new WorkerPlacement('local', local, remote)
+    expect(placement.pickNode('filler')).toBe('local')
+    expect(placement.pickNode('t-remote')).toBe('remote-a')
+    placement.release('filler')
+    expect(local.inFlight(placement.localNodeId)).toBe(0)
+
+    await placement.cancelRemote('t-remote', 'asg_y')
+
+    expect(remote.inFlight('remote-a')).toBe(0)
+    expect(remote.hasTicketAssignment('t-remote')).toBe(false)
+    expect(local.inFlight(placement.localNodeId)).toBe(0)
+  })
+
   it('falls back to local when the sticky remote node goes offline', () => {
     const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
     const remote = new RemoteMeshRegistry({ localPeerId: 'host' })
