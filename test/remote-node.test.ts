@@ -471,7 +471,7 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(mesh.pick('t2')?.id).toBe('node-1')
   })
 
-  it('releases capacity on unroutable/failed/throwing transports without leaking peer text', async () => {
+  it('keeps the sticky reservation on unroutable/failed/throwing transports without leaking peer text', async () => {
     let mode: 'unroutable' | 'failed' | 'throw' = 'unroutable'
     const factory = (_options: A2AHttpTransportOptions): A2ATransport => ({
       send: async (envelope: A2AEnvelope): Promise<A2ADelivery> => {
@@ -498,7 +498,12 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(mesh.pick('t1', NOW)?.id).toBe('a')
     const unroutable = await mesh.dispatch('t1', { instruction: 'x' })
     expect(unroutable?.status).toBe('unroutable')
-    expect(mesh.inFlight('a')).toBe(0)
+    // A send that settled non-delivered keeps the sticky reservation: the
+    // caller owns the release decision so a late failure cannot steal a live
+    // replacement's slot.
+    expect(mesh.hasTicketAssignment('t1')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.release('t1')).toBe(true)
     expect(mesh.pick('t2', NOW)?.id).toBe('a')
 
     mode = 'failed'
@@ -506,7 +511,9 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(failed?.status).toBe('failed')
     expect(JSON.stringify(failed)).not.toContain('peer text')
     expect(JSON.stringify(failed)).not.toContain(SECRET)
-    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.hasTicketAssignment('t2')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.release('t2')).toBe(true)
     expect(mesh.pick('t3', NOW)?.id).toBe('a')
 
     mode = 'throw'
@@ -514,7 +521,9 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(thrown?.status).toBe('failed')
     expect(thrown?.error).toBe('remote delivery failed')
     expect(JSON.stringify(thrown)).not.toContain(SECRET)
-    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.hasTicketAssignment('t3')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.release('t3')).toBe(true)
     expect(mesh.pick('t4', NOW)?.id).toBe('a')
   })
 })

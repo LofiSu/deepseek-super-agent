@@ -413,9 +413,13 @@ export class RemoteMeshRegistry {
    * node holding the ticket, after a successful `pick`. Returns `undefined`
    * when the ticket has no assignment or the node is stale/offline/unknown.
    *
-   * `delivered` keeps the in-flight assignment. `unroutable` and `failed`
-   * release it. No transport error is ever thrown; the returned delivery never
-   * carries peer-supplied error text or a secret.
+   * `delivered` keeps the in-flight assignment. Any outcome after the send
+   * settles, including `unroutable`, `failed`, a thrown transport, or an
+   * invalid delivery, also keeps it: the caller owns the decision because the
+   * ticket may already have moved on to a live replacement Assignment. Callers
+   * must `release` when the failed dispatch should free the slot. No transport
+   * error is ever thrown; the returned delivery never carries peer-supplied
+   * error text or a secret.
    */
   async dispatch(ticketId: string, assignment: unknown): Promise<A2ADelivery | undefined> {
     if (!nonEmptyString(ticketId)) return undefined
@@ -447,16 +451,14 @@ export class RemoteMeshRegistry {
       delivery = await transport.send(envelope)
     } catch {
       // A remote transport may throw arbitrary text; never surface it.
-      this.assignments.delete(ticketId)
+      // The send settled: keep the sticky reservation so the caller can tell
+      // a genuine failure from a late result for a replaced Assignment.
       return failedDelivery(envelope)
     }
     if (!isDelivery(delivery)) {
-      this.assignments.delete(ticketId)
       return failedDelivery(envelope)
     }
 
-    if (delivery.status === 'delivered') return safeDelivery(delivery)
-    this.assignments.delete(ticketId)
     return safeDelivery(delivery)
   }
 

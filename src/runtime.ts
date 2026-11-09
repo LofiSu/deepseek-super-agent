@@ -910,11 +910,50 @@ export class Runtime {
         if (delivery?.status !== 'delivered') {
           const status = delivery?.status ?? 'none'
           log.info(`[mesh] remote dispatch failed ticketId=${ticket.id} node=${node} status=${status}`)
+          // The send is asynchronous: a result may have been applied while it
+          // was awaiting, or recovery may have replaced the Assignment.
+          // `Assignments.report` always mutates the *latest* Assignment, so a
+          // late failure for a replaced Assignment must not report at all.
+          const current = store.getDoc<Ticket>('ticket', ticket.id)
+          const armed = current?.assignments.find(item => item.id === assignment.id)
+          const latest = current?.assignments.at(-1)
+          const skipReason = !current
+            ? 'missing-ticket'
+            : current.ended
+              ? 'ticket-ended'
+              : latest?.id !== assignment.id
+                ? 'assignment-replaced'
+                : armed?.state === 'ended'
+                  ? 'assignment-ended'
+                  : undefined
+          if (skipReason) {
+            // A newer Assignment may already own this ticket's remote
+            // reservation: sticky placement keeps the slot, so a replacement
+            // that has claimed the node or started work must not lose capacity
+            // to this stale failed send.
+            const liveReplacement = current !== undefined
+              && !current.ended
+              && latest !== undefined
+              && latest.id !== assignment.id
+              && latest.state !== 'ended'
+              && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+              && placement.remoteHasTicket(ticket.id)
+            if (liveReplacement) {
+              log.info(
+                `[mesh] remote dispatch failed kept slot ticketId=${ticket.id} assignmentId=${assignment.id} replacementId=${latest?.id} reason=live-replacement`,
+              )
+              late.remoteResultWait?.clear(ticket.id)
+              return
+            }
+            placement.release(ticket.id)
+            late.remoteResultWait?.clear(ticket.id)
+            return
+          }
           // The Harness already marked the Assignment started and placed. The
-          // transport released the mesh slot, but nothing will ever report a
-          // result, so end the Assignment here through the same path as the
-          // remote result timeout. `deliver: false` keeps the Ticket open so it
-          // can retry with a new Assignment.
+          // transport leaves the sticky reservation to the caller, but nothing
+          // will ever report a result, so end the Assignment here through the
+          // same path as the remote result timeout. `deliver: false` keeps the
+          // Ticket open so it can retry with a new Assignment.
           try {
             engine.report(ticket.id, {
               kind: 'failed',

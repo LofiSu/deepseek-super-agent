@@ -71,6 +71,29 @@ async function waitFor(predicate: () => boolean, ms: number, label: string): Pro
   if (!predicate()) throw new Error(`timed out waiting for ${label}`)
 }
 
+/**
+ * Peer inbox that rejects every assignment with 502 after an optional gate.
+ * The A2A transport maps a non-2xx response to `failed`, so the held request
+ * can be released after the host has already moved on to a replacement.
+ */
+async function startRejectingInbox(gate: Promise<void>, onRequest: () => void): Promise<string> {
+  const server = createServer((_req, res) => {
+    onRequest()
+    void gate.then(() => {
+      res.writeHead(502, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: 'delivery failed' }))
+    })
+  })
+  servers.push(server)
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = server.address()
+  if (typeof address !== 'object' || address === null) throw new Error('worker bind failed')
+  return `http://127.0.0.1:${address.port}/a2a`
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(s => new Promise<void>(resolve => {
     s.close(() => resolve())
@@ -141,6 +164,96 @@ describe('Runtime remote mesh dispatch failure', () => {
     expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(false)
 
     runtime.placement.release(ticketId)
+    await shutdown(runtime)
+  }, 60_000)
+
+  it('keeps a live replacement Assignment and its slot when a late dispatch fails', async () => {
+    let releaseDelivery!: () => void
+    const deliveryGate = new Promise<void>(resolve => { releaseDelivery = resolve })
+    let requested = false
+    const workerUrl = await startRejectingInbox(deliveryGate, () => { requested = true })
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-dispatch-late-fail-'))
+    homes.push(home)
+    const runtime = runtimeFor(home)
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    })
+    runtime.start({ assessPending: false })
+
+    const ticketId = createTicket(runtime, 'late_dispatch_fail_live_replacement')
+    const launch = runtime.harness.launch(loadTicket(runtime, ticketId))
+
+    // The HTTP send is still awaiting its response. The first Assignment owns
+    // the ticket's remote reservation while the dispatch is in flight.
+    await waitFor(() => requested, 5_000, 'remote assignment request to arrive')
+    await waitFor(
+      () => runtime.placement.remote?.hasTicketAssignment(ticketId) === true,
+      5_000,
+      'remote slot to be reserved',
+    )
+    const current = loadTicket(runtime, ticketId)
+    const armed = current.assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // Simulate recovery that ends the in-flight Assignment and commits a
+    // replacement which already claimed the same remote node and started. The
+    // sticky registry assignment deliberately stays in place: the live
+    // replacement owns the reservation even though the old dispatch has not
+    // returned yet.
+    const replacementAssignment = {
+      id: 'asg_late_failed_dispatch_replacement',
+      state: 'running' as const,
+      speculative: false,
+      node: REMOTE_NODE_ID,
+      startedAt: new Date().toISOString(),
+    }
+    const replacement: Ticket = {
+      ...current,
+      assignments: [
+        { ...armed, state: 'ended', endedAt: new Date().toISOString() },
+        replacementAssignment,
+      ],
+    }
+    runtime.store.putDoc('ticket', ticketId, replacement)
+
+    // Let the original dispatch finish as a failed delivery. Its Assignment is
+    // stale, so it must not report on (or release the slot of) the replacement.
+    releaseDelivery()
+    await waitFor(
+      () => runtime.log.text().includes(`[mesh] remote dispatch failed ticketId=${ticketId}`),
+      5_000,
+      'remote dispatch to fail',
+    )
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote dispatch failed kept slot ticketId=${ticketId} assignmentId=${armed.id} replacementId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'late failed dispatch to keep the live replacement slot',
+    )
+    launch.catch(() => undefined)
+
+    const after = loadTicket(runtime, ticketId)
+    const latest = after.assignments.at(-1)!
+    expect(latest.id).toBe(replacementAssignment.id)
+    expect(latest.state).toBe('running')
+    // `Assignments.report` mutates the latest Assignment, so the failed
+    // dispatch must not reach it at all.
+    expect(latest.report?.text ?? '').not.toContain('remote dispatch failed')
+    expect(latest.report).toBeUndefined()
+    expect(after.ended).toBeUndefined()
+    // The late failure must not steal the live replacement's mesh capacity.
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
     await shutdown(runtime)
   }, 60_000)
 })
