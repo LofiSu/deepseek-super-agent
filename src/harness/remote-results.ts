@@ -12,7 +12,12 @@ export interface RemoteAssignmentResult {
 }
 
 function docId(peerId: string, deliveryKey: string): string {
-  return `${DOC_PREFIX}${peerId}:${deliveryKey}`
+  // Length-prefix the peerId so the boundary stays recoverable when either
+  // field contains ':'. Without it, (peerId "a", deliveryKey "b:c") and
+  // (peerId "a:b", deliveryKey "c") would share one document id and whichever
+  // pair recorded first would mark the other pair's genuine result as a
+  // duplicate. The deliveryKey is the tail, so its own ':' characters are safe.
+  return `${DOC_PREFIX}${peerId.length}:${peerId}:${deliveryKey}`
 }
 
 /**

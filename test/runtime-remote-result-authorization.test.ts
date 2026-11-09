@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { imTrigger } from '../src/channels/im.ts'
-import { remoteResultSeen } from '../src/harness/remote-results.ts'
+import { recordRemoteResult, remoteResultSeen } from '../src/harness/remote-results.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import type { Runtime } from '../src/runtime.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
@@ -168,5 +168,46 @@ describe('Runtime remote assignment result authorization', () => {
 
     expect(runtime.log.text()).toContain('remote result duplicate deliveryKey')
     expect(runtime.store.getDoc<Ticket>('ticket', b.ticketId)?.assignments.at(-1)?.report?.text).toBe('from-worker-b')
+  })
+
+  it('does not collide when peerId and deliveryKey both contain a colon', () => {
+    const runtime = authRuntime()
+    const report = { kind: 'ready' as const, text: 'done', deliver: false }
+
+    // Both pairs serialize to the same naive "peer:key" text, but they are
+    // distinct peers authorized for distinct results.
+    expect(recordRemoteResult(runtime.store, {
+      ticketId: 'ticket_colon_a',
+      assignmentId: 'asg_colon_a',
+      report,
+      deliveryKey: 'b:c',
+      peerId: 'a',
+    })).toBe(true)
+    expect(recordRemoteResult(runtime.store, {
+      ticketId: 'ticket_colon_b',
+      assignmentId: 'asg_colon_b',
+      report,
+      deliveryKey: 'c',
+      peerId: 'a:b',
+    })).toBe(true)
+
+    expect(remoteResultSeen(runtime.store, 'a', 'b:c')).toBe(true)
+    expect(remoteResultSeen(runtime.store, 'a:b', 'c')).toBe(true)
+
+    // Idempotence remains per (peerId, deliveryKey) pair.
+    expect(recordRemoteResult(runtime.store, {
+      ticketId: 'ticket_colon_a',
+      assignmentId: 'asg_colon_a',
+      report,
+      deliveryKey: 'b:c',
+      peerId: 'a',
+    })).toBe(false)
+    expect(recordRemoteResult(runtime.store, {
+      ticketId: 'ticket_colon_b',
+      assignmentId: 'asg_colon_b',
+      report,
+      deliveryKey: 'c',
+      peerId: 'a:b',
+    })).toBe(false)
   })
 })
