@@ -234,6 +234,57 @@ describe('Runtime stale remote result timeout', () => {
     await shutdown(runtime)
   }, 60_000)
 
+  it('keeps the remote slot when a stale timeout hits a live replacement', async () => {
+    const inbox = await startInbox()
+    const runtime = startHost(inbox)
+    const ticketId = await dispatchToRemote(runtime, inbox, 'live_replacement_stale')
+    const current = loadTicket(runtime, ticketId)
+    const armed = current.assignments.at(-1)!
+    // The armed Assignment owns the remote reservation mid-flight.
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // Simulate recovery that committed the end + replacement directly, with no
+    // onAssignmentEnded: the timer stays armed for the old Assignment id, while
+    // the replacement has already claimed the same remote node and started.
+    const replacementAssignment = {
+      id: 'asg_live_replacement',
+      state: 'running' as const,
+      speculative: false,
+      node: armed.node,
+      startedAt: new Date().toISOString(),
+    }
+    const replacement: Ticket = {
+      ...current,
+      assignments: [
+        { ...armed, state: 'ended', endedAt: new Date().toISOString() },
+        replacementAssignment,
+      ],
+    }
+    runtime.store.putDoc('ticket', ticketId, replacement)
+
+    // The sticky registry assignment deliberately stays in place: the live
+    // replacement still owns this ticket's remote reservation.
+    await sleep(RESULT_TIMEOUT_MS + 250)
+
+    const after = loadTicket(runtime, ticketId)
+    const latest = after.assignments.at(-1)!
+    expect(latest.id).toBe(replacementAssignment.id)
+    expect(latest.state).toBe('running')
+    expect(latest.report).toBeUndefined()
+    expect(after.ended).toBeUndefined()
+    expect(runtime.log.text()).toContain(
+      `[mesh] remote result timeout ignored ticketId=${ticketId} assignmentId=${armed.id}`,
+    )
+    // The stale timer must not steal the live replacement's mesh capacity.
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    await shutdown(runtime)
+  }, 60_000)
+
   it('defers a pause-held timeout, keeps the remote slot, and recovers after resume', async () => {
     const inbox = await startInbox()
     const runtime = startHost(inbox)

@@ -625,6 +625,20 @@ export class Runtime {
         log.info(
           `[mesh] remote result timeout ignored ticketId=${ticketId} assignmentId=${assignmentId} reason=${staleReason}`,
         )
+        // A newer Assignment may already own this ticket's remote reservation:
+        // sticky placement keeps the slot, so a replacement that has claimed
+        // the node or started work must not lose capacity to the stale timer.
+        const liveReplacement = latest !== undefined
+          && latest.id !== assignmentId
+          && latest.state !== 'ended'
+          && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+          && placement.remoteHasTicket(ticketId)
+        if (liveReplacement) {
+          log.info(
+            `[mesh] remote result timeout kept slot ticketId=${ticketId} assignmentId=${assignmentId} replacementId=${latest?.id} reason=live-replacement`,
+          )
+          return
+        }
         // Recovery can end the Assignment without going through `releaseMesh`.
         // Free any capacity it left reserved; do not invent another way to end
         // the Assignment or the Ticket.
