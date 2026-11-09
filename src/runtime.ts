@@ -51,7 +51,7 @@ import {
   RemoteMeshResultWait,
   remoteResultTimeoutMsFromEnv,
 } from './harness/remote-mesh-wait.ts'
-import { recordRemoteResult } from './harness/remote-results.ts'
+import { recordRemoteResult, remoteResultSeen } from './harness/remote-results.ts'
 import type { RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
 import type { WorkerReport } from './shared/ports.ts'
 import { Logger } from './shared/log.ts'
@@ -1088,31 +1088,55 @@ export class Runtime {
       )
       return
     }
-    const applied = recordRemoteResult(this.store, {
-      ticketId: event.ticketId,
-      assignmentId: event.assignmentId,
-      report,
-      deliveryKey: event.deliveryKey,
-      peerId: event.peerId,
-    })
-    if (!applied) {
+    // Idempotence is keyed on the persisted delivery marker, never on the
+    // report having been attempted. A key that already landed must not re-run
+    // `engine.report`: an ended Ticket rejects the second report, and a duplicate
+    // must never rewrite the terminal outcome.
+    if (remoteResultSeen(this.store, event.peerId, event.deliveryKey)) {
       this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
       this.remoteResultWait?.clear(event.ticketId)
       return
     }
-    this.remoteResultWait?.clear(event.ticketId)
+    // An already-ended Ticket has no live Assignment to report to. Keep
+    // accepting its authorized result as an idempotent archival copy.
     if (ticket.ended) {
+      recordRemoteResult(this.store, {
+        ticketId: event.ticketId,
+        assignmentId: event.assignmentId,
+        report,
+        deliveryKey: event.deliveryKey,
+        peerId: event.peerId,
+      })
+      this.remoteResultWait?.clear(event.ticketId)
       this.log.info(
         `[mesh] remote result after ticket end ticketId=${event.ticketId} outcome=${ticket.ended.outcome}`,
       )
       this.placement.release(event.ticketId)
       return
     }
+    // Report first, then persist the delivery marker. Recording before the
+    // report made a throwing report permanently unretryable: the key looked
+    // handled while the outcome was lost. If `engine.report` throws here, keep
+    // the marker unwritten and leave the Assignment's timeout armed; that
+    // handler owns recovery and slot release, and the caller sees the error so
+    // it can replay the same deliveryKey.
     try {
       this.engine.report(event.ticketId, report)
-    } finally {
-      this.placement.release(event.ticketId)
+    } catch (error) {
+      this.log.info(
+        `[mesh] remote result report failed ticketId=${event.ticketId} assignmentId=${event.assignmentId} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+      throw error
     }
+    recordRemoteResult(this.store, {
+      ticketId: event.ticketId,
+      assignmentId: event.assignmentId,
+      report,
+      deliveryKey: event.deliveryKey,
+      peerId: event.peerId,
+    })
+    this.remoteResultWait?.clear(event.ticketId)
+    this.placement.release(event.ticketId)
     this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
   }
 
