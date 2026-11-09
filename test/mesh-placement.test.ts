@@ -23,4 +23,24 @@ describe('WorkerPlacement', () => {
     placement.release('t2')
     expect(remote.inFlight('remote-a')).toBe(0)
   })
+
+  it('does not dual-assign after a sticky local node goes offline', () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const remote = new RemoteMeshRegistry({ localPeerId: 'host' })
+    remote.register({
+      id: 'remote-a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'worker-a',
+      secret: 'a'.repeat(32),
+      capacity: 1,
+    })
+    const placement = new WorkerPlacement('local', local, remote)
+    expect(placement.pickNode('t1')).toBe('local')
+    placement.local.markOnline(placement.localNodeId, false)
+    // Local releases its stale sticky assignment inside pickNode, so the same
+    // call can fall through to the remote instead of assigning both.
+    expect(placement.pickNode('t1')).toBe('remote-a')
+    expect(placement.local.inFlight(placement.localNodeId)).toBe(0)
+    expect(remote.inFlight('remote-a')).toBe(1)
+  })
 })

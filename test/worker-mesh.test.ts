@@ -43,6 +43,15 @@ describe('T47 WorkerMeshRegistry', () => {
     expect(mesh.inFlight('a')).toBe(1)
   })
 
+  it('releases a sticky assignment when its node goes offline', () => {
+    const mesh = new WorkerMeshRegistry([{ id: 'a', capacity: 1 }, { id: 'b', capacity: 1 }])
+    expect(mesh.pickNode('t1')?.id).toBe('a')
+    mesh.markOnline('a', false)
+    expect(mesh.pickNode('t1')).toBeUndefined()
+    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.pickNode('t1')?.id).toBe('b')
+  })
+
   it('skips offline nodes and frees slots when a node leaves', () => {
     const mesh = new WorkerMeshRegistry([{ id: 'a', capacity: 1 }, { id: 'b', capacity: 1 }])
     mesh.markOnline('a', false)
