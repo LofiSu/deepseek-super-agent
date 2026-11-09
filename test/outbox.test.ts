@@ -112,6 +112,33 @@ describe('durable outbox', () => {
     store.close()
   })
 
+  it('does not send the canned English acknowledgement into a Feishu p2p conversation', () => {
+    const store = tempStore()
+    const lines: string[] = []
+    const host: Host = {
+      repo: store,
+      now: () => new Date().toISOString(),
+      log: line => { lines.push(line) },
+      metrics: { increment: () => undefined } as unknown as Host['metrics'],
+      scope: { admit: () => ({ listened: true, reason: 'test' }) },
+    }
+    const feishuTicket = ticket({
+      threadKeys: ['im:feishu:oc_p2p'],
+      channels: [{
+        source: 'im',
+        thread: 'feishu:oc_p2p',
+        address: { provider: 'feishu', chat_id: 'oc_p2p', message_id: 'om_1' },
+      }],
+    })
+    const replies = new Replies(host)
+    replies.acknowledge(feishuTicket, 'im:feishu:oc_p2p')
+    expect(store.listReplies()).toHaveLength(0)
+    expect(store.listOutbox('pending')).toHaveLength(0)
+    expect(lines.some(line => line.includes('ack-suppressed') && line.includes('reason=conversational'))).toBe(true)
+    expect(lines.some(line => line.includes('Working on it.'))).toBe(false)
+    store.close()
+  })
+
   it('sends a direct chat answer as a few short bubbles', () => {
     const store = tempStore()
     const host: Host = {

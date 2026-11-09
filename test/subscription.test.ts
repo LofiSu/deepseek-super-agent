@@ -491,6 +491,14 @@ describe('subscription bypass rules', () => {
       channels: [{ source: 'imessage', thread: 'chat:any;-;+1', address: { handle: '+1' } }],
     })
     expect(bypassEligible(live, follow)).toBe(false)
+    const feishuP2p = sampleTicket('ticket_feishu', {
+      channels: [{
+        source: 'im',
+        thread: 'feishu:oc_p2p',
+        address: { provider: 'feishu', chat_id: 'oc_p2p', message_id: 'om_1' },
+      }],
+    })
+    expect(bypassEligible(feishuP2p, follow)).toBe(false)
   })
 
   it('reject-ended-mandate', () => {

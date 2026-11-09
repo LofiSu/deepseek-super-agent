@@ -1,3 +1,4 @@
+import { directConversationalChannel, ticketIsDirectConversation } from '../channels/direct-chat.ts'
 import { renderOutbound } from '../channels/norms.ts'
 import { maySurface } from '../speculate/gate.ts'
 import type { Ticket } from '../shared/types.ts'
@@ -11,8 +12,10 @@ export class Replies {
     // the Router has even decided whether there is work is noise, and it cannot
     // be retracted when the Router vetoes (the sender sees "Working on it."
     // followed by silence). Only the real result goes back to a chat.
-    if (channelFor(ticket, threadKey)?.source === 'imessage') {
-      this.host.log(`[reply] ack-suppressed ticketId=${ticket.id} channel=imessage reason=conversational`)
+    const ref = channelFor(ticket, threadKey)
+    if (directConversationalChannel(ref) || ticketIsDirectConversation(ticket)) {
+      const channel = ref?.source ?? ticket.channels[0]?.source ?? 'unknown'
+      this.host.log(`[reply] ack-suppressed ticketId=${ticket.id} channel=${channel} reason=conversational`)
       return
     }
     this.send(ticket, `Acknowledged “${ticket.title}”. Working on it.`, 'acknowledgement', threadKey)
@@ -34,7 +37,7 @@ export class Replies {
     const rendered = renderOutbound(channel, text, ticket.id)
     // A direct chat reads like texting: one long block feels like a letter.
     // Split at paragraph/sentence boundaries into at most three bubbles.
-    const directChat = channel === 'imessage' && target.group == null
+    const directChat = directConversationalChannel(ref)
     const parts = directChat ? splitChatText(rendered) : [rendered]
     for (const [index, part] of parts.entries()) {
       const label = parts.length > 1 ? `${purpose} part=${index + 1}/${parts.length}` : purpose

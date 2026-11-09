@@ -107,6 +107,16 @@ DS_AGENT_UI_TOKEN="$(openssl rand -hex 16)" pnpm ds-agent ui
 
 The dashboard is read-only, binds to loopback, and requires a token of at least 16 characters. See [docs/UI.md](docs/UI.md).
 
+### Feishu personal DM quick start
+
+Full Chinese walkthrough: [docs/FEISHU_SETUP.zh-CN.md](docs/FEISHU_SETUP.zh-CN.md).
+
+1. Complete the Feishu developer console steps (bot, scopes, `im.message.receive_v1` long connection, publish).
+2. Run `pnpm ds-agent feishu setup` (optional `--dry-run`) — writes `feishu.env` with mode `0600` and binds your p2p chat via a one-time passphrase.
+3. `set -a && source ./.ds-agent/feishu.env && set +a`
+4. `pnpm ds-agent channels check --feishu --network`
+5. Configure a live model, then `pnpm ds-agent serve --feishu`.
+
 ### Tests and the live demo
 
 `pnpm test` and `pnpm demo` use a live model; MockModel is forbidden on those paths. If `DS_AGENT_API_*` is unset, the `test` script fills a local Magpie default (`http://127.0.0.1:3425/v1`, key `magpie`, model `workbuddy/deepseek-v4.1-flash`), so it needs that gateway running. For a no-key fixture run, use:
@@ -179,7 +189,7 @@ For mid-task collaboration, the CLI exposes `pause`, `intervene`, `resume`, and 
 CLI, GitHub-style sources, Feishu, iMessage, A2A, and a local OpenAI-compatible gateway.
 
 - **GitHub** uses the machine's `gh` login. The real demo creates and reads issues and posts comments through `gh api`.
-- **Feishu** polls exactly one chat per process, stores its cursor in SQLite, and never sends during preflight. Inbound delivery is polling only; webhooks and long-connection delivery are not implemented. See [docs/REAL_CHANNELS.md](docs/REAL_CHANNELS.md).
+- **Feishu** polls exactly one chat per process, stores its cursor in SQLite, and never sends during preflight. Use `pnpm ds-agent feishu setup` for a local pairing wizard (long-connection bind, `feishu.env` at mode 0600). Inbound `serve --feishu` remains HTTP polling. See [Feishu personal DM quick start](#feishu-personal-dm-quick-start), [docs/FEISHU_SETUP.zh-CN.md](docs/FEISHU_SETUP.zh-CN.md) (Chinese walkthrough), and [docs/REAL_CHANNELS.md](docs/REAL_CHANNELS.md).
 - **iMessage** is a two-way channel for a dedicated Apple ID: inbound reads `~/Library/Messages/chat.db` read-only (`is_from_me = 0` only), outbound goes through Messages.app via `osascript`. It needs macOS Full Disk Access and Automation permission. See [docs/IMESSAGE.md](docs/IMESSAGE.md).
 - `serve --imessage --feishu` runs both inbound loops over one Runtime and SQLite store. Both configurations are validated before startup; a missing item fails before any network or database access.
 - Run `ds-agent channels check` first. It needs no model, opens no SQLite, and sends nothing.
@@ -451,6 +461,7 @@ Partial and owner-gated areas, stated plainly:
 | [docs/MODULES.md](docs/MODULES.md) | M0–M11 module reference. |
 | [docs/safety.md](docs/safety.md) | Keys, demo writes, tool text, sandbox limits. |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security model and reporting. |
+| [docs/FEISHU_SETUP.zh-CN.md](docs/FEISHU_SETUP.zh-CN.md) | Feishu p2p wizard (Chinese; EN summary in README). |
 | [docs/REAL_CHANNELS.md](docs/REAL_CHANNELS.md) | GitHub, Feishu, and channel setup. |
 | [docs/GATEWAY.md](docs/GATEWAY.md) | Local OpenAI-compatible gateway. |
 | [docs/IMESSAGE.md](docs/IMESSAGE.md) | macOS iMessage channel. |

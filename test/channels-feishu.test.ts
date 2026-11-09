@@ -110,6 +110,24 @@ describe('Feishu message mapping', () => {
     expect(flattenFeishuMessage(message())).toBe('@ds-agent please fix the login timeout')
   })
 
+  it('flattens file_key JSON bodies as media placeholders, not raw JSON', () => {
+    const fileShell = message({
+      msg_type: 'text',
+      body: { content: JSON.stringify({ file_key: 'v3_0016b_04873018-837a-470c-8e0e-1b7b0ad8b84g' }) },
+    })
+    expect(flattenFeishuMessage(fileShell)).toBe('[file]')
+    const imageShell = message({
+      msg_type: 'text',
+      body: { content: JSON.stringify({ image_key: 'img_abc' }) },
+    })
+    expect(flattenFeishuMessage(imageShell)).toBe('[image]')
+    const typedImage = message({
+      msg_type: 'image',
+      body: { content: JSON.stringify({ image_key: 'img_abc' }) },
+    })
+    expect(flattenFeishuMessage(typedImage)).toBe('[image]')
+  })
+
   it('flattens rich post messages', () => {
     const post = message({
       msg_type: 'post',
@@ -159,6 +177,22 @@ describe('Feishu message mapping', () => {
       ruleSemantic,
       allowed,
     )).toMatchObject({ action: 'drop', layer: 'fast', reason: 'group-not-allowlisted' })
+  })
+
+  it('maps p2p direct mode without address.group and addressed=direct', () => {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const trigger = feishuTriggerFromMessage(message({
+        body: { content: JSON.stringify({ text: '你好' }) },
+      }), config)
+      expect(trigger.addressed).toBe('direct')
+      expect(trigger.channel?.address?.group).toBeUndefined()
+      expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({ action: 'pass', strength: 'explicit' })
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
   })
 
   it('treats an app sender as non-human and detects bot mention ids', () => {

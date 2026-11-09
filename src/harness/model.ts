@@ -59,6 +59,7 @@ const POLICY_SYSTEM_PROMPT = [
   'Reply with exactly one JSON object and no prose:',
   '{"pass":boolean,"strength":"explicit"|"inferred"|"maybe","reason":string}.',
   'pass=true only when the text asks for or clearly implies action for the assistant.',
+  '(Note: addressed=direct 1:1 chats are classified by rules upstream; this prompt applies to group and ambient messages.)',
   'strength=explicit for a direct request, inferred for a clear implication, maybe for speculation.',
   'reason must be a short single-line explanation.',
 ].join(' ')

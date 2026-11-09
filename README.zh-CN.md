@@ -106,6 +106,16 @@ DS_AGENT_UI_TOKEN="$(openssl rand -hex 16)" pnpm ds-agent ui
 
 面板只读、只绑定 loopback，token 至少 16 个字符。详见 [docs/UI.md](docs/UI.md)。
 
+### 飞书单聊快速上手
+
+完整教程：[docs/FEISHU_SETUP.zh-CN.md](docs/FEISHU_SETUP.zh-CN.md)。
+
+1. 在飞书开放平台完成人工步骤（机器人、权限、事件 `im.message.receive_v1` 长连接、发布）。
+2. 运行 `pnpm ds-agent feishu setup`（可先 `--dry-run`）——写入 0600 的 `feishu.env`，并用一次性口令绑定你的 p2p 会话。
+3. `set -a && source ./.ds-agent/feishu.env && set +a`
+4. `pnpm ds-agent channels check --feishu --network`
+5. 配置 live model 后执行 `pnpm ds-agent serve --feishu`。
+
 ### 测试与真实 Demo
 
 `pnpm test` 与 `pnpm demo` 都使用真实模型，这两条路径禁止 MockModel。如果没有设置 `DS_AGENT_API_*`，`test` 脚本会填入本机 Magpie 默认值（`http://127.0.0.1:3425/v1`、密钥 `magpie`、模型 `workbuddy/deepseek-v4.1-flash`），因此需要该网关在运行。不需要模型 Key 的离线 fixture 套件是：
@@ -178,7 +188,7 @@ Router 是全局序点：它负责对话、批处理 Trigger 和分派。Worker 
 CLI、GitHub 风格来源、Feishu、iMessage、A2A，以及本地 OpenAI 兼容网关。
 
 - **GitHub** 使用本机 `gh` 登录。真实 demo 通过 `gh api` 创建、读取 issue 并发布 comment。
-- **Feishu** 每个进程只轮询一个会话，cursor 存在 SQLite，预检阶段绝不发送。入站仅支持轮询；webhook 与长连接投递尚未实现。详见 [docs/REAL_CHANNELS.md](docs/REAL_CHANNELS.md)。
+- **Feishu** 每个进程只轮询一个会话，cursor 存在 SQLite，预检阶段绝不发送。本地可用 `pnpm ds-agent feishu setup` 向导（长连接绑定、0600 的 `feishu.env`）；常驻 `serve --feishu` 仍为 HTTP 轮询。详见 [docs/FEISHU_SETUP.zh-CN.md](docs/FEISHU_SETUP.zh-CN.md) 与 [docs/REAL_CHANNELS.md](docs/REAL_CHANNELS.md)。
 - **iMessage** 是面向专用 Apple ID 的双向信道：入站只读 `~/Library/Messages/chat.db`（仅 `is_from_me = 0`），出站经 Messages.app 的 `osascript`。需要 macOS 完全磁盘访问权限与自动化权限。详见 [docs/IMESSAGE.md](docs/IMESSAGE.md)。
 - `serve --imessage --feishu` 会在同一个 Runtime 和 SQLite 存储上同时跑两个入站循环。启动前会校验两份配置；缺项时在打开任何网络或数据库之前失败。
 - 先运行 `ds-agent channels check`。它不需要模型、不打开 SQLite，也不发送任何消息。
@@ -417,6 +427,7 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 故意保留真实 issue
 | [docs/MODULES.md](docs/MODULES.md) | M0–M11 模块参考。 |
 | [docs/zh/safety.md](docs/zh/safety.md) | Key、demo 写入、工具文本、沙箱边界。 |
 | [docs/SECURITY.md](docs/SECURITY.md) | 安全模型与报告方式。 |
+| [docs/FEISHU_SETUP.zh-CN.md](docs/FEISHU_SETUP.zh-CN.md) | 飞书单聊向导与控制台人工步骤。 |
 | [docs/REAL_CHANNELS.md](docs/REAL_CHANNELS.md) | GitHub、Feishu 与信道配置。 |
 | [docs/GATEWAY.md](docs/GATEWAY.md) | 本地 OpenAI 兼容网关。 |
 | [docs/IMESSAGE.md](docs/IMESSAGE.md) | macOS iMessage 信道。 |

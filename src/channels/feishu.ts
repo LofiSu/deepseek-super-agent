@@ -199,18 +199,58 @@ export class FeishuClient {
     )
     return data.items?.[0]
   }
+
+  /** Bot open_id for admission (`DS_AGENT_DROP_SELF` / mention checks). */
+  async botOpenId(): Promise<string | undefined> {
+    const data = await this.request<{ bot?: { open_id?: string } }>('/open-apis/bot/v3/info', {})
+    const id = data.bot?.open_id?.trim()
+    return id || undefined
+  }
+}
+
+const FEISHU_MEDIA_PLACEHOLDER: Record<string, string> = {
+  image: '[image]',
+  file: '[file]',
+  audio: '[audio]',
+  media: '[media]',
+  video: '[video]',
+  sticker: '[sticker]',
+}
+
+/** JSON Feishu bodies sometimes ship as `text` with only a file/image key (poll API). */
+export function feishuMediaPlaceholderFromRaw(raw: string, msgType: string): string | undefined {
+  const byType = FEISHU_MEDIA_PLACEHOLDER[msgType]
+  if (byType) return byType
+  if (!raw.trim().startsWith('{')) return undefined
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (typeof parsed.text === 'string' && parsed.text.trim()) return parsed.text
+    if (typeof parsed.file_key === 'string' || typeof parsed.fileKey === 'string') return '[file]'
+    if (typeof parsed.image_key === 'string' || typeof parsed.imageKey === 'string') return '[image]'
+  } catch {
+    return undefined
+  }
+  return undefined
 }
 
 /** Flatten the text-bearing parts of a Feishu message (`text`, `post`, cards). */
 export function flattenFeishuMessage(message: FeishuMessage): string {
   const raw = message.body?.content ?? message.content ?? ''
+  const media = feishuMediaPlaceholderFromRaw(raw, message.msg_type)
+  if (media && (message.msg_type !== 'text' || !raw.includes('"text"'))) {
+    if (message.msg_type === 'text' && media !== raw) return media
+    if (message.msg_type !== 'text') return media
+  }
   if (message.msg_type === 'text') {
+    const placeholder = feishuMediaPlaceholderFromRaw(raw, message.msg_type)
+    if (placeholder && (placeholder === '[file]' || placeholder === '[image]')) return placeholder
     try {
       const parsed = JSON.parse(raw) as { text?: string }
-      return parsed.text ?? raw
+      if (typeof parsed.text === 'string') return parsed.text
     } catch {
-      return raw
+      /* fall through */
     }
+    return raw
   }
   if (message.msg_type === 'post') {
     try {
@@ -223,9 +263,9 @@ export function flattenFeishuMessage(message: FeishuMessage): string {
       return raw
     }
   }
-  if (message.msg_type === 'image') return '[image]'
-  if (message.msg_type === 'file') return '[file]'
-  if (message.msg_type === 'audio') return '[audio]'
+  if (FEISHU_MEDIA_PLACEHOLDER[message.msg_type]) return FEISHU_MEDIA_PLACEHOLDER[message.msg_type]!
+  const trailing = feishuMediaPlaceholderFromRaw(raw, message.msg_type)
+  if (trailing) return trailing
   return raw
 }
 
@@ -264,7 +304,10 @@ function mentionsBot(message: FeishuMessage, config?: FeishuConfig): boolean {
 export function feishuTriggerFromMessage(message: FeishuMessage, config?: FeishuConfig): Trigger {
   const text = flattenFeishuMessage(message)
   const thread = feishuThread(message.chat_id, message.thread_id)
-  const addressed = mentionsBot(message, config) ? 'mention' as const : undefined
+  // Local ops flag for a verified p2p bind: treat as direct chat like CLI/iMessage 1:1.
+  // Keeps group allowlist usable when unset; when set, serve should rely on actor allowlist + single chat poll.
+  const p2pDirect = process.env.DS_AGENT_FEISHU_P2P_DIRECT?.trim() === '1'
+  const addressed = mentionsBot(message, config) ? 'mention' as const : (p2pDirect ? 'direct' as const : undefined)
   const senderType = message.sender?.sender_type
   return {
     id: `feishu_${message.message_id}`,
@@ -282,7 +325,8 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
         provider: 'feishu',
         chat_id: message.chat_id,
         // Group admission reads only `address.group`; a Feishu chat is the group.
-        group: message.chat_id,
+        // For verified p2p direct mode, omit group so short chatter is not noise-dropped.
+        ...(p2pDirect ? {} : { group: message.chat_id }),
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
       },

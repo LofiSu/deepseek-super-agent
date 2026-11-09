@@ -60,6 +60,17 @@ function addressed(trigger: Trigger): boolean {
     || /@ds-agent\b/i.test(trigger.text)
 }
 
+/**
+ * A 1:1 conversational thread (Feishu p2p, iMessage DM, CLI). Semantic
+ * admission stays on deterministic rules so greetings and casual hellos are not
+ * dropped by the optional model policy, which targets group and ambient traffic.
+ */
+export function directConversationalChat(trigger: Trigger): boolean {
+  return trigger.source !== 'a2a'
+    && trigger.addressed === 'direct'
+    && trigger.channel?.address?.group == null
+}
+
 /** Program fast path: admission rules, source allowlist, mention, keyword, obvious noise. */
 export function fastPath(
   trigger: Trigger,
@@ -96,9 +107,7 @@ export function ruleClassify(trigger: Trigger): SemanticHit {
   // "haha" is a valid message there and must not be dropped as noise. Group
   // messages keep the noise rule: they are input, not a conversation with us.
   // Agent-to-agent traffic is not a conversation either, even when addressed.
-  const directChat = trigger.source !== 'a2a'
-    && trigger.addressed === 'direct'
-    && trigger.channel?.address?.group == null
+  const directChat = directConversationalChat(trigger)
   if (NOISE.test(trigger.text) && !ACTION.test(trigger.text) && !directChat) {
     return { pass: false, strength: 'inferred', reason: 'noise' }
   }

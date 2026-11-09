@@ -28,6 +28,7 @@ import { backupUsage, runBackupCli } from './backup.ts'
 import { runUi } from './ui.ts'
 import { runProfileCommand, runWireCommand } from './wiring.ts'
 import { runSetupCommand } from './setup.ts'
+import { runFeishuSetupCommand } from './feishu-setup/index.ts'
 import { readPackageVersion } from './version.ts'
 
 function option(name: string): string | undefined {
@@ -132,6 +133,8 @@ function help(): void {
   pnpm ds-agent chat "fix the login timeout"
   pnpm ds-agent gateway [--port 4319] [--host 127.0.0.1]  # local OpenAI-compatible model gateway
   pnpm ds-agent setup [--write] [--url http://host:port/v1]  # discover local LLMs, write gateway.config.json
+  pnpm ds-agent feishu setup [--dry-run] [--credentials <file>] [--bind-timeout <sec>] [--skip-bind] [--force-bind]
+                            # local wizard: 0600 feishu.env, long-connection p2p bind passphrase
   pnpm ds-agent ui [--host 127.0.0.1] [--port <n>] [--token <token>]
                             # read-only loopback dashboard over persisted state; requires
                             # DS_AGENT_UI_TOKEN or --token (at least 16 characters)
@@ -789,6 +792,13 @@ async function main(): Promise<void> {
   }
   if (cmd === 'setup') {
     await runSetupCommand(home)
+    return
+  }
+  if (cmd === 'feishu') {
+    if (sub !== 'setup') {
+      throw new Error('feishu needs "setup": ds-agent feishu setup [--dry-run] [--credentials <file>]')
+    }
+    await runFeishuSetupCommand(home)
     return
   }
   if (cmd === 'wire') {

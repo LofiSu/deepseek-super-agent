@@ -1,4 +1,5 @@
 import {
+  directConversationalChat,
   fastPath,
   ruleClassify,
   type AdmissionRules,
@@ -155,8 +156,12 @@ export async function filterTriggerWithPolicy(
       semantic: 'skip:fast-drop',
     }
   }
-  // `model` is the synchronous rules classifier used when no policy is wired.
-  const semantic = policy ? await policy.classify(trigger) : model.classify(trigger)
+  // 1:1 direct chats keep rule-based semantics even in model slow-path mode.
+  const semantic = directConversationalChat(trigger)
+    ? ruleClassify(trigger)
+    : policy
+      ? await policy.classify(trigger)
+      : model.classify(trigger)
   const semanticLabel = `${semantic.pass ? 'pass' : 'drop'}:${semantic.reason}`
   if (!semantic.pass) {
     return {

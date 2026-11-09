@@ -1,3 +1,4 @@
+import { ticketIsDirectConversation } from '../channels/direct-chat.ts'
 import { grantTicketSpill } from '../memory/acl.ts'
 import { refsForTrigger } from '../memory/graph.ts'
 import { UserError } from '../shared/errors.ts'
@@ -155,7 +156,7 @@ export function bypassEligible(
   if (ticket.ended) return false
   // A direct chat is a conversation, not a running mandate: a follow-up
   // belongs to the Router (its own thread session), never to this Worker.
-  if (ticket.channels.some(channel => channel.source === 'imessage' && !channel.address?.group)) return false
+  if (ticketIsDirectConversation(ticket)) return false
   if (subscription?.contextOnly === true) return false
   const scope = ticket.mandate?.scope
   if (typeof scope !== 'string' || scope.trim().length === 0) return false
