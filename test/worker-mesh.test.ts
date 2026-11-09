@@ -43,13 +43,15 @@ describe('T47 WorkerMeshRegistry', () => {
     expect(mesh.inFlight('a')).toBe(1)
   })
 
-  it('releases a sticky assignment when its node goes offline', () => {
+  it('re-picks an online node in the same call after the sticky node goes offline', () => {
     const mesh = new WorkerMeshRegistry([{ id: 'a', capacity: 1 }, { id: 'b', capacity: 1 }])
     expect(mesh.pickNode('t1')?.id).toBe('a')
     mesh.markOnline('a', false)
-    expect(mesh.pickNode('t1')).toBeUndefined()
-    expect(mesh.inFlight('a')).toBe(0)
+    // The offline sticky assignment is released and the same call falls through
+    // to the least-loaded online node instead of returning undefined.
     expect(mesh.pickNode('t1')?.id).toBe('b')
+    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.inFlight('b')).toBe(1)
   })
 
   it('skips offline nodes and frees slots when a node leaves', () => {

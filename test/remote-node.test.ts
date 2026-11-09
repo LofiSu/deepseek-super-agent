@@ -311,12 +311,10 @@ describe('RemoteMeshRegistry placement', () => {
     mesh.register({ id: 'a', url, peerId: 'peer-a', secret: SECRET, capacity: 2 })
     mesh.register({ id: 'b', url, peerId: 'peer-b', secret: SECRET, capacity: 2 })
 
-    // pick() drops an offline assignment instead of leaking its slot.
+    // pick() drops an offline assignment and re-picks in the same call.
     expect(mesh.pick('t1', now)?.id).toBe('a')
     expect(mesh.inFlight('a')).toBe(1)
     mesh.markOffline('a')
-    expect(mesh.pick('t1', now)).toBeUndefined()
-    expect(mesh.inFlight('a')).toBe(0)
     expect(mesh.pick('t1', now)?.id).toBe('b')
     expect(mesh.inFlight('a')).toBe(0)
     expect(mesh.inFlight('b')).toBe(1)
@@ -328,6 +326,53 @@ describe('RemoteMeshRegistry placement', () => {
     mesh.heartbeat('b', now)
     expect(mesh.pick('t1', now)?.id).toBe('b')
     expect(mesh.inFlight('b')).toBe(1)
+  })
+
+  it('re-picks a capability-eligible node in the same call when the sticky node mismatches', () => {
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => NOW })
+    mesh.register({
+      id: 'generic',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'peer-g',
+      secret: SECRET,
+    })
+    mesh.register({
+      id: 'linux',
+      url: 'http://127.0.0.1:8/a2a',
+      peerId: 'peer-l',
+      secret: SECRET,
+      capabilities: ['linux'],
+    })
+
+    expect(mesh.pick('t1', NOW)?.id).toBe('generic')
+    // The pinned node fails the requirement; the same call releases it and
+    // assigns the eligible peer instead of requiring a second pick.
+    expect(mesh.pick('t1', NOW, ['linux'])?.id).toBe('linux')
+    expect(mesh.inFlight('generic')).toBe(0)
+    expect(mesh.inFlight('linux')).toBe(1)
+  })
+
+  it('keeps the sticky node while it remains eligible', () => {
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => NOW })
+    mesh.register({
+      id: 'a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'peer-a',
+      secret: SECRET,
+      capacity: 2,
+    })
+    mesh.register({
+      id: 'b',
+      url: 'http://127.0.0.1:8/a2a',
+      peerId: 'peer-b',
+      secret: SECRET,
+      capacity: 2,
+    })
+
+    expect(mesh.pick('t1', NOW)?.id).toBe('a')
+    expect(mesh.pick('t1', NOW)?.id).toBe('a')
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.inFlight('b')).toBe(0)
   })
 })
 

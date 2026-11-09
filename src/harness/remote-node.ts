@@ -342,8 +342,10 @@ export class RemoteMeshRegistry {
 
   /**
    * Least-loaded eligible node for a ticket. A ticket keeps its node on repeat
-   * picks while that node remains eligible. A stale/offline/unknown assignment
-   * is released so its capacity is not leaked; callers may then pick again.
+   * picks while that node remains eligible. A stale/offline/unknown or
+   * capability-mismatched assignment is released so its capacity is not leaked,
+   * and the same call then keeps searching: it may assign another eligible node
+   * or still return `undefined` when none is available.
    */
   pick(
     ticketId: string,
@@ -356,12 +358,13 @@ export class RemoteMeshRegistry {
     const assignedId = this.assignments.get(ticketId)
     if (assignedId !== undefined) {
       const assigned = this.nodes.get(assignedId)
-      if (!assigned || !this.eligible(assigned, at)
-        || !capabilitiesMatch(assigned.capabilities, requiredCapabilities)) {
-        this.assignments.delete(ticketId)
-        return undefined
+      if (assigned && this.eligible(assigned, at)
+        && capabilitiesMatch(assigned.capabilities, requiredCapabilities)) {
+        return this.view(assigned, at)
       }
-      return this.view(assigned, at)
+      // Release the ineligible sticky assignment, then fall through to the
+      // least-loaded search below instead of stalling until a second pick.
+      this.assignments.delete(ticketId)
     }
 
     let best: RemoteNodeRecord | undefined

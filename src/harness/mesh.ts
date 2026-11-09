@@ -41,18 +41,19 @@ export class WorkerMeshRegistry {
   /**
    * Least-loaded online node with free capacity. A ticket keeps its node on
    * repeat picks while that node is still registered and online. A missing or
-   * offline sticky assignment is released so its capacity is not leaked;
-   * callers may pick again after the call (matching the remote registry).
+   * offline sticky assignment is released so its capacity is not leaked, and
+   * the same call then keeps searching: it may assign another online node or
+   * still return `undefined` when none is available (matching the remote
+   * registry).
    */
   pickNode(ticketId: string): WorkerMeshNode | undefined {
     const assignedId = this.assignments.get(ticketId)
     if (assignedId) {
       const node = this.nodes.get(assignedId)
-      if (!node || node.online === false) {
-        this.assignments.delete(ticketId)
-        return undefined
-      }
-      return { ...node }
+      if (node && node.online !== false) return { ...node }
+      // Release the ineligible sticky assignment, then fall through to the
+      // least-loaded search below instead of stalling until a second pick.
+      this.assignments.delete(ticketId)
     }
     let best: WorkerMeshNode | undefined
     let bestLoad = Number.POSITIVE_INFINITY
