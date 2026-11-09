@@ -970,7 +970,10 @@ export class Runtime {
               log.info(
                 `[mesh] remote dispatch failed kept slot ticketId=${ticket.id} assignmentId=${assignment.id} replacementId=${latest?.id} reason=live-replacement`,
               )
-              late.remoteResultWait?.clear(ticket.id)
+              // The wait is keyed by ticketId, so clearing here would disarm a
+              // live replacement that already armed its own result wait for the
+              // same ticket. Mirror the successful late-dispatch skip path and
+              // leave the replacement's recovery timer alone.
               return
             }
             placement.release(ticket.id)
