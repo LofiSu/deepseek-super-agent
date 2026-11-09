@@ -246,6 +246,11 @@ export const DEFAULT_MEMORY_COLD_MAX_ENTRIES = 200
 export const DEFAULT_MEMORY_COLD_MAX_AGE_DAYS = 3650
 /** Bounded in-process Worker backlog when every mesh slot is busy. */
 export const DEFAULT_MESH_QUEUE = 100
+/**
+ * Report kinds that end an Assignment (`src/core/assignments.ts`). A remote
+ * result with one of these is settled even when a pause holds its verdict.
+ */
+const REMOTE_ENDING_REPORT_KINDS = new Set(['ready', 'failed', 'dropped', 'blocked', 'waiting'])
 
 /**
  * Parse `DS_AGENT_MEMORY_MAX_ENTRIES` / `DS_AGENT_MEMORY_MAX_AGE_DAYS` as
@@ -1150,9 +1155,30 @@ export class Runtime {
       deliveryKey: event.deliveryKey,
       peerId: event.peerId,
     })
-    this.remoteResultWait?.clear(event.ticketId)
-    this.placement.release(event.ticketId)
-    this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
+    // A non-ending heartbeat (`progress`) leaves the Assignment running: it
+    // must keep its result timeout armed and its mesh slot held, or a hung
+    // remote worker is never recovered (`test/runtime-remote-result-progress`).
+    // Re-read the Store after the report, because `engine.report` owns the
+    // terminal transition.
+    const settled = this.store.getDoc<Ticket>('ticket', event.ticketId)
+    const settledAssignment = settled?.assignments.at(-1)
+    const recordedKind = settledAssignment?.report?.kind ?? report.kind
+    // A terminal report held by a pause does not end the Assignment while it is
+    // held, but the remote work is done: resume applies the held verdict later,
+    // so capacity can be freed now. A speculative silent hold is different — the
+    // turn may still be live — and is excluded by `ticket.speculative`.
+    const heldTerminal = REMOTE_ENDING_REPORT_KINDS.has(recordedKind) && settled?.speculative !== true
+    const remoteWorkDone =
+      !settled || Boolean(settled.ended) || settledAssignment?.state === 'ended' || heldTerminal
+    if (remoteWorkDone) {
+      this.remoteResultWait?.clear(event.ticketId)
+      this.placement.release(event.ticketId)
+      this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
+      return
+    }
+    this.log.info(
+      `[mesh] remote progress kept wait ticketId=${event.ticketId} assignmentId=${event.assignmentId}`,
+    )
   }
 
   private assessments = new Set<Promise<void>>()
