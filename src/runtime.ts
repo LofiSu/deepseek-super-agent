@@ -950,6 +950,22 @@ export class Runtime {
           log.info(
             `[mesh] remote result wait skipped ticketId=${ticket.id} assignmentId=${assignment.id} reason=${skipReason}`,
           )
+          // A newer Assignment may already own this ticket's remote reservation:
+          // sticky placement keeps the slot, so a replacement that has claimed
+          // the node or started work must not lose capacity to this stale send.
+          const liveReplacement = current !== undefined
+            && !current.ended
+            && latest !== undefined
+            && latest.id !== assignment.id
+            && latest.state !== 'ended'
+            && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+            && placement.remoteHasTicket(ticket.id)
+          if (liveReplacement) {
+            log.info(
+              `[mesh] remote result wait kept slot ticketId=${ticket.id} assignmentId=${assignment.id} replacementId=${latest?.id} reason=live-replacement`,
+            )
+            return
+          }
           placement.release(ticket.id)
           return
         }

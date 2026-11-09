@@ -382,4 +382,85 @@ describe('Runtime stale remote result timeout', () => {
 
     await shutdown(runtime)
   }, 60_000)
+
+  it('keeps the remote slot when a late dispatch skip hits a live replacement', async () => {
+    let releaseDelivery!: () => void
+    const deliveryGate = new Promise<void>(resolve => { releaseDelivery = resolve })
+    let requested = false
+    const inbox = await startInbox({
+      beforeHandle: () => { requested = true },
+      deliveryGate,
+    })
+    const runtime = startHost(inbox)
+    const ticketId = createTicket(runtime, 'late_dispatch_live_replacement')
+    const launch = runtime.harness.launch(loadTicket(runtime, ticketId))
+
+    // The HTTP send is still awaiting its response. The first Assignment owns
+    // the ticket's remote reservation while the dispatch is in flight.
+    await waitFor(() => requested, 5_000, 'remote assignment request to arrive')
+    await waitFor(
+      () => runtime.placement.remote?.hasTicketAssignment(ticketId) === true,
+      5_000,
+      'remote slot to be reserved',
+    )
+    const current = loadTicket(runtime, ticketId)
+    const armed = current.assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // Simulate recovery that ends the in-flight Assignment and commits a
+    // replacement which already claimed the same remote node and started. The
+    // sticky registry assignment deliberately stays in place: the live
+    // replacement owns the reservation even though the old dispatch has not
+    // returned yet.
+    const replacementAssignment = {
+      id: 'asg_late_live_replacement',
+      state: 'running' as const,
+      speculative: false,
+      node: REMOTE_NODE_ID,
+      startedAt: new Date().toISOString(),
+    }
+    const replacement: Ticket = {
+      ...current,
+      assignments: [
+        { ...armed, state: 'ended', endedAt: new Date().toISOString() },
+        replacementAssignment,
+      ],
+    }
+    runtime.store.putDoc('ticket', ticketId, replacement)
+
+    // Let the original dispatch finish successfully. Its Assignment is stale,
+    // so it must skip arming a wait and must not steal the replacement's slot.
+    releaseDelivery()
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait skipped ticketId=${ticketId} assignmentId=${armed.id}`,
+      ),
+      5_000,
+      'late dispatch to skip arming the result wait',
+    )
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait kept slot ticketId=${ticketId} assignmentId=${armed.id} replacementId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'late dispatch to keep the live replacement slot',
+    )
+    launch.catch(() => undefined)
+
+    await sleep(RESULT_TIMEOUT_MS + 250)
+
+    const after = loadTicket(runtime, ticketId)
+    const latest = after.assignments.at(-1)!
+    expect(latest.id).toBe(replacementAssignment.id)
+    expect(latest.state).toBe('running')
+    expect(latest.report).toBeUndefined()
+    expect(after.ended).toBeUndefined()
+    // The stale dispatch must not steal the live replacement's mesh capacity.
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    await shutdown(runtime)
+  }, 60_000)
 })
