@@ -637,6 +637,18 @@ export class Runtime {
           log.info(
             `[mesh] remote result timeout kept slot ticketId=${ticketId} assignmentId=${assignmentId} replacementId=${latest?.id} reason=live-replacement`,
           )
+          // The fired timer deleted itself (the wait is keyed per ticket) before
+          // this callback ran. A live replacement that has not yet armed its own
+          // wait would otherwise hold the sticky slot forever with no recovery.
+          // Transfer the wait to the replacement.
+          if (latest) {
+            if (remoteResultTimeoutMs > 0) {
+              log.info(
+                `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${latest.id}`,
+              )
+            }
+            late.remoteResultWait?.arm(ticketId, latest.id)
+          }
           return
         }
         // Recovery can end the Assignment without going through `releaseMesh`.
