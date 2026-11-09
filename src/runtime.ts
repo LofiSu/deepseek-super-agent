@@ -984,8 +984,18 @@ export class Runtime {
               )
               // The wait is keyed by ticketId, so clearing here would disarm a
               // live replacement that already armed its own result wait for the
-              // same ticket. Mirror the successful late-dispatch skip path and
-              // leave the replacement's recovery timer alone.
+              // same ticket. But leaving the slot unarmed is worse: a
+              // replacement that has not armed yet would keep the sticky slot
+              // forever with no recovery timer. Transfer the wait onto the
+              // replacement, like the stale-timeout keep-slot path.
+              if (latest) {
+                if (remoteResultTimeoutMs > 0) {
+                  log.info(
+                    `[mesh] remote result wait armed ticketId=${ticket.id} assignmentId=${latest.id}`,
+                  )
+                }
+                late.remoteResultWait?.arm(ticket.id, latest.id)
+              }
               return
             }
             placement.release(ticket.id)
