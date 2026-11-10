@@ -1056,6 +1056,19 @@ export class Runtime {
             log.info(
               `[mesh] remote result wait kept slot ticketId=${ticket.id} assignmentId=${assignment.id} replacementId=${latest?.id} reason=live-replacement`,
             )
+            // A1 never armed (arm happens after a successful current dispatch).
+            // A live replacement that has not yet armed its own wait would
+            // otherwise hold the sticky slot forever with no recovery. Transfer
+            // the wait, matching the stale-timeout and late-failed-dispatch
+            // keep-slot paths.
+            if (latest) {
+              if (remoteResultTimeoutMs > 0) {
+                log.info(
+                  `[mesh] remote result wait armed ticketId=${ticket.id} assignmentId=${latest.id}`,
+                )
+              }
+              late.remoteResultWait?.arm(ticket.id, latest.id)
+            }
             return
           }
           placement.release(ticket.id)

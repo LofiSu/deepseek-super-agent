@@ -559,8 +559,9 @@ describe('Runtime stale remote result timeout', () => {
     )
     launch.catch(() => undefined)
 
-    await sleep(RESULT_TIMEOUT_MS + 250)
-
+    // This test only proves the stale dispatch does not steal the live
+    // replacement's slot. It deliberately does not wait past the re-armed
+    // timeout; the re-arm behaviour is covered by the dedicated test below.
     const after = loadTicket(runtime, ticketId)
     const latest = after.assignments.at(-1)!
     expect(latest.id).toBe(replacementAssignment.id)
@@ -570,6 +571,101 @@ describe('Runtime stale remote result timeout', () => {
     // The stale dispatch must not steal the live replacement's mesh capacity.
     expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
     expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    // The late successful dispatch re-arms the wait for the live replacement, so
+    // a timer is still pending here. finish() clears result waits before closing
+    // SQLite; the bare test shutdown fixture does not, and the timer would fire
+    // against a closed store.
+    await runtime.finish()
+  }, 60_000)
+
+  it('re-arms a result wait for a live replacement when a late dispatch succeeds', async () => {
+    let releaseDelivery!: () => void
+    const deliveryGate = new Promise<void>(resolve => { releaseDelivery = resolve })
+    let requested = false
+    const inbox = await startInbox({
+      beforeHandle: () => { requested = true },
+      deliveryGate,
+    })
+    const runtime = startHost(inbox)
+    const ticketId = createTicket(runtime, 'late_dispatch_success_rearms_wait')
+    const launch = runtime.harness.launch(loadTicket(runtime, ticketId))
+
+    await waitFor(() => requested, 5_000, 'remote assignment request to arrive')
+    await waitFor(
+      () => runtime.placement.remote?.hasTicketAssignment(ticketId) === true,
+      5_000,
+      'remote slot to be reserved',
+    )
+    const current = loadTicket(runtime, ticketId)
+    const armed = current.assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+
+    // Commit a live replacement that already claimed the same remote node and
+    // started. Deliberately do NOT arm a wait for it: the late successful
+    // dispatch is the only thing that can install a recovery timer for this
+    // slot. The sticky registry assignment stays in place, so the replacement
+    // owns the reservation.
+    const replacementAssignment = {
+      id: 'asg_late_success_dispatch_replacement_rearm',
+      state: 'running' as const,
+      speculative: false,
+      node: REMOTE_NODE_ID,
+      startedAt: new Date().toISOString(),
+    }
+    const replacement: Ticket = {
+      ...current,
+      assignments: [
+        { ...armed, state: 'ended', endedAt: new Date().toISOString() },
+        replacementAssignment,
+      ],
+    }
+    runtime.store.putDoc('ticket', ticketId, replacement)
+
+    // Let the original dispatch finish successfully. Its Assignment is stale,
+    // so it must keep the replacement's slot and transfer the result wait.
+    releaseDelivery()
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait kept slot ticketId=${ticketId} assignmentId=${armed.id} replacementId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'late successful dispatch to keep the live replacement slot',
+    )
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'late successful dispatch to re-arm the result wait for the replacement',
+    )
+    launch.catch(() => undefined)
+
+    // The transferred wait must fire for the replacement, not the ended
+    // original Assignment. Without the re-arm nothing would ever time out,
+    // because no wait was armed for the replacement and the successful
+    // dispatch never armed the old Assignment.
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result timeout ticketId=${ticketId} assignmentId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'replacement result wait to fire',
+    )
+
+    // Recovering the hung replacement releases the sticky mesh reservation.
+    await waitFor(
+      () => runtime.placement.remote?.hasTicketAssignment(ticketId) === false,
+      5_000,
+      'mesh slot to be released after the timeout',
+    )
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(0)
+    const recovered = loadTicket(runtime, ticketId).assignments.find(
+      item => item.id === replacementAssignment.id,
+    )
+    expect(recovered?.report?.text).toContain('remote worker result timeout')
+    // The Ticket stays open so it can retry with a new Assignment.
+    expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
 
     await shutdown(runtime)
   }, 60_000)
