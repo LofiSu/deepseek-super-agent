@@ -939,6 +939,20 @@ export class Runtime {
           trackRemoteCancelSends(ticketId, cancelSends, cancelNode)
           void Promise.all(cancelSends)
             .finally(() => {
+              // `Runtime.finish()` (or a crash-simulation / teardown that closes
+              // SQLite directly) can close the Store while this fail-soft cancel
+              // send is still in flight. There is no committed state left to
+              // decide keep-vs-release from, and every Store read on a closed
+              // handle throws `database is not open`. This promise is voided, so
+              // letting that throw escape would surface as an unhandled
+              // rejection. Fail soft in memory instead: release the sticky slot
+              // (no live replacement can be proven) and notify the harness,
+              // neither of which needs the Store.
+              if (!store.isOpen) {
+                placement.release(ticketId)
+                notifyHarnessReleased(ticketId)
+                return
+              }
               const current = store.getDoc<Ticket>('ticket', ticketId)
               const currentLatest = current?.assignments.at(-1)
               const superseded = current?.assignments

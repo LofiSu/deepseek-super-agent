@@ -2113,4 +2113,79 @@ describe('Runtime remote mesh cancel releases capacity', () => {
 
     await shutdown(runtime)
   }, 60_000)
+
+  it('closes cleanly when finish() shuts SQLite down while a remote cancel is still in flight', async () => {
+    const inbox = await startWorkerInbox()
+    // Generous delay so the cancel is still in flight when finish() closes the
+    // Store even on a loaded CI worker; it is delayed, never dropped.
+    const proxy = await startCancelDelayingProxy(inbox.url, 1_500)
+
+    // Production shutdown path: a report ends the remote Assignment and queues
+    // a fail-soft `assignment_cancel`; `finish()` then closes SQLite while the
+    // delayed send is still in flight. The voided settlement promise used to
+    // re-read the Ticket and throw `database is not open`, which Vitest surfaces
+    // as an unhandled rejection even though every assertion passed.
+    const REQUIRED_CAPABILITY = 'cancel-finish-closed-store'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-finish-closed-store-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    const runtime = runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode(node)
+    runtime.start({ assessPending: false })
+
+    const ticketId = createTicket(runtime, 'cancel_finish_closed_store')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => inbox.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach the remote inbox',
+    )
+    const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(a1.state).toBe('running')
+
+    const rejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => { rejections.push(reason) }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      // End the Assignment (and the Ticket) through the production report path;
+      // the queued `releaseSlot` sends A1's cancel, which the proxy holds.
+      proxy.delaying = true
+      expect(runtime.engine.report(ticketId, {
+        kind: 'ready',
+        text: 'remote done',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.held.some(item => item.assignmentId === a1.id),
+        5_000,
+        'A1 cancel send to be in flight at the proxy',
+      )
+
+      // Shutdown closes the Store before the delayed cancel settles.
+      await runtime.finish()
+      expect(runtime.store.isOpen).toBe(false)
+      expect(inbox.cancels).toHaveLength(0)
+
+      // The cancel is forwarded and the fail-soft send settles against the
+      // now-closed Store. Give Node a turn to emit any unhandled rejection.
+      await waitFor(
+        () => inbox.cancels.some(event => event.assignmentId === a1.id),
+        5_000,
+        'the delayed cancel to settle at the worker',
+      )
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      expect(rejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  }, 60_000)
 })
