@@ -465,4 +465,142 @@ describe('Runtime remote mesh cancel releases capacity', () => {
 
     await shutdown(runtime)
   }, 60_000)
+
+  it('keeps a retry replacement slot when the cancel settles after it is dispatched', async () => {
+    const assignments: RemoteMeshAssignmentEvent[] = []
+    const cancels: RemoteMeshAssignmentCancelEvent[] = []
+    const workerHandler = createRemoteMeshHandler({
+      localPeerId: WORKER_PEER,
+      replayCache: createA2AReplayCache(),
+      resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+      onAssignment: (event) => {
+        assignments.push(event)
+        return undefined
+      },
+      onAssignmentCancel: (event) => {
+        cancels.push(event)
+        return undefined
+      },
+    })
+    // Hold the cancel request (the first request after the release microtask
+    // starts it) at the inbox until the retry replacement has been launched,
+    // placed, and dispatched. The send must not settle before then.
+    const cancelGate = gate()
+    let holdNextRequest = false
+    let onCancelHeld!: () => void
+    const cancelHeld = new Promise<void>(resolve => { onCancelHeld = resolve })
+    const server = createServer((req, res) => {
+      if (holdNextRequest) {
+        holdNextRequest = false
+        onCancelHeld()
+        void cancelGate.promise.then(() => workerHandler(req, res))
+        return
+      }
+      void workerHandler(req, res)
+    })
+    servers.push(server)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = server.address()
+    if (typeof address !== 'object' || address === null) throw new Error('worker bind failed')
+    const workerUrl = `http://127.0.0.1:${address.port}/a2a`
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-retry-race-'))
+    homes.push(home)
+    const runtime = runtimeFor(home, holdingModel(new Map()))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    // Occupy the only local slot so placement must choose the remote node.
+    expect(runtime.placement.local.pickNode('slot-blocker')?.id).toBe(HOST_PEER)
+
+    const ticketId = createTicket(runtime, 'cancel_retry_race')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'ticket to reach the remote inbox',
+    )
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    const current = loadTicket(runtime, ticketId)
+    const armed = current.assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+
+    // End the armed Assignment through the normal report path. `onAssignmentEnded`
+    // queues the cancel/release microtask, which starts a releasing cancel only
+    // after it re-reads the Ticket and sees no replacement yet.
+    holdNextRequest = true
+    const failed = runtime.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'remote worker result timeout',
+      deliver: false,
+    })
+    expect(failed.surfaced).toBe(false)
+
+    // The default cancel path is now in flight and parked at the inbox.
+    await cancelHeld
+
+    // A genuine relaunch runs before that cancel settles. The sticky remote
+    // reservation is still present, so the retry is placed and dispatched to
+    // the same node while the old cancel is still awaiting its response.
+    await runtime.retry(ticketId)
+    await waitFor(
+      () => assignments.some(
+        event => event.ticketId === ticketId
+          && (event.assignment as { id?: string } | undefined)?.id !== armed.id,
+      ),
+      5_000,
+      'retry Assignment to reach the remote inbox',
+    )
+    const replaced = loadTicket(runtime, ticketId)
+    const replacement = replaced.assignments.at(-1)!
+    expect(replacement.id).not.toBe(armed.id)
+    expect(replacement.state).toBe('running')
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // Let the in-flight cancel settle now that the replacement owns the slot.
+    cancelGate.release()
+
+    await waitFor(
+      () => cancels.some(event => event.ticketId === ticketId),
+      5_000,
+      'inbox to receive the cancel for the ended Assignment',
+    )
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${armed.id} replacementId=${replacement.id} reason=live-replacement`,
+      ),
+      5_000,
+      'settled cancel to keep the retry replacement slot',
+    )
+
+    const after = loadTicket(runtime, ticketId)
+    const latest = after.assignments.at(-1)!
+    expect(latest.id).toBe(replacement.id)
+    expect(latest.state).toBe('running')
+    expect(latest.report).toBeUndefined()
+    expect(after.ended).toBeUndefined()
+    // The cancel still targets the ended Assignment, not the retry.
+    expect(cancels.find(event => event.ticketId === ticketId)?.assignmentId).toBe(armed.id)
+    // The settled cancel must not steal the retry replacement's mesh capacity.
+    expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    // The wait was re-armed for the live replacement.
+    expect(runtime.log.text()).toContain(
+      `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${replacement.id}`,
+    )
+
+    await shutdown(runtime)
+  }, 60_000)
 })

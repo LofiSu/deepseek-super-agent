@@ -751,13 +751,51 @@ export class Runtime {
               .finally(() => notifyHarnessReleased(ticketId))
             return
           }
-          void placement.cancelRemote(ticketId, assignmentId)
+          // No live replacement is visible yet, but the cancel send awaits the
+          // network. A genuine relaunch (for example `Runtime.retry`) can place,
+          // dispatch, and start a replacement while this send is in flight.
+          // Cancel without releasing, then decide after the send settles: a
+          // blind `release` here would steal the slot the replacement now runs
+          // on. Re-read the committed Ticket and apply the same live-replacement
+          // predicate as the synchronous keep-slot branch above.
+          void placement.cancelRemote(ticketId, assignmentId, { release: false })
             .catch(error => {
               log.info(
                 `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
               )
             })
-            .finally(() => notifyHarnessReleased(ticketId))
+            .finally(() => {
+              const current = store.getDoc<Ticket>('ticket', ticketId)
+              const currentLatest = current?.assignments.at(-1)
+              const superseded = current?.assignments
+                .slice(0, -1).reverse().find(item => item.state === 'ended')
+              const liveReplacement = current !== undefined
+                && !current.ended
+                && currentLatest !== undefined
+                && currentLatest.state !== 'ended'
+                && (currentLatest.state === 'running'
+                  || currentLatest.node !== undefined
+                  || currentLatest.startedAt !== undefined)
+                && superseded !== undefined
+                && placement.remoteHasTicket(ticketId)
+              if (liveReplacement && superseded && currentLatest) {
+                log.info(
+                  `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${superseded.id} replacementId=${currentLatest.id} reason=live-replacement`,
+                )
+                // The replacement's own wait may already be armed; arming is
+                // keyed per ticketId and resetting it to the live replacement
+                // is the same transfer the other late keep-slot paths make.
+                if (remoteResultTimeoutMs > 0) {
+                  log.info(
+                    `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${currentLatest.id}`,
+                  )
+                }
+                late.remoteResultWait?.arm(ticketId, currentLatest.id)
+              } else {
+                placement.release(ticketId)
+              }
+              notifyHarnessReleased(ticketId)
+            })
           return
         }
         placement.release(ticketId)
