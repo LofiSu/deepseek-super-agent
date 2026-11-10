@@ -1496,7 +1496,17 @@ export class Runtime {
       !settled || Boolean(settled.ended) || settledAssignment?.state === 'ended' || heldTerminal
     if (remoteWorkDone) {
       this.remoteResultWait?.clear(event.ticketId)
-      this.placement.release(event.ticketId)
+      // When the report actually ended the latest Assignment or the Ticket,
+      // `onAssignmentEnded` / `onTicketEnded` already queued `releaseMesh` →
+      // `releaseSlot`. That microtask is the single owner of superseded/ended
+      // remote cancels (including an older A1 whose cancel was lost) and of the
+      // keep-vs-release settle policy. Clearing the sticky reservation here
+      // first would make it take the local no-cancel branch and the Worker would
+      // keep running A1. Only free capacity synchronously on the paths where no
+      // end hook queued a release: a pause-held terminal verdict leaves the
+      // Assignment open, and a vanished Ticket document has no hook to run.
+      const endedByReport = Boolean(settled?.ended) || settledAssignment?.state === 'ended'
+      if (!endedByReport) this.placement.release(event.ticketId)
       this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
       return
     }

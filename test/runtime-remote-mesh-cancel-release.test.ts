@@ -1462,6 +1462,98 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await shutdown(runtimeB)
   }, 60_000)
 
+  it('cancels the lost older remote Assignment when the inbound failed result ends the latest one', async () => {
+    const { assignments, cancels, proxy, runtimeB, ticketId, a1, a2 } =
+      await setupLostA1ThenRunningA2('apply-failed-report')
+
+    // Production inbound path: a Worker posts `assignment_result` and the host
+    // applies it here. `engine.report` queues `releaseSlot` as a microtask, but
+    // this method used to synchronously clear the sticky reservation right
+    // after, so that microtask saw no remote slot and sent no cancel. The
+    // Worker would then keep A1 (whose cancel was lost) running while A3 is
+    // retried onto it.
+    proxy.dropping = false
+    runtimeB.applyRemoteAssignmentResult({
+      peerId: WORKER_PEER,
+      ticketId,
+      assignmentId: a2.id,
+      report: { kind: 'failed', text: 'remote worker failed', deliver: false },
+      deliveryKey: `deliv-apply-failed-${ticketId}-${a2.id}`,
+      envelope: { from: WORKER_PEER, to: HOST_PEER, body: {} },
+    })
+
+    const afterResult = loadTicket(runtimeB, ticketId)
+    expect(afterResult.ended).toBeUndefined()
+    expect(afterResult.assignments.at(-1)?.id).toBe(a2.id)
+    expect(afterResult.assignments.at(-1)?.state).toBe('ended')
+    expect(afterResult.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+
+    await waitFor(
+      () => cancels.some(event => event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the lost A1 cancel after the inbound failed result',
+    )
+    expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
+
+    // A retry may dispatch A3 onto the same Worker, but A1 must already have
+    // been cancelled rather than left running uncancelled beside it.
+    const retried = await runtimeB.retry(ticketId, 'apply-failed-retry')
+    expect(retried).toBeDefined()
+    expect(retried?.ended).toBeUndefined()
+    const a3 = loadTicket(runtimeB, ticketId).assignments.at(-1)!
+    expect(a3.id).not.toBe(a1.id)
+    expect(a3.id).not.toBe(a2.id)
+    await waitFor(
+      () => assignments.some(event => assignmentIdOf(event) === a3.id) || a3.state === 'running',
+      5_000,
+      'A3 to reach the remote inbox or start running',
+    )
+    expect(cancels.some(event => event.ticketId === ticketId && event.assignmentId === a1.id)).toBe(true)
+
+    await shutdown(runtimeB)
+  }, 60_000)
+
+  it('cancels the lost older remote Assignment when the inbound ready result ends the Ticket', async () => {
+    const { cancels, proxy, runtimeB, ticketId, a1, a2 } =
+      await setupLostA1ThenRunningA2('apply-ready-report')
+
+    proxy.dropping = false
+    runtimeB.applyRemoteAssignmentResult({
+      peerId: WORKER_PEER,
+      ticketId,
+      assignmentId: a2.id,
+      report: { kind: 'ready', text: 'remote done', deliver: false },
+      deliveryKey: `deliv-apply-ready-${ticketId}-${a2.id}`,
+      envelope: { from: WORKER_PEER, to: HOST_PEER, body: {} },
+    })
+
+    const afterResult = loadTicket(runtimeB, ticketId)
+    expect(afterResult.ended).toBeDefined()
+    expect(afterResult.assignments.at(-1)?.id).toBe(a2.id)
+    expect(afterResult.assignments.at(-1)?.state).toBe('ended')
+
+    // Both end hooks queue `releaseSlot`, so duplicate A2 cancels are fine. The
+    // Worker must still receive A1's cancel even though the Ticket is terminal,
+    // because the inbound path no longer clears the reservation first.
+    await waitFor(
+      () => cancels.some(event => event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the lost A1 cancel after the inbound ready result ended the Ticket',
+    )
+    expect(cancels.filter(event => event.assignmentId === a1.id).length).toBeGreaterThanOrEqual(1)
+    expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
+
+    // The queued `releaseSlot` still frees the ended Ticket's slot, so capacity
+    // does not leak on the successful inbound path.
+    await waitFor(
+      () => runtimeB.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+      5_000,
+      'the ended Ticket slot to be released',
+    )
+
+    await shutdown(runtimeB)
+  }, 60_000)
+
   it('cancels a lost older remote Assignment when a crash loses the ended-latest cancels', async () => {
     const { assignments, cancels, proxy, runtimeB, ticketId, a1, a2, node, newRuntime } =
       await setupLostA1ThenRunningA2('failed-report-crash')
