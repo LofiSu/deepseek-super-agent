@@ -698,6 +698,30 @@ export class Runtime {
       }
     }
     /**
+     * Every ended remote Assignment that a still-open later Assignment
+     * superseded.
+     *
+     * The nearest ended row is not enough to authenticate the cancel: a Worker
+     * can still hold an older Assignment whose `assignment_cancel` never
+     * arrived. For example recovery in a previous process ended A1 and
+     * dispatched A2 on the same Worker, then a later recovery ended the running
+     * A2 and appended A3. Assignments are now A1 ended, A2 ended, A3 open; the
+     * Worker still running A1 must be told to stop it as well as A2. Duplicate
+     * cancels are fail-soft (the Worker ignores an unknown/already-ended id),
+     * and every send uses `{ release: false }` so the settle policy below
+     * remains the single owner of keep-vs-release.
+     */
+    const supersededRemoteAssignments = (snapshot: Ticket | undefined): Assignment[] => {
+      const latest = snapshot?.assignments.at(-1)
+      if (!snapshot || !latest || latest.state === 'ended') return []
+      return snapshot.assignments
+        .slice(0, -1)
+        .filter(item =>
+          item.state === 'ended'
+          && item.node !== undefined
+          && placement.isRemote(item.node))
+    }
+    /**
      * Free one ticket's Worker slot, then let the scheduler pump.
      *
      * A local slot is free synchronously, so `release` can pump immediately.
@@ -745,15 +769,19 @@ export class Runtime {
               }
               late.remoteResultWait?.arm(ticketId, latest.id)
             }
-            // Still tell the ended remote worker to stop, but keep the sticky
-            // reservation so the live replacement does not lose its slot.
-            void placement.cancelRemote(ticketId, ended.id, { release: false })
-              .catch(error => {
-                log.info(
-                  `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-                )
-              })
-              .finally(() => notifyHarnessReleased(ticketId))
+            // Still tell every ended remote worker Assignment to stop, but keep
+            // the sticky reservation so the live replacement does not lose its
+            // slot. A Worker may still hold an older predecessor whose cancel
+            // was lost, so send them all; duplicates stay fail-soft.
+            void Promise.all(
+              supersededRemoteAssignments(ticket).map(target =>
+                placement.cancelRemote(ticketId, target.id, { release: false })
+                  .catch(error => {
+                    log.info(
+                      `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+                    )
+                  })),
+            ).finally(() => notifyHarnessReleased(ticketId))
             return
           }
           // No live replacement is visible yet, but the cancel send awaits the
@@ -764,23 +792,28 @@ export class Runtime {
           // on. Re-read the committed Ticket and apply the same live-replacement
           // predicate as the synchronous keep-slot branch above.
           //
-          // Cancel the Assignment that actually ran remotely and is being ended
-          // or superseded. `latest` can be a not-yet-live pending replacement
+          // Cancel every Assignment that ran remotely and is being ended or
+          // superseded. `latest` can be a not-yet-live pending replacement
           // (for example `recoverInterrupted` appends A2 before releasing A1's
           // slot): authenticating the cancel for that pending id would leave the
           // Assignment still running on the worker untouched. When `latest` is
-          // still open and a predecessor already ended, that predecessor owns
-          // the remote reservation. When `latest` itself is the ended Assignment
-          // (normal report/retry) keep targeting it, not an older predecessor.
-          const cancelAssignmentId = latest?.state !== 'ended' && ended !== undefined
-            ? ended.id
-            : assignmentId
-          void placement.cancelRemote(ticketId, cancelAssignmentId, { release: false })
-            .catch(error => {
-              log.info(
-                `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-              )
-            })
+          // still open and predecessors already ended, every one of them owns a
+          // remote reservation the Worker may still hold. When `latest` itself
+          // is the ended Assignment (normal report/retry) keep targeting it, not
+          // an older predecessor.
+          const supersededEnded = supersededRemoteAssignments(ticket)
+          const cancelAssignmentIds = latest?.state !== 'ended' && ended !== undefined
+            ? (supersededEnded.length > 0 ? supersededEnded.map(item => item.id) : [ended.id])
+            : assignmentId ? [assignmentId] : []
+          void Promise.all(
+            cancelAssignmentIds.map(id =>
+              placement.cancelRemote(ticketId, id, { release: false })
+                .catch(error => {
+                  log.info(
+                    `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+                  )
+                })),
+          )
             .finally(() => {
               const current = store.getDoc<Ticket>('ticket', ticketId)
               const currentLatest = current?.assignments.at(-1)
