@@ -834,6 +834,28 @@ export class Runtime {
           && placement.isRemote(item.node))
     }
     /**
+     * Every ended remote Assignment whose worker may still hold it, including
+     * `latest` when it is itself an ended remote row.
+     *
+     * `supersededRemoteAssignments` stops at `latest` because the sticky-slot
+     * paths cancel `latest` separately. The no-sticky path has no sticky
+     * reservation to reason about, so it needs the whole set: a local
+     * replacement can supersede a remote Assignment whose cancel was lost, and
+     * the worker that still holds that historical Assignment must be told to
+     * stop even though the Ticket no longer reserves any remote slot.
+     */
+    const endedRemoteAssignments = (snapshot: Ticket | undefined): Assignment[] => {
+      const latest = snapshot?.assignments.at(-1)
+      const superseded = supersededRemoteAssignments(snapshot)
+      const latestEndedRemote = latest !== undefined
+        && latest.state === 'ended'
+        && latest.node !== undefined
+        && placement.isRemote(latest.node)
+        ? [latest]
+        : []
+      return [...superseded, ...latestEndedRemote]
+    }
+    /**
      * Free one ticket's Worker slot, then let the scheduler pump.
      *
      * A local slot is free synchronously, so `release` can pump immediately.
@@ -1006,6 +1028,29 @@ export class Runtime {
               notifyHarnessReleased(ticketId)
             })
           return
+        }
+        // No remote sticky reservation: the Ticket's replacement is local (or
+        // there is none). A worker can still hold an older remote Assignment
+        // whose `assignment_cancel` was lost, for example a local-first retry
+        // that ran after a lost cancel conservatively freed the remote slot.
+        // Send those cancels to the node recorded on each Assignment; the
+        // explicit `nodeId` needs no sticky reservation and `{ release: false }`
+        // leaves keep-vs-release untouched. Fail-soft and voided: local capacity
+        // below is still freed synchronously and `finish()` never waits on the
+        // HTTP send.
+        const historical = endedRemoteAssignments(ticket)
+        for (const target of historical) {
+          const send = placement.cancelRemote(ticketId, target.id, {
+            release: false,
+            ...(target.node !== undefined ? { nodeId: target.node } : {}),
+          }).catch(error => {
+            log.info(
+              `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+            )
+          })
+          // Attribute the send to the node it actually targets so a later
+          // dispatch of a different Ticket to that node still orders after it.
+          trackRemoteCancelSends(ticketId, [send], target.node)
         }
         placement.release(ticketId)
       } catch (error) {
