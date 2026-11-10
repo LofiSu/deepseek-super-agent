@@ -2578,4 +2578,167 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       await shutdown(runtime)
     }
   }, 60_000)
+
+  it('keeps a lost cancel for its own node when a later Ticket overflows to a different node', async () => {
+    // Same local-replacement-while-running setup as the 6f4ae79 regression,
+    // plus a second remote node. A dispatch-time resend must not consume T1's
+    // orphan record when the dispatching Ticket lands on a *different* node
+    // than the Worker that still holds A1: otherwise a later Ticket can reach
+    // N1 without ever cancelling the historical Assignment.
+    const inboxN1 = await startWorkerInbox()
+    const inboxN2 = await startWorkerInbox('cancel-pump-worker-2')
+    const proxy = await startCancelDroppingProxy(inboxN1.url)
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-orphan-wrong-node-'))
+    homes.push(home)
+    const held = new Map<string, Gate>()
+    const runtime = runtimeFor(home, holdingModel(held))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.placement.registerRemoteNode({
+      id: 'cancel-pump-node-2',
+      url: inboxN2.url,
+      peerId: 'cancel-pump-worker-2',
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      // Hold the only local slot so T1 has to overflow to N1.
+      const blockerId = createTicket(runtime, 'cancel_orphan_wrong_node_blocker')
+      held.set(blockerId, gate())
+      void runtime.harness.launch(loadTicket(runtime, blockerId))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held',
+      )
+
+      const ticketId = createTicket(runtime, 'cancel_orphan_wrong_node')
+      await runtime.harness.launch(loadTicket(runtime, ticketId))
+      await waitFor(
+        () => inboxN1.assignments.some(event => event.ticketId === ticketId),
+        5_000,
+        'A1 to reach N1',
+      )
+      const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a1.node).toBe(REMOTE_NODE_ID)
+      expect(a1.state).toBe('running')
+
+      // Lose A1's failed-report cancel. After the failed send settles
+      // keep-vs-release frees T1's remote sticky slot; the worker still holds
+      // A1.
+      proxy.dropping = true
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'remote worker failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === a1.id),
+        5_000,
+        'A1 cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+        5_000,
+        'the N1 sticky slot to be released after the lost cancel',
+      )
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+
+      // End the blocker and free the local slot.
+      expect(runtime.engine.report(blockerId, {
+        kind: 'ready',
+        text: 'blocker done',
+        deliver: false,
+      }).surfaced).toBe(false)
+      held.get(blockerId)?.release()
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 0,
+        5_000,
+        'the local slot to be released after the holder ends',
+      )
+
+      // Retry T1 locally but hold A2's worker turn so `releaseSlot` for T1
+      // never runs. Snapshot the drop count first: the local-placement send
+      // must be a *new* drop, not the failed-report one.
+      const droppedBeforeRetry = proxy.dropped
+        .filter(item => item.assignmentId === a1.id).length
+      held.set(ticketId, gate())
+      void runtime.retry(ticketId, 'local-replacement-retry').catch(() => undefined)
+      await waitFor(
+        () => loadTicket(runtime, ticketId).assignments.at(-1)?.state === 'running',
+        5_000,
+        'A2 to be running',
+      )
+      const a2 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a2.id).not.toBe(a1.id)
+      expect(runtime.placement.isRemote(a2.node)).toBe(false)
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+
+      await waitFor(
+        () => proxy.dropped.filter(item => item.assignmentId === a1.id).length
+          > droppedBeforeRetry,
+        5_000,
+        'the local-placement A1 cancel to be dropped at the N1 proxy',
+      )
+      expect(inboxN1.cancels.some(event => event.assignmentId === a1.id)).toBe(false)
+
+      // Restore forwarding, then take N1 offline so the next Ticket overflows
+      // to N2. That dispatch must leave T1's orphan record intact because A1
+      // lives on N1, not N2.
+      proxy.dropping = false
+      const remote = runtime.placement.remote
+      if (!remote) throw new Error('expected a remote mesh registry')
+      expect(remote.markOffline(REMOTE_NODE_ID)).toBe(true)
+
+      const divertId = createTicket(runtime, 'cancel_orphan_wrong_node_divert')
+      await runtime.harness.launch(loadTicket(runtime, divertId))
+      await waitFor(
+        () => inboxN2.assignments.some(event => event.ticketId === divertId),
+        5_000,
+        'the diverting Ticket to reach N2',
+      )
+      const divert = loadTicket(runtime, divertId).assignments.at(-1)!
+      expect(divert.node).toBe('cancel-pump-node-2')
+      expect(inboxN1.cancels.some(event => event.assignmentId === a1.id)).toBe(false)
+
+      // Bring N1 back and overflow a later Ticket there. The kept record must
+      // re-send A1's cancel, and the body must wait for it.
+      expect(remote.heartbeat(REMOTE_NODE_ID)).toBe(true)
+
+      const laterId = createTicket(runtime, 'cancel_orphan_wrong_node_later')
+      await runtime.harness.launch(loadTicket(runtime, laterId))
+      const later = loadTicket(runtime, laterId).assignments.at(-1)!
+      expect(later.node).toBe(REMOTE_NODE_ID)
+
+      // Wait for both arrivals; asserting after only one would race.
+      await waitFor(
+        () => stampIndex(inboxN1.stamps, 'cancel', a1.id) >= 0
+          && stampIndex(inboxN1.stamps, 'assignment', later.id) >= 0,
+        10_000,
+        'A1 cancel and the later Ticket body to reach N1',
+      )
+      const cancelIndex = stampIndex(inboxN1.stamps, 'cancel', a1.id)
+      const laterIndex = stampIndex(inboxN1.stamps, 'assignment', later.id)
+      expect(cancelIndex).toBeLessThanOrEqual(laterIndex)
+      expect(inboxN1.stamps[cancelIndex].at).toBeLessThanOrEqual(inboxN1.stamps[laterIndex].at)
+
+      // Still the while-running gap: A2 is the running local replacement and
+      // T1 has no remote sticky.
+      expect(loadTicket(runtime, ticketId).assignments.find(item => item.id === a2.id)?.state)
+        .toBe('running')
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+    } finally {
+      for (const hold of held.values()) hold.release()
+      await shutdown(runtime)
+    }
+  }, 60_000)
 })

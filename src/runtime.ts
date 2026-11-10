@@ -739,11 +739,13 @@ export class Runtime {
      * Assignment. The record lets that later `dispatchRemote` re-send from
      * committed state right before its own body; the node-keyed
      * `remoteCancelSendsByNode` wait below then orders the body after the
-     * cancel. The first later dispatch consumes the record after one re-send
-     * attempt; a Ticket that has since gained a remote sticky is skipped (the
-     * sticky paths own their cancels). The no-sticky `releaseSlot` backstop
-     * also clears the record once the local replacement ends, so the set is
-     * bounded by Tickets that still have a live local replacement.
+     * cancel. The first later dispatch that targets the owning node consumes the
+     * record after one re-send attempt; a dispatch to a different node leaves it
+     * in place so that node can still resend. A Ticket that has since gained a
+     * remote sticky is dropped (the sticky paths own their cancels). The
+     * no-sticky `releaseSlot` backstop also clears the record once the local
+     * replacement ends, so the set is bounded by Tickets that still have a live
+     * local replacement.
      */
     const orphanedRemoteTickets = new Set<string>()
     const trackRemoteCancelSends = (
@@ -930,10 +932,13 @@ export class Runtime {
      * when a later Ticket is placed on the same node. Re-read committed state
      * and send the targets for this node now; the node-keyed wait in
      * `dispatchRemote` then holds the later body until they settle. The first
-     * later dispatch consumes the record after one re-send attempt; the local
-     * replacement's own no-sticky `releaseSlot` backstop owns any later
-     * attempt. Paused/approval-held Tickets are left alone, and a Ticket that
-     * has since gained a remote sticky is owned by the sticky paths.
+     * later dispatch *to the owning node* consumes the record after one re-send
+     * attempt; a dispatch to a different node leaves it in place so a later
+     * Ticket on the owning node can still resend. The local replacement's own
+     * no-sticky `releaseSlot` backstop owns any later attempt. Paused or
+     * approval-held Tickets are left alone (and stay recorded, since no cancel
+     * was attempted), and a Ticket that has since gained a remote sticky is
+     * owned by the sticky paths.
      */
     const resendOrphanedRemoteCancels = (node: string, dispatchingTicketId: string): void => {
       // No committed state to re-derive targets from after `finish()` closes
@@ -942,12 +947,29 @@ export class Runtime {
       for (const ticketId of orphanedRemoteTickets) {
         if (ticketId === dispatchingTicketId) continue
         const ticket = store.getDoc<Ticket>('ticket', ticketId)
-        orphanedRemoteTickets.delete(ticketId)
-        if (!ticket || ticket.collab?.paused || pendingApproval(ticket)) continue
-        if (placement.remoteHasTicket(ticketId)) continue
-        for (const target of endedRemoteAssignments(ticket)) {
-          if (target.node === node) sendEndedRemoteCancel(ticketId, target)
+        if (!ticket) {
+          // No committed Ticket remains to derive targets from, so the record
+          // can never produce a send. Drop it rather than leak the id.
+          orphanedRemoteTickets.delete(ticketId)
+          continue
         }
+        // Paused/approval-held Tickets are never cancelled as a drive-by. Keep
+        // the record: no send was attempted, and a later dispatch after
+        // recovery may still need to re-send it.
+        if (ticket.collab?.paused || pendingApproval(ticket)) continue
+        // A remote sticky means the sticky-slot paths own this Ticket's
+        // cancels; the dispatch-time resend is not needed.
+        if (placement.remoteHasTicket(ticketId)) {
+          orphanedRemoteTickets.delete(ticketId)
+          continue
+        }
+        // Only targets recorded on *this* node are in scope. If every ended
+        // remote Assignment lives elsewhere, leave the record so a dispatch to
+        // that node can still resend it.
+        const targets = endedRemoteAssignments(ticket).filter(target => target.node === node)
+        if (targets.length === 0) continue
+        orphanedRemoteTickets.delete(ticketId)
+        for (const target of targets) sendEndedRemoteCancel(ticketId, target)
       }
     }
     /**
