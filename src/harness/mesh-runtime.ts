@@ -170,12 +170,17 @@ export class WorkerPlacement {
    * a superseded historical Assignment be cancelled on the worker that still
    * holds it even when the Ticket's sticky reservation moved elsewhere. The
    * sticky slot remains the single owner of keep-vs-release.
+   *
+   * Returns whether the Worker acknowledged the cancel. `false` covers every
+   * fail-soft outcome (unknown/ineligible node, transport error, non-2xx); a
+   * caller that keeps a retry record can use it to tell a lost send from a
+   * delivered one without changing the transport's fail-soft contract.
    */
   async cancelRemote(
     ticketId: string,
     assignmentId: string,
     opts?: { release?: boolean; nodeId?: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const release = opts?.release ?? true
     const nodeId = opts?.nodeId
     // An explicit node target does not depend on a sticky reservation: the
@@ -183,10 +188,15 @@ export class WorkerPlacement {
     // currently sits.
     if (nodeId === undefined && !this.remote?.hasTicketAssignment(ticketId)) {
       if (release) this.release(ticketId)
-      return
+      return false
     }
     try {
-      await this.remote?.dispatchCancel(ticketId, assignmentId, { release, ...(nodeId ? { nodeId } : {}) })
+      const delivery = await this.remote?.dispatchCancel(
+        ticketId,
+        assignmentId,
+        { release, ...(nodeId ? { nodeId } : {}) },
+      )
+      return delivery?.status === 'delivered'
     } finally {
       // Release both registries: a leftover local sticky from a prior race must
       // not leak local capacity after the remote assignment is cancelled.

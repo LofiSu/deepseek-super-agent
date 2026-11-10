@@ -739,11 +739,11 @@ export class Runtime {
      * Assignment. The record lets that later `dispatchRemote` re-send from
      * committed state right before its own body; the node-keyed
      * `remoteCancelSendsByNode` wait below then orders the body after the
-     * cancel. The first later dispatch that targets the owning node consumes the
-     * record after one re-send attempt; a dispatch to a different node leaves it
-     * in place so that node can still resend. A Ticket that has since gained a
-     * remote sticky is dropped (the sticky paths own their cancels). The
-     * no-sticky `releaseSlot` backstop also clears the record once the local
+     * cancel. The record is consumed only once a dispatch-time re-send to the
+     * owning node succeeds; a dispatch to a different node, or a lost re-send,
+     * leaves it in place so that node can still resend. A Ticket that has since
+     * gained a remote sticky is dropped (the sticky paths own their cancels).
+     * The no-sticky `releaseSlot` backstop also clears the record once the local
      * replacement ends, so the set is bounded by Tickets that still have a live
      * local replacement.
      */
@@ -881,16 +881,21 @@ export class Runtime {
      * the send is tracked under that node so a later different Ticket's
      * `dispatchRemote` can order its body after it.
      */
-    const sendEndedRemoteCancel = (ticketId: string, target: Assignment): void => {
-      const send = placement.cancelRemote(ticketId, target.id, {
+    const sendEndedRemoteCancel = (ticketId: string, target: Assignment): Promise<boolean> => {
+      const settled = placement.cancelRemote(ticketId, target.id, {
         release: false,
         ...(target.node !== undefined ? { nodeId: target.node } : {}),
-      }).catch(error => {
-        log.info(
-          `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-        )
-      })
-      trackRemoteCancelSends(ticketId, [send], target.node)
+      }).then(
+        delivered => delivered,
+        error => {
+          log.info(
+            `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+          )
+          return false
+        },
+      )
+      trackRemoteCancelSends(ticketId, [settled], target.node)
+      return settled
     }
     /**
      * Tell every Worker that may still hold an ended remote Assignment for this
@@ -931,14 +936,14 @@ export class Runtime {
      * fail-soft: when it was lost, the Worker still holds the old Assignment
      * when a later Ticket is placed on the same node. Re-read committed state
      * and send the targets for this node now; the node-keyed wait in
-     * `dispatchRemote` then holds the later body until they settle. The first
-     * later dispatch *to the owning node* consumes the record after one re-send
-     * attempt; a dispatch to a different node leaves it in place so a later
-     * Ticket on the owning node can still resend. The local replacement's own
-     * no-sticky `releaseSlot` backstop owns any later attempt. Paused or
-     * approval-held Tickets are left alone (and stay recorded, since no cancel
-     * was attempted), and a Ticket that has since gained a remote sticky is
-     * owned by the sticky paths.
+     * `dispatchRemote` then holds the later body until they settle. The record
+     * is consumed only when a dispatch-time re-send to the owning node
+     * *succeeds*; a dispatch to a different node leaves it in place, and a lost
+     * same-node re-send also leaves it so a further later Ticket on the owning
+     * node can resend. The local replacement's own no-sticky `releaseSlot`
+     * backstop owns any later attempt. Paused or approval-held Tickets are left
+     * alone (and stay recorded, since no cancel was attempted), and a Ticket
+     * that has since gained a remote sticky is owned by the sticky paths.
      */
     const resendOrphanedRemoteCancels = (node: string, dispatchingTicketId: string): void => {
       // No committed state to re-derive targets from after `finish()` closes
@@ -968,8 +973,18 @@ export class Runtime {
         // that node can still resend it.
         const targets = endedRemoteAssignments(ticket).filter(target => target.node === node)
         if (targets.length === 0) continue
-        orphanedRemoteTickets.delete(ticketId)
-        for (const target of targets) sendEndedRemoteCancel(ticketId, target)
+        // Keep the record in place while these sends are in flight and only
+        // consume it once every one succeeds. A lost send (fail-soft 502) must
+        // leave the record so a *further* later dispatch to this node can
+        // resend; deleting synchronously before the send settles would burn it
+        // on a resend that was itself lost. A concurrent same-node dispatch may
+        // start a duplicate cancel while this one is in flight, which is fine:
+        // the Worker ignores a cancel for an Assignment it already dropped, and
+        // `settleRemoteCancelSendsToNode` orders the later body after both.
+        const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
+        void Promise.all(sends).then(outcomes => {
+          if (outcomes.every(Boolean)) orphanedRemoteTickets.delete(ticketId)
+        })
       }
     }
     /**
