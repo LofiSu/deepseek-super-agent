@@ -603,4 +603,105 @@ describe('Runtime remote mesh cancel releases capacity', () => {
 
     await shutdown(runtime)
   }, 60_000)
+
+  it('cancels the ended remote Assignment when recovery releases a pending replacement', async () => {
+    const assignments: RemoteMeshAssignmentEvent[] = []
+    const cancels: RemoteMeshAssignmentCancelEvent[] = []
+    const workerHandler = createRemoteMeshHandler({
+      localPeerId: WORKER_PEER,
+      replayCache: createA2AReplayCache(),
+      resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+      onAssignment: (event) => {
+        assignments.push(event)
+        return undefined
+      },
+      onAssignmentCancel: (event) => {
+        cancels.push(event)
+        return undefined
+      },
+    })
+    const server = createServer(workerHandler)
+    servers.push(server)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = server.address()
+    if (typeof address !== 'object' || address === null) throw new Error('worker bind failed')
+    const workerUrl = `http://127.0.0.1:${address.port}/a2a`
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-recovery-target-'))
+    homes.push(home)
+    const runtime = runtimeFor(home, holdingModel(new Map()))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    // Occupy the only local slot so placement must choose the remote node.
+    expect(runtime.placement.local.pickNode('slot-blocker')?.id).toBe(HOST_PEER)
+
+    const ticketId = createTicket(runtime, 'cancel_recovery_target')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'ticket to reach the remote inbox',
+    )
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    const armed = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+
+    // Real restart recovery ends the running Assignment, appends a pending
+    // replacement, and queues the release microtask. The pending replacement is
+    // visible before `releaseSlot` starts and is deliberately not live.
+    const recovered = runtime.engine.recoverInterrupted()
+    expect(recovered.map(item => item.ticketId)).toContain(ticketId)
+    const afterRecovery = loadTicket(runtime, ticketId)
+    const ended = afterRecovery.assignments.find(item => item.id === armed.id)!
+    expect(ended.state).toBe('ended')
+    const replacement = afterRecovery.assignments.at(-1)!
+    expect(replacement.id).not.toBe(armed.id)
+    expect(replacement.state).toBe('pending')
+    expect(replacement.node).toBeUndefined()
+    expect(replacement.startedAt).toBeUndefined()
+
+    await waitFor(
+      () => cancels.some(event => event.ticketId === ticketId),
+      5_000,
+      'inbox to receive the cancel for the ended Assignment',
+    )
+    // The unplaced pending replacement is not live, so the sticky slot is
+    // conservatively released after the cancel settles.
+    await waitFor(
+      () => runtime.placement.remote?.hasTicketAssignment(ticketId) === false,
+      5_000,
+      'sticky remote slot to be released',
+    )
+    await waitFor(
+      () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+      5_000,
+      'remote capacity to be released',
+    )
+
+    // The authenticated cancel must target the Assignment that ran on the
+    // worker, not the pending replacement the worker never received.
+    const cancel = cancels.find(event => event.ticketId === ticketId)
+    expect(cancel?.assignmentId).toBe(armed.id)
+    expect(cancel?.assignmentId).not.toBe(replacement.id)
+
+    const after = loadTicket(runtime, ticketId)
+    const latest = after.assignments.at(-1)!
+    expect(latest.id).toBe(replacement.id)
+    expect(latest.state).toBe('pending')
+    expect(after.ended).toBeUndefined()
+
+    await shutdown(runtime)
+  }, 60_000)
 })

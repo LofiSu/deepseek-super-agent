@@ -758,7 +758,19 @@ export class Runtime {
           // blind `release` here would steal the slot the replacement now runs
           // on. Re-read the committed Ticket and apply the same live-replacement
           // predicate as the synchronous keep-slot branch above.
-          void placement.cancelRemote(ticketId, assignmentId, { release: false })
+          //
+          // Cancel the Assignment that actually ran remotely and is being ended
+          // or superseded. `latest` can be a not-yet-live pending replacement
+          // (for example `recoverInterrupted` appends A2 before releasing A1's
+          // slot): authenticating the cancel for that pending id would leave the
+          // Assignment still running on the worker untouched. When `latest` is
+          // still open and a predecessor already ended, that predecessor owns
+          // the remote reservation. When `latest` itself is the ended Assignment
+          // (normal report/retry) keep targeting it, not an older predecessor.
+          const cancelAssignmentId = latest?.state !== 'ended' && ended !== undefined
+            ? ended.id
+            : assignmentId
+          void placement.cancelRemote(ticketId, cancelAssignmentId, { release: false })
             .catch(error => {
               log.info(
                 `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
