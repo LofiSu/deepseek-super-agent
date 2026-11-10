@@ -165,19 +165,28 @@ export class WorkerPlacement {
    * send. Pass `{ release: false }` to tell the remote worker to stop without
    * clearing the sticky reservation, so a live replacement that already owns
    * the ticket's remote slot keeps its capacity.
+   *
+   * `opts.nodeId` sends the cancel to that specific registered node, which lets
+   * a superseded historical Assignment be cancelled on the worker that still
+   * holds it even when the Ticket's sticky reservation moved elsewhere. The
+   * sticky slot remains the single owner of keep-vs-release.
    */
   async cancelRemote(
     ticketId: string,
     assignmentId: string,
-    opts?: { release?: boolean },
+    opts?: { release?: boolean; nodeId?: string },
   ): Promise<void> {
     const release = opts?.release ?? true
-    if (!this.remote?.hasTicketAssignment(ticketId)) {
+    const nodeId = opts?.nodeId
+    // An explicit node target does not depend on a sticky reservation: the
+    // historical worker must be told to stop regardless of where the Ticket
+    // currently sits.
+    if (nodeId === undefined && !this.remote?.hasTicketAssignment(ticketId)) {
       if (release) this.release(ticketId)
       return
     }
     try {
-      await this.remote.dispatchCancel(ticketId, assignmentId, { release })
+      await this.remote?.dispatchCancel(ticketId, assignmentId, { release, ...(nodeId ? { nodeId } : {}) })
     } finally {
       // Release both registries: a leftover local sticky from a prior race must
       // not leak local capacity after the remote assignment is cancelled.

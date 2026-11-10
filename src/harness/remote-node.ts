@@ -510,21 +510,29 @@ export class RemoteMeshRegistry {
    * that already owns the ticket's slot, even when the old target is
    * unreachable. No transport error is ever thrown; the returned delivery never
    * carries peer-supplied error text or a secret.
+   *
+   * `opts.nodeId` targets a specific registered node instead of the Ticket's
+   * current sticky reservation. Historical Assignment cancels use it so the
+   * worker that still holds an older Assignment learns to stop it even after
+   * the Ticket moved to a different remote node. An unknown or ineligible
+   * explicit target stays fail-soft and never touches the live sticky slot.
    */
   async dispatchCancel(
     ticketId: string,
     assignmentId: string,
-    opts?: { release?: boolean },
+    opts?: { release?: boolean; nodeId?: string },
   ): Promise<A2ADelivery | undefined> {
     if (!nonEmptyString(ticketId) || !nonEmptyString(assignmentId)) return undefined
     const release = opts?.release ?? true
-    const nodeId = this.assignments.get(ticketId)
+    const sticky = this.assignments.get(ticketId)
+    const nodeId = opts?.nodeId ?? sticky
     if (nodeId === undefined) return undefined
     const node = this.nodes.get(nodeId)
     if (!node || !this.eligible(node, this.clock())) {
       // A keep-slot cancel must leave the sticky map alone even when the
-      // assigned node is offline/stale/unknown.
-      if (release) this.assignments.delete(ticketId)
+      // assigned node is offline/stale/unknown. An explicit historical target
+      // is not the sticky reservation, so it must never clear that slot.
+      if (release && nodeId === sticky) this.assignments.delete(ticketId)
       return undefined
     }
 
@@ -539,8 +547,9 @@ export class RemoteMeshRegistry {
       transport = this.transportFor(node)
     } catch {
       // Same keep-assignment contract as the ineligible-target branch above:
-      // only a releasing cancel frees the slot before the send.
-      if (release) this.assignments.delete(ticketId)
+      // only a releasing cancel frees the slot before the send, and only when
+      // it targets the sticky reservation itself.
+      if (release && nodeId === sticky) this.assignments.delete(ticketId)
       return failedDelivery(envelope)
     }
 

@@ -246,12 +246,12 @@ interface WorkerInbox {
   url: string
 }
 
-async function startWorkerInbox(): Promise<WorkerInbox> {
+async function startWorkerInbox(localPeerId = WORKER_PEER): Promise<WorkerInbox> {
   const assignments: RemoteMeshAssignmentEvent[] = []
   const cancels: RemoteMeshAssignmentCancelEvent[] = []
   const stamps: InboxStamp[] = []
   const workerHandler = createRemoteMeshHandler({
-    localPeerId: WORKER_PEER,
+    localPeerId,
     replayCache: createA2AReplayCache(),
     resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
     onAssignment: (event) => {
@@ -2187,5 +2187,124 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     } finally {
       process.off('unhandledRejection', onUnhandledRejection)
     }
+  }, 60_000)
+
+  it('cancels a superseded remote Assignment on its own node after a lost cancel moved the Ticket', async () => {
+    // Two eligible remote workers, both capacity 1 and matching the required
+    // capability. N1 is registered first, so placement prefers it.
+    const inboxN1 = await startWorkerInbox()
+    const inboxN2 = await startWorkerInbox('cancel-pump-worker-2')
+    // A cancel-dropping proxy in front of N1 faithfully loses A1's cancel: the
+    // send settles (502) but the worker never sees it.
+    const proxy = await startCancelDroppingProxy(inboxN1.url)
+
+    const REQUIRED_CAPABILITY = 'cancel-cross-node-routing'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-cross-node-routing-'))
+    homes.push(home)
+    const nodeN1 = {
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    const nodeN2 = {
+      id: 'cancel-pump-node-2',
+      url: inboxN2.url,
+      peerId: 'cancel-pump-worker-2',
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    const runtime = runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode(nodeN1)
+    runtime.placement.registerRemoteNode(nodeN2)
+    runtime.start({ assessPending: false })
+
+    const ticketId = createTicket(runtime, 'cancel_cross_node_routing')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => inboxN1.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach N1',
+    )
+    const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(a1.state).toBe('running')
+
+    // Production failed-report path: A1 ends, the Ticket stays open. The proxy
+    // answers and drops A1's cancel, so after the failed send settles
+    // keep-vs-release conservatively frees T1's N1 sticky slot.
+    proxy.dropping = true
+    expect(runtime.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'remote worker failed',
+      deliver: false,
+    }).surfaced).toBe(false)
+    expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
+    await waitFor(
+      () => proxy.dropped.some(item => item.assignmentId === a1.id),
+      5_000,
+      'A1 cancel to be dropped at the N1 proxy',
+    )
+    expect(inboxN1.cancels).toHaveLength(0)
+    await waitFor(
+      () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+      5_000,
+      'N1 sticky slot to be released after the lost cancel',
+    )
+
+    // Occupy N1 with a different Ticket so T1's retry cannot stick there.
+    const otherId = createTicket(runtime, 'cancel_cross_node_occupier')
+    await runtime.harness.launch(loadTicket(runtime, otherId))
+    await waitFor(
+      () => inboxN1.assignments.some(event => event.ticketId === otherId),
+      5_000,
+      'the occupying Ticket to reach N1',
+    )
+    const other = loadTicket(runtime, otherId).assignments.at(-1)!
+    expect(other.node).toBe(REMOTE_NODE_ID)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // Retry T1 while N1 is full: the replacement is placed on N2, so the
+    // Ticket's sticky reservation now differs from A1's recorded node.
+    const retried = await runtime.retry(ticketId, 'cross-node-retry')
+    expect(retried).toBeDefined()
+    await waitFor(
+      () => inboxN2.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A2 to reach N2',
+    )
+    const a2 = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(a2.id).not.toBe(a1.id)
+    expect(a2.node).toBe('cancel-pump-node-2')
+    expect(a2.state).toBe('running')
+    expect(loadTicket(runtime, ticketId).assignments.find(item => item.id === a1.id)?.state)
+      .toBe('ended')
+    expect(runtime.placement.remoteNodeFor(ticketId)).toBe('cancel-pump-node-2')
+
+    // Cancel forwarding is restored. Ending A2 must cancel A2 on N2 *and* the
+    // still-held A1 on N1: `assignment_cancel` follows the node recorded on the
+    // Assignment, not the Ticket's current sticky reservation.
+    proxy.dropping = false
+    expect(runtime.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'remote worker result timeout',
+      deliver: false,
+    }).surfaced).toBe(false)
+
+    await waitFor(
+      () => inboxN1.cancels.some(event => event.assignmentId === a1.id)
+        && inboxN2.cancels.some(event => event.assignmentId === a2.id),
+      5_000,
+      'A1 cancel to reach N1 and A2 cancel to reach N2',
+    )
+    // The worker that still held A1 was told to stop it. A1's cancel is not
+    // required to reach N2; delivering it there instead is exactly the defect.
+    expect(inboxN1.cancels.some(event => event.assignmentId === a1.id)).toBe(true)
+    expect(inboxN2.cancels.some(event => event.assignmentId === a2.id)).toBe(true)
+
+    await shutdown(runtime)
   }, 60_000)
 })

@@ -888,15 +888,25 @@ export class Runtime {
             // Still tell every ended remote worker Assignment to stop, but keep
             // the sticky reservation so the live replacement does not lose its
             // slot. A Worker may still hold an older predecessor whose cancel
-            // was lost, so send them all; duplicates stay fail-soft.
-            const keepSlotSends = supersededRemoteAssignments(ticket).map(target =>
-              placement.cancelRemote(ticketId, target.id, { release: false })
-                .catch(error => {
-                  log.info(
-                    `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-                  )
-                }))
-            trackRemoteCancelSends(ticketId, keepSlotSends, cancelNode)
+            // was lost, so send them all; duplicates stay fail-soft. Each
+            // cancel targets the node recorded on that Assignment: the sticky
+            // reservation may have moved to a different remote node after an
+            // earlier lost cancel freed it, and the worker that still holds the
+            // old Assignment is the one that must stop.
+            const keepSlotSends = supersededRemoteAssignments(ticket).map(target => {
+              const send = placement.cancelRemote(ticketId, target.id, {
+                release: false,
+                ...(target.node !== undefined ? { nodeId: target.node } : {}),
+              }).catch(error => {
+                log.info(
+                  `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+                )
+              })
+              // Attribute the batch to the node it actually targets so a later
+              // dispatch to that node can order after it.
+              trackRemoteCancelSends(ticketId, [send], target.node ?? cancelNode)
+              return send
+            })
             void Promise.all(keepSlotSends).finally(() => notifyHarnessReleased(ticketId))
             return
           }
@@ -929,14 +939,25 @@ export class Runtime {
             : supersededEnded.length > 0
               ? [...supersededEnded.map(item => item.id), ...(assignmentId ? [assignmentId] : [])]
               : assignmentId ? [assignmentId] : []
-          const cancelSends = cancelAssignmentIds.map(id =>
-            placement.cancelRemote(ticketId, id, { release: false })
-              .catch(error => {
-                log.info(
-                  `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-                )
-              }))
-          trackRemoteCancelSends(ticketId, cancelSends, cancelNode)
+          // Resolve each id back to its Assignment so the cancel goes to the
+          // node that actually ran it (`assignment.node`), not the Ticket's
+          // current sticky reservation. A lost earlier cancel can conservatively
+          // free the old slot and let a retry land on a different remote node;
+          // the worker still holding the older Assignment is on the old node.
+          const byId = new Map((ticket?.assignments ?? []).map(item => [item.id, item]))
+          const cancelSends = cancelAssignmentIds.map(id => {
+            const target = byId.get(id)
+            const send = placement.cancelRemote(ticketId, id, {
+              release: false,
+              ...(target?.node !== undefined ? { nodeId: target.node } : {}),
+            }).catch(error => {
+              log.info(
+                `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+              )
+            })
+            trackRemoteCancelSends(ticketId, [send], target?.node ?? cancelNode)
+            return send
+          })
           void Promise.all(cancelSends)
             .finally(() => {
               // `Runtime.finish()` (or a crash-simulation / teardown that closes
