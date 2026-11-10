@@ -146,6 +146,11 @@ export class WorkerPlacement {
     return this.remote?.hasTicketAssignment(ticketId) ?? false
   }
 
+  /** Node currently holding the ticket's sticky remote reservation, if any. */
+  remoteNodeFor(ticketId: string): string | undefined {
+    return this.remote?.nodeFor(ticketId)
+  }
+
   /**
    * Restore a persisted remote sticky reservation without picking. Used by
    * startup recovery so a cancel can reach the node that actually ran the

@@ -485,6 +485,17 @@ export class RemoteMeshRegistry {
   }
 
   /**
+   * The node currently holding the ticket's sticky reservation, if any.
+   *
+   * Read-only: used to attribute an in-flight fail-soft `assignment_cancel` to
+   * the node it targets, so a later dispatch to that same node can wait for it.
+   * No placement, capacity, or cancel-transport behavior changes.
+   */
+  nodeFor(ticketId: string): string | undefined {
+    return this.assignments.get(ticketId)
+  }
+
+  /**
    * Propagate ticket end / local cancel to the assigned remote worker inbox.
    *
    * `delivered` keeps the in-flight assignment. Any outcome after the send

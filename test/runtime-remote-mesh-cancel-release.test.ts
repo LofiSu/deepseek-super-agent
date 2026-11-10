@@ -1960,4 +1960,157 @@ describe('Runtime remote mesh cancel releases capacity', () => {
 
     await shutdown(runtimeC)
   }, 60_000)
+
+  it('cancels an older Ticket before dispatching a later Ticket to the same worker after a crash', async () => {
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDelayingProxy(inbox.url, 400)
+
+    // Capacity 2 is the point of this test: unlike the capacity-1 leftover
+    // case, the ended Ticket's sticky reservation does not block a different
+    // Ticket from being placed, so only a node-level cancel barrier can stop
+    // the later body from overtaking the delayed cancel.
+    const REQUIRED_CAPABILITY = 'cancel-cross-ticket-restart'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-cross-ticket-restart-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 2,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    const newRuntime = (): Runtime =>
+      runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+
+    // Runtime A: A1 runs on the required-capability worker, then a production
+    // successful report ends A1 and the Ticket. Crash in the same turn so the
+    // queued `releaseSlot` never sends A1's cancel.
+    const runtimeA = newRuntime()
+    runtimeA.placement.registerRemoteNode(node)
+    runtimeA.start({ assessPending: false })
+    const ticketId = createTicket(runtimeA, 'cancel_cross_ticket_restart')
+    await runtimeA.harness.launch(loadTicket(runtimeA, ticketId))
+    await waitFor(
+      () => inbox.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach the remote inbox',
+    )
+    const a1 = loadTicket(runtimeA, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(a1.state).toBe('running')
+    expect(runtimeA.engine.report(ticketId, {
+      kind: 'ready',
+      text: 'remote done',
+      deliver: false,
+    }).surfaced).toBe(false)
+    expect(loadTicket(runtimeA, ticketId).ended).toBeDefined()
+    runtimeA.daemon.stop()
+    runtimeA.store.close()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(inbox.cancels).toHaveLength(0)
+
+    // Runtime B: start() restores the sticky from ended A1 and queues the
+    // leftover cancel. The proxy delays (never drops) its HTTP send.
+    proxy.delaying = true
+    const runtimeB = newRuntime()
+    runtimeB.placement.registerRemoteNode(node)
+    runtimeB.start({ assessPending: false })
+    expect(runtimeB.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${ticketId} assignmentId=${a1.id} node=${REMOTE_NODE_ID} state=ended`,
+    )
+    expect(runtimeB.log.text()).toContain(
+      `[recovery] remote cancel queued ticketId=${ticketId} assignmentId=${a1.id} node=${REMOTE_NODE_ID}`,
+    )
+
+    // Launch a *different* Ticket immediately, without waiting for A1's cancel
+    // to arrive. Its body must wait for that send to settle on the same node.
+    const laterId = createTicket(runtimeB, 'cancel_cross_ticket_restart_later')
+    await runtimeB.harness.launch(loadTicket(runtimeB, laterId))
+    const laterAssignment = loadTicket(runtimeB, laterId).assignments.at(-1)!
+    expect(laterAssignment.node).toBe(REMOTE_NODE_ID)
+    expect(laterAssignment.state).toBe('running')
+
+    await waitFor(
+      () => stampIndex(inbox.stamps, 'cancel', a1.id) >= 0
+        && stampIndex(inbox.stamps, 'assignment', laterAssignment.id) >= 0,
+      10_000,
+      'A1 cancel and the later Ticket body to reach the worker',
+    )
+    const cancelIndex = stampIndex(inbox.stamps, 'cancel', a1.id)
+    const laterIndex = stampIndex(inbox.stamps, 'assignment', laterAssignment.id)
+    // The proxy really held A1's cancel rather than dropping it.
+    expect(proxy.held.some(item => item.assignmentId === a1.id)).toBe(true)
+    // A spare-capacity worker must never hold the ended A1 beside the later
+    // Ticket's Assignment: the older Ticket's cancel is observed no later.
+    expect(cancelIndex).toBeLessThanOrEqual(laterIndex)
+    expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[laterIndex].at)
+
+    await shutdown(runtimeB)
+  }, 60_000)
+
+  it('cancels an older Ticket before dispatching a later Ticket to the same worker in the same process', async () => {
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDelayingProxy(inbox.url, 400)
+
+    // Same spare-capacity hole without a restart: a successful report queues
+    // A1's cancel, and a later Ticket is launched on the same worker in the
+    // same turn. One node-level barrier must cover this path too.
+    const REQUIRED_CAPABILITY = 'cancel-cross-ticket-in-process'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-cross-ticket-in-process-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 2,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    const runtime = runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode(node)
+    runtime.start({ assessPending: false })
+
+    const ticketId = createTicket(runtime, 'cancel_cross_ticket_in_process')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => inbox.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach the remote inbox',
+    )
+    const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(a1.state).toBe('running')
+
+    // Delay A1's cancel, then end A1 and the Ticket through the production
+    // report path. The queued `releaseSlot` send is still in flight when the
+    // later Ticket is launched below.
+    proxy.delaying = true
+    expect(runtime.engine.report(ticketId, {
+      kind: 'ready',
+      text: 'remote done',
+      deliver: false,
+    }).surfaced).toBe(false)
+    expect(loadTicket(runtime, ticketId).ended).toBeDefined()
+
+    const laterId = createTicket(runtime, 'cancel_cross_ticket_in_process_later')
+    await runtime.harness.launch(loadTicket(runtime, laterId))
+    const laterAssignment = loadTicket(runtime, laterId).assignments.at(-1)!
+    expect(laterAssignment.node).toBe(REMOTE_NODE_ID)
+    expect(laterAssignment.state).toBe('running')
+
+    await waitFor(
+      () => stampIndex(inbox.stamps, 'cancel', a1.id) >= 0
+        && stampIndex(inbox.stamps, 'assignment', laterAssignment.id) >= 0,
+      10_000,
+      'A1 cancel and the later Ticket body to reach the worker',
+    )
+    const cancelIndex = stampIndex(inbox.stamps, 'cancel', a1.id)
+    const laterIndex = stampIndex(inbox.stamps, 'assignment', laterAssignment.id)
+    expect(proxy.held.some(item => item.assignmentId === a1.id)).toBe(true)
+    expect(cancelIndex).toBeLessThanOrEqual(laterIndex)
+    expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[laterIndex].at)
+
+    await shutdown(runtime)
+  }, 60_000)
 })

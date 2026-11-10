@@ -714,12 +714,25 @@ export class Runtime {
      */
     const remoteCancelSends = new Map<string, Set<Promise<void>>>()
     /**
+     * The same fail-soft cancel batches, additionally keyed by the node they
+     * target (value = owning ticketId). `remoteCancelSends` is per Ticket, so a
+     * later *different* Ticket launched onto the same worker cannot use it to
+     * order against an older Ticket's delayed cancel; this map is what that
+     * cross-Ticket wait reads. Only observers are added here, the cancel
+     * transport and slot accounting are untouched.
+     */
+    const remoteCancelSendsByNode = new Map<string, Map<Promise<void>, string>>()
+    /**
      * Per-Ticket gate that holds a replacement's remote assignment body until
      * the superseded Assignment's cancels settle. Placement already happened,
      * so slot accounting is untouched; only the wire body waits.
      */
     const remoteDispatchBarriers = new Map<string, Promise<void>>()
-    const trackRemoteCancelSends = (ticketId: string, sends: Promise<unknown>[]): void => {
+    const trackRemoteCancelSends = (
+      ticketId: string,
+      sends: Promise<unknown>[],
+      node: string | undefined,
+    ): void => {
       if (sends.length === 0) return
       let pending = remoteCancelSends.get(ticketId)
       if (!pending) {
@@ -728,12 +741,62 @@ export class Runtime {
       }
       const batch = Promise.allSettled(sends).then(() => undefined)
       pending.add(batch)
+      if (node !== undefined) {
+        let byNode = remoteCancelSendsByNode.get(node)
+        if (!byNode) {
+          byNode = new Map()
+          remoteCancelSendsByNode.set(node, byNode)
+        }
+        byNode.set(batch, ticketId)
+      }
       void batch.finally(() => {
         pending.delete(batch)
         if (pending.size === 0 && remoteCancelSends.get(ticketId) === pending) {
           remoteCancelSends.delete(ticketId)
         }
+        if (node !== undefined) {
+          const nodePending = remoteCancelSendsByNode.get(node)
+          nodePending?.delete(batch)
+          if (nodePending && nodePending.size === 0
+            && remoteCancelSendsByNode.get(node) === nodePending) {
+            remoteCancelSendsByNode.delete(node)
+          }
+        }
       })
+    }
+    /**
+     * Wait until every fail-soft remote cancel send to `node` that belongs to a
+     * *different* Ticket has settled.
+     *
+     * The per-Ticket dispatch barrier fences a replacement against its own
+     * Ticket's cancels. It cannot see a later Ticket placed on the same worker,
+     * so with spare worker capacity that body would reach the worker while it
+     * still holds an older Ticket's ended Assignment. This is the cross-Ticket
+     * counterpart; only the wire body waits, placement and keep-vs-release are
+     * unchanged.
+     *
+     * The current Ticket's batches are excluded on purpose: `Runtime.retry`
+     * deliberately skips same-Ticket sends already in flight when it was called
+     * (so a held keep-slot cancel cannot deadlock a relaunch), and the
+     * per-Ticket barrier owns that ordering. Sends are fail-soft, so an
+     * unregistered, ineligible, or offline target settles instead of hanging
+     * the dispatch. The yield first makes a `releaseSlot` microtask queued in
+     * the same turn visible before deciding there is nothing to wait for.
+     */
+    const settleRemoteCancelSendsToNode = async (
+      node: string,
+      ticketId: string,
+    ): Promise<void> => {
+      await Promise.resolve()
+      for (;;) {
+        const byNode = remoteCancelSendsByNode.get(node)
+        if (!byNode) return
+        const pending = [...byNode]
+          .filter(([, owner]) => owner !== ticketId)
+          .map(([batch]) => batch)
+        if (pending.length === 0) return
+        await Promise.allSettled(pending)
+      }
     }
     const notifyHarnessReleased = (ticketId: string): void => {
       try {
@@ -789,6 +852,10 @@ export class Runtime {
         const latest = ticket?.assignments.at(-1)
         const assignmentId = latest?.id
         if (assignmentId && placement.remoteHasTicket(ticketId)) {
+          // Attribute these fail-soft cancels to the node they target while the
+          // sticky reservation still exists. A later different Ticket placed on
+          // the same node reads this to order its assignment body after them.
+          const cancelNode = placement.remoteNodeFor(ticketId)
           // `releaseSlot` is also reached from `releaseNode` while the only
           // Assignment is still the live running one (the Worker failed before
           // it started). A newer open Assignment alone is therefore not proof
@@ -829,7 +896,7 @@ export class Runtime {
                     `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
                   )
                 }))
-            trackRemoteCancelSends(ticketId, keepSlotSends)
+            trackRemoteCancelSends(ticketId, keepSlotSends, cancelNode)
             void Promise.all(keepSlotSends).finally(() => notifyHarnessReleased(ticketId))
             return
           }
@@ -869,7 +936,7 @@ export class Runtime {
                   `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
                 )
               }))
-          trackRemoteCancelSends(ticketId, cancelSends)
+          trackRemoteCancelSends(ticketId, cancelSends, cancelNode)
           void Promise.all(cancelSends)
             .finally(() => {
               const current = store.getDoc<Ticket>('ticket', ticketId)
@@ -1103,6 +1170,13 @@ export class Runtime {
           remoteDispatchBarriers.delete(ticket.id)
           await barrier
         }
+        // The per-Ticket gate above only covers this Ticket's own cancels. A
+        // *different* Ticket may have just ended (in this process, or before a
+        // restart) and its fail-soft cancel to this same node may still be in
+        // flight. With spare worker capacity the new body would otherwise reach
+        // the worker while it still holds the old Assignment. Hold only this
+        // body; placement and the keep-vs-release settle path already ran.
+        await settleRemoteCancelSendsToNode(node, ticket.id)
         const assignment = ticket.assignments.at(-1)
         if (!assignment) return
         const payload = {
