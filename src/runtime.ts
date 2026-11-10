@@ -1611,8 +1611,13 @@ export class Runtime {
     for (const ticketId of restoredFromEnded) {
       if (newlyEnded.has(ticketId)) continue
       const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
-      if (!ticket || ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) continue
+      // A successful report can already have ended the Ticket before the crash;
+      // the lost cancel for its older ended remote predecessor still has to go
+      // out. `endedLatestRemotePredecessor` below requires that persisted
+      // pattern, so terminal Tickets without it stay skipped.
+      if (!ticket || ticket.collab?.paused || pendingApproval(ticket)) continue
       const predecessor = this.leftoverRemotePredecessor(ticket)
+        ?? this.endedLatestRemotePredecessor(ticket)
       if (!predecessor) continue
       this.log.info(
         `[recovery] remote cancel queued ticketId=${ticketId} assignmentId=${predecessor.id} node=${predecessor.node}`,
@@ -1638,6 +1643,28 @@ export class Runtime {
   }
 
   /**
+   * The older ended remote Assignment a Ticket carries when `latest` itself is
+   * already ended. This is the crash window after an in-process report/timeout
+   * (or a successful report ending the Ticket) queued the 30903c9 cancel for
+   * every older ended remote and died before the HTTP send: `latest` was the
+   * ended row, so once the process is gone neither recovery nor
+   * `leftoverRemotePredecessor` sees a later open Assignment to justify a
+   * cancel. The persisted older ended remote row is the recoverable signal.
+   *
+   * The Ticket may still be open (failed/timeout report) or already terminal
+   * (successful report); paused and approval-held Tickets are filtered by the
+   * caller like the rest of recovery.
+   */
+  private endedLatestRemotePredecessor(ticket: Ticket): Assignment | undefined {
+    const latest = ticket.assignments.at(-1)
+    if (!latest || latest.state !== 'ended') return undefined
+    return ticket.assignments
+      .slice(0, -1)
+      .reverse()
+      .find(item => item.state === 'ended' && item.node !== undefined && this.placement.isRemote(item.node))
+  }
+
+  /**
    * Rebuild the remote sticky map from persisted Assignment.node. Startup
    * recovery on a new Runtime otherwise has no reservation, so `releaseSlot`
    * takes the local branch and the worker that still runs the interrupted
@@ -1645,33 +1672,44 @@ export class Runtime {
    * remote placement is restored: the in-process worker died with the process,
    * and only a remote peer needs a cancel. This trusts persisted truth and
    * intentionally skips `pick`/eligibility so a now-stale peer is still
-   * cancelled (the cancel send stays fail-soft). Tickets that recovery leaves
-   * untouched — ended, paused, or approval-held — are skipped as well.
+   * cancelled (the cancel send stays fail-soft). Paused and approval-held
+   * Tickets are skipped as well. A terminal Ticket is only considered for the
+   * ended-latest lost-cancel window below, never for a live running placement.
    *
    * Returns the Tickets whose reservation was rebuilt from an already-ended
-   * remote Assignment superseded by a later open one. That is the narrower
-   * crash window: recovery committed the end, so this `start()` will not end
-   * the predecessor again and must still send its cancel.
+   * remote Assignment rather than a running one. Two crash windows leave that
+   * row behind: recovery ended the predecessor but died before the queued
+   * `releaseSlot` sent its cancel (a later open Assignment exists), or the
+   * process itself ended `latest`/the Ticket through a report and died before
+   * its queued cancels went out (no later open Assignment exists). Both must
+   * still send the lost cancel on this `start()`.
    */
   private restoreRemoteStickyReservations(): Set<string> {
     const restoredFromEnded = new Set<string>()
     for (const ticket of this.store.listDocs<Ticket>('ticket')) {
-      if (ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) continue
-      for (const assignment of ticket.assignments) {
-        if (assignment.state !== 'running' || !assignment.node) continue
-        if (!this.placement.isRemote(assignment.node)) continue
-        if (!this.placement.restoreRemoteTicket(ticket.id, assignment.node)) continue
-        this.log.info(
-          `[recovery] remote reservation restored ticketId=${ticket.id} assignmentId=${assignment.id} node=${assignment.node}`,
-        )
+      if (ticket.collab?.paused || pendingApproval(ticket)) continue
+      // Only an open Ticket can still own a live placement; a terminal Ticket
+      // has no running Assignment to rebuild from.
+      if (!ticket.ended) {
+        for (const assignment of ticket.assignments) {
+          if (assignment.state !== 'running' || !assignment.node) continue
+          if (!this.placement.isRemote(assignment.node)) continue
+          if (!this.placement.restoreRemoteTicket(ticket.id, assignment.node)) continue
+          this.log.info(
+            `[recovery] remote reservation restored ticketId=${ticket.id} assignmentId=${assignment.id} node=${assignment.node}`,
+          )
+        }
       }
       // A crash in the window after recovery committed A1 `ended` but before
       // the queued `releaseSlot` sent its cancel leaves an ended remote
-      // predecessor with a later open Assignment and no running one. Rebuild
-      // sticky from that predecessor too so the next `releaseSlot` can reach
-      // the worker that still holds it. `bind` stays idempotent and never
-      // clobbers a reservation already bound to a different node.
+      // predecessor with a later open Assignment and no running one. The same
+      // lost-cancel window exists when `latest` itself is the ended row (an
+      // in-process failed/timeout report, or a successful report that ended the
+      // Ticket). Rebuild sticky from that predecessor too so the next
+      // `releaseSlot` can reach the worker that still holds it. `bind` stays
+      // idempotent and never clobbers a reservation bound to a different node.
       const predecessor = this.leftoverRemotePredecessor(ticket)
+        ?? this.endedLatestRemotePredecessor(ticket)
       if (!predecessor?.node) continue
       if (!this.placement.restoreRemoteTicket(ticket.id, predecessor.node)) continue
       restoredFromEnded.add(ticket.id)

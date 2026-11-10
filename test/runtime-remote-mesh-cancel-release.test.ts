@@ -282,7 +282,7 @@ async function setupLostA1ThenRunningA2(slug: string) {
   // The dropped cancel never reached the Worker.
   expect(cancels).toHaveLength(0)
 
-  return { assignments, cancels, proxy, runtimeB, ticketId, a1, a2 }
+  return { assignments, cancels, proxy, runtimeB, ticketId, a1, a2, home, node, newRuntime }
 }
 
 afterEach(async () => {
@@ -1324,5 +1324,116 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
 
     await shutdown(runtimeB)
+  }, 60_000)
+
+  it('cancels a lost older remote Assignment when a crash loses the ended-latest cancels', async () => {
+    const { assignments, cancels, proxy, runtimeB, ticketId, a1, a2, node, newRuntime } =
+      await setupLostA1ThenRunningA2('failed-report-crash')
+
+    // Production timeout path in process B: the failed report leaves the Ticket
+    // open and ends the latest Assignment (A2) itself. 30903c9's `releaseSlot`
+    // would cancel A1 and A2, but the process dies in the same turn before the
+    // queued microtask can send either.
+    const reported = runtimeB.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'remote worker result timeout',
+      deliver: false,
+    })
+    expect(reported.surfaced).toBe(false)
+
+    const afterReport = loadTicket(runtimeB, ticketId)
+    expect(afterReport.ended).toBeUndefined()
+    expect(afterReport.assignments.at(-1)?.id).toBe(a2.id)
+    expect(afterReport.assignments.at(-1)?.state).toBe('ended')
+    expect(afterReport.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+
+    runtimeB.daemon.stop()
+    runtimeB.store.close()
+    // Let B's queued `releaseSlot` microtask run against the closed store. It
+    // cannot deliver a cancel, reproducing the crash before the HTTP send.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(cancels).toHaveLength(0)
+
+    // Process C: recovery sees no running Assignment and no pending
+    // replacement, so it ends nobody and relaunches nothing. It must still
+    // rebuild sticky from the ended remote predecessor and send the lost
+    // cancels.
+    proxy.dropping = false
+    const runtimeC = newRuntime()
+    runtimeC.placement.registerRemoteNode(node)
+    runtimeC.start({ assessPending: false })
+
+    expect(runtimeC.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${ticketId} assignmentId=${a1.id} node=${REMOTE_NODE_ID} state=ended`,
+    )
+    await waitFor(
+      () => cancels.some(event => event.ticketId === ticketId && event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the lost A1 cancel from the restarted host',
+    )
+
+    const afterStart = loadTicket(runtimeC, ticketId)
+    expect(afterStart.ended).toBeUndefined()
+    expect(afterStart.assignments.at(-1)?.id).toBe(a2.id)
+    expect(afterStart.assignments.at(-1)?.state).toBe('ended')
+
+    // A later retry may dispatch A3 onto the same Worker; A1 must not still be
+    // running uncancelled beside it.
+    const retried = await runtimeC.retry(ticketId, 'crash-window-retry')
+    expect(retried).toBeDefined()
+    expect(retried?.ended).toBeUndefined()
+    const a3 = loadTicket(runtimeC, ticketId).assignments.at(-1)!
+    expect(a3.id).not.toBe(a1.id)
+    expect(a3.id).not.toBe(a2.id)
+    await waitFor(
+      () => assignments.some(event => assignmentIdOf(event) === a3.id) || a3.state === 'running',
+      5_000,
+      'A3 to reach the remote inbox or start running',
+    )
+    expect(cancels.some(event => event.ticketId === ticketId && event.assignmentId === a1.id)).toBe(true)
+
+    await shutdown(runtimeC)
+  }, 60_000)
+
+  it('cancels a lost older remote Assignment when a crash loses the terminal Ticket cancels', async () => {
+    const { cancels, proxy, runtimeB, ticketId, a1, a2, node, newRuntime } =
+      await setupLostA1ThenRunningA2('ready-report-crash')
+
+    // A successful report ends the Ticket and A2. Both end hooks queue
+    // `releaseSlot`, but the process dies in the same turn before either
+    // microtask can send the lost A1 cancel.
+    const reported = runtimeB.engine.report(ticketId, {
+      kind: 'ready',
+      text: 'remote done',
+      deliver: false,
+    })
+    expect(reported.surfaced).toBe(false)
+
+    const afterReport = loadTicket(runtimeB, ticketId)
+    expect(afterReport.ended).toBeDefined()
+    expect(afterReport.assignments.at(-1)?.id).toBe(a2.id)
+    expect(afterReport.assignments.at(-1)?.state).toBe('ended')
+
+    runtimeB.daemon.stop()
+    runtimeB.store.close()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(cancels).toHaveLength(0)
+
+    // Process C: the Ticket is already terminal, so recovery skips it. The
+    // persisted older ended remote row must still trigger the lost A1 cancel.
+    proxy.dropping = false
+    const runtimeC = newRuntime()
+    runtimeC.placement.registerRemoteNode(node)
+    runtimeC.start({ assessPending: false })
+
+    await waitFor(
+      () => cancels.some(event => event.ticketId === ticketId && event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the lost A1 cancel even though the Ticket is terminal',
+    )
+    expect(cancels.filter(event => event.assignmentId === a1.id).length).toBeGreaterThanOrEqual(1)
+    expect(loadTicket(runtimeC, ticketId).ended).toBeDefined()
+
+    await shutdown(runtimeC)
   }, 60_000)
 })
