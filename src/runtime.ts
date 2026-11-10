@@ -983,7 +983,38 @@ export class Runtime {
         // `settleRemoteCancelSendsToNode` orders the later body after both.
         const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
         void Promise.all(sends).then(outcomes => {
-          if (outcomes.every(Boolean)) orphanedRemoteTickets.delete(ticketId)
+          // A lost same-node resend keeps the record (e240f87): a further later
+          // dispatch to this node must be able to resend it.
+          if (!outcomes.every(Boolean)) return
+          // The Store may have closed while the send was in flight. There is no
+          // committed state left to decide from, and the closed-Store path at
+          // the top of this function is a no-op; leave the record for the
+          // releaseSlot/finish paths that own shutdown.
+          if (!store.isOpen) return
+          const current = store.getDoc<Ticket>('ticket', ticketId)
+          if (!current) {
+            // No committed Ticket remains, so the record can never produce a
+            // send.
+            orphanedRemoteTickets.delete(ticketId)
+            return
+          }
+          // Paused/approval-held Tickets are never cancelled as a drive-by and
+          // stay recorded (existing policy).
+          if (current.collab?.paused || pendingApproval(current)) return
+          // A remote sticky gained since means the sticky-slot paths own this
+          // Ticket's cancels.
+          if (placement.remoteHasTicket(ticketId)) {
+            orphanedRemoteTickets.delete(ticketId)
+            return
+          }
+          // Succeeding on *this* node must not consume ended remotes recorded on
+          // another node: a later dispatch there still has to resend before its
+          // body reaches the Worker that may still hold them. Re-read committed
+          // state and only drop the record when no other node has an ended
+          // remote Assignment left.
+          const remaining = endedRemoteAssignments(current)
+            .filter(target => target.node !== node)
+          if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
         })
       }
     }
