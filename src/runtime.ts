@@ -743,9 +743,12 @@ export class Runtime {
      * owning node succeeds; a dispatch to a different node, or a lost re-send,
      * leaves it in place so that node can still resend. A Ticket that has since
      * gained a remote sticky is dropped (the sticky paths own their cancels).
-     * The no-sticky `releaseSlot` backstop also clears the record once the local
-     * replacement ends, so the set is bounded by Tickets that still have a live
-     * local replacement.
+     * The no-sticky `releaseSlot` backstop also drops the record once the local
+     * replacement ends, but only after its last-attempt cancels are actually
+     * delivered: a lost last attempt keeps the record so a later dispatch can
+     * still resend it. The set is therefore bounded by Tickets that still have
+     * a live local replacement, or whose last-attempt (or later dispatch-time)
+     * cancel has not yet been delivered.
      */
     const orphanedRemoteTickets = new Set<string>()
     const trackRemoteCancelSends = (
@@ -919,14 +922,15 @@ export class Runtime {
     const cancelEndedRemoteAssignments = (
       ticketId: string,
       ticket: Ticket | undefined = store.getDoc<Ticket>('ticket', ticketId),
-    ): void => {
+    ): { targets: Assignment[]; sends: Promise<boolean>[] } => {
       const targets = endedRemoteAssignments(ticket)
-      if (targets.length === 0) return
+      if (targets.length === 0) return { targets, sends: [] }
       // Keep the Ticket marked until the local replacement releases: this send
       // is fail-soft, so a later different Ticket placed on the same Worker may
       // still need to re-send before its own body reaches it.
       orphanedRemoteTickets.add(ticketId)
-      for (const target of targets) sendEndedRemoteCancel(ticketId, target)
+      const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
+      return { targets, sends }
     }
     /**
      * Re-send a Ticket's orphaned ended-remote cancels before a *different*
@@ -1200,10 +1204,48 @@ export class Runtime {
         // placement already sent the same fail-soft cancels (duplicates are
         // harmless). Local capacity below is still freed synchronously and
         // `finish()` never waits on the HTTP send. The replacement is ending,
-        // so this is the last attempt: drop the orphan record that let a later
-        // dispatch re-send while it was still running.
-        cancelEndedRemoteAssignments(ticketId, ticket)
-        orphanedRemoteTickets.delete(ticketId)
+        // so this is the last attempt — but a lost last attempt must not burn
+        // the orphan record: a later different Ticket placed on the same Worker
+        // still has to resend it. Consume the record only once every
+        // last-attempt send is delivered and committed state has no ended
+        // remote left that the batch did not cover.
+        const lastAttempt = cancelEndedRemoteAssignments(ticketId, ticket)
+        if (lastAttempt.sends.length === 0) {
+          // No ended-remote target exists, so the record can never produce a
+          // send.
+          orphanedRemoteTickets.delete(ticketId)
+        } else {
+          const cancelledIds = new Set(lastAttempt.targets.map(target => target.id))
+          void Promise.all(lastAttempt.sends).then(outcomes => {
+            // A lost last attempt (fail-soft 502 / rejected HTTP) keeps the
+            // record so a later dispatch can resend it before its own body.
+            if (!outcomes.every(Boolean)) return
+            // The Store may close while the send is in flight (`finish()` never
+            // waits on cancel HTTP). No committed state remains to decide
+            // from; leave the record rather than throw on a closed handle.
+            if (!store.isOpen) return
+            const current = store.getDoc<Ticket>('ticket', ticketId)
+            if (!current) {
+              // No committed Ticket remains, so the record can never produce a
+              // send.
+              orphanedRemoteTickets.delete(ticketId)
+              return
+            }
+            // A Ticket that has since gained a remote sticky is owned by the
+            // sticky-slot paths.
+            if (placement.remoteHasTicket(ticketId)) {
+              orphanedRemoteTickets.delete(ticketId)
+              return
+            }
+            // Only ended remotes this delivered batch did not cover still need
+            // a later resend (for example an Assignment appended after the
+            // snapshot). Re-read committed state rather than trusting the
+            // snapshot.
+            const remaining = endedRemoteAssignments(current)
+              .filter(target => !cancelledIds.has(target.id))
+            if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
+          })
+        }
         placement.release(ticketId)
       } catch (error) {
         log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)

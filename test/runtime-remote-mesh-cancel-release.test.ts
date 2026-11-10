@@ -3128,4 +3128,184 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       await shutdown(runtime)
     }
   }, 60_000)
+
+  it('keeps a lost last-attempt cancel after the local replacement ends', async () => {
+    // One remote worker behind a cancel-dropping proxy, local mesh capacity 1.
+    // A1 overflows to N1, loses its failed-report cancel and T1's remote sticky
+    // is released. A local-first retry places A2 on the host; its placement-time
+    // A1 cancel is lost too. Then A2 ends through the production failed-report
+    // path while forwarding is still off: `releaseSlot` starts the last-attempt
+    // A1 cancel and that send is lost as well. Consuming the orphan record there
+    // would leave no resend path, so a later Ticket reaching N1 would find the
+    // Worker still holding A1.
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDroppingProxy(inbox.url)
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-lost-last-attempt-'))
+    homes.push(home)
+    const held = new Map<string, Gate>()
+    const runtime = runtimeFor(home, holdingModel(held))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      // Hold the only local slot so T1 has to overflow to N1.
+      const blockerId = createTicket(runtime, 'cancel_lost_last_attempt_blocker')
+      held.set(blockerId, gate())
+      void runtime.harness.launch(loadTicket(runtime, blockerId))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held',
+      )
+
+      const ticketId = createTicket(runtime, 'cancel_lost_last_attempt')
+      await runtime.harness.launch(loadTicket(runtime, ticketId))
+      await waitFor(
+        () => inbox.assignments.some(event => event.ticketId === ticketId),
+        5_000,
+        'A1 to reach N1',
+      )
+      const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a1.node).toBe(REMOTE_NODE_ID)
+      expect(a1.state).toBe('running')
+
+      // Lose A1's failed-report cancel. After the failed send settles
+      // keep-vs-release frees T1's remote sticky slot; the worker holds A1.
+      proxy.dropping = true
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'remote worker failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === a1.id),
+        5_000,
+        'A1 cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+        5_000,
+        'the N1 sticky slot to be released after the lost cancel',
+      )
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+
+      // End the blocker and free the local slot.
+      expect(runtime.engine.report(blockerId, {
+        kind: 'ready',
+        text: 'blocker done',
+        deliver: false,
+      }).surfaced).toBe(false)
+      held.get(blockerId)?.release()
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 0,
+        5_000,
+        'the local slot to be released after the holder ends',
+      )
+
+      // Local-first retry places A2 on the host. Hold A2's worker turn so
+      // `releaseSlot` does not run yet, then wait for the placement-time A1
+      // cancel to be dropped as well.
+      const droppedBeforeRetry = proxy.dropped
+        .filter(item => item.assignmentId === a1.id).length
+      held.set(ticketId, gate())
+      void runtime.retry(ticketId, 'local-replacement-retry').catch(() => undefined)
+      await waitFor(
+        () => loadTicket(runtime, ticketId).assignments.at(-1)?.state === 'running',
+        5_000,
+        'A2 to be running',
+      )
+      const a2 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a2.id).not.toBe(a1.id)
+      expect(runtime.placement.isRemote(a2.node)).toBe(false)
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+
+      await waitFor(
+        () => proxy.dropped.filter(item => item.assignmentId === a1.id).length
+          > droppedBeforeRetry,
+        5_000,
+        'the local-placement A1 cancel to be dropped at the N1 proxy',
+      )
+      expect(inbox.cancels.some(event => event.assignmentId === a1.id)).toBe(false)
+
+      // Still forwarding off: end A2 through the production failed-report path
+      // and release its worker turn so `releaseSlot` runs. Its last-attempt A1
+      // cancel is dropped too, which is exactly the attempt that used to consume
+      // the orphan record.
+      const droppedBeforeRelease = proxy.dropped
+        .filter(item => item.assignmentId === a1.id).length
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'local replacement failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      expect(loadTicket(runtime, ticketId).assignments.find(item => item.id === a2.id)?.state)
+        .toBe('ended')
+      held.get(ticketId)?.release()
+      await waitFor(
+        () => proxy.dropped.filter(item => item.assignmentId === a1.id).length
+          > droppedBeforeRelease,
+        5_000,
+        'the releaseSlot A1 cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 0,
+        5_000,
+        'the local slot to be free after A2 ends',
+      )
+      // Let the lost last-attempt send settle before a later dispatch, so this
+      // cannot race the in-flight batch.
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(inbox.cancels.some(event => event.assignmentId === a1.id)).toBe(false)
+
+      // Fill the local slot again so a later Ticket must overflow to N1, then
+      // restore forwarding. With the orphan record kept, the later dispatch
+      // resends A1's cancel and orders its body after it.
+      const blocker2Id = createTicket(runtime, 'cancel_lost_last_attempt_blocker2')
+      held.set(blocker2Id, gate())
+      void runtime.harness.launch(loadTicket(runtime, blocker2Id))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held again',
+      )
+      proxy.dropping = false
+
+      const laterId = createTicket(runtime, 'cancel_lost_last_attempt_later')
+      await runtime.harness.launch(loadTicket(runtime, laterId))
+      const laterAssignment = loadTicket(runtime, laterId).assignments.at(-1)!
+      expect(laterAssignment.node).toBe(REMOTE_NODE_ID)
+
+      // Wait for both arrivals; asserting after only one would race.
+      await waitFor(
+        () => stampIndex(inbox.stamps, 'cancel', a1.id) >= 0
+          && stampIndex(inbox.stamps, 'assignment', laterAssignment.id) >= 0,
+        10_000,
+        'A1 cancel and the later Ticket body to reach the worker',
+      )
+      const cancelIndex = stampIndex(inbox.stamps, 'cancel', a1.id)
+      const laterIndex = stampIndex(inbox.stamps, 'assignment', laterAssignment.id)
+      expect(cancelIndex).toBeLessThanOrEqual(laterIndex)
+      expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[laterIndex].at)
+
+      // The gap is a local replacement that has already ended: T1 has no remote
+      // sticky, A2 is ended, and T1 is still open (failed report, not a
+      // successful Ticket end).
+      const current = loadTicket(runtime, ticketId)
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+      expect(current.ended).toBeUndefined()
+      expect(current.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+      expect(current.assignments.find(item => item.id === a2.id)?.state).toBe('ended')
+    } finally {
+      for (const hold of held.values()) hold.release()
+      await shutdown(runtime)
+    }
+  }, 60_000)
 })
