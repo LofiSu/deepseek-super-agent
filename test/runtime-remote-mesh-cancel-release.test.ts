@@ -180,6 +180,111 @@ async function waitFor(predicate: () => boolean, ms: number, label: string): Pro
   if (!predicate()) throw new Error(`timed out waiting for ${label}`)
 }
 
+/**
+ * Drive the production lost-A1 window: Runtime A launches running remote A1,
+ * crashes without cancelling; Runtime B `start()`s on the same home, recovery
+ * ends A1 and dispatches A2 onto the same Worker, and the proxy drops A1's
+ * `assignment_cancel` so the Worker never sees it. A2 is persisted `running`
+ * in process B when this resolves.
+ *
+ * The proxy is left in `dropping` mode. Callers turn it off to observe what
+ * this same process sends when A2 later ends.
+ */
+async function setupLostA1ThenRunningA2(slug: string) {
+  const assignments: RemoteMeshAssignmentEvent[] = []
+  const cancels: RemoteMeshAssignmentCancelEvent[] = []
+  const workerHandler = createRemoteMeshHandler({
+    localPeerId: WORKER_PEER,
+    replayCache: createA2AReplayCache(),
+    resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+    onAssignment: (event) => {
+      assignments.push(event)
+      return undefined
+    },
+    onAssignmentCancel: (event) => {
+      cancels.push(event)
+      return undefined
+    },
+  })
+  const worker = createServer(workerHandler)
+  servers.push(worker)
+  await new Promise<void>((resolve, reject) => {
+    worker.once('error', reject)
+    worker.listen(0, '127.0.0.1', () => resolve())
+  })
+  const workerAddress = worker.address()
+  if (typeof workerAddress !== 'object' || workerAddress === null) throw new Error('worker bind failed')
+  const proxy = await startCancelDroppingProxy(`http://127.0.0.1:${workerAddress.port}/a2a`)
+
+  // A required capability forces every placement onto this remote node, so a
+  // restarted host with a free local slot still dispatches there. Ticket rows
+  // below are written only by production recovery / launch / report.
+  const REQUIRED_CAPABILITY = `cancel-lost-same-process-${slug}`
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), `ds-mesh-cancel-lost-same-process-${slug}-`))
+  homes.push(home)
+  const node = {
+    id: REMOTE_NODE_ID,
+    url: proxy.url,
+    peerId: WORKER_PEER,
+    secret: SECRET,
+    capacity: 1,
+    capabilities: [REQUIRED_CAPABILITY],
+  }
+  const newRuntime = (): Runtime =>
+    runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+
+  const runtimeA = newRuntime()
+  runtimeA.placement.registerRemoteNode(node)
+  runtimeA.start({ assessPending: false })
+
+  const ticketId = createTicket(runtimeA, slug)
+  await runtimeA.harness.launch(loadTicket(runtimeA, ticketId))
+  await waitFor(
+    () => assignments.some(event => event.ticketId === ticketId),
+    5_000,
+    'A1 to reach the remote inbox',
+  )
+  const a1 = loadTicket(runtimeA, ticketId).assignments.at(-1)!
+  expect(a1.node).toBe(REMOTE_NODE_ID)
+  expect(a1.state).toBe('running')
+  expect(runtimeA.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+  runtimeA.daemon.stop()
+  runtimeA.store.close()
+  expect(cancels).toHaveLength(0)
+
+  proxy.dropping = true
+  const runtimeB = newRuntime()
+  runtimeB.placement.registerRemoteNode(node)
+  runtimeB.start({ assessPending: false })
+
+  const recoveredB = loadTicket(runtimeB, ticketId)
+  const a2 = recoveredB.assignments.at(-1)!
+  expect(a2.id).not.toBe(a1.id)
+  expect(recoveredB.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+  await waitFor(
+    () => assignments.some(event => assignmentIdOf(event) === a2.id),
+    5_000,
+    'A2 to reach the remote inbox',
+  )
+  await waitFor(
+    () => loadTicket(runtimeB, ticketId).assignments
+      .some(item => item.id === a2.id && item.state === 'running'),
+    5_000,
+    'A2 to be persisted as running on the remote node',
+  )
+  expect(loadTicket(runtimeB, ticketId).assignments.find(item => item.id === a2.id)?.node)
+    .toBe(REMOTE_NODE_ID)
+  await waitFor(
+    () => proxy.dropped.some(item => item.assignmentId === a1.id),
+    5_000,
+    'B to attempt the lost A1 cancel',
+  )
+  // The dropped cancel never reached the Worker.
+  expect(cancels).toHaveLength(0)
+
+  return { assignments, cancels, proxy, runtimeB, ticketId, a1, a2 }
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(s => new Promise<void>(resolve => {
     s.close(() => resolve())
@@ -1139,5 +1244,85 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     expect(cancels.some(event => event.ticketId === ticketId && event.assignmentId === a1.id)).toBe(true)
 
     await shutdown(runtimeC)
+  }, 60_000)
+
+  it('cancels a lost older remote Assignment when its replacement ends in the same process', async () => {
+    const { assignments, cancels, proxy, runtimeB, ticketId, a1, a2 } =
+      await setupLostA1ThenRunningA2('failed-report')
+
+    // From here the proxy forwards cancels, so the Worker inbox shows what this
+    // process actually sends when A2 ends. Production timeout path: the failed
+    // report leaves the Ticket open and ends the latest Assignment (A2) itself.
+    proxy.dropping = false
+    const reported = runtimeB.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'remote worker result timeout',
+      deliver: false,
+    })
+    expect(reported.surfaced).toBe(false)
+
+    const afterReport = loadTicket(runtimeB, ticketId)
+    expect(afterReport.ended).toBeUndefined()
+    expect(afterReport.assignments.at(-1)?.id).toBe(a2.id)
+    expect(afterReport.assignments.at(-1)?.state).toBe('ended')
+    expect(afterReport.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+
+    // `releaseSlot` targets ended A2, but A1's cancel was lost earlier and the
+    // Worker may still run it. That older predecessor must be cancelled too,
+    // not only the nearest ended row.
+    await waitFor(
+      () => cancels.some(event => event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the retried A1 cancel after A2 ended',
+    )
+    expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
+
+    // A later retry may dispatch A3 onto the same Worker, but A1 must already
+    // have been cancelled rather than left running beside it.
+    const retried = await runtimeB.retry(ticketId, 'same-process-failed-retry')
+    expect(retried).toBeDefined()
+    expect(retried?.ended).toBeUndefined()
+    const a3 = loadTicket(runtimeB, ticketId).assignments.at(-1)!
+    expect(a3.id).not.toBe(a1.id)
+    expect(a3.id).not.toBe(a2.id)
+    await waitFor(
+      () => assignments.some(event => assignmentIdOf(event) === a3.id) || a3.state === 'running',
+      5_000,
+      'A3 to reach the remote inbox or start running',
+    )
+    expect(cancels.some(event => event.ticketId === ticketId && event.assignmentId === a1.id)).toBe(true)
+
+    await shutdown(runtimeB)
+  }, 60_000)
+
+  it('cancels a lost older remote Assignment when a successful report ends the Ticket', async () => {
+    const { cancels, proxy, runtimeB, ticketId, a1, a2 } =
+      await setupLostA1ThenRunningA2('ready-report')
+
+    proxy.dropping = false
+    const reported = runtimeB.engine.report(ticketId, {
+      kind: 'ready',
+      text: 'remote done',
+      deliver: false,
+    })
+    expect(reported.surfaced).toBe(false)
+
+    const afterReport = loadTicket(runtimeB, ticketId)
+    expect(afterReport.ended).toBeDefined()
+    expect(afterReport.assignments.at(-1)?.id).toBe(a2.id)
+    expect(afterReport.assignments.at(-1)?.state).toBe('ended')
+
+    // Both end hooks (`onAssignmentEnded`, `onTicketEnded`) may queue
+    // `releaseSlot`, so duplicate A2 cancels are fine. The Worker must still
+    // receive A1's cancel even though the Ticket is already terminal.
+    await waitFor(
+      () => cancels.some(event => event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the retried A1 cancel after the Ticket ended',
+    )
+    expect(cancels.filter(event => event.assignmentId === a1.id).length).toBeGreaterThanOrEqual(1)
+    expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
+
+    await shutdown(runtimeB)
   }, 60_000)
 })

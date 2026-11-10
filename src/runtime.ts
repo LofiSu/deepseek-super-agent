@@ -698,22 +698,26 @@ export class Runtime {
       }
     }
     /**
-     * Every ended remote Assignment that a still-open later Assignment
-     * superseded.
+     * Every ended remote Assignment that a later Assignment superseded.
      *
      * The nearest ended row is not enough to authenticate the cancel: a Worker
      * can still hold an older Assignment whose `assignment_cancel` never
      * arrived. For example recovery in a previous process ended A1 and
      * dispatched A2 on the same Worker, then a later recovery ended the running
      * A2 and appended A3. Assignments are now A1 ended, A2 ended, A3 open; the
-     * Worker still running A1 must be told to stop it as well as A2. Duplicate
-     * cancels are fail-soft (the Worker ignores an unknown/already-ended id),
-     * and every send uses `{ release: false }` so the settle policy below
-     * remains the single owner of keep-vs-release.
+     * Worker still running A1 must be told to stop it as well as A2.
+     *
+     * The same lost-cancel window exists without a later open Assignment: A1's
+     * cancel is lost, A2 runs in the same process, then A2 ends through the
+     * normal report/timeout/retry path and is itself `latest`. Those older
+     * ended rows still own remote reservations the Worker may hold, so return
+     * them there too. Duplicate cancels are fail-soft (the Worker ignores an
+     * unknown/already-ended id), and every send uses `{ release: false }` so
+     * the settle policy below remains the single owner of keep-vs-release.
      */
     const supersededRemoteAssignments = (snapshot: Ticket | undefined): Assignment[] => {
       const latest = snapshot?.assignments.at(-1)
-      if (!snapshot || !latest || latest.state === 'ended') return []
+      if (!snapshot || !latest) return []
       return snapshot.assignments
         .slice(0, -1)
         .filter(item =>
@@ -798,13 +802,21 @@ export class Runtime {
           // slot): authenticating the cancel for that pending id would leave the
           // Assignment still running on the worker untouched. When `latest` is
           // still open and predecessors already ended, every one of them owns a
-          // remote reservation the Worker may still hold. When `latest` itself
-          // is the ended Assignment (normal report/retry) keep targeting it, not
-          // an older predecessor.
+          // remote reservation the Worker may still hold.
+          //
+          // When `latest` itself is the ended Assignment (normal report/timeout/
+          // retry), its own cancel is required, but an older predecessor's
+          // cancel may also have been lost (A1 dropped, A2 ran and ended in the
+          // same process). Send every older ended remote id as well; duplicates
+          // stay fail-soft and `{ release: false }` keeps settle policy single.
           const supersededEnded = supersededRemoteAssignments(ticket)
-          const cancelAssignmentIds = latest?.state !== 'ended' && ended !== undefined
-            ? (supersededEnded.length > 0 ? supersededEnded.map(item => item.id) : [ended.id])
-            : assignmentId ? [assignmentId] : []
+          const cancelAssignmentIds = latest?.state !== 'ended'
+            ? (ended !== undefined
+              ? (supersededEnded.length > 0 ? supersededEnded.map(item => item.id) : [ended.id])
+              : assignmentId ? [assignmentId] : [])
+            : supersededEnded.length > 0
+              ? [...supersededEnded.map(item => item.id), ...(assignmentId ? [assignmentId] : [])]
+              : assignmentId ? [assignmentId] : []
           void Promise.all(
             cancelAssignmentIds.map(id =>
               placement.cancelRemote(ticketId, id, { release: false })
