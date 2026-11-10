@@ -1479,11 +1479,15 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     // `releaseSlot` targets ended A2, but A1's cancel was lost earlier and the
     // Worker may still run it. That older predecessor must be cancelled too,
     // not only the nearest ended row.
+    // Both end hooks queue `releaseSlot`, so A1's and A2's cancels are sent
+    // concurrently; wait for both before asserting either one arrived.
     await waitFor(
-      () => cancels.some(event => event.assignmentId === a1.id),
+      () => cancels.some(event => event.assignmentId === a1.id)
+        && cancels.some(event => event.assignmentId === a2.id),
       5_000,
-      'worker to receive the retried A1 cancel after A2 ended',
+      'worker to receive the retried A1 cancel and the A2 cancel after A2 ended',
     )
+    expect(cancels.some(event => event.assignmentId === a1.id)).toBe(true)
     expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
 
     // A later retry may dispatch A3 onto the same Worker, but A1 must already
@@ -1524,10 +1528,13 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     // Both end hooks (`onAssignmentEnded`, `onTicketEnded`) may queue
     // `releaseSlot`, so duplicate A2 cancels are fine. The Worker must still
     // receive A1's cancel even though the Ticket is already terminal.
+    // Both end hooks queue `releaseSlot`, so A1's and A2's cancels are sent
+    // concurrently; wait for both before asserting either one arrived.
     await waitFor(
-      () => cancels.some(event => event.assignmentId === a1.id),
+      () => cancels.some(event => event.assignmentId === a1.id)
+        && cancels.some(event => event.assignmentId === a2.id),
       5_000,
-      'worker to receive the retried A1 cancel after the Ticket ended',
+      'worker to receive the retried A1 cancel and the A2 cancel after the Ticket ended',
     )
     expect(cancels.filter(event => event.assignmentId === a1.id).length).toBeGreaterThanOrEqual(1)
     expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
@@ -1561,11 +1568,15 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     expect(afterResult.assignments.at(-1)?.state).toBe('ended')
     expect(afterResult.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
 
+    // Both end hooks queue `releaseSlot`, so A1's and A2's cancels are sent
+    // concurrently; wait for both before asserting either one arrived.
     await waitFor(
-      () => cancels.some(event => event.assignmentId === a1.id),
+      () => cancels.some(event => event.assignmentId === a1.id)
+        && cancels.some(event => event.assignmentId === a2.id),
       5_000,
-      'worker to receive the lost A1 cancel after the inbound failed result',
+      'worker to receive the lost A1 cancel and the A2 cancel after the inbound failed result',
     )
+    expect(cancels.some(event => event.assignmentId === a1.id)).toBe(true)
     expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
 
     // A retry may dispatch A3 onto the same Worker, but A1 must already have
@@ -1609,9 +1620,10 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     // Worker must still receive A1's cancel even though the Ticket is terminal,
     // because the inbound path no longer clears the reservation first.
     await waitFor(
-      () => cancels.some(event => event.assignmentId === a1.id),
+      () => cancels.some(event => event.assignmentId === a1.id)
+        && cancels.some(event => event.assignmentId === a2.id),
       5_000,
-      'worker to receive the lost A1 cancel after the inbound ready result ended the Ticket',
+      'worker to receive the lost A1 cancel and the A2 cancel after the inbound ready result ended the Ticket',
     )
     expect(cancels.filter(event => event.assignmentId === a1.id).length).toBeGreaterThanOrEqual(1)
     expect(cancels.some(event => event.assignmentId === a2.id)).toBe(true)
