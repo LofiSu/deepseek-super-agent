@@ -56,7 +56,7 @@ import { recordRemoteResult, remoteResultSeen } from './harness/remote-results.t
 import type { RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
 import type { WorkerReport } from './shared/ports.ts'
 import { Logger } from './shared/log.ts'
-import { threadKey, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
+import { threadKey, type Assignment, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
 import { settleSpeculation } from './speculate/silent.ts'
@@ -396,6 +396,8 @@ export class Runtime {
   /** Kept so finish() can close external MCP server processes. */
   private readonly tools: ToolRegistry
   private readonly remoteResultWait?: RemoteMeshResultWait
+  /** Shared slot-release/cancel path, bound in the factory closure. */
+  private readonly releaseSlot: (ticketId: string) => void
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
@@ -428,6 +430,7 @@ export class Runtime {
     admission: AdmissionRules
     tools: ToolRegistry
     remoteResultWait?: RemoteMeshResultWait
+    releaseSlot: (ticketId: string) => void
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -456,6 +459,7 @@ export class Runtime {
     this.admission = parts.admission
     this.tools = parts.tools
     this.remoteResultWait = parts.remoteResultWait
+    this.releaseSlot = parts.releaseSlot
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -1246,6 +1250,7 @@ export class Runtime {
       admission,
       tools,
       remoteResultWait: late.remoteResultWait,
+      releaseSlot: ticketId => releaseSlot(ticketId),
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
@@ -1529,7 +1534,7 @@ export class Runtime {
     // A fresh process has an empty sticky map. Rebuild it from persisted
     // Assignment.node before recovery ends those Assignments so `releaseSlot`
     // can send the remote cancel the dead process never sent.
-    this.restoreRemoteStickyReservations()
+    const restoredFromEnded = this.restoreRemoteStickyReservations()
     let recovered: ReturnType<Engine['recoverInterrupted']>
     try {
       recovered = this.engine.recoverInterrupted()
@@ -1547,6 +1552,44 @@ export class Runtime {
       )
       this.launchRecovered(outcome.ticketId, ticket)
     }
+    // The previous process may have committed recovery (ended Assignment, one
+    // RECOVERED prompt, one pending replacement) and died before its queued
+    // `releaseSlot` sent `assignment_cancel`. `recoverInterrupted` sees no
+    // running Assignment now, so it neither ends anyone nor queues that cancel
+    // again. Cancel the ended remote predecessor from the restored sticky
+    // reservation. Tickets recovery just ended in this `start()` already
+    // queued `releaseSlot` through `releaseMesh`, so skip them to avoid a
+    // duplicate cancel.
+    const newlyEnded = new Set(
+      recovered.filter(outcome => !outcome.relaunchOnly).map(outcome => outcome.ticketId),
+    )
+    for (const ticketId of restoredFromEnded) {
+      if (newlyEnded.has(ticketId)) continue
+      const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
+      if (!ticket || ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) continue
+      const predecessor = this.leftoverRemotePredecessor(ticket)
+      if (!predecessor) continue
+      this.log.info(
+        `[recovery] remote cancel queued ticketId=${ticketId} assignmentId=${predecessor.id} node=${predecessor.node}`,
+      )
+      // Run in a microtask like `releaseMesh`: recovery must return first, and
+      // a crash in this same window must leave the state recoverable again.
+      queueMicrotask(() => this.releaseSlot(ticketId))
+    }
+  }
+
+  /**
+   * The ended remote Assignment a still-open later Assignment superseded, if
+   * any. `releaseSlot` targets this same predecessor, so it is what a leftover
+   * restart cancel must authenticate.
+   */
+  private leftoverRemotePredecessor(ticket: Ticket): Assignment | undefined {
+    const latest = ticket.assignments.at(-1)
+    if (!latest || latest.state === 'ended') return undefined
+    return ticket.assignments
+      .slice(0, -1)
+      .reverse()
+      .find(item => item.state === 'ended' && item.node !== undefined && this.placement.isRemote(item.node))
   }
 
   /**
@@ -1559,8 +1602,14 @@ export class Runtime {
    * intentionally skips `pick`/eligibility so a now-stale peer is still
    * cancelled (the cancel send stays fail-soft). Tickets that recovery leaves
    * untouched — ended, paused, or approval-held — are skipped as well.
+   *
+   * Returns the Tickets whose reservation was rebuilt from an already-ended
+   * remote Assignment superseded by a later open one. That is the narrower
+   * crash window: recovery committed the end, so this `start()` will not end
+   * the predecessor again and must still send its cancel.
    */
-  private restoreRemoteStickyReservations(): void {
+  private restoreRemoteStickyReservations(): Set<string> {
+    const restoredFromEnded = new Set<string>()
     for (const ticket of this.store.listDocs<Ticket>('ticket')) {
       if (ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) continue
       for (const assignment of ticket.assignments) {
@@ -1571,7 +1620,21 @@ export class Runtime {
           `[recovery] remote reservation restored ticketId=${ticket.id} assignmentId=${assignment.id} node=${assignment.node}`,
         )
       }
+      // A crash in the window after recovery committed A1 `ended` but before
+      // the queued `releaseSlot` sent its cancel leaves an ended remote
+      // predecessor with a later open Assignment and no running one. Rebuild
+      // sticky from that predecessor too so the next `releaseSlot` can reach
+      // the worker that still holds it. `bind` stays idempotent and never
+      // clobbers a reservation already bound to a different node.
+      const predecessor = this.leftoverRemotePredecessor(ticket)
+      if (!predecessor?.node) continue
+      if (!this.placement.restoreRemoteTicket(ticket.id, predecessor.node)) continue
+      restoredFromEnded.add(ticket.id)
+      this.log.info(
+        `[recovery] remote reservation restored ticketId=${ticket.id} assignmentId=${predecessor.id} node=${predecessor.node} state=ended`,
+      )
     }
+    return restoredFromEnded
   }
 
   /**

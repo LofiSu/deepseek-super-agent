@@ -801,4 +801,121 @@ describe('Runtime remote mesh cancel releases capacity', () => {
 
     await shutdown(runtimeB)
   }, 60_000)
+
+  it('cancels an ended remote Assignment left behind by a mid-recovery crash', async () => {
+    const assignments: RemoteMeshAssignmentEvent[] = []
+    const cancels: RemoteMeshAssignmentCancelEvent[] = []
+    const workerHandler = createRemoteMeshHandler({
+      localPeerId: WORKER_PEER,
+      replayCache: createA2AReplayCache(),
+      resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+      onAssignment: (event) => {
+        assignments.push(event)
+        return undefined
+      },
+      onAssignmentCancel: (event) => {
+        cancels.push(event)
+        return undefined
+      },
+    })
+    const server = createServer(workerHandler)
+    servers.push(server)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = server.address()
+    if (typeof address !== 'object' || address === null) throw new Error('worker bind failed')
+    const workerUrl = `http://127.0.0.1:${address.port}/a2a`
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-mid-recovery-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    }
+
+    // Runtime A: dispatch a running remote Assignment. The worker accepts it
+    // and never returns a result.
+    const runtimeA = runtimeFor(home, holdingModel(new Map()))
+    runtimeA.placement.registerRemoteNode(node)
+    runtimeA.start({ assessPending: false })
+    expect(runtimeA.placement.local.pickNode('slot-blocker')?.id).toBe(HOST_PEER)
+
+    const ticketId = createTicket(runtimeA, 'cancel_mid_recovery')
+    await runtimeA.harness.launch(loadTicket(runtimeA, ticketId))
+    await waitFor(
+      () => assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'ticket to reach the remote inbox',
+    )
+    const armed = loadTicket(runtimeA, ticketId).assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+
+    // Host crash without a cancel.
+    runtimeA.daemon.stop()
+    runtimeA.store.close()
+    expect(cancels).toHaveLength(0)
+
+    // Runtime B: the production restart path commits recovery (A1 ended, one
+    // pending replacement, RECOVERED input) and queues `releaseSlot` as a
+    // microtask. Crash synchronously after `start()` returns, before that
+    // microtask can send the cancel, while the worker still holds A1.
+    const runtimeB = runtimeFor(home, holdingModel(new Map()))
+    runtimeB.placement.registerRemoteNode(node)
+    runtimeB.start({ assessPending: false })
+
+    const recoveredB = loadTicket(runtimeB, ticketId)
+    const ended = recoveredB.assignments.find(item => item.id === armed.id)!
+    expect(ended.state).toBe('ended')
+    const replacement = recoveredB.assignments.at(-1)!
+    expect(replacement.id).not.toBe(armed.id)
+    expect(replacement.state).toBe('pending')
+
+    runtimeB.daemon.stop()
+    runtimeB.store.close()
+    // Let B's queued microtask run against the closed store so it cannot
+    // deliver a cancel for A1.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(cancels).toHaveLength(0)
+
+    // Runtime C: recovery finds no running Assignment (A1 is already ended and
+    // the replacement is still pending), so it only relaunches A2. It must
+    // still rebuild sticky from the ended remote predecessor and send A1's
+    // cancel before (or while) A2 is dispatched to the same worker.
+    const runtimeC = runtimeFor(home, holdingModel(new Map()))
+    runtimeC.placement.registerRemoteNode(node)
+    runtimeC.start({ assessPending: false })
+
+    expect(runtimeC.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${ticketId} assignmentId=${armed.id} node=${REMOTE_NODE_ID} state=ended`,
+    )
+
+    await waitFor(
+      () => cancels.some(event => event.ticketId === ticketId),
+      5_000,
+      'inbox to receive the leftover cancel for the ended Assignment',
+    )
+    const cancel = cancels.find(event => event.ticketId === ticketId)
+    expect(cancel?.assignmentId).toBe(armed.id)
+    expect(cancel?.assignmentId).not.toBe(replacement.id)
+
+    // A2 may be pending or already dispatched; either way A1 is not left
+    // running on the worker uncancelled.
+    await waitFor(
+      () => assignments.some(event =>
+        (event.assignment as { assignmentId?: string } | undefined)?.assignmentId === replacement.id),
+      5_000,
+      'replacement Assignment to reach the remote inbox',
+    )
+    const current = loadTicket(runtimeC, ticketId)
+    expect(current.assignments.find(item => item.id === armed.id)?.state).toBe('ended')
+    expect(cancels.filter(event => event.assignmentId === armed.id)).toHaveLength(1)
+
+    await shutdown(runtimeC)
+  }, 60_000)
 })
