@@ -1672,12 +1672,11 @@ export class Runtime {
       if (newlyEnded.has(ticketId)) continue
       const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
       // A successful report can already have ended the Ticket before the crash;
-      // the lost cancel for its older ended remote predecessor still has to go
-      // out. `endedLatestRemotePredecessor` below requires that persisted
-      // pattern, so terminal Tickets without it stay skipped.
+      // the lost cancel for the ended remote `latest` (and any older superseded
+      // remote row) still has to go out. `leftoverRemoteCancelTarget` accepts
+      // the ended latest itself when the Ticket has no older predecessor.
       if (!ticket || ticket.collab?.paused || pendingApproval(ticket)) continue
-      const predecessor = this.leftoverRemotePredecessor(ticket)
-        ?? this.endedLatestRemotePredecessor(ticket)
+      const predecessor = this.leftoverRemoteCancelTarget(ticket)
       if (!predecessor) continue
       this.log.info(
         `[recovery] remote cancel queued ticketId=${ticketId} assignmentId=${predecessor.id} node=${predecessor.node}`,
@@ -1735,6 +1734,36 @@ export class Runtime {
   }
 
   /**
+   * The ended remote `latest` row itself, when it is the only remote row a
+   * Ticket carries. A Ticket whose sole Assignment is the ended remote latest
+   * (a failed/timeout report that ended A1 while the Ticket stayed open, or a
+   * successful report that ended A1 and the Ticket) has no superseded
+   * predecessor, so `leftoverRemotePredecessor` and
+   * `endedLatestRemotePredecessor` both return undefined and the crash window
+   * before the queued `releaseSlot` sent A1's cancel would be lost. The ended
+   * latest is itself a sufficient restore/authenticate signal: `releaseSlot`
+   * already sends the cancel for an ended `latest` when it superseded nothing.
+   */
+  private endedLatestRemoteAssignment(ticket: Ticket): Assignment | undefined {
+    const latest = ticket.assignments.at(-1)
+    if (!latest || latest.state !== 'ended') return undefined
+    if (latest.node === undefined || !this.placement.isRemote(latest.node)) return undefined
+    return latest
+  }
+
+  /**
+   * The remote Assignment a leftover restart cancel must authenticate: the
+   * older superseded ended predecessor when one exists, otherwise the ended
+   * remote `latest` itself. A non-undefined value is the signal to queue
+   * `releaseSlot`, which sends `latest` plus every superseded ended remote row.
+   */
+  private leftoverRemoteCancelTarget(ticket: Ticket): Assignment | undefined {
+    return this.leftoverRemotePredecessor(ticket)
+      ?? this.endedLatestRemotePredecessor(ticket)
+      ?? this.endedLatestRemoteAssignment(ticket)
+  }
+
+  /**
    * Rebuild the remote sticky map from persisted Assignment.node. Startup
    * recovery on a new Runtime otherwise has no reservation, so `releaseSlot`
    * takes the local branch and the worker that still runs the interrupted
@@ -1775,11 +1804,11 @@ export class Runtime {
       // predecessor with a later open Assignment and no running one. The same
       // lost-cancel window exists when `latest` itself is the ended row (an
       // in-process failed/timeout report, or a successful report that ended the
-      // Ticket). Rebuild sticky from that predecessor too so the next
+      // Ticket), including when that ended latest is the Ticket's only
+      // Assignment. Rebuild sticky from that target too so the next
       // `releaseSlot` can reach the worker that still holds it. `bind` stays
       // idempotent and never clobbers a reservation bound to a different node.
-      const predecessor = this.leftoverRemotePredecessor(ticket)
-        ?? this.endedLatestRemotePredecessor(ticket)
+      const predecessor = this.leftoverRemoteCancelTarget(ticket)
       if (!predecessor?.node) continue
       if (!this.placement.restoreRemoteTicket(ticket.id, predecessor.node)) continue
       restoredFromEnded.add(ticket.id)

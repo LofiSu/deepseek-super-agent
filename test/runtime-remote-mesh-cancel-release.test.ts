@@ -421,6 +421,79 @@ async function setupLostA1ThenRunningA2(slug: string) {
   return { assignments, cancels, proxy, runtimeB, ticketId, a1, a2, home, node, newRuntime }
 }
 
+/**
+ * Drive the A1-only lost-cancel window: Runtime A runs the Ticket's only
+ * remote Assignment A1, a production report ends A1 (and, for `ready`, the
+ * Ticket), then the process dies in the same turn before the queued
+ * `releaseSlot` can send A1's cancel. Unlike `setupLostA1ThenRunningA2` this
+ * leaves no superseded predecessor, so the ended latest itself is the only
+ * leftover-restore signal. Runtime B is started on the same home and node for
+ * the caller to observe.
+ */
+async function setupA1OnlyEndedRemote(slug: string, kind: 'ready' | 'failed') {
+  const inbox = await startWorkerInbox()
+  const REQUIRED_CAPABILITY = `cancel-lost-a1-only-${slug}`
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), `ds-mesh-cancel-a1-only-${slug}-`))
+  homes.push(home)
+  const node = {
+    id: REMOTE_NODE_ID,
+    url: inbox.url,
+    peerId: WORKER_PEER,
+    secret: SECRET,
+    capacity: 1,
+    capabilities: [REQUIRED_CAPABILITY],
+  }
+  const newRuntime = (): Runtime =>
+    runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+
+  // Runtime A: the Ticket's only Assignment is dispatched to the remote node.
+  const runtimeA = newRuntime()
+  runtimeA.placement.registerRemoteNode(node)
+  runtimeA.start({ assessPending: false })
+  const ticketId = createTicket(runtimeA, slug)
+  await runtimeA.harness.launch(loadTicket(runtimeA, ticketId))
+  await waitFor(
+    () => inbox.assignments.some(event => event.ticketId === ticketId),
+    5_000,
+    'A1 to reach the remote inbox',
+  )
+  const a1 = loadTicket(runtimeA, ticketId).assignments.at(-1)!
+  expect(a1.node).toBe(REMOTE_NODE_ID)
+  expect(a1.state).toBe('running')
+  expect(loadTicket(runtimeA, ticketId).assignments).toHaveLength(1)
+
+  // Production report path: `ready` ends A1 and the Ticket; `failed` leaves the
+  // Ticket open and ends only A1. In both cases A1 is the ended latest with no
+  // predecessor.
+  const reported = runtimeA.engine.report(ticketId, {
+    kind,
+    text: kind === 'ready' ? 'remote done' : 'remote worker result timeout',
+    deliver: false,
+  })
+  expect(reported.surfaced).toBe(false)
+
+  const afterReport = loadTicket(runtimeA, ticketId)
+  expect(afterReport.assignments).toHaveLength(1)
+  expect(afterReport.assignments.at(-1)?.id).toBe(a1.id)
+  expect(afterReport.assignments.at(-1)?.state).toBe('ended')
+  if (kind === 'ready') expect(afterReport.ended).toBeDefined()
+  else expect(afterReport.ended).toBeUndefined()
+
+  // Crash in the same turn: the queued `releaseSlot` microtask has not run, so
+  // no `assignment_cancel` leaves this process.
+  runtimeA.daemon.stop()
+  runtimeA.store.close()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  expect(inbox.cancels).toHaveLength(0)
+
+  // Runtime B: a fresh process on the same persisted state and remote node.
+  const runtimeB = newRuntime()
+  runtimeB.placement.registerRemoteNode(node)
+  runtimeB.start({ assessPending: false })
+
+  return { inbox, runtimeB, ticketId, a1, node, newRuntime }
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(s => new Promise<void>(resolve => {
     s.close(() => resolve())
@@ -1663,6 +1736,79 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     expect(loadTicket(runtimeC, ticketId).ended).toBeDefined()
 
     await shutdown(runtimeC)
+  }, 60_000)
+
+  it('cancels an A1-only ended remote Assignment when a crash loses the terminal Ticket cancel', async () => {
+    const { inbox, runtimeB, ticketId, a1 } =
+      await setupA1OnlyEndedRemote('a1-only-ready-crash', 'ready')
+
+    // The Ticket's only Assignment is the ended remote A1 and the successful
+    // report already ended the Ticket. There is no superseded predecessor, so
+    // the ended latest itself must be the leftover-restore signal.
+    expect(runtimeB.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${ticketId} assignmentId=${a1.id} node=${REMOTE_NODE_ID} state=ended`,
+    )
+    await waitFor(
+      () => inbox.cancels.some(event =>
+        event.ticketId === ticketId && event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the lost A1 cancel for the terminal A1-only Ticket',
+    )
+    expect(loadTicket(runtimeB, ticketId).ended).toBeDefined()
+
+    // A later Ticket is launched onto the same required-capability node; the
+    // required observable is that start() already resends A1's cancel, not a
+    // cross-Ticket dispatch order.
+    const laterId = createTicket(runtimeB, 'a1-only-ready-crash-later')
+    await runtimeB.harness.launch(loadTicket(runtimeB, laterId))
+    await waitFor(
+      () => inbox.assignments.some(event => event.ticketId === laterId),
+      5_000,
+      'the later Ticket to reach the remote inbox',
+    )
+    expect(inbox.cancels.some(event =>
+      event.ticketId === ticketId && event.assignmentId === a1.id)).toBe(true)
+
+    await shutdown(runtimeB)
+  }, 60_000)
+
+  it('cancels an A1-only ended remote Assignment when a crash loses the failed-report cancel', async () => {
+    const { inbox, runtimeB, ticketId, a1 } =
+      await setupA1OnlyEndedRemote('a1-only-failed-crash', 'failed')
+
+    // The failed/timeout report left the Ticket open but ended A1, which is the
+    // only Assignment. start() must rebuild sticky from it and resend its cancel.
+    expect(runtimeB.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${ticketId} assignmentId=${a1.id} node=${REMOTE_NODE_ID} state=ended`,
+    )
+    await waitFor(
+      () => inbox.cancels.some(event =>
+        event.ticketId === ticketId && event.assignmentId === a1.id),
+      5_000,
+      'worker to receive the lost A1 cancel for the open A1-only Ticket',
+    )
+    const openAfterStart = loadTicket(runtimeB, ticketId)
+    expect(openAfterStart.ended).toBeUndefined()
+    expect(openAfterStart.assignments.at(-1)?.id).toBe(a1.id)
+    expect(openAfterStart.assignments.at(-1)?.state).toBe('ended')
+
+    // A later retry may dispatch a replacement onto the same Worker, but A1
+    // must already be cancelled rather than left running beside it.
+    const retried = await runtimeB.retry(ticketId, 'a1-only-failed-crash-retry')
+    expect(retried).toBeDefined()
+    expect(retried?.ended).toBeUndefined()
+    const a2 = loadTicket(runtimeB, ticketId).assignments.at(-1)!
+    expect(a2.id).not.toBe(a1.id)
+    await waitFor(
+      () => inbox.assignments.some(event => assignmentIdOf(event) === a2.id)
+        || a2.state === 'running',
+      5_000,
+      'the retry replacement to reach the remote inbox or start running',
+    )
+    expect(inbox.cancels.some(event =>
+      event.ticketId === ticketId && event.assignmentId === a1.id)).toBe(true)
+
+    await shutdown(runtimeB)
   }, 60_000)
 
   it('cancels the superseded remote Assignment before dispatching its replacement after recovery', async () => {
