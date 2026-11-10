@@ -727,6 +727,19 @@ export class Runtime {
             log.info(
               `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${ended.id} replacementId=${latest?.id} reason=live-replacement`,
             )
+            // `releaseMesh` already cleared the only per-ticket wait before this
+            // microtask ran. A live replacement that has not yet armed its own
+            // wait would otherwise hold the sticky slot forever with no recovery.
+            // Transfer the wait to the replacement, matching the stale-timeout
+            // and late dispatch keep-slot paths.
+            if (latest) {
+              if (remoteResultTimeoutMs > 0) {
+                log.info(
+                  `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${latest.id}`,
+                )
+              }
+              late.remoteResultWait?.arm(ticketId, latest.id)
+            }
             // Still tell the ended remote worker to stop, but keep the sticky
             // reservation so the live replacement does not lose its slot.
             void placement.cancelRemote(ticketId, ended.id, { release: false })

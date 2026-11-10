@@ -48,13 +48,17 @@ function holdingModel(held: Map<string, Gate>): ScriptedModel {
   })
 }
 
-function runtimeFor(home: string, model: ScriptedModel): Runtime {
+function runtimeFor(
+  home: string,
+  model: ScriptedModel,
+  remoteResultTimeoutMs = 60_000,
+): Runtime {
   return freshRuntime({
     home,
     model,
     meshCapacity: 1,
     instanceId: HOST_PEER,
-    remoteResultTimeoutMs: 60_000,
+    remoteResultTimeoutMs,
     jobDelayMs: 0,
     watchdogIntervalMs: 600_000,
     stuckMs: 600_000,
@@ -318,6 +322,146 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     // The cancel must not steal the live replacement's mesh capacity.
     expect(runtime.placement.remote?.hasTicketAssignment(ticketId)).toBe(true)
     expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    await shutdown(runtime)
+  }, 60_000)
+
+  it('re-arms the live replacement wait after a late cancel keep-slot', async () => {
+    const assignments: RemoteMeshAssignmentEvent[] = []
+    const cancels: RemoteMeshAssignmentCancelEvent[] = []
+    const workerHandler = createRemoteMeshHandler({
+      localPeerId: WORKER_PEER,
+      replayCache: createA2AReplayCache(),
+      resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+      onAssignment: (event) => {
+        assignments.push(event)
+        return undefined
+      },
+      onAssignmentCancel: (event) => {
+        cancels.push(event)
+        return undefined
+      },
+    })
+    const server = createServer(workerHandler)
+    servers.push(server)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = server.address()
+    if (typeof address !== 'object' || address === null) throw new Error('worker bind failed')
+    const workerUrl = `http://127.0.0.1:${address.port}/a2a`
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-live-replacement-rearm-'))
+    homes.push(home)
+    const runtime = runtimeFor(home, holdingModel(new Map()), 300)
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    // Occupy the only local slot so placement must choose the remote node.
+    expect(runtime.placement.local.pickNode('slot-blocker')?.id).toBe(HOST_PEER)
+
+    const ticketId = createTicket(runtime, 'late_cancel_rearm')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'ticket to reach the remote inbox',
+    )
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    const current = loadTicket(runtime, ticketId)
+    const armed = current.assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+
+    // Let the original wait arm first so the later transfer is a distinct arm.
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${armed.id}`,
+      ),
+      5_000,
+      'remote result wait to arm before the report',
+    )
+
+    // End the armed Assignment through the normal report path. `onAssignmentEnded`
+    // clears the per-ticket wait and queues the cancel/release microtask.
+    const failed = runtime.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'remote worker result timeout',
+      deliver: false,
+    })
+    expect(failed.surfaced).toBe(false)
+    const afterReport = loadTicket(runtime, ticketId)
+    const ended = afterReport.assignments.at(-1)!
+    expect(ended.id).toBe(armed.id)
+    expect(ended.state).toBe('ended')
+
+    // Before the release microtask runs, commit a replacement that already
+    // claimed the same remote node and started, with no wait of its own. The
+    // cancel keep-slot path must transfer the wait onto it.
+    const replacementAssignment = {
+      id: 'asg_cancel_live_replacement_rearm',
+      state: 'running' as const,
+      speculative: false,
+      node: REMOTE_NODE_ID,
+      startedAt: new Date().toISOString(),
+    }
+    runtime.store.putDoc('ticket', ticketId, {
+      ...afterReport,
+      assignments: [...afterReport.assignments, replacementAssignment],
+    })
+
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${armed.id} replacementId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'late cancel to keep the live replacement slot',
+    )
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'cancel keep-slot to transfer the wait to the live replacement',
+    )
+
+    // The transferred wait now fires for the replacement: report the failed
+    // timeout, end the hung replacement, and free the sticky slot.
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result timeout ticketId=${ticketId} assignmentId=${replacementAssignment.id}`,
+      ),
+      5_000,
+      'replacement result timeout to fire',
+    )
+    await waitFor(
+      () => loadTicket(runtime, ticketId).assignments.at(-1)!.state === 'ended',
+      5_000,
+      'replacement Assignment to end after its timeout',
+    )
+    await waitFor(
+      () => runtime.placement.remote?.hasTicketAssignment(ticketId) === false,
+      5_000,
+      'sticky remote slot to be released after the replacement timeout',
+    )
+
+    const after = loadTicket(runtime, ticketId)
+    const latest = after.assignments.at(-1)!
+    expect(latest.id).toBe(replacementAssignment.id)
+    expect(latest.report?.kind).toBe('failed')
+    expect(latest.report?.text).toBe('remote worker result timeout')
+    expect(after.ended).toBeUndefined()
+    // The cancel still targets the ended Assignment, not the replacement.
+    expect(cancels.find(event => event.ticketId === ticketId)?.assignmentId).toBe(armed.id)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(0)
 
     await shutdown(runtime)
   }, 60_000)
