@@ -387,6 +387,24 @@ export class RemoteMeshRegistry {
     return this.assignments.delete(ticketId)
   }
 
+  /**
+   * Rebuild a persisted sticky reservation without picking. Startup recovery
+   * uses this to remember which peer ran an interrupted Assignment so a later
+   * cancel can reach it. Unlike `pick`, it consults no eligibility, load, or
+   * capacity: it restores pre-crash truth even when the peer is stale/offline
+   * (the cancel itself stays fail-soft). An empty or unregistered node is a
+   * no-op `false`; a ticket already bound to another node is left untouched.
+   * Returns whether the ticket is bound to `nodeId` afterwards.
+   */
+  bind(ticketId: string, nodeId: string): boolean {
+    if (!nonEmptyString(ticketId) || !nonEmptyString(nodeId)) return false
+    if (!this.nodes.has(nodeId)) return false
+    const assigned = this.assignments.get(ticketId)
+    if (assigned !== undefined) return assigned === nodeId
+    this.assignments.set(ticketId, nodeId)
+    return true
+  }
+
   /** Current assignment count for a node. */
   inFlight(nodeId: string): number {
     let count = 0

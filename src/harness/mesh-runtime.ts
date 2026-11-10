@@ -147,6 +147,15 @@ export class WorkerPlacement {
   }
 
   /**
+   * Restore a persisted remote sticky reservation without picking. Used by
+   * startup recovery so a cancel can reach the node that actually ran the
+   * interrupted Assignment. Unknown node or no remote registry → `false`.
+   */
+  restoreRemoteTicket(ticketId: string, nodeId: string): boolean {
+    return this.remote?.bind(ticketId, nodeId) ?? false
+  }
+
+  /**
    * Authenticated HTTP cancel to the child runtime; releases mesh capacity after
    * send. Pass `{ release: false }` to tell the remote worker to stop without
    * clearing the sticky reservation, so a live replacement that already owns

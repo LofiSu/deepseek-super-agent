@@ -8,6 +8,7 @@ import type {
   PauseOutcome,
   ResumeOutcome,
 } from './core/collab.ts'
+import { pendingApproval } from './core/collab.ts'
 import { assessWithMainAgent } from './core/assessment.ts'
 import { Engine } from './core/engine.ts'
 import { arbitrateSubscribers } from './core/intake.ts'
@@ -1525,6 +1526,10 @@ export class Runtime {
       this.log.info('[recovery] deferred reason=mock-model')
       return
     }
+    // A fresh process has an empty sticky map. Rebuild it from persisted
+    // Assignment.node before recovery ends those Assignments so `releaseSlot`
+    // can send the remote cancel the dead process never sent.
+    this.restoreRemoteStickyReservations()
     let recovered: ReturnType<Engine['recoverInterrupted']>
     try {
       recovered = this.engine.recoverInterrupted()
@@ -1541,6 +1546,31 @@ export class Runtime {
         `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',') || '-'} replacementId=${outcome.replacementAssignmentId} mode=${outcome.relaunchOnly ? 'pending' : 'recovered'}`,
       )
       this.launchRecovered(outcome.ticketId, ticket)
+    }
+  }
+
+  /**
+   * Rebuild the remote sticky map from persisted Assignment.node. Startup
+   * recovery on a new Runtime otherwise has no reservation, so `releaseSlot`
+   * takes the local branch and the worker that still runs the interrupted
+   * Assignment is never told to stop (ADR-004 restart path). Only in-memory
+   * remote placement is restored: the in-process worker died with the process,
+   * and only a remote peer needs a cancel. This trusts persisted truth and
+   * intentionally skips `pick`/eligibility so a now-stale peer is still
+   * cancelled (the cancel send stays fail-soft). Tickets that recovery leaves
+   * untouched — ended, paused, or approval-held — are skipped as well.
+   */
+  private restoreRemoteStickyReservations(): void {
+    for (const ticket of this.store.listDocs<Ticket>('ticket')) {
+      if (ticket.ended || ticket.collab?.paused || pendingApproval(ticket)) continue
+      for (const assignment of ticket.assignments) {
+        if (assignment.state !== 'running' || !assignment.node) continue
+        if (!this.placement.isRemote(assignment.node)) continue
+        if (!this.placement.restoreRemoteTicket(ticket.id, assignment.node)) continue
+        this.log.info(
+          `[recovery] remote reservation restored ticketId=${ticket.id} assignmentId=${assignment.id} node=${assignment.node}`,
+        )
+      }
     }
   }
 

@@ -704,4 +704,101 @@ describe('Runtime remote mesh cancel releases capacity', () => {
 
     await shutdown(runtime)
   }, 60_000)
+
+  it('cancels the ended remote Assignment after a process restart', async () => {
+    const assignments: RemoteMeshAssignmentEvent[] = []
+    const cancels: RemoteMeshAssignmentCancelEvent[] = []
+    const workerHandler = createRemoteMeshHandler({
+      localPeerId: WORKER_PEER,
+      replayCache: createA2AReplayCache(),
+      resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+      onAssignment: (event) => {
+        assignments.push(event)
+        return undefined
+      },
+      onAssignmentCancel: (event) => {
+        cancels.push(event)
+        return undefined
+      },
+    })
+    const server = createServer(workerHandler)
+    servers.push(server)
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = server.address()
+    if (typeof address !== 'object' || address === null) throw new Error('worker bind failed')
+    const workerUrl = `http://127.0.0.1:${address.port}/a2a`
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-process-restart-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: workerUrl,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    }
+
+    // Runtime A: place the ticket on the remote peer and leave it running there.
+    const runtimeA = runtimeFor(home, holdingModel(new Map()))
+    runtimeA.placement.registerRemoteNode(node)
+    runtimeA.start({ assessPending: false })
+    // Occupy the only local slot so placement must choose the remote node.
+    expect(runtimeA.placement.local.pickNode('slot-blocker')?.id).toBe(HOST_PEER)
+
+    const ticketId = createTicket(runtimeA, 'cancel_process_restart')
+    await runtimeA.harness.launch(loadTicket(runtimeA, ticketId))
+    await waitFor(
+      () => assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'ticket to reach the remote inbox',
+    )
+    const armed = loadTicket(runtimeA, ticketId).assignments.at(-1)!
+    expect(armed.node).toBe(REMOTE_NODE_ID)
+    expect(armed.state).toBe('running')
+    expect(runtimeA.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    // The worker accepted the Assignment and never returned a result.
+    expect(cancels).toHaveLength(0)
+
+    // Crash the host without cancelling: stop the daemon and close SQLite while
+    // the remote worker still runs the accepted Assignment.
+    runtimeA.daemon.stop()
+    runtimeA.store.close()
+    expect(cancels).toHaveLength(0)
+
+    // Runtime B: the production restart path. A fresh process has an empty
+    // sticky map, so recovery must rebuild it from the persisted Assignment
+    // node before ending the running Assignment.
+    const runtimeB = runtimeFor(home, holdingModel(new Map()))
+    runtimeB.placement.registerRemoteNode(node)
+    runtimeB.start({ assessPending: false })
+
+    const recovered = loadTicket(runtimeB, ticketId)
+    const ended = recovered.assignments.find(item => item.id === armed.id)!
+    expect(ended.state).toBe('ended')
+    const replacement = recovered.assignments.at(-1)!
+    expect(replacement.id).not.toBe(armed.id)
+    expect(['pending', 'running']).toContain(replacement.state)
+
+    // The required result: the restarted host tells the worker to stop the
+    // Assignment that actually ran. A2 may still be pending or already
+    // dispatched, so only A1's cancel is asserted.
+    await waitFor(
+      () => cancels.some(event => event.ticketId === ticketId),
+      5_000,
+      'inbox to receive the cancel for the interrupted Assignment',
+    )
+    const cancel = cancels.find(event => event.ticketId === ticketId)
+    expect(cancel?.assignmentId).toBe(armed.id)
+    expect(cancel?.assignmentId).not.toBe(replacement.id)
+    // The cancel was only possible because recovery rebuilt the sticky
+    // reservation from persisted state before `releaseSlot` ran.
+    expect(runtimeB.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${ticketId} assignmentId=${armed.id} node=${REMOTE_NODE_ID}`,
+    )
+
+    await shutdown(runtimeB)
+  }, 60_000)
 })

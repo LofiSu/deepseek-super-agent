@@ -221,4 +221,34 @@ describe('WorkerPlacement', () => {
     expect(remote.inFlight('remote-a')).toBe(0)
     expect(local.inFlight(placement.localNodeId)).toBe(1)
   })
+
+  it('restores a persisted remote reservation without picking', () => {
+    const local = new WorkerMeshRegistry([{ id: 'local', capacity: 1 }])
+    const remote = new RemoteMeshRegistry({ localPeerId: 'host' })
+    for (const [id, peerId, secret] of [
+      ['remote-a', 'worker-a', 'a'.repeat(32)],
+      ['remote-b', 'worker-b', 'b'.repeat(32)],
+    ] as const) {
+      remote.register({ id, url: 'http://127.0.0.1:9/a2a', peerId, secret, capacity: 1 })
+    }
+    const placement = new WorkerPlacement('local', local, remote)
+
+    // Recovery reconstructs pre-crash truth even when the peer is offline; the
+    // cancel itself stays fail-soft, but the reservation must exist first.
+    remote.markOffline('remote-a')
+    expect(placement.restoreRemoteTicket('t1', 'remote-a')).toBe(true)
+    expect(placement.remoteHasTicket('t1')).toBe(true)
+    expect(remote.inFlight('remote-a')).toBe(1)
+    // No placement search ran, so the local registry was not touched.
+    expect(local.inFlight(placement.localNodeId)).toBe(0)
+
+    // Idempotent for the same node; a different or unknown node is a no-op.
+    expect(placement.restoreRemoteTicket('t1', 'remote-a')).toBe(true)
+    expect(placement.restoreRemoteTicket('t1', 'remote-b')).toBe(false)
+    expect(placement.restoreRemoteTicket('t2', 'unknown-node')).toBe(false)
+    expect(placement.restoreRemoteTicket('', 'remote-a')).toBe(false)
+    expect(remote.inFlight('remote-a')).toBe(1)
+    expect(remote.inFlight('remote-b')).toBe(0)
+    expect(remote.get('remote-a')?.online).toBe(false)
+  })
 })
