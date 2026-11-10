@@ -154,6 +154,142 @@ async function startCancelDroppingProxy(targetUrl: string): Promise<CancelDroppi
   return state
 }
 
+interface CancelDelayingProxy {
+  url: string
+  delayMs: number
+  /** While true, `assignment_cancel` bodies are forwarded after `delayMs`. */
+  delaying: boolean
+  /** Cancels the proxy read and held before forwarding. */
+  held: Array<{ ticketId: string; assignmentId: string }>
+}
+
+/**
+ * Loopback proxy in front of the worker handler that *delays* (never drops)
+ * `assignment_cancel` forwarding by `delayMs`, while forwarding assignment
+ * bodies immediately. This reproduces a slow cancel HTTP leg on the host under
+ * observation, so a replacement dispatched ahead of the cancel reaches the
+ * Worker first. Unlike the dropping proxy it eventually delivers the cancel and
+ * only stretches the send's settle time, which is what the launch ordering
+ * contract has to survive.
+ */
+async function startCancelDelayingProxy(
+  targetUrl: string,
+  delayMs = 400,
+): Promise<CancelDelayingProxy> {
+  const target = new URL(targetUrl)
+  const state: CancelDelayingProxy = { url: '', delayMs, delaying: false, held: [] }
+  const proxy = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = Buffer.concat(chunks)
+      const text = body.toString('utf8')
+      const forward = (): void => {
+        const headers = { ...req.headers, host: target.host }
+        delete headers['content-length']
+        delete headers['transfer-encoding']
+        const forwarded = httpRequest({
+          hostname: target.hostname,
+          port: target.port,
+          path: req.url,
+          method: req.method,
+          headers: { ...headers, 'content-length': String(body.length) },
+        }, proxied => {
+          res.writeHead(proxied.statusCode ?? 502, proxied.headers)
+          proxied.pipe(res)
+        })
+        forwarded.on('error', () => {
+          if (!res.headersSent) res.statusCode = 502
+          res.end()
+        })
+        forwarded.end(body)
+      }
+      if (state.delaying && text.includes('assignment_cancel')) {
+        const ticket = text.match(/"ticketId"\s*:\s*"([^"]+)"/)
+        const assignment = text.match(/"assignmentId"\s*:\s*"([^"]+)"/)
+        state.held.push({
+          ticketId: ticket?.[1] ?? '',
+          assignmentId: assignment?.[1] ?? '',
+        })
+        setTimeout(forward, state.delayMs)
+        return
+      }
+      forward()
+    })
+    req.on('error', () => {
+      if (!res.headersSent) res.statusCode = 502
+      res.end()
+    })
+  })
+  servers.push(proxy)
+  await new Promise<void>((resolve, reject) => {
+    proxy.once('error', reject)
+    proxy.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = proxy.address()
+  if (typeof address !== 'object' || address === null) throw new Error('proxy bind failed')
+  state.url = `http://127.0.0.1:${address.port}/a2a`
+  return state
+}
+
+interface InboxStamp {
+  kind: 'assignment' | 'cancel'
+  assignmentId: string
+  at: number
+}
+
+interface WorkerInbox {
+  assignments: RemoteMeshAssignmentEvent[]
+  cancels: RemoteMeshAssignmentCancelEvent[]
+  /** Arrival order at the worker handler, used to assert cancel-before-dispatch. */
+  stamps: InboxStamp[]
+  url: string
+}
+
+async function startWorkerInbox(): Promise<WorkerInbox> {
+  const assignments: RemoteMeshAssignmentEvent[] = []
+  const cancels: RemoteMeshAssignmentCancelEvent[] = []
+  const stamps: InboxStamp[] = []
+  const workerHandler = createRemoteMeshHandler({
+    localPeerId: WORKER_PEER,
+    replayCache: createA2AReplayCache(),
+    resolveSecret: peer => (peer === HOST_PEER ? SECRET : undefined),
+    onAssignment: (event) => {
+      assignments.push(event)
+      stamps.push({ kind: 'assignment', assignmentId: assignmentIdOf(event), at: Date.now() })
+      return undefined
+    },
+    onAssignmentCancel: (event) => {
+      cancels.push(event)
+      stamps.push({ kind: 'cancel', assignmentId: event.assignmentId, at: Date.now() })
+      return undefined
+    },
+  })
+  const worker = createServer(workerHandler)
+  servers.push(worker)
+  await new Promise<void>((resolve, reject) => {
+    worker.once('error', reject)
+    worker.listen(0, '127.0.0.1', () => resolve())
+  })
+  const workerAddress = worker.address()
+  if (typeof workerAddress !== 'object' || workerAddress === null) throw new Error('worker bind failed')
+  return {
+    assignments,
+    cancels,
+    stamps,
+    url: `http://127.0.0.1:${workerAddress.port}/a2a`,
+  }
+}
+
+/** Index of the first matching stamp, or -1. */
+function stampIndex(
+  stamps: InboxStamp[],
+  kind: InboxStamp['kind'],
+  assignmentId: string,
+): number {
+  return stamps.findIndex(stamp => stamp.kind === kind && stamp.assignmentId === assignmentId)
+}
+
 function createTicket(runtime: Runtime, slug: string): string {
   runtime.engine.receive(imTrigger({
     id: `trg_${slug}`,
@@ -1433,6 +1569,156 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     )
     expect(cancels.filter(event => event.assignmentId === a1.id).length).toBeGreaterThanOrEqual(1)
     expect(loadTicket(runtimeC, ticketId).ended).toBeDefined()
+
+    await shutdown(runtimeC)
+  }, 60_000)
+
+  it('cancels the superseded remote Assignment before dispatching its replacement after recovery', async () => {
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDelayingProxy(inbox.url, 400)
+
+    // The required capability keeps placement remote-only even on a restarted
+    // host with a free local slot. Every Ticket row below is written by
+    // production recovery / launch, never faked.
+    const REQUIRED_CAPABILITY = 'cancel-order-restart'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-order-restart-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    const newRuntime = (): Runtime =>
+      runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+
+    // Runtime A: dispatch running remote A1, worker accepts it, host crashes
+    // without a cancel.
+    const runtimeA = newRuntime()
+    runtimeA.placement.registerRemoteNode(node)
+    runtimeA.start({ assessPending: false })
+    const ticketId = createTicket(runtimeA, 'cancel_order_restart')
+    await runtimeA.harness.launch(loadTicket(runtimeA, ticketId))
+    await waitFor(
+      () => inbox.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach the remote inbox',
+    )
+    const a1 = loadTicket(runtimeA, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(a1.state).toBe('running')
+    runtimeA.daemon.stop()
+    runtimeA.store.close()
+    expect(inbox.cancels).toHaveLength(0)
+
+    // Runtime B: recovery ends A1, appends A2, and must not dispatch A2 until
+    // A1's (delayed, not dropped) cancel send has settled.
+    proxy.delaying = true
+    const runtimeB = newRuntime()
+    runtimeB.placement.registerRemoteNode(node)
+    runtimeB.start({ assessPending: false })
+
+    const recoveredB = loadTicket(runtimeB, ticketId)
+    expect(recoveredB.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+    const a2 = recoveredB.assignments.at(-1)!
+    expect(a2.id).not.toBe(a1.id)
+
+    await waitFor(
+      () => stampIndex(inbox.stamps, 'cancel', a1.id) >= 0
+        && stampIndex(inbox.stamps, 'assignment', a2.id) >= 0,
+      10_000,
+      'A1 cancel and A2 body to reach the worker',
+    )
+    const cancelIndex = stampIndex(inbox.stamps, 'cancel', a1.id)
+    const replacementIndex = stampIndex(inbox.stamps, 'assignment', a2.id)
+    expect(proxy.held.some(item => item.assignmentId === a1.id)).toBe(true)
+    // The cancel must be observed no later than the replacement body; a Worker
+    // must never hold the superseded A1 beside A2.
+    expect(cancelIndex).toBeLessThanOrEqual(replacementIndex)
+    expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[replacementIndex].at)
+
+    const current = loadTicket(runtimeB, ticketId)
+    expect(current.ended).toBeUndefined()
+    expect(current.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+    await shutdown(runtimeB)
+  }, 60_000)
+
+  it('cancels the superseded remote Assignment before dispatching its replacement after a mid-recovery crash', async () => {
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDelayingProxy(inbox.url, 400)
+
+    const REQUIRED_CAPABILITY = 'cancel-order-mid-recovery'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-order-mid-recovery-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    const newRuntime = (): Runtime =>
+      runtimeFor(home, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+
+    // Runtime A: running remote A1, host crash without a cancel.
+    const runtimeA = newRuntime()
+    runtimeA.placement.registerRemoteNode(node)
+    runtimeA.start({ assessPending: false })
+    const ticketId = createTicket(runtimeA, 'cancel_order_mid_recovery')
+    await runtimeA.harness.launch(loadTicket(runtimeA, ticketId))
+    await waitFor(
+      () => inbox.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach the remote inbox',
+    )
+    const a1 = loadTicket(runtimeA, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(a1.state).toBe('running')
+    runtimeA.daemon.stop()
+    runtimeA.store.close()
+    expect(inbox.cancels).toHaveLength(0)
+
+    // Runtime B: recovery commits A1 ended + pending A2, then the process dies
+    // in the same turn before the queued `releaseSlot` can send the cancel.
+    const runtimeB = newRuntime()
+    runtimeB.placement.registerRemoteNode(node)
+    runtimeB.start({ assessPending: false })
+    const recoveredB = loadTicket(runtimeB, ticketId)
+    expect(recoveredB.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+    const a2 = recoveredB.assignments.at(-1)!
+    expect(a2.id).not.toBe(a1.id)
+    expect(a2.state).toBe('pending')
+    runtimeB.daemon.stop()
+    runtimeB.store.close()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(inbox.cancels).toHaveLength(0)
+
+    // Runtime C: recovery finds only the pending replacement, so it queues the
+    // leftover cancel and relaunches A2. With cancel HTTP delayed, A2 must
+    // still wait for that leftover cancel send to settle.
+    proxy.delaying = true
+    const runtimeC = newRuntime()
+    runtimeC.placement.registerRemoteNode(node)
+    runtimeC.start({ assessPending: false })
+
+    expect(runtimeC.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${ticketId} assignmentId=${a1.id} node=${REMOTE_NODE_ID} state=ended`,
+    )
+    await waitFor(
+      () => stampIndex(inbox.stamps, 'cancel', a1.id) >= 0
+        && stampIndex(inbox.stamps, 'assignment', a2.id) >= 0,
+      10_000,
+      'leftover A1 cancel and A2 body to reach the worker',
+    )
+    const cancelIndex = stampIndex(inbox.stamps, 'cancel', a1.id)
+    const replacementIndex = stampIndex(inbox.stamps, 'assignment', a2.id)
+    expect(proxy.held.some(item => item.assignmentId === a1.id)).toBe(true)
+    expect(cancelIndex).toBeLessThanOrEqual(replacementIndex)
+    expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[replacementIndex].at)
+    expect(inbox.cancels.filter(event => event.assignmentId === a1.id)).toHaveLength(1)
 
     await shutdown(runtimeC)
   }, 60_000)

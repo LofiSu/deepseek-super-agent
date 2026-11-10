@@ -398,6 +398,14 @@ export class Runtime {
   private readonly remoteResultWait?: RemoteMeshResultWait
   /** Shared slot-release/cancel path, bound in the factory closure. */
   private readonly releaseSlot: (ticketId: string) => void
+  /**
+   * In-flight fail-soft remote cancel sends, keyed by ticketId. Shared with the
+   * factory-side `releaseSlot` so a replacement launch can wait for a
+   * superseded Assignment's cancel to settle first.
+   */
+  private readonly remoteCancelSends: Map<string, Set<Promise<void>>>
+  /** Per-Ticket gates that hold a replacement's remote assignment body. */
+  private readonly remoteDispatchBarriers: Map<string, Promise<void>>
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
@@ -431,6 +439,8 @@ export class Runtime {
     tools: ToolRegistry
     remoteResultWait?: RemoteMeshResultWait
     releaseSlot: (ticketId: string) => void
+    remoteCancelSends: Map<string, Set<Promise<void>>>
+    remoteDispatchBarriers: Map<string, Promise<void>>
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -460,6 +470,8 @@ export class Runtime {
     this.tools = parts.tools
     this.remoteResultWait = parts.remoteResultWait
     this.releaseSlot = parts.releaseSlot
+    this.remoteCancelSends = parts.remoteCancelSends
+    this.remoteDispatchBarriers = parts.remoteDispatchBarriers
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -690,6 +702,39 @@ export class Runtime {
         late.remoteResultWait?.arm(ticketId, assignmentId)
       }
     })
+    /**
+     * In-flight remote cancel sends per Ticket.
+     *
+     * `releaseSlot` deliberately does not await `cancelRemote`: the slot-settle
+     * `finally` remains the single owner of keep-vs-release. But a replacement
+     * must not reach a Worker that still holds a superseded ended Assignment
+     * before that fail-soft cancel has at least settled (sent, or failed soft).
+     * Recovery and `Runtime.retry` gate the replacement's remote body on these
+     * batches; slot release is not what they wait for.
+     */
+    const remoteCancelSends = new Map<string, Set<Promise<void>>>()
+    /**
+     * Per-Ticket gate that holds a replacement's remote assignment body until
+     * the superseded Assignment's cancels settle. Placement already happened,
+     * so slot accounting is untouched; only the wire body waits.
+     */
+    const remoteDispatchBarriers = new Map<string, Promise<void>>()
+    const trackRemoteCancelSends = (ticketId: string, sends: Promise<unknown>[]): void => {
+      if (sends.length === 0) return
+      let pending = remoteCancelSends.get(ticketId)
+      if (!pending) {
+        pending = new Set()
+        remoteCancelSends.set(ticketId, pending)
+      }
+      const batch = Promise.allSettled(sends).then(() => undefined)
+      pending.add(batch)
+      void batch.finally(() => {
+        pending.delete(batch)
+        if (pending.size === 0 && remoteCancelSends.get(ticketId) === pending) {
+          remoteCancelSends.delete(ticketId)
+        }
+      })
+    }
     const notifyHarnessReleased = (ticketId: string): void => {
       try {
         late.harness?.release(ticketId)
@@ -777,15 +822,15 @@ export class Runtime {
             // the sticky reservation so the live replacement does not lose its
             // slot. A Worker may still hold an older predecessor whose cancel
             // was lost, so send them all; duplicates stay fail-soft.
-            void Promise.all(
-              supersededRemoteAssignments(ticket).map(target =>
-                placement.cancelRemote(ticketId, target.id, { release: false })
-                  .catch(error => {
-                    log.info(
-                      `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-                    )
-                  })),
-            ).finally(() => notifyHarnessReleased(ticketId))
+            const keepSlotSends = supersededRemoteAssignments(ticket).map(target =>
+              placement.cancelRemote(ticketId, target.id, { release: false })
+                .catch(error => {
+                  log.info(
+                    `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+                  )
+                }))
+            trackRemoteCancelSends(ticketId, keepSlotSends)
+            void Promise.all(keepSlotSends).finally(() => notifyHarnessReleased(ticketId))
             return
           }
           // No live replacement is visible yet, but the cancel send awaits the
@@ -817,15 +862,15 @@ export class Runtime {
             : supersededEnded.length > 0
               ? [...supersededEnded.map(item => item.id), ...(assignmentId ? [assignmentId] : [])]
               : assignmentId ? [assignmentId] : []
-          void Promise.all(
-            cancelAssignmentIds.map(id =>
-              placement.cancelRemote(ticketId, id, { release: false })
-                .catch(error => {
-                  log.info(
-                    `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-                  )
-                })),
-          )
+          const cancelSends = cancelAssignmentIds.map(id =>
+            placement.cancelRemote(ticketId, id, { release: false })
+              .catch(error => {
+                log.info(
+                  `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+                )
+              }))
+          trackRemoteCancelSends(ticketId, cancelSends)
+          void Promise.all(cancelSends)
             .finally(() => {
               const current = store.getDoc<Ticket>('ticket', ticketId)
               const currentLatest = current?.assignments.at(-1)
@@ -1050,6 +1095,14 @@ export class Runtime {
       },
       isRemoteNode: nodeId => placement.isRemote(nodeId),
       dispatchRemote: async (ticket, node) => {
+        // Recovery/retry replacement: the Assignment is already placed (so the
+        // sticky slot is kept), but the Worker must receive the superseded
+        // Assignment's fail-soft cancel before this body. Consume the gate once.
+        const barrier = remoteDispatchBarriers.get(ticket.id)
+        if (barrier) {
+          remoteDispatchBarriers.delete(ticket.id)
+          await barrier
+        }
         const assignment = ticket.assignments.at(-1)
         if (!assignment) return
         const payload = {
@@ -1296,6 +1349,8 @@ export class Runtime {
       tools,
       remoteResultWait: late.remoteResultWait,
       releaseSlot: ticketId => releaseSlot(ticketId),
+      remoteCancelSends,
+      remoteDispatchBarriers,
     })
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
@@ -1587,16 +1642,6 @@ export class Runtime {
       this.log.info(`[recovery] failed error=${error instanceof Error ? error.message : String(error)}`)
       return
     }
-    for (const outcome of recovered) {
-      const ticket = this.store.getDoc<Ticket>('ticket', outcome.ticketId)
-      if (!ticket || ticket.ended) continue
-      // The Engine committed the ended Assignment, the RECOVERED prompt, and
-      // the single pending replacement before this launch.
-      this.log.info(
-        `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',') || '-'} replacementId=${outcome.replacementAssignmentId} mode=${outcome.relaunchOnly ? 'pending' : 'recovered'}`,
-      )
-      this.launchRecovered(outcome.ticketId, ticket)
-    }
     // The previous process may have committed recovery (ended Assignment, one
     // RECOVERED prompt, one pending replacement) and died before its queued
     // `releaseSlot` sent `assignment_cancel`. `recoverInterrupted` sees no
@@ -1605,6 +1650,11 @@ export class Runtime {
     // reservation. Tickets recovery just ended in this `start()` already
     // queued `releaseSlot` through `releaseMesh`, so skip them to avoid a
     // duplicate cancel.
+    //
+    // Queue these before the launch loop: `launchRecovered` holds the
+    // replacement's remote body until the Ticket's cancel sends settle, and a
+    // leftover queued afterwards would not be visible to that barrier (the
+    // replacement would reach the Worker before the superseded cancel).
     const newlyEnded = new Set(
       recovered.filter(outcome => !outcome.relaunchOnly).map(outcome => outcome.ticketId),
     )
@@ -1625,6 +1675,16 @@ export class Runtime {
       // Run in a microtask like `releaseMesh`: recovery must return first, and
       // a crash in this same window must leave the state recoverable again.
       queueMicrotask(() => this.releaseSlot(ticketId))
+    }
+    for (const outcome of recovered) {
+      const ticket = this.store.getDoc<Ticket>('ticket', outcome.ticketId)
+      if (!ticket || ticket.ended) continue
+      // The Engine committed the ended Assignment, the RECOVERED prompt, and
+      // the single pending replacement before this launch.
+      this.log.info(
+        `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',') || '-'} replacementId=${outcome.replacementAssignmentId} mode=${outcome.relaunchOnly ? 'pending' : 'recovered'}`,
+      )
+      this.launchRecovered(outcome.ticketId, ticket)
     }
   }
 
@@ -1724,6 +1784,15 @@ export class Runtime {
    * Relaunch one recovered Ticket without letting a failure abort the others
    * or surface as an unhandled rejection. A launch failure changes no state:
    * the replacement stays `pending`, so a later restart can relaunch it.
+   *
+   * The launch itself still runs synchronously, so recovery stays synchronous
+   * and a crash right after `start()` leaves the replacement pending. Only the
+   * replacement's *remote assignment body* is held behind a dispatch barrier
+   * until every fail-soft `assignment_cancel` send for a superseded ended
+   * Assignment on this Ticket has settled. The Assignment is placed before
+   * that wait, so the existing keep-vs-release settle policy still sees a live
+   * replacement and keeps the sticky slot. A Worker that still holds the old
+   * Assignment is therefore told to stop before the new body reaches it.
    */
   private launchRecovered(ticketId: string, ticket: Ticket): void {
     const failed = (error: unknown): void => {
@@ -1731,10 +1800,50 @@ export class Runtime {
         `[recovery] launch failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
       )
     }
+    this.setRemoteDispatchBarrier(ticketId, this.settleRemoteCancelSends(ticketId))
     try {
       void this.harness.launch(ticket).catch(failed)
     } catch (error) {
       failed(error)
+    }
+  }
+
+  /**
+   * Hold the next remote assignment body for this Ticket until `barrier`
+   * settles. Dispatch consumes the barrier; if the replacement is placed
+   * locally (or never dispatches) the entry simply expires.
+   */
+  private setRemoteDispatchBarrier(ticketId: string, barrier: Promise<void>): void {
+    this.remoteDispatchBarriers.set(ticketId, barrier)
+    const expire = (): void => {
+      if (this.remoteDispatchBarriers.get(ticketId) === barrier) {
+        this.remoteDispatchBarriers.delete(ticketId)
+      }
+    }
+    void barrier.then(expire, expire)
+  }
+
+  /**
+   * Wait until every remote cancel send already in flight (or queued behind a
+   * `releaseSlot` microtask) for this Ticket has settled. Sends are fail-soft:
+   * an unregistered, ineligible, or offline node settles without throwing, so
+   * a launch never hangs on a cancel that cannot be delivered. No in-flight
+   * send means no added delay. `skip` excludes batches already in flight when a
+   * caller only wants to wait for sends its own yield is about to start.
+   */
+  private async settleRemoteCancelSends(
+    ticketId: string,
+    skip?: ReadonlySet<Promise<void>>,
+  ): Promise<void> {
+    // `releaseMesh` queues `releaseSlot` as a microtask; on this tick the send
+    // may not be registered yet. Yield once so those microtasks start their
+    // sends before deciding there is nothing to wait for.
+    await Promise.resolve()
+    for (;;) {
+      const pending = [...(this.remoteCancelSends.get(ticketId) ?? [])]
+        .filter(batch => !skip?.has(batch))
+      if (pending.length === 0) return
+      await Promise.allSettled(pending)
     }
   }
 
@@ -2015,7 +2124,23 @@ export class Runtime {
   async retry(ticketId: string, reason = 'retry'): Promise<Ticket | undefined> {
     this.engine.retryTicket(ticketId, reason)
     const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
-    if (ticket && !ticket.ended) await this.harness.launch(ticket)
+    if (ticket && !ticket.ended) {
+      // An in-process end (report/timeout) may leave a superseded remote cancel
+      // queued behind a `releaseSlot` microtask. Do not put the new Assignment
+      // on a Worker before that send has at least started: the barrier flushes
+      // the queue and holds the body until sends that begin now settle.
+      //
+      // Sends already in flight when `retry` was requested are deliberately not
+      // awaited. They are owned by the keep-vs-release settle path, and blocking
+      // a genuine relaunch on a slow (or held) cancel would strand the
+      // replacement instead of letting it claim the slot the settle path keeps.
+      const alreadySending = new Set(this.remoteCancelSends.get(ticketId) ?? [])
+      this.setRemoteDispatchBarrier(
+        ticketId,
+        this.settleRemoteCancelSends(ticketId, alreadySending),
+      )
+      await this.harness.launch(ticket)
+    }
     return ticket
   }
 
