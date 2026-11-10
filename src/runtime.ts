@@ -728,6 +728,24 @@ export class Runtime {
      * so slot accounting is untouched; only the wire body waits.
      */
     const remoteDispatchBarriers = new Map<string, Promise<void>>()
+    /**
+     * Tickets whose ended remote Assignments have no remote sticky reservation,
+     * so a Worker may still hold one whose cancel was lost.
+     *
+     * `cancelEndedRemoteAssignments` records a Ticket when local placement
+     * starts the fail-soft cancels. That send can itself be lost (the very
+     * failure this path exists for), and then a later different Ticket placed
+     * on the same Worker would reach it while it still holds the old
+     * Assignment. The record lets that later `dispatchRemote` re-send from
+     * committed state right before its own body; the node-keyed
+     * `remoteCancelSendsByNode` wait below then orders the body after the
+     * cancel. The first later dispatch consumes the record after one re-send
+     * attempt; a Ticket that has since gained a remote sticky is skipped (the
+     * sticky paths own their cancels). The no-sticky `releaseSlot` backstop
+     * also clears the record once the local replacement ends, so the set is
+     * bounded by Tickets that still have a live local replacement.
+     */
+    const orphanedRemoteTickets = new Set<string>()
     const trackRemoteCancelSends = (
       ticketId: string,
       sends: Promise<unknown>[],
@@ -854,6 +872,83 @@ export class Runtime {
         ? [latest]
         : []
       return [...superseded, ...latestEndedRemote]
+    }
+    /**
+     * Fail-soft, voided cancel for one ended remote Assignment. Targets the
+     * node recorded on that Assignment and leaves keep-vs-release untouched;
+     * the send is tracked under that node so a later different Ticket's
+     * `dispatchRemote` can order its body after it.
+     */
+    const sendEndedRemoteCancel = (ticketId: string, target: Assignment): void => {
+      const send = placement.cancelRemote(ticketId, target.id, {
+        release: false,
+        ...(target.node !== undefined ? { nodeId: target.node } : {}),
+      }).catch(error => {
+        log.info(
+          `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
+      trackRemoteCancelSends(ticketId, [send], target.node)
+    }
+    /**
+     * Tell every Worker that may still hold an ended remote Assignment for this
+     * Ticket to stop, without touching keep-vs-release.
+     *
+     * This is the no-sticky counterpart to the sticky-slot cancel paths: a
+     * local replacement means the Ticket will never reclaim a remote
+     * reservation, so the only reason to cancel an ended remote row is the
+     * Worker still holding it. `releaseSlot` also calls this when the local
+     * replacement ends, but that is too late: a later different Ticket can be
+     * placed on the same Worker while the local replacement still runs, and
+     * `dispatchRemote`'s cross-Ticket wait can only order after a cancel that
+     * has actually started. Sending at local placement starts it early; the
+     * node-attributed tracking then fences that later Ticket's body.
+     *
+     * `{ release: false }` leaves keep-vs-release to the sticky settle path,
+     * and the send is voided so `finish()` never waits on cancel HTTP.
+     * Duplicate sends stay fail-soft: the Worker ignores a cancel for an
+     * Assignment it already dropped.
+     */
+    const cancelEndedRemoteAssignments = (
+      ticketId: string,
+      ticket: Ticket | undefined = store.getDoc<Ticket>('ticket', ticketId),
+    ): void => {
+      const targets = endedRemoteAssignments(ticket)
+      if (targets.length === 0) return
+      // Keep the Ticket marked until the local replacement releases: this send
+      // is fail-soft, so a later different Ticket placed on the same Worker may
+      // still need to re-send before its own body reaches it.
+      orphanedRemoteTickets.add(ticketId)
+      for (const target of targets) sendEndedRemoteCancel(ticketId, target)
+    }
+    /**
+     * Re-send a Ticket's orphaned ended-remote cancels before a *different*
+     * Ticket's body reaches the same Worker.
+     *
+     * Local placement already started these cancels, but that send is
+     * fail-soft: when it was lost, the Worker still holds the old Assignment
+     * when a later Ticket is placed on the same node. Re-read committed state
+     * and send the targets for this node now; the node-keyed wait in
+     * `dispatchRemote` then holds the later body until they settle. The first
+     * later dispatch consumes the record after one re-send attempt; the local
+     * replacement's own no-sticky `releaseSlot` backstop owns any later
+     * attempt. Paused/approval-held Tickets are left alone, and a Ticket that
+     * has since gained a remote sticky is owned by the sticky paths.
+     */
+    const resendOrphanedRemoteCancels = (node: string, dispatchingTicketId: string): void => {
+      // No committed state to re-derive targets from after `finish()` closes
+      // the Store; a dispatch this late must not throw on a closed handle.
+      if (!store.isOpen) return
+      for (const ticketId of orphanedRemoteTickets) {
+        if (ticketId === dispatchingTicketId) continue
+        const ticket = store.getDoc<Ticket>('ticket', ticketId)
+        orphanedRemoteTickets.delete(ticketId)
+        if (!ticket || ticket.collab?.paused || pendingApproval(ticket)) continue
+        if (placement.remoteHasTicket(ticketId)) continue
+        for (const target of endedRemoteAssignments(ticket)) {
+          if (target.node === node) sendEndedRemoteCancel(ticketId, target)
+        }
+      }
     }
     /**
      * Free one ticket's Worker slot, then let the scheduler pump.
@@ -1033,25 +1128,14 @@ export class Runtime {
         // there is none). A worker can still hold an older remote Assignment
         // whose `assignment_cancel` was lost, for example a local-first retry
         // that ran after a lost cancel conservatively freed the remote slot.
-        // Send those cancels to the node recorded on each Assignment; the
-        // explicit `nodeId` needs no sticky reservation and `{ release: false }`
-        // leaves keep-vs-release untouched. Fail-soft and voided: local capacity
-        // below is still freed synchronously and `finish()` never waits on the
-        // HTTP send.
-        const historical = endedRemoteAssignments(ticket)
-        for (const target of historical) {
-          const send = placement.cancelRemote(ticketId, target.id, {
-            release: false,
-            ...(target.node !== undefined ? { nodeId: target.node } : {}),
-          }).catch(error => {
-            log.info(
-              `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-            )
-          })
-          // Attribute the send to the node it actually targets so a later
-          // dispatch of a different Ticket to that node still orders after it.
-          trackRemoteCancelSends(ticketId, [send], target.node)
-        }
+        // Keep this as the backstop for a replacement that ends later; local
+        // placement already sent the same fail-soft cancels (duplicates are
+        // harmless). Local capacity below is still freed synchronously and
+        // `finish()` never waits on the HTTP send. The replacement is ending,
+        // so this is the last attempt: drop the orphan record that let a later
+        // dispatch re-send while it was still running.
+        cancelEndedRemoteAssignments(ticketId, ticket)
+        orphanedRemoteTickets.delete(ticketId)
         placement.release(ticketId)
       } catch (error) {
         log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
@@ -1234,14 +1318,33 @@ export class Runtime {
         const disposition = store.getDoc<Disposition>('disposition', ticket.originTriggerId)
         return disposition?.shards?.length ? disposition.shards : ['default']
       },
-      pickNode: (ticketId, _ticket) => {
+      pickNode: (ticketId, ticket) => {
         const need = requiredMeshCapabilities(baseEnv)
         const nodeId = placement.pickNode(ticketId, need)
-        if (nodeId) metrics.increment('mesh.assigned')
+        if (nodeId) {
+          metrics.increment('mesh.assigned')
+          // Local placement chosen (the returned id is the in-process node).
+          // The Ticket will not claim a remote sticky slot, so start the
+          // historical ended-remote cancels now instead of waiting for the
+          // local replacement to end. Fail-soft and voided; a later different
+          // Ticket dispatched to that node orders its body after them.
+          if (!placement.isRemote(nodeId)) cancelEndedRemoteAssignments(ticketId, ticket)
+        } else if (!placement.remoteHasTicket(ticketId)) {
+          // Queued for a local slot: the replacement will still be local, so
+          // start the same cancels early rather than at its eventual end.
+          cancelEndedRemoteAssignments(ticketId, ticket)
+        }
         return nodeId
       },
       isRemoteNode: nodeId => placement.isRemote(nodeId),
       dispatchRemote: async (ticket, node) => {
+        // A different Ticket's local replacement may have started cancels for
+        // ended remote Assignments this Worker still holds; the fail-soft send
+        // can have been lost. Re-send them now (tracked under the owning
+        // Ticket), so the cross-Ticket wait below holds this body until they
+        // settle. This is not a capacity barrier: only the wire body waits and
+        // only when a recorded orphan targets this node.
+        resendOrphanedRemoteCancels(node, ticket.id)
         // Recovery/retry replacement: the Assignment is already placed (so the
         // sticky slot is kept), but the Worker must receive the superseded
         // Assignment's fail-soft cancel before this body. Consume the gate once.
