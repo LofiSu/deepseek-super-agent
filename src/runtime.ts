@@ -409,6 +409,19 @@ export class Runtime {
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
+  /**
+   * True only after the real persisted-state restore ran in `start()` (a
+   * `MockModel` deferral leaves it false: late-bind must not consume work that
+   * recovery deliberately deferred).
+   */
+  private recoveryRestoreDone = false
+  /**
+   * Remote node ids whose persisted sticky reservations were already rebuilt,
+   * either by `start()` or by the first late-bind of that node. A later
+   * heartbeat that merely makes an already-known node eligible again only
+   * pumps; it must not rerun the leftover/ended cancel restore.
+   */
+  private readonly reservationsRestoredForNodes = new Set<string>()
 
   private constructor(parts: {
     home: string
@@ -1889,11 +1902,6 @@ export class Runtime {
       },
     })
     late.harness = harness
-    // A remote node becoming eligible again (offline/stale → heartbeat) is an
-    // external capacity event. Wake the Harness mesh FIFO so a parked retry or
-    // enqueueWorker can pick the returned node without waiting for an unrelated
-    // Worker turn to end. Extra pumps are harmless; an empty queue no-ops.
-    placement.setRemoteEligibleListener(() => harness.pumpQueue())
     const watchdog = new Watchdog({
       store,
       engine,
@@ -1938,6 +1946,14 @@ export class Runtime {
       remoteCancelSends,
       remoteDispatchBarriers,
     })
+    // A remote node becoming eligible (late register / mesh inbox `register`,
+    // or a heartbeat that brings an offline/stale node back) is an external
+    // capacity event. Rebuild any persisted sticky reservation `start()` could
+    // not see because the node was not registered yet, then wake the Harness
+    // mesh FIFO so a parked retry or enqueueWorker can pick the node without
+    // waiting for an unrelated Worker turn to end. Extra pumps are harmless; an
+    // empty queue no-ops, and only the first sighting of a node restores.
+    placement.setRemoteEligibleListener(nodeId => runtime.handleRemoteNodeEligible(nodeId))
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
     host.onAssessmentNeeded = () => runtime.assessPending()
@@ -2239,6 +2255,15 @@ export class Runtime {
     // Assignment.node before recovery ends those Assignments so `releaseSlot`
     // can send the remote cancel the dead process never sent.
     const restoredFromEnded = this.restoreRemoteStickyReservations()
+    // Every node registered at this point had its persisted reservations
+    // rebuilt above (only registered nodes can be remote). Mark them so a later
+    // heartbeat for the same node only pumps. A node that appears *after* this
+    // scan (the production late-bind order) is missing from this set and gets
+    // its restore on the eligible-listener wake instead.
+    for (const node of this.placement.remote?.list() ?? []) {
+      this.reservationsRestoredForNodes.add(node.id)
+    }
+    this.recoveryRestoreDone = true
     let recovered: ReturnType<Engine['recoverInterrupted']>
     try {
       recovered = this.engine.recoverInterrupted()
@@ -2380,8 +2405,13 @@ export class Runtime {
    * process itself ended `latest`/the Ticket through a report and died before
    * its queued cancels went out (no later open Assignment exists). Both must
    * still send the lost cancel on this `start()`.
+   *
+   * `onlyNode` restricts both passes to Assignments recorded on that node. The
+   * late-bind wake uses it: `start()` ran before the node was registered, so it
+   * could not see these rows as remote. Passing no filter keeps the full
+   * startup scan unchanged.
    */
-  private restoreRemoteStickyReservations(): Set<string> {
+  private restoreRemoteStickyReservations(onlyNode?: string): Set<string> {
     const restoredFromEnded = new Set<string>()
     for (const ticket of this.store.listDocs<Ticket>('ticket')) {
       const held = Boolean(ticket.collab?.paused) || pendingApproval(ticket)
@@ -2390,6 +2420,7 @@ export class Runtime {
       if (!ticket.ended) {
         for (const assignment of ticket.assignments) {
           if (assignment.state !== 'running' || !assignment.node) continue
+          if (onlyNode !== undefined && assignment.node !== onlyNode) continue
           if (!this.placement.isRemote(assignment.node)) continue
           if (!this.placement.restoreRemoteTicket(ticket.id, assignment.node)) continue
           this.log.info(
@@ -2412,6 +2443,7 @@ export class Runtime {
       // idempotent and never clobbers a reservation bound to a different node.
       const predecessor = this.leftoverRemoteCancelTarget(ticket)
       if (!predecessor?.node) continue
+      if (onlyNode !== undefined && predecessor.node !== onlyNode) continue
       if (!this.placement.restoreRemoteTicket(ticket.id, predecessor.node)) continue
       restoredFromEnded.add(ticket.id)
       this.log.info(
@@ -2419,6 +2451,75 @@ export class Runtime {
       )
     }
     return restoredFromEnded
+  }
+
+  /**
+   * Eligible-listener wake for a remote node: rebuild the persisted sticky
+   * reservations `start()` could not see, start any leftover cancel, then pump.
+   *
+   * The production late-bind order calls `Runtime.start()` *before*
+   * `placement.registerRemoteNode` / mesh-inbox `handleRegister`. At `start()`
+   * the node was unknown, so `placement.isRemote` was false and
+   * `restoreRemoteStickyReservations()` skipped the peer's live running
+   * Assignment. The node's register now fires this wake. Without the restore
+   * the paused/approval-held Ticket's remote Worker keeps running while a later
+   * (or already parked) Ticket is placed on the same capacity-1 node, and the
+   * leftover ended remote of an unpaused recovered Ticket is never cancelled
+   * before its replacement body is dispatched.
+   *
+   * Only the first sighting of a node after `start()` restores; a heartbeat
+   * that merely brings an already-known node back from ineligible → eligible
+   * only pumps, so it cannot start a duplicate leftover-cancel storm.
+   */
+  private handleRemoteNodeEligible(nodeId: string): void {
+    try {
+      this.restoreLateBoundRemoteNode(nodeId)
+    } catch (error) {
+      // The registry already accepted the register/heartbeat; a restore failure
+      // must not turn it into a failed delivery. The queue is still pumped.
+      this.log.info(
+        `[recovery] remote late-bind restore failed node=${nodeId} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    this.harness.pumpQueue()
+  }
+
+  /**
+   * Complete the sticky restore for a node that became known after `start()`.
+   *
+   * A `MockModel` process deferred recovery on purpose; late-bind must not
+   * consume that work, so the restore waits until a real `start()` has run.
+   * `start()` marks every node it already restored, and this marks the node on
+   * its first late-bind, so both the heartbeat re-eligibility path and a
+   * second wake stay quiet.
+   */
+  private restoreLateBoundRemoteNode(nodeId: string): void {
+    if (!this.recoveryRestoreDone || !this.store.isOpen) return
+    if (this.reservationsRestoredForNodes.has(nodeId)) return
+    if (!this.placement.isRemote(nodeId)) return
+    this.reservationsRestoredForNodes.add(nodeId)
+    const restoredFromEnded = this.restoreRemoteStickyReservations(nodeId)
+    for (const ticketId of restoredFromEnded) {
+      const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
+      // Same drive-by policy as `start()`: paused and approval-held Tickets
+      // keep their live reservation but never queue a leftover/ended cancel.
+      if (!ticket || ticket.collab?.paused || pendingApproval(ticket)) continue
+      const predecessor = this.leftoverRemoteCancelTarget(ticket)
+      if (!predecessor) continue
+      this.log.info(
+        `[recovery] remote cancel queued ticketId=${ticketId} assignmentId=${predecessor.id} node=${predecessor.node}`,
+      )
+      // Start the cancel *before* the pump below. A replacement already parked
+      // in the FIFO would otherwise dispatch its body onto the Worker that
+      // still holds the ended Assignment. Unlike `start()`, this hook is not
+      // inside a Store transaction, so the fail-soft send can begin now.
+      this.releaseSlot(ticketId)
+      // A replacement launch already in flight (recovery relaunch or retry) has
+      // a dispatch barrier from its own launch; replace it with one that also
+      // sees these just-started sends, so the pump cannot deliver the body
+      // before the Worker is told to stop the old Assignment.
+      this.setRemoteDispatchBarrier(ticketId, this.settleRemoteCancelSends(ticketId))
+    }
   }
 
   /**
