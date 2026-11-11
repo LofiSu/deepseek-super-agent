@@ -3224,6 +3224,80 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     }
   }, 60_000)
 
+  it('fails soft when the result timeout fires after a crash closed the Store', async () => {
+    const inbox = await startWorkerInbox()
+
+    // Crash simulation: a remote Assignment is running and its unref'd result
+    // timer is armed, then the Store is closed directly (no `finish()` /
+    // `clearAll()`), as the crash-close tests in this file do. When the timer
+    // later fires on a still-alive host it must not read the closed Store.
+    // `onTimeout` used to call `store.getDoc` unguarded, throwing
+    // `database is not open` from the timer and surfacing as an uncaught
+    // exception (official CI on 2d1be17 failed every test this way).
+    const REQUIRED_CAPABILITY = 'remote-result-timeout-closed-store'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-result-timeout-closed-store-'))
+    homes.push(home)
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: inbox.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+    // Short timeout so the test does not wait the 60s default.
+    const runtime = runtimeFor(home, holdingModel(new Map()), 500, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode(node)
+    runtime.start({ assessPending: false })
+
+    const ticketId = createTicket(runtime, 'remote_result_timeout_closed_store')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => inbox.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach the remote inbox',
+    )
+    const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(a1.state).toBe('running')
+    // Close only once the wait is actually armed, so the timeout is guaranteed
+    // to fire after the Store is gone rather than racing the dispatch.
+    await waitFor(
+      () => runtime.log.text().includes(
+        `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${a1.id}`,
+      ),
+      5_000,
+      'the remote result wait to be armed',
+    )
+
+    const crashes: unknown[] = []
+    const onUncaughtException = (error: unknown): void => { crashes.push(error) }
+    const onUnhandledRejection = (reason: unknown): void => { crashes.push(reason) }
+    process.on('uncaughtException', onUncaughtException)
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      runtime.daemon.stop()
+      runtime.store.close()
+      expect(runtime.store.isOpen).toBe(false)
+
+      // Wait past the result timeout plus a turn for Node to emit any error.
+      await new Promise(resolve => setTimeout(resolve, 500 + 400))
+
+      // The hard assertion: the fired timer must not surface an error.
+      expect(crashes).toEqual([])
+      expect(crashes.map(item => item instanceof Error ? item.message : String(item)))
+        .not.toContain('database is not open')
+      // The ignored-timeout log is a positive signal that the timer really
+      // fired against the closed Store.
+      expect(runtime.log.text()).toContain(
+        `[mesh] remote result timeout ignored ticketId=${ticketId} assignmentId=${a1.id} reason=store-closed`,
+      )
+    } finally {
+      process.off('uncaughtException', onUncaughtException)
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  }, 60_000)
+
   it('cancels a superseded remote Assignment on its own node after a lost cancel moved the Ticket', async () => {
     // Two eligible remote workers, both capacity 1 and matching the required
     // capability. N1 is registered first, so placement prefers it.

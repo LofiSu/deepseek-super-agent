@@ -637,6 +637,20 @@ export class Runtime {
       // report path mutates the *latest* Assignment, so recovering or ending
       // that Assignment can leave this timer pointing at a replacement. Failing
       // the replacement for the old Assignment's missing result would be wrong.
+      //
+      // The Store can already be closed when this unref'd timer fires: a
+      // crash-simulation or teardown closes SQLite directly without
+      // `finish()`/`clearAll()`, and even `finish()` cannot stop a callback
+      // that has already started. Every Store read on a closed handle throws
+      // `database is not open`; this timer is fire-and-forget, so letting that
+      // escape becomes an uncaught exception that can take down the host or the
+      // test process. There is no state left to recover, so fail soft.
+      if (!store.isOpen) {
+        log.info(
+          `[mesh] remote result timeout ignored ticketId=${ticketId} assignmentId=${assignmentId} reason=store-closed`,
+        )
+        return
+      }
       const ticket = store.getDoc<Ticket>('ticket', ticketId)
       const armed = ticket?.assignments.find(item => item.id === assignmentId)
       const latest = ticket?.assignments.at(-1)
