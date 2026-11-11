@@ -2,7 +2,7 @@ import { withSessionRole } from '../core/session-role.ts'
 import { redactRecord } from '../env/sanitize.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { formatRefs } from '../memory/graph.ts'
-import type { ObjectRef, Role, Ticket, Trigger } from '../shared/types.ts'
+import type { Assignment, ObjectRef, Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import type { SkillInfo } from '../env/skills.ts'
 import { systemPrompt, type PromptFiles } from './prompts.ts'
@@ -70,6 +70,13 @@ export interface HarnessOptions {
 
 /** Bound for an in-process Worker backlog. Environment parsing already sanitizes. */
 export const DEFAULT_QUEUE_LIMIT = 100
+
+/**
+ * Report kinds that end an Assignment. Mirrors `REMOTE_ENDING_REPORT_KINDS` in
+ * `src/runtime.ts`: a remote result with one of these is settled, even when a
+ * pause holds its verdict.
+ */
+const TERMINAL_REPORT_KINDS = new Set(['ready', 'failed', 'dropped', 'blocked', 'waiting'])
 
 /** One redacted entry in a resident Router Session's journal. */
 export interface RouterObservation {
@@ -591,6 +598,22 @@ export class Harness {
     const resumeThroughMesh = Boolean(this.opts.pickNode)
       && assignment.state === 'pending'
       && assignment.node === undefined
+    // An already-placed remote Assignment that is still in progress is still
+    // running on the peer. Starting a local Worker turn here would run the same
+    // required-capability work locally and remotely (P1 / scenario D). Leave the
+    // remote Assignment and its reserved mesh slot alone: when it posts a
+    // terminal result, `applyRemoteAssignmentResult` applies it to the now
+    // unpaused Ticket. A pause-held terminal report is scenario P instead — the
+    // remote work is already done and its slot was released — so that case must
+    // keep the local RESUME Worker path that applies the held verdict.
+    const remoteInProgress = (candidate: Assignment | undefined): boolean =>
+      Boolean(this.opts.pickNode)
+      && candidate !== undefined
+      && candidate.state === 'running'
+      && candidate.node !== undefined
+      && this.opts.isRemoteNode?.(candidate.node) === true
+      && !(candidate.report && TERMINAL_REPORT_KINDS.has(candidate.report.kind))
+    const resumeRemoteInProgress = remoteInProgress(assignment)
     const sessionId = workerSessionId(ticket.id)
     const since = ticket.collab?.resumes.at(-1)?.pausedAt
     const pending = since
@@ -602,9 +625,11 @@ export class Harness {
       ? []
       : this.opts.routerSessions?.(ticket) ?? ['default']
     for (const shard of shards) this.armRouter(shard)
-    this.opts.log(
-      `[harness] ExecutorSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
-    )
+    if (!resumeRemoteInProgress) {
+      this.opts.log(
+        `[harness] ExecutorSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
+      )
+    }
     if (assignment.state === 'pending' && !resumeThroughMesh) {
       this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
     }
@@ -682,6 +707,15 @@ export class Harness {
             return
           }
           return this.startOrQueue(ticket.id)
+        }
+        if (resumeRemoteInProgress) {
+          // The remote keeps the Assignment and its mesh slot. The pause is
+          // already cleared, so its terminal result will apply normally rather
+          // than be held. No local Worker session and no second dispatch.
+          this.opts.log(
+            `[collab] resume kept remote ticketId=${ticket.id} node=${latest.assignments.at(-1)?.node ?? assignment.node ?? '-'}`,
+          )
+          return
         }
         return this.enqueue(sessionId, () => guarded(sessionId, 'worker', workerPrompt))
       })
