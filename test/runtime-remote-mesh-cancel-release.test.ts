@@ -95,6 +95,15 @@ interface CancelDroppingProxy {
    * predecessor cancel is still in flight.
    */
   dropDelayMs: number
+  /**
+   * While `dropping`, cancels for these Assignment ids are forwarded after
+   * their delay instead of dropped. This lets one Assignment's cancel be
+   * delayed and then *delivered* while another's is genuinely lost, which is
+   * the race the last-attempt/terminal settle ordering has to survive.
+   */
+  forwardDelays: Map<string, number>
+  /** Delayed forwards that have been scheduled (possibly still in flight). */
+  delayedForwards: Array<{ ticketId: string; assignmentId: string }>
 }
 
 /**
@@ -103,31 +112,28 @@ interface CancelDroppingProxy {
  * reproducing a cancel that never reached the worker (lost/failed send) while
  * still letting assignment bodies through. It answers immediately unless
  * `dropDelayMs` is set, so the runtime's keep-alive socket is never blocked and
- * a replacement can still be dispatched while the cancel is missing.
+ * a replacement can still be dispatched while the cancel is missing. An id
+ * listed in `forwardDelays` is forwarded after that delay even while
+ * `dropping` is set, so a test can delay-then-deliver one cancel while losing
+ * another in the same batch.
  */
 async function startCancelDroppingProxy(targetUrl: string): Promise<CancelDroppingProxy> {
   const target = new URL(targetUrl)
-  const state: CancelDroppingProxy = { url: '', dropped: [], dropping: false, dropDelayMs: 0 }
+  const state: CancelDroppingProxy = {
+    url: '',
+    dropped: [],
+    dropping: false,
+    dropDelayMs: 0,
+    forwardDelays: new Map(),
+    delayedForwards: [],
+  }
   const proxy = createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
     req.on('end', () => {
       const body = Buffer.concat(chunks)
       const text = body.toString('utf8')
-      const reply = (): void => {
-        // Re-read `dropping` when the delayed reply fires: a caller may restore
-        // forwarding while the 502 is pending, and that must forward normally.
-        if (state.dropping && text.includes('assignment_cancel')) {
-          const ticket = text.match(/"ticketId"\s*:\s*"([^"]+)"/)
-          const assignment = text.match(/"assignmentId"\s*:\s*"([^"]+)"/)
-          state.dropped.push({
-            ticketId: ticket?.[1] ?? '',
-            assignmentId: assignment?.[1] ?? '',
-          })
-          res.statusCode = 502
-          res.end('cancel dropped')
-          return
-        }
+      const forward = (): void => {
         const headers = { ...req.headers, host: target.host }
         delete headers['content-length']
         delete headers['transfer-encoding']
@@ -147,9 +153,38 @@ async function startCancelDroppingProxy(targetUrl: string): Promise<CancelDroppi
         })
         forwarded.end(body)
       }
-      if (state.dropping && text.includes('assignment_cancel') && state.dropDelayMs > 0) {
-        setTimeout(reply, state.dropDelayMs)
-        return
+      const reply = (): void => {
+        // Re-read `dropping` when the delayed reply fires: a caller may restore
+        // forwarding while the 502 is pending, and that must forward normally.
+        if (state.dropping && text.includes('assignment_cancel')) {
+          const ticket = text.match(/"ticketId"\s*:\s*"([^"]+)"/)
+          const assignment = text.match(/"assignmentId"\s*:\s*"([^"]+)"/)
+          state.dropped.push({
+            ticketId: ticket?.[1] ?? '',
+            assignmentId: assignment?.[1] ?? '',
+          })
+          res.statusCode = 502
+          res.end('cancel dropped')
+          return
+        }
+        forward()
+      }
+      if (state.dropping && text.includes('assignment_cancel')) {
+        const assignmentId = text.match(/"assignmentId"\s*:\s*"([^"]+)"/)?.[1] ?? ''
+        const forwardDelay = state.forwardDelays.get(assignmentId)
+        if (forwardDelay !== undefined) {
+          const ticket = text.match(/"ticketId"\s*:\s*"([^"]+)"/)
+          state.delayedForwards.push({
+            ticketId: ticket?.[1] ?? '',
+            assignmentId,
+          })
+          setTimeout(forward, forwardDelay)
+          return
+        }
+        if (state.dropDelayMs > 0) {
+          setTimeout(reply, state.dropDelayMs)
+          return
+        }
       }
       reply()
     })
@@ -3579,6 +3614,236 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       expect(current.assignments.at(-1)?.id).toBe(a2.id)
       // The local slot is still held only by the blocker: no local replacement
       // was placed for T1.
+      expect(runtime.placement.local.inFlight(HOST_PEER)).toBe(1)
+    } finally {
+      for (const hold of held.values()) hold.release()
+      await shutdown(runtime)
+    }
+  }, 60_000)
+
+  it('keeps a delivered last-attempt record for a later lost terminal cancel', async () => {
+    // One remote worker behind a cancel-dropping proxy, local mesh capacity 1.
+    // A1 overflows to N1 and loses its failed-report cancel, releasing the
+    // sticky. A local-first retry places A2 on the host; its placement-time A1
+    // cancel is lost too. A2 then ends through the production failed-report
+    // path, so `releaseSlot` starts the no-sticky last-attempt A1 cancel; the
+    // proxy delays and then *delivers* that send. While it is in flight, a
+    // second local blocker forces another overflow and `Runtime.retry` places
+    // A3 on N1 (sticky gained). A3 ends through a failed report: its terminal
+    // sticky cancel batch includes the delayed A1 send plus A3's own cancel,
+    // which is lost. The last-attempt batch settles first, sees the sticky A3
+    // gained, and must not consume the record: A3 is still an uncovered ended
+    // remote. The terminal `!delivered` arm must also be able to re-add the
+    // record rather than assume it survived. Otherwise a later Ticket
+    // overflowing to N1 has nothing to resend and its body reaches a Worker
+    // that still holds A3.
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDroppingProxy(inbox.url)
+
+    const home = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'ds-mesh-cancel-last-attempt-terminal-lost-'),
+    )
+    homes.push(home)
+    const held = new Map<string, Gate>()
+    const runtime = runtimeFor(home, holdingModel(held))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      // 1. Hold the only local slot so T1 overflows to N1 as A1.
+      const blockerId = createTicket(runtime, 'cancel_last_attempt_terminal_blocker')
+      held.set(blockerId, gate())
+      void runtime.harness.launch(loadTicket(runtime, blockerId))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held',
+      )
+
+      const ticketId = createTicket(runtime, 'cancel_last_attempt_terminal')
+      await runtime.harness.launch(loadTicket(runtime, ticketId))
+      await waitFor(
+        () => inbox.assignments.some(event => event.ticketId === ticketId),
+        5_000,
+        'A1 to reach N1',
+      )
+      const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a1.node).toBe(REMOTE_NODE_ID)
+      expect(a1.state).toBe('running')
+
+      // Lose A1's failed-report cancel. After the failed send settles
+      // keep-vs-release frees T1's remote sticky; the worker holds A1.
+      proxy.dropping = true
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'remote worker failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === a1.id),
+        5_000,
+        'A1 cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+        5_000,
+        'the N1 sticky slot to be released after the lost cancel',
+      )
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+
+      // 2. Free the local slot and retry T1 local-first. Hold A2's worker turn;
+      // its placement-time A1 cancel is lost as well.
+      expect(runtime.engine.report(blockerId, {
+        kind: 'ready',
+        text: 'blocker done',
+        deliver: false,
+      }).surfaced).toBe(false)
+      held.get(blockerId)?.release()
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 0,
+        5_000,
+        'the local slot to be released after the holder ends',
+      )
+
+      const droppedBeforeRetry = proxy.dropped
+        .filter(item => item.assignmentId === a1.id).length
+      held.set(ticketId, gate())
+      void runtime.retry(ticketId, 'local-replacement-retry').catch(() => undefined)
+      await waitFor(
+        () => loadTicket(runtime, ticketId).assignments.at(-1)?.state === 'running',
+        5_000,
+        'A2 to be running',
+      )
+      const a2 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a2.id).not.toBe(a1.id)
+      expect(runtime.placement.isRemote(a2.node)).toBe(false)
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+      await waitFor(
+        () => proxy.dropped.filter(item => item.assignmentId === a1.id).length
+          > droppedBeforeRetry,
+        5_000,
+        'the local-placement A1 cancel to be dropped',
+      )
+
+      // 3. End A2 through the production failed-report path. Its last-attempt
+      // A1 cancel is delayed and then delivered, so the settle path will see a
+      // sticky gained later while its send was in flight.
+      proxy.forwardDelays.set(a1.id, 1_200)
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'local replacement failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      held.get(ticketId)?.release()
+      held.delete(ticketId)
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 0,
+        5_000,
+        'the local slot to be free after A2 ends',
+      )
+      await waitFor(
+        () => proxy.delayedForwards.some(item => item.assignmentId === a1.id),
+        5_000,
+        'the last-attempt A1 cancel to be delayed in flight',
+      )
+
+      // 4. While that send is in flight, refill the local slot and retry T1
+      // onto N1 as A3. The sticky is gained before the last-attempt settles.
+      const blocker2Id = createTicket(runtime, 'cancel_last_attempt_terminal_blocker2')
+      held.set(blocker2Id, gate())
+      void runtime.harness.launch(loadTicket(runtime, blocker2Id))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held again',
+      )
+
+      held.set(ticketId, gate())
+      const retried = await runtime.retry(ticketId, 'remote-a3-retry')
+      expect(retried?.ended).toBeUndefined()
+      await waitFor(
+        () => {
+          const latest = loadTicket(runtime, ticketId).assignments.at(-1)
+          return latest !== undefined
+            && latest.id !== a2.id
+            && latest.node === REMOTE_NODE_ID
+            && latest.state !== 'ended'
+        },
+        10_000,
+        'A3 to be placed on N1',
+      )
+      const a3 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a3.id).not.toBe(a1.id)
+      expect(a3.id).not.toBe(a2.id)
+      await waitFor(
+        () => stampIndex(inbox.stamps, 'assignment', a3.id) >= 0,
+        5_000,
+        'A3 body to reach N1',
+      )
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(true)
+
+      // 5. End A3. Its terminal sticky batch waits on a delayed A1 cancel and
+      // loses A3's own cancel. Wait for the sticky release, which happens only
+      // after that whole batch settles.
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'remote A3 failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      held.get(ticketId)?.release()
+      held.delete(ticketId)
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === a3.id),
+        5_000,
+        'A3 terminal cancel to be dropped',
+      )
+      await waitFor(
+        () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+        5_000,
+        'the N1 sticky to be released after the terminal batch settles',
+      )
+      // Let the last-attempt settle (it started before the terminal batch)
+      // finish before a later dispatch can race its in-flight batch.
+      await new Promise(resolve => setTimeout(resolve, 200))
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+      expect(inbox.cancels.some(event => event.assignmentId === a3.id)).toBe(false)
+
+      // 6. Restore forwarding and overflow a later Ticket to N1. The kept
+      // orphan record must resend A3's cancel and order the later body after
+      // it.
+      proxy.dropping = false
+      proxy.forwardDelays.clear()
+      const laterId = createTicket(runtime, 'cancel_last_attempt_terminal_later')
+      await runtime.harness.launch(loadTicket(runtime, laterId))
+      const laterAssignment = loadTicket(runtime, laterId).assignments.at(-1)!
+      expect(laterAssignment.node).toBe(REMOTE_NODE_ID)
+
+      // Wait for both arrivals; asserting after only one would race.
+      await waitFor(
+        () => stampIndex(inbox.stamps, 'cancel', a3.id) >= 0
+          && stampIndex(inbox.stamps, 'assignment', laterAssignment.id) >= 0,
+        10_000,
+        'A3 cancel and the later Ticket body to reach N1',
+      )
+      const cancelIndex = stampIndex(inbox.stamps, 'cancel', a3.id)
+      const laterIndex = stampIndex(inbox.stamps, 'assignment', laterAssignment.id)
+      expect(cancelIndex).toBeLessThanOrEqual(laterIndex)
+      expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[laterIndex].at)
+
+      // The gap this covers: T1 is open with A3 ended, no local replacement
+      // and no remote sticky. The failed reports never claim a successful
+      // cross-machine result.
+      const current = loadTicket(runtime, ticketId)
+      expect(current.ended).toBeUndefined()
+      expect(current.assignments.find(item => item.id === a3.id)?.state).toBe('ended')
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
       expect(runtime.placement.local.inFlight(HOST_PEER)).toBe(1)
     } finally {
       for (const hold of held.values()) hold.release()

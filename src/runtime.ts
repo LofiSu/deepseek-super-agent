@@ -749,9 +749,10 @@ export class Runtime {
      * has since gained a remote sticky is not dropped for that reason alone.
      * The no-sticky `releaseSlot` backstop also drops the record once the local
      * replacement ends, but only after its last-attempt cancels are actually
-     * delivered: a lost last attempt keeps the record so a later dispatch can
-     * still resend it. The set is therefore bounded by Tickets that still have
-     * an uncovered ended remote Assignment or a live local replacement, or
+     * delivered *and* a re-read has no uncovered ended remote left: a lost last
+     * attempt keeps the record so a later dispatch can still resend it. The
+     * set is therefore bounded by Tickets that still have an uncovered ended
+     * remote Assignment or a live local replacement, or
      * whose last-attempt (or later dispatch-time) cancel has not yet been
      * delivered.
      */
@@ -1242,26 +1243,23 @@ export class Runtime {
               // A lost terminal cancel with the sticky released must stay
               // recorded: a later different Ticket placed on the same Worker
               // has nothing else to resend, and the Worker still holds this
-              // ended Assignment.
+              // ended Assignment. Re-add rather than assume the record is
+              // still present: a delivered last-attempt batch (or a
+              // dispatch-time resend) can consume it while this batch waits on
+              // a delayed send of its own.
               if (!delivered) {
-                // Keep the record for the next same-node dispatch.
-              } else if (!current) {
-                // No committed Ticket remains, so the record can never produce
-                // a send.
-                orphanedRemoteTickets.delete(ticketId)
-              } else if (placement.remoteHasTicket(ticketId)) {
-                // A sticky gained while the send was in flight is owned by the
-                // sticky-slot paths.
-                orphanedRemoteTickets.delete(ticketId)
+                orphanedRemoteTickets.add(ticketId)
               } else {
-                // Only ended remotes this delivered batch did not cover still
-                // need a later resend (for example an Assignment appended after
-                // the snapshot). Re-read committed state instead of trusting
-                // the snapshot.
-                const cancelledIds = new Set(cancelAssignmentIds)
-                const remaining = endedRemoteAssignments(current)
-                  .filter(target => !cancelledIds.has(target.id))
-                if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
+                // A sticky gained while the send was in flight does not
+                // consume the record by itself, and this batch may not cover
+                // every ended remote (for example an Assignment appended after
+                // the snapshot). Re-read committed state and drop the record
+                // only when it has no uncovered ended remote left.
+                consumeOrphanedRemoteCancels(
+                  ticketId,
+                  cancelAssignmentIds.map(id => ({ id })),
+                  delivered,
+                )
               }
             }
             notifyHarnessReleased(ticketId)
@@ -1291,35 +1289,20 @@ export class Runtime {
           // send.
           orphanedRemoteTickets.delete(ticketId)
         } else {
-          const cancelledIds = new Set(lastAttempt.targets.map(target => target.id))
           void Promise.all(lastAttempt.sends).then(outcomes => {
             // A lost last attempt (fail-soft 502 / rejected HTTP) keeps the
-            // record so a later dispatch can resend it before its own body.
-            if (!outcomes.every(Boolean)) return
-            // The Store may close while the send is in flight (`finish()` never
-            // waits on cancel HTTP). No committed state remains to decide
-            // from; leave the record rather than throw on a closed handle.
-            if (!store.isOpen) return
-            const current = store.getDoc<Ticket>('ticket', ticketId)
-            if (!current) {
-              // No committed Ticket remains, so the record can never produce a
-              // send.
-              orphanedRemoteTickets.delete(ticketId)
-              return
-            }
-            // A Ticket that has since gained a remote sticky is owned by the
-            // sticky-slot paths.
-            if (placement.remoteHasTicket(ticketId)) {
-              orphanedRemoteTickets.delete(ticketId)
-              return
-            }
-            // Only ended remotes this delivered batch did not cover still need
-            // a later resend (for example an Assignment appended after the
-            // snapshot). Re-read committed state rather than trusting the
-            // snapshot.
-            const remaining = endedRemoteAssignments(current)
-              .filter(target => !cancelledIds.has(target.id))
-            if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
+            // record so a later dispatch can resend it before its own body. A
+            // delivered batch consumes the record only when a re-read of
+            // committed state has no ended remote left that it did not cover.
+            // A remote sticky gained while the send was in flight (a live
+            // replacement) does not consume it: keeping the sticky must not
+            // hide an uncovered ended remote whose own terminal cancel was
+            // lost, for example A3 in the delayed-A1-cancel race.
+            consumeOrphanedRemoteCancels(
+              ticketId,
+              lastAttempt.targets,
+              outcomes.every(Boolean),
+            )
           })
         }
         placement.release(ticketId)
