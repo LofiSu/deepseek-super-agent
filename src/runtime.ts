@@ -1046,10 +1046,14 @@ export class Runtime {
       )
       return sends
     }
-    const resendOrphanedRemoteCancels = (node: string, dispatchingTicketId: string): void => {
+    const resendOrphanedRemoteCancels = (
+      node: string,
+      dispatchingTicketId: string,
+    ): Promise<boolean>[] => {
+      const started: Promise<boolean>[] = []
       // No committed state to re-derive targets from after `finish()` closes
       // the Store; a dispatch this late must not throw on a closed handle.
-      if (!store.isOpen) return
+      if (!store.isOpen) return started
       for (const ticketId of orphanedRemoteTickets) {
         if (ticketId === dispatchingTicketId) continue
         const ticket = store.getDoc<Ticket>('ticket', ticketId)
@@ -1077,6 +1081,7 @@ export class Runtime {
         // the Worker ignores a cancel for an Assignment it already dropped, and
         // `settleRemoteCancelSendsToNode` orders the later body after both.
         const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
+        started.push(...sends)
         void Promise.all(sends).then(outcomes => {
           // A lost same-node resend keeps the record (e240f87): a further later
           // dispatch to this node must be able to resend it.
@@ -1107,6 +1112,7 @@ export class Runtime {
           if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
         })
       }
+      return started
     }
     /**
      * Free one ticket's Worker slot, then let the scheduler pump.
@@ -1588,6 +1594,22 @@ export class Runtime {
         // flight. With spare worker capacity the new body would otherwise reach
         // the worker while it still holds the old Assignment. Hold only this
         // body; placement and the keep-vs-release settle path already ran.
+        await settleRemoteCancelSendsToNode(node, ticket.id)
+        // A different Ticket can end *while* the wait above holds this body,
+        // and its fail-soft terminal cancel can start and be lost (502) during
+        // that wait. The start-of-dispatch resend ran before that cancel
+        // existed, so it could not see the new orphan; the wait then observes
+        // the failed send settle and returns. Re-run the orphan resends now,
+        // after the wait, and hold the body until these new sends and any
+        // still-in-flight other-Ticket sends settle. One post-wait attempt is
+        // enough: a further loss is left to a later Ticket/retry on this node
+        // (existing policy), never an in-dispatch delivery loop. The same-Ticket
+        // resend still no-ops while its own batch is in flight (2a2de80).
+        const postWaitResends = [
+          ...resendOrphanedRemoteCancels(node, ticket.id),
+          ...resendOwnOrphanedRemoteCancels(node, ticket.id),
+        ]
+        if (postWaitResends.length > 0) await Promise.all(postWaitResends)
         await settleRemoteCancelSendsToNode(node, ticket.id)
         const assignment = ticket.assignments.at(-1)
         if (!assignment) return

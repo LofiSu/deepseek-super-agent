@@ -282,6 +282,102 @@ async function startCancelDelayingProxy(
   return state
 }
 
+interface SelectiveCancelProxy {
+  url: string
+  /** Cancel bodies the proxy answered 502 without forwarding. */
+  dropped: Array<{ ticketId: string; assignmentId: string }>
+  /** Cancel bodies the proxy held and then forwarded after `delayMs`. */
+  delayed: Array<{ ticketId: string; assignmentId: string }>
+  /** While an id is in the set, its `assignment_cancel` body is answered 502. */
+  dropIds: Set<string>
+  /** Ids whose `assignment_cancel` body is forwarded after `delayMs`. */
+  delayIds: Set<string>
+  delayMs: number
+}
+
+/**
+ * Loopback proxy in front of the worker handler that can lose one Assignment's
+ * cancel while delaying (and then delivering) another's.
+ *
+ * The dropping proxy loses *every* cancel and the delaying proxy delays *every*
+ * cancel. A race where a later Ticket waits on one delayed cancel while a
+ * different Ticket's cancel is lost and later resent needs both behaviors at
+ * once. Membership is read per request, so a caller can restore forwarding for
+ * one id once its first send has settled and let the post-wait resend through.
+ * Assignment bodies are always forwarded immediately.
+ */
+async function startSelectiveCancelProxy(
+  targetUrl: string,
+  delayMs = 1_000,
+): Promise<SelectiveCancelProxy> {
+  const target = new URL(targetUrl)
+  const state: SelectiveCancelProxy = {
+    url: '',
+    dropped: [],
+    delayed: [],
+    dropIds: new Set(),
+    delayIds: new Set(),
+    delayMs,
+  }
+  const proxy = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = Buffer.concat(chunks)
+      const text = body.toString('utf8')
+      const ticketId = text.match(/"ticketId"\s*:\s*"([^"]+)"/)?.[1] ?? ''
+      const assignmentId = text.match(/"assignmentId"\s*:\s*"([^"]+)"/)?.[1] ?? ''
+      const forward = (): void => {
+        const headers = { ...req.headers, host: target.host }
+        delete headers['content-length']
+        delete headers['transfer-encoding']
+        const forwarded = httpRequest({
+          hostname: target.hostname,
+          port: target.port,
+          path: req.url,
+          method: req.method,
+          headers: { ...headers, 'content-length': String(body.length) },
+        }, proxied => {
+          res.writeHead(proxied.statusCode ?? 502, proxied.headers)
+          proxied.pipe(res)
+        })
+        forwarded.on('error', () => {
+          if (!res.headersSent) res.statusCode = 502
+          res.end()
+        })
+        forwarded.end(body)
+      }
+      if (text.includes('assignment_cancel')) {
+        if (state.dropIds.has(assignmentId)) {
+          state.dropped.push({ ticketId, assignmentId })
+          res.statusCode = 502
+          res.end('cancel dropped')
+          return
+        }
+        if (state.delayIds.has(assignmentId)) {
+          state.delayed.push({ ticketId, assignmentId })
+          setTimeout(forward, state.delayMs)
+          return
+        }
+      }
+      forward()
+    })
+    req.on('error', () => {
+      if (!res.headersSent) res.statusCode = 502
+      res.end()
+    })
+  })
+  servers.push(proxy)
+  await new Promise<void>((resolve, reject) => {
+    proxy.once('error', reject)
+    proxy.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = proxy.address()
+  if (typeof address !== 'object' || address === null) throw new Error('proxy bind failed')
+  state.url = `http://127.0.0.1:${address.port}/a2a`
+  return state
+}
+
 interface InboxStamp {
   kind: 'assignment' | 'cancel'
   assignmentId: string
@@ -3962,6 +4058,145 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
       expect(runtime.placement.remoteHasTicket(ticketId)).toBe(true)
       expect(runtime.placement.local.inFlight(HOST_PEER)).toBe(1)
+    } finally {
+      for (const hold of held.values()) hold.release()
+      await shutdown(runtime)
+    }
+  }, 60_000)
+
+  it('resends a cancel lost while a later Ticket was already waiting to dispatch', async () => {
+    // Same process, three Tickets on one remote worker. Local mesh capacity is
+    // 1 and N1 has capacity 3, so T0 and T1 overflow to N1 and run. T0's
+    // failed-report terminal cancel is *delayed* (not lost), so its sticky is
+    // still held and T2, placed on N1, waits in
+    // `settleRemoteCancelSendsToNode` for that in-flight send. While T2 waits,
+    // T1's terminal cancel is lost (502) and settles: T1's sticky is released
+    // but the Worker still holds A1. The start-of-dispatch resend ran before T1
+    // ended, so only a post-wait resend can order A1's cancel before T2's body.
+    const inbox = await startWorkerInbox()
+    const proxy = await startSelectiveCancelProxy(inbox.url, 1_500)
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-mid-wait-loss-'))
+    homes.push(home)
+    const held = new Map<string, Gate>()
+    const runtime = runtimeFor(home, holdingModel(held))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 3,
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      // Hold the only local slot so T0 and T1 have to overflow to N1.
+      const blockerId = createTicket(runtime, 'cancel_mid_wait_loss_blocker')
+      held.set(blockerId, gate())
+      void runtime.harness.launch(loadTicket(runtime, blockerId))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held',
+      )
+
+      const launchOverflow = async (slug: string) => {
+        const ticketId = createTicket(runtime, slug)
+        await runtime.harness.launch(loadTicket(runtime, ticketId))
+        await waitFor(
+          () => inbox.assignments.some(event => event.ticketId === ticketId),
+          5_000,
+          `${slug} to reach N1`,
+        )
+        const assignment = loadTicket(runtime, ticketId).assignments.at(-1)!
+        expect(assignment.node).toBe(REMOTE_NODE_ID)
+        expect(assignment.state).toBe('running')
+        return { ticketId, assignment }
+      }
+
+      const t0 = await launchOverflow('cancel_mid_wait_loss_t0')
+      const t1 = await launchOverflow('cancel_mid_wait_loss_t1')
+
+      // Delay T0's terminal cancel so T2's dispatch has an in-flight
+      // other-Ticket batch to wait on, and its sticky stays held.
+      proxy.delayIds.add(t0.assignment.id)
+      expect(runtime.engine.report(t0.ticketId, {
+        kind: 'failed',
+        text: 't0 remote failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.delayed.some(item => item.assignmentId === t0.assignment.id),
+        5_000,
+        'T0 cancel to be delayed at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.remoteHasTicket(t0.ticketId),
+        2_000,
+        'T0 sticky to remain held during the delayed cancel',
+      )
+
+      // Place T2 on N1's spare capacity. Launch does not resolve until the
+      // body is dispatched, so keep its promise handled and observe placement.
+      const t2Id = createTicket(runtime, 'cancel_mid_wait_loss_t2')
+      const t2Launch = runtime.harness.launch(loadTicket(runtime, t2Id))
+      void t2Launch.catch(() => undefined)
+      await waitFor(
+        () => loadTicket(runtime, t2Id).assignments.at(-1)?.node === REMOTE_NODE_ID,
+        5_000,
+        'T2 to be placed on N1',
+      )
+      // The body must still be held behind T0's delayed cancel.
+      expect(proxy.delayed.some(item => item.assignmentId === t0.assignment.id)).toBe(true)
+      expect(inbox.assignments.some(event => event.ticketId === t2Id)).toBe(false)
+
+      // While T2 waits, lose T1's terminal cancel and let it settle. The lost
+      // send releases T1's sticky but leaves the Worker holding A1.
+      proxy.dropIds.add(t1.assignment.id)
+      expect(runtime.engine.report(t1.ticketId, {
+        kind: 'failed',
+        text: 't1 remote failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === t1.assignment.id),
+        5_000,
+        'T1 terminal cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => !runtime.placement.remoteHasTicket(t1.ticketId),
+        5_000,
+        'T1 sticky to be released after the lost cancel settled',
+      )
+      // Stop dropping T1 so the post-wait resend can actually be delivered.
+      proxy.dropIds.delete(t1.assignment.id)
+
+      // T0's delayed cancel is delivered, T2's wait ends, and the post-wait
+      // resend must resend A1's cancel before T2's body.
+      await waitFor(
+        () => inbox.cancels.some(event => event.assignmentId === t1.assignment.id)
+          && inbox.assignments.some(event => event.ticketId === t2Id),
+        10_000,
+        'A1 cancel and the T2 body to reach N1',
+      )
+      const a1CancelIndex = stampIndex(inbox.stamps, 'cancel', t1.assignment.id)
+      const a2 = loadTicket(runtime, t2Id).assignments.at(-1)!
+      const bodyIndex = stampIndex(inbox.stamps, 'assignment', a2.id)
+      expect(a1CancelIndex).toBeGreaterThanOrEqual(0)
+      expect(bodyIndex).toBeGreaterThanOrEqual(0)
+      expect(a1CancelIndex).toBeLessThanOrEqual(bodyIndex)
+      expect(inbox.stamps[a1CancelIndex].at).toBeLessThanOrEqual(inbox.stamps[bodyIndex].at)
+
+      // Same-process state: T1 open with A1 ended, T2/A2 running on N1. The
+      // failed reports never claim a successful cross-machine result.
+      const t1State = loadTicket(runtime, t1.ticketId)
+      expect(t1State.ended).toBeUndefined()
+      expect(t1State.assignments.find(item => item.id === t1.assignment.id)?.state).toBe('ended')
+      const t2State = loadTicket(runtime, t2Id)
+      expect(t2State.ended).toBeUndefined()
+      expect(a2.node).toBe(REMOTE_NODE_ID)
+      expect(a2.state).toBe('running')
+      expect(t2State.assignments.at(-1)?.id).toBe(a2.id)
     } finally {
       for (const hold of held.values()) hold.release()
       await shutdown(runtime)
