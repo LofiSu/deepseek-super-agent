@@ -53,7 +53,7 @@ import {
   remoteResultTimeoutMsFromEnv,
 } from './harness/remote-mesh-wait.ts'
 import { recordRemoteResult, remoteResultSeen } from './harness/remote-results.ts'
-import type { RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
+import type { RemoteEligibleReason, RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
 import type { WorkerReport } from './shared/ports.ts'
 import { Logger } from './shared/log.ts'
 import { threadKey, type Assignment, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
@@ -1953,7 +1953,8 @@ export class Runtime {
     // mesh FIFO so a parked retry or enqueueWorker can pick the node without
     // waiting for an unrelated Worker turn to end. Extra pumps are harmless; an
     // empty queue no-ops, and only the first sighting of a node restores.
-    placement.setRemoteEligibleListener(nodeId => runtime.handleRemoteNodeEligible(nodeId))
+    placement.setRemoteEligibleListener((nodeId, reason) =>
+      runtime.handleRemoteNodeEligible(nodeId, reason))
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
     host.onAssessmentNeeded = () => runtime.assessPending()
@@ -2470,10 +2471,16 @@ export class Runtime {
    * Only the first sighting of a node after `start()` restores; a heartbeat
    * that merely brings an already-known node back from ineligible → eligible
    * only pumps, so it cannot start a duplicate leftover-cancel storm.
+   *
+   * A successful `register` always inserts a brand-new node (a duplicate id
+   * throws), so a register that follows `unregister` is another first sighting
+   * even though this id was marked before: `unregister` dropped every sticky
+   * assignment for the node, and only a fresh restore rebuilds them. The
+   * `reason` distinguishes that from the heartbeat pump.
    */
-  private handleRemoteNodeEligible(nodeId: string): void {
+  private handleRemoteNodeEligible(nodeId: string, reason: RemoteEligibleReason): void {
     try {
-      this.restoreLateBoundRemoteNode(nodeId)
+      this.restoreLateBoundRemoteNode(nodeId, reason)
     } catch (error) {
       // The registry already accepted the register/heartbeat; a restore failure
       // must not turn it into a failed delivery. The queue is still pumped.
@@ -2491,12 +2498,17 @@ export class Runtime {
    * consume that work, so the restore waits until a real `start()` has run.
    * `start()` marks every node it already restored, and this marks the node on
    * its first late-bind, so both the heartbeat re-eligibility path and a
-   * second wake stay quiet.
+   * second wake stay quiet. A `register` wake is exempt from the mark: a
+   * successful register inserts a brand-new node, so after `unregister` (which
+   * dropped the node and all of its sticky assignments) it is a first sighting
+   * again and must rebuild the reservations and leftover cancels before the
+   * queue is pumped.
    */
-  private restoreLateBoundRemoteNode(nodeId: string): void {
+  private restoreLateBoundRemoteNode(nodeId: string, reason: RemoteEligibleReason): void {
     if (!this.recoveryRestoreDone || !this.store.isOpen) return
-    if (this.reservationsRestoredForNodes.has(nodeId)) return
     if (!this.placement.isRemote(nodeId)) return
+    const reRegistered = reason === 'register'
+    if (!reRegistered && this.reservationsRestoredForNodes.has(nodeId)) return
     this.reservationsRestoredForNodes.add(nodeId)
     const restoredFromEnded = this.restoreRemoteStickyReservations(nodeId)
     for (const ticketId of restoredFromEnded) {

@@ -194,6 +194,14 @@ function boundedInteger(value: number | undefined, fallback: number): number {
 /** Injectable transport constructor used by tests. */
 export type RemoteTransportFactory = (options: A2AHttpTransportOptions) => A2ATransport
 
+/**
+ * Why a node became eligible. A successful `register` always inserts a
+ * brand-new node (a duplicate id throws), so it is a first sighting even when
+ * this id was registered before and later `unregister`ed. A `heartbeat` only
+ * reports an already-registered node coming back from offline/stale.
+ */
+export type RemoteEligibleReason = 'register' | 'heartbeat'
+
 export interface RemoteMeshRegistryOptions {
   /** This process's authenticated A2A identity; signs every outbound envelope. */
   localPeerId?: string
@@ -215,7 +223,7 @@ export interface RemoteMeshRegistryOptions {
    * ineligible (offline or stale) node back to eligible. Late wiring uses
    * `setOnBecameEligible` instead. The registry never starts dispatch itself.
    */
-  onBecameEligible?: (nodeId: string) => void
+  onBecameEligible?: (nodeId: string, reason: RemoteEligibleReason) => void
 }
 
 interface RemoteNodeRecord {
@@ -265,7 +273,7 @@ export class RemoteMeshRegistry {
   private readonly nodes = new Map<string, RemoteNodeRecord>()
   private readonly assignments = new Map<string, string>()
   private readonly transports = new Map<string, A2ATransport>()
-  private becameEligibleListener?: (nodeId: string) => void
+  private becameEligibleListener?: (nodeId: string, reason: RemoteEligibleReason) => void
 
   constructor(options: RemoteMeshRegistryOptions | string = {}) {
     const resolved: RemoteMeshRegistryOptions = typeof options === 'string'
@@ -293,7 +301,9 @@ export class RemoteMeshRegistry {
    * register that adds an eligible node, can wake a parked mesh queue. Passing
    * `undefined` removes the listener.
    */
-  setOnBecameEligible(listener: ((nodeId: string) => void) | undefined): void {
+  setOnBecameEligible(
+    listener: ((nodeId: string, reason: RemoteEligibleReason) => void) | undefined,
+  ): void {
     this.becameEligibleListener = listener
   }
 
@@ -303,9 +313,9 @@ export class RemoteMeshRegistry {
    * register/heartbeat into a failed delivery (a replay would not fire again
    * because the node is now eligible).
    */
-  private notifyBecameEligible(nodeId: string): void {
+  private notifyBecameEligible(nodeId: string, reason: RemoteEligibleReason): void {
     try {
-      this.becameEligibleListener?.(nodeId)
+      this.becameEligibleListener?.(nodeId, reason)
     } catch {
       // See the method comment: the registry operation already succeeded.
     }
@@ -345,7 +355,7 @@ export class RemoteMeshRegistry {
     // production "a placeable node just appeared" event and must wake a parked
     // FIFO without waiting for an unrelated Worker turn. Failed registers throw
     // above, so they never reach this notification.
-    this.notifyBecameEligible(id)
+    this.notifyBecameEligible(id, 'register')
     return this.view(record, record.lastHeartbeatAt)
   }
 
@@ -364,7 +374,7 @@ export class RemoteMeshRegistry {
     node.lastHeartbeatAt = at
     node.online = true
     if (!wasEligible && this.eligible(node, now)) {
-      this.notifyBecameEligible(id)
+      this.notifyBecameEligible(id, 'heartbeat')
     }
     return true
   }

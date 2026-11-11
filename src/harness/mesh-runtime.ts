@@ -1,6 +1,6 @@
 import type { A2ADelivery } from '../channels/a2a.ts'
 import type { A2ASecret } from '../channels/a2a-auth.ts'
-import { RemoteMeshRegistry, type RemoteNodeRegistration } from './remote-node.ts'
+import { RemoteMeshRegistry, type RemoteEligibleReason, type RemoteNodeRegistration } from './remote-node.ts'
 import { WorkerMeshRegistry } from './mesh.ts'
 
 function parseCapabilitiesCsv(raw: string | undefined): string[] {
@@ -62,7 +62,7 @@ export function parseRemoteMeshNodesFromEnv(env: NodeJS.ProcessEnv): RemoteMeshE
  */
 export class WorkerPlacement {
   private remoteRegistry?: RemoteMeshRegistry
-  private remoteEligibleListener?: (nodeId: string) => void
+  private remoteEligibleListener?: (nodeId: string, reason: RemoteEligibleReason) => void
 
   get remote(): RemoteMeshRegistry | undefined {
     return this.remoteRegistry
@@ -81,7 +81,9 @@ export class WorkerPlacement {
    * Applied to the current registry (when one exists) and to a registry this
    * placement creates later through `registerRemoteNode`.
    */
-  setRemoteEligibleListener(listener: ((nodeId: string) => void) | undefined): void {
+  setRemoteEligibleListener(
+    listener: ((nodeId: string, reason: RemoteEligibleReason) => void) | undefined,
+  ): void {
     this.remoteEligibleListener = listener
     this.remoteRegistry?.setOnBecameEligible(listener)
   }

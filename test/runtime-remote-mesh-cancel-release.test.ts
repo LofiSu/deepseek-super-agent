@@ -2034,6 +2034,104 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await shutdown(runtimeB)
   }, 60_000)
 
+  it('restores a paused remote reservation when the node re-registers after unregister', async () => {
+    const REQUIRED_CAPABILITY = 'reregister-paused-remote-capability'
+    const worker = await startWorkerInbox()
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-paused-remote-reregister-'))
+    homes.push(home)
+    const scripted = (): ScriptedModel =>
+      new ScriptedModel(async request => {
+        if (request.role !== 'worker') return { text: 'router-ok' }
+        return { text: 'worker-done' }
+      })
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: worker.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+
+    // Runtime A: place T1 on the required-capability node, let the body arrive,
+    // then pause it before any terminal result and crash without cancelling.
+    const runtimeA = runtimeFor(home, scripted(), 60_000, REQUIRED_CAPABILITY)
+    runtimeA.placement.registerRemoteNode(node)
+    runtimeA.start({ assessPending: false })
+
+    const firstTicketId = createTicket(runtimeA, 'reregister_paused_remote_a')
+    const firstLaunch = runtimeA.harness.launch(loadTicket(runtimeA, firstTicketId))
+    firstLaunch.catch(() => undefined)
+    await waitFor(
+      () => worker.assignments.some(event => event.ticketId === firstTicketId),
+      5_000,
+      'T1 to reach the remote node',
+    )
+    const pausedAssignment = loadTicket(runtimeA, firstTicketId).assignments.at(-1)!
+    expect(pausedAssignment.node).toBe(REMOTE_NODE_ID)
+    expect(pausedAssignment.state).toBe('running')
+    expect(runtimeA.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    expect(runtimeA.pause(firstTicketId).changed).toBe(true)
+    expect(loadTicket(runtimeA, firstTicketId).assignments.at(-1)?.state).toBe('running')
+    expect(worker.cancels).toHaveLength(0)
+
+    runtimeA.daemon.stop()
+    runtimeA.store.close()
+    expect(worker.cancels).toHaveLength(0)
+
+    // Runtime B: start() first, then late-bind the node. The first restore
+    // rebuilds the paused Ticket's sticky reservation.
+    const runtimeB = runtimeFor(home, scripted(), 60_000, REQUIRED_CAPABILITY)
+    runtimeB.start({ assessPending: false })
+    runtimeB.placement.registerRemoteNode(node)
+    const restoreLine =
+      `[recovery] remote reservation restored ticketId=${firstTicketId} assignmentId=${pausedAssignment.id} node=${REMOTE_NODE_ID}`
+    expect(runtimeB.log.text()).toContain(restoreLine)
+    expect(runtimeB.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // unregister drops the node and every sticky assignment for it. The same
+    // peer coming back is a brand-new register, so the reservation must be
+    // rebuilt again even though this id was marked on the first late-bind.
+    expect(runtimeB.placement.remote?.unregister(REMOTE_NODE_ID)).toBe(true)
+    expect(runtimeB.placement.isRemote(REMOTE_NODE_ID)).toBe(false)
+    expect(runtimeB.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(0)
+    expect(runtimeB.log.text().split(restoreLine)).toHaveLength(2)
+
+    runtimeB.placement.registerRemoteNode(node)
+    expect(runtimeB.placement.isRemote(REMOTE_NODE_ID)).toBe(true)
+    expect(runtimeB.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    // Exactly one more restore: the re-register is another first sighting.
+    expect(runtimeB.log.text().split(restoreLine)).toHaveLength(3)
+
+    // T2 cannot take the re-registered node while T1's paused remote still runs
+    // there: it parks in the mesh FIFO and is neither dispatched nor run.
+    const secondTicketId = createTicket(runtimeB, 'reregister_paused_remote_b')
+    const secondLaunch = runtimeB.harness.launch(loadTicket(runtimeB, secondTicketId))
+    secondLaunch.catch(() => undefined)
+    await waitFor(
+      () => runtimeB.log.text().includes(`mesh.queued ticketId=${secondTicketId}`),
+      5_000,
+      'T2 to queue behind the re-registered paused remote slot',
+    )
+    const secondAssignment = loadTicket(runtimeB, secondTicketId).assignments.at(-1)!
+    expect(secondAssignment.state).toBe('pending')
+    expect(secondAssignment.node).toBeUndefined()
+    expect(worker.assignments.some(event => event.ticketId === secondTicketId)).toBe(false)
+    expect(runtimeB.log.text()).not.toContain(`[mesh] remote dispatch ticketId=${secondTicketId}`)
+    expect(runtimeB.log.text()).not.toContain(`session=worker_${secondTicketId}`)
+    expect(runtimeB.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // T1 was not ended, replaced, or cancelled while T2 parked.
+    const recovered = loadTicket(runtimeB, firstTicketId)
+    expect(recovered.collab?.paused).toBeDefined()
+    expect(recovered.assignments.map(item => item.id)).toEqual([pausedAssignment.id])
+    expect(recovered.assignments[0]?.state).toBe('running')
+    expect(recovered.assignments[0]?.node).toBe(REMOTE_NODE_ID)
+    expect(worker.cancels).toHaveLength(0)
+
+    await shutdown(runtimeB)
+  }, 60_000)
+
   it('cancels a leftover remote before a late-bound node receives the recovered replacement', async () => {
     const REQUIRED_CAPABILITY = 'late-bind-resumed-remote-capability'
     const worker = await startWorkerInbox()
