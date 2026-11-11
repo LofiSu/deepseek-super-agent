@@ -729,8 +729,8 @@ export class Runtime {
      */
     const remoteDispatchBarriers = new Map<string, Promise<void>>()
     /**
-     * Tickets whose ended remote Assignments have no remote sticky reservation,
-     * so a Worker may still hold one whose cancel was lost.
+     * Tickets whose ended remote Assignments a Worker may still hold because
+     * their cancel was lost.
      *
      * `cancelEndedRemoteAssignments` records a Ticket when local placement
      * starts the fail-soft cancels. That send can itself be lost (the very
@@ -739,16 +739,21 @@ export class Runtime {
      * Assignment. The record lets that later `dispatchRemote` re-send from
      * committed state right before its own body; the node-keyed
      * `remoteCancelSendsByNode` wait below then orders the body after the
-     * cancel. The record is consumed only once a dispatch-time re-send to the
-     * owning node succeeds; a dispatch to a different node, or a lost re-send,
-     * leaves it in place so that node can still resend. A Ticket that has since
-     * gained a remote sticky is dropped (the sticky paths own their cancels).
+     * cancel. The keep-slot path records a Ticket when it *starts* its ended
+     * predecessor cancels too, even though a live replacement keeps the sticky:
+     * keeping the sticky must not hide a lost predecessor cancel.
+     *
+     * The record is consumed only once a delivered batch covers every ended
+     * remote left in committed state; a dispatch to a different node, or a lost
+     * re-send, leaves it in place so that node can still resend. A Ticket that
+     * has since gained a remote sticky is not dropped for that reason alone.
      * The no-sticky `releaseSlot` backstop also drops the record once the local
      * replacement ends, but only after its last-attempt cancels are actually
      * delivered: a lost last attempt keeps the record so a later dispatch can
      * still resend it. The set is therefore bounded by Tickets that still have
-     * a live local replacement, or whose last-attempt (or later dispatch-time)
-     * cancel has not yet been delivered.
+     * an uncovered ended remote Assignment or a live local replacement, or
+     * whose last-attempt (or later dispatch-time) cancel has not yet been
+     * delivered.
      */
     const orphanedRemoteTickets = new Set<string>()
     const trackRemoteCancelSends = (
@@ -908,6 +913,37 @@ export class Runtime {
       return settled
     }
     /**
+     * Drop an orphan record only when this batch actually covered every ended
+     * remote Assignment committed state still knows about.
+     *
+     * A live replacement holding the sticky does not own the record: the ended
+     * predecessor's cancel can still have been lost, and keeping the sticky must
+     * not hide that. A lost send keeps the record so a later same-node dispatch
+     * can resend it. A closed Store has no committed state to decide from and
+     * leaves the record to the shutdown owners (`finish()` never waits on cancel
+     * HTTP).
+     */
+    const consumeOrphanedRemoteCancels = (
+      ticketId: string,
+      cancelled: ReadonlyArray<Pick<Assignment, 'id'>>,
+      delivered: boolean,
+    ): void => {
+      if (!delivered) return
+      if (!store.isOpen) return
+      const current = store.getDoc<Ticket>('ticket', ticketId)
+      if (!current) {
+        // No committed Ticket remains, so the record can never produce a send.
+        orphanedRemoteTickets.delete(ticketId)
+        return
+      }
+      const cancelledIds = new Set(cancelled.map(target => target.id))
+      // Re-read committed state: only ended remotes this delivered batch did not
+      // cover still need a later resend. Any node keeps the record (f23e9e5).
+      const remaining = endedRemoteAssignments(current)
+        .filter(target => !cancelledIds.has(target.id))
+      if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
+    }
+    /**
      * Tell every Worker that may still hold an ended remote Assignment for this
      * Ticket to stop, without touching keep-vs-release.
      *
@@ -953,8 +989,12 @@ export class Runtime {
      * same-node re-send also leaves it so a further later Ticket on the owning
      * node can resend. The local replacement's own no-sticky `releaseSlot`
      * backstop owns any later attempt. Paused or approval-held Tickets are left
-     * alone (and stay recorded, since no cancel was attempted), and a Ticket
-     * that has since gained a remote sticky is owned by the sticky paths.
+     * alone (and stay recorded, since no cancel was attempted).
+     *
+     * A live replacement that keeps a remote sticky does *not* own the record:
+     * its ended predecessor's cancel can still have been lost, and the sticky
+     * must not hide that. Only an actually delivered resend whose re-read has no
+     * uncovered ended remote on any node consumes the record.
      */
     const resendOrphanedRemoteCancels = (node: string, dispatchingTicketId: string): void => {
       // No committed state to re-derive targets from after `finish()` closes
@@ -973,12 +1013,6 @@ export class Runtime {
         // the record: no send was attempted, and a later dispatch after
         // recovery may still need to re-send it.
         if (ticket.collab?.paused || pendingApproval(ticket)) continue
-        // A remote sticky means the sticky-slot paths own this Ticket's
-        // cancels; the dispatch-time resend is not needed.
-        if (placement.remoteHasTicket(ticketId)) {
-          orphanedRemoteTickets.delete(ticketId)
-          continue
-        }
         // Only targets recorded on *this* node are in scope. If every ended
         // remote Assignment lives elsewhere, leave the record so a dispatch to
         // that node can still resend it.
@@ -1012,19 +1046,14 @@ export class Runtime {
           // Paused/approval-held Tickets are never cancelled as a drive-by and
           // stay recorded (existing policy).
           if (current.collab?.paused || pendingApproval(current)) return
-          // A remote sticky gained since means the sticky-slot paths own this
-          // Ticket's cancels.
-          if (placement.remoteHasTicket(ticketId)) {
-            orphanedRemoteTickets.delete(ticketId)
-            return
-          }
           // Succeeding on *this* node must not consume ended remotes recorded on
           // another node: a later dispatch there still has to resend before its
-          // body reaches the Worker that may still hold them. Re-read committed
-          // state and only drop the record when no other node has an ended
-          // remote Assignment left.
+          // body reaches the Worker that may still hold them. A remote sticky
+          // gained since (a live replacement) does not consume either; only a
+          // re-read with no uncovered ended remote left does.
+          const cancelledIds = new Set(targets.map(target => target.id))
           const remaining = endedRemoteAssignments(current)
-            .filter(target => target.node !== node)
+            .filter(target => !cancelledIds.has(target.id))
           if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
         })
       }
@@ -1089,21 +1118,30 @@ export class Runtime {
             // reservation may have moved to a different remote node after an
             // earlier lost cancel freed it, and the worker that still holds the
             // old Assignment is the one that must stop.
-            const keepSlotSends = supersededRemoteAssignments(ticket).map(target => {
-              const send = placement.cancelRemote(ticketId, target.id, {
-                release: false,
-                ...(target.node !== undefined ? { nodeId: target.node } : {}),
-              }).catch(error => {
-                log.info(
-                  `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+            const keepSlotTargets = supersededRemoteAssignments(ticket)
+            // Record the Ticket as soon as these cancels are *started*, not only
+            // after a loss is observed. A later dispatch can race the in-flight
+            // first send; if that send is then lost, the dispatch-time resend
+            // must already have a record to resend from. Keeping the sticky with
+            // the live replacement does not consume it.
+            if (keepSlotTargets.length > 0) orphanedRemoteTickets.add(ticketId)
+            const keepSlotSends = keepSlotTargets.map(target =>
+              sendEndedRemoteCancel(ticketId, target, cancelNode),
+            )
+            void Promise.all(keepSlotSends).then(
+              outcomes => {
+                // Keep-vs-release is unchanged (the sticky stays with the live
+                // replacement); only decide whether a lost predecessor cancel
+                // must stay resendable.
+                consumeOrphanedRemoteCancels(
+                  ticketId,
+                  keepSlotTargets,
+                  outcomes.every(Boolean),
                 )
-              })
-              // Attribute the batch to the node it actually targets so a later
-              // dispatch to that node can order after it.
-              trackRemoteCancelSends(ticketId, [send], target.node ?? cancelNode)
-              return send
-            })
-            void Promise.all(keepSlotSends).finally(() => notifyHarnessReleased(ticketId))
+                notifyHarnessReleased(ticketId)
+              },
+              () => notifyHarnessReleased(ticketId),
+            )
             return
           }
           // No live replacement is visible yet, but the cancel send awaits the
@@ -1178,7 +1216,7 @@ export class Runtime {
                 || currentLatest.startedAt !== undefined)
               && superseded !== undefined
               && placement.remoteHasTicket(ticketId)
-            if (liveReplacement && superseded && currentLatest) {
+            if (liveReplacement && superseded && currentLatest && current) {
               log.info(
                 `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${superseded.id} replacementId=${currentLatest.id} reason=live-replacement`,
               )
@@ -1191,10 +1229,14 @@ export class Runtime {
                 )
               }
               late.remoteResultWait?.arm(ticketId, currentLatest.id)
-              // The sticky slot is kept, so the sticky-slot paths own this
-              // Ticket's cancels; drop the record like the matching
-              // `remoteHasTicket` consume rule in `resendOrphanedRemoteCancels`.
-              orphanedRemoteTickets.delete(ticketId)
+              // Keep the sticky with the live replacement, but do not drop the
+              // record merely because the sticky was kept: a lost predecessor
+              // cancel must stay resendable by a later same-node dispatch.
+              consumeOrphanedRemoteCancels(
+                ticketId,
+                cancelAssignmentIds.map(id => ({ id })),
+                delivered,
+              )
             } else {
               placement.release(ticketId)
               // A lost terminal cancel with the sticky released must stay
