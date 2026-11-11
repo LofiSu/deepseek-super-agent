@@ -715,13 +715,19 @@ export class Runtime {
     const remoteCancelSends = new Map<string, Set<Promise<void>>>()
     /**
      * The same fail-soft cancel batches, additionally keyed by the node they
-     * target (value = owning ticketId). `remoteCancelSends` is per Ticket, so a
-     * later *different* Ticket launched onto the same worker cannot use it to
-     * order against an older Ticket's delayed cancel; this map is what that
-     * cross-Ticket wait reads. Only observers are added here, the cancel
-     * transport and slot accounting are untouched.
+     * target (value = owning ticketId + Assignment id). `remoteCancelSends` is
+     * per Ticket, so a later *different* Ticket launched onto the same worker
+     * cannot use it to order against an older Ticket's delayed cancel; this map
+     * is what that cross-Ticket wait reads. The Assignment id lets a same-Ticket
+     * dispatch tell an in-flight cancel for one ended Assignment from a settled
+     * lost cancel for another (see `resendOwnOrphanedRemoteCancels`). Only
+     * observers are added here, the cancel transport and slot accounting are
+     * untouched.
      */
-    const remoteCancelSendsByNode = new Map<string, Map<Promise<void>, string>>()
+    const remoteCancelSendsByNode = new Map<
+      string,
+      Map<Promise<void>, { ticketId: string; assignmentId: string }>
+    >()
     /**
      * Per-Ticket gate that holds a replacement's remote assignment body until
      * the superseded Assignment's cancels settle. Placement already happened,
@@ -759,6 +765,7 @@ export class Runtime {
     const orphanedRemoteTickets = new Set<string>()
     const trackRemoteCancelSends = (
       ticketId: string,
+      assignmentId: string,
       sends: Promise<unknown>[],
       node: string | undefined,
     ): void => {
@@ -776,7 +783,7 @@ export class Runtime {
           byNode = new Map()
           remoteCancelSendsByNode.set(node, byNode)
         }
-        byNode.set(batch, ticketId)
+        byNode.set(batch, { ticketId, assignmentId })
       }
       void batch.finally(() => {
         pending.delete(batch)
@@ -821,7 +828,7 @@ export class Runtime {
         const byNode = remoteCancelSendsByNode.get(node)
         if (!byNode) return
         const pending = [...byNode]
-          .filter(([, owner]) => owner !== ticketId)
+          .filter(([, owner]) => owner.ticketId !== ticketId)
           .map(([batch]) => batch)
         if (pending.length === 0) return
         await Promise.allSettled(pending)
@@ -910,7 +917,7 @@ export class Runtime {
           return false
         },
       )
-      trackRemoteCancelSends(ticketId, [settled], node)
+      trackRemoteCancelSends(ticketId, target.id, [settled], node)
       return settled
     }
     /**
@@ -977,31 +984,24 @@ export class Runtime {
       return { targets, sends }
     }
     /**
-     * Re-send a Ticket's orphaned ended-remote cancels before a *different*
-     * Ticket's body reaches the same Worker.
+     * Is this exact ended remote Assignment's cancel already being sent to
+     * `node` by this Ticket?
      *
-     * Local placement already started these cancels, but that send is
-     * fail-soft: when it was lost, the Worker still holds the old Assignment
-     * when a later Ticket is placed on the same node. Re-read committed state
-     * and send the targets for this node now; the node-keyed wait in
-     * `dispatchRemote` then holds the later body until they settle. The record
-     * is consumed only when a dispatch-time re-send to the owning node
-     * *succeeds*; a dispatch to a different node leaves it in place, and a lost
-     * same-node re-send also leaves it so a further later Ticket on the owning
-     * node can resend. The local replacement's own no-sticky `releaseSlot`
-     * backstop owns any later attempt. Paused or approval-held Tickets are left
-     * alone (and stay recorded, since no cancel was attempted).
-     *
-     * A live replacement that keeps a remote sticky does *not* own the record:
-     * its ended predecessor's cancel can still have been lost, and the sticky
-     * must not hide that. Only an actually delivered resend whose re-read has no
-     * uncovered ended remote on any node consumes the record.
+     * Tracking is per Assignment, not per Ticket: a same-Ticket dispatch must
+     * still be able to resend a *settled lost* cancel for one Assignment while
+     * an older sibling cancel on the same Ticket and node is still in flight.
      */
-    const sameTicketCancelSendsInFlight = (node: string, ticketId: string): boolean => {
+    const cancelSendInFlightToNode = (
+      node: string,
+      ticketId: string,
+      assignmentId: string,
+    ): boolean => {
       const byNode = remoteCancelSendsByNode.get(node)
       if (!byNode) return false
       for (const owner of byNode.values()) {
-        if (owner === ticketId) return true
+        if (owner.ticketId === ticketId && owner.assignmentId === assignmentId) {
+          return true
+        }
       }
       return false
     }
@@ -1029,12 +1029,16 @@ export class Runtime {
      * relaunch is not a drive-by, so resend before the body and let the caller
      * hold it until these new sends settle.
      *
-     * A same-Ticket batch already in flight to this node is left alone: start
-     * nothing and wait for nothing, preserving the 2a2de80 tradeoff where a
-     * delayed/held keep-slot cancel must not block the replacement body. The
-     * record is kept on a lost send and consumed only when a delivered batch
-     * covers every ended remote in a re-read (`consumeOrphanedRemoteCancels`),
-     * so a later different Ticket, or a further later retry, can try again.
+     * Only a target whose own cancel is already in flight to this node is left
+     * alone: starting a duplicate would let a delayed/held endpoint hold the
+     * duplicate too, and the caller awaits the sends started here, which would
+     * block the replacement body — the 2a2de80 tradeoff. An in-flight cancel
+     * for a *different* ended Assignment on the same Ticket does not suppress
+     * the resend of a settled lost one; the caller then awaits only the new
+     * sends, never the older in-flight batch. The record is kept on a lost send
+     * and consumed only when a delivered batch covers every ended remote in a
+     * re-read (`consumeOrphanedRemoteCancels`), so a later different Ticket, or
+     * a further later retry, can try again.
      */
     const resendOwnOrphanedRemoteCancels = (
       node: string,
@@ -1043,7 +1047,6 @@ export class Runtime {
     ): Promise<boolean>[] => {
       if (!store.isOpen) return []
       if (!orphanedRemoteTickets.has(ticketId)) return []
-      if (sameTicketCancelSendsInFlight(node, ticketId)) return []
       const ticket = store.getDoc<Ticket>('ticket', ticketId)
       if (!ticket) {
         orphanedRemoteTickets.delete(ticketId)
@@ -1051,10 +1054,14 @@ export class Runtime {
       }
       // The dispatching Ticket is being actively relaunched, so the
       // paused/approval-held drive-by skip does not apply to its own resend.
+      // Skip only targets whose own cancel is already in flight; a settled lost
+      // sibling cancel on this node must still be resent.
       const targets = endedRemoteAssignments(ticket)
         .filter(target => target.node === node)
         .filter(target =>
           !attempted?.has(remoteCancelAttemptKey(ticketId, target.id)))
+        .filter(target =>
+          !cancelSendInFlightToNode(node, ticketId, target.id))
       if (targets.length === 0) return []
       for (const target of targets) {
         attempted?.add(remoteCancelAttemptKey(ticketId, target.id))
@@ -1065,6 +1072,27 @@ export class Runtime {
       )
       return sends
     }
+    /**
+     * Re-send a Ticket's orphaned ended-remote cancels before a *different*
+     * Ticket's body reaches the same Worker.
+     *
+     * Local placement already started these cancels, but that send is
+     * fail-soft: when it was lost, the Worker still holds the old Assignment
+     * when a later Ticket is placed on the same node. Re-read committed state
+     * and send the targets for this node now; the node-keyed wait in
+     * `dispatchRemote` then holds the later body until they settle. The record
+     * is consumed only when a dispatch-time re-send to the owning node
+     * *succeeds*; a dispatch to a different node leaves it in place, and a lost
+     * same-node re-send also leaves it so a further later Ticket on the owning
+     * node can resend. The local replacement's own no-sticky `releaseSlot`
+     * backstop owns any later attempt. Paused or approval-held Tickets are left
+     * alone (and stay recorded, since no cancel was attempted).
+     *
+     * A live replacement that keeps a remote sticky does *not* own the record:
+     * its ended predecessor's cancel can still have been lost, and the sticky
+     * must not hide that. Only an actually delivered resend whose re-read has no
+     * uncovered ended remote on any node consumes the record.
+     */
     const resendOrphanedRemoteCancels = (
       node: string,
       dispatchingTicketId: string,
@@ -1605,10 +1633,11 @@ export class Runtime {
         resendOrphanedRemoteCancels(node, ticket.id, attemptedCancelTargets)
         // The dispatching Ticket is not a drive-by: it is being actively
         // relaunched. If its own lost terminal cancel already settled before
-        // this retry, there is no in-flight batch and no barrier, so resend its
-        // uncovered ended remotes on this node now. A same-Ticket batch still in
-        // flight to this node is left to the 2a2de80 tradeoff: start nothing
-        // and wait for nothing.
+        // this retry, there is no in-flight batch for that target and no
+        // barrier, so resend its uncovered ended remotes on this node now. Only
+        // a target whose own cancel is still in flight is left to the 2a2de80
+        // tradeoff; another ended Assignment's settled lost cancel on this same
+        // Ticket is still resent.
         const ownResends = resendOwnOrphanedRemoteCancels(
           node,
           ticket.id,
@@ -1643,8 +1672,9 @@ export class Runtime {
         // settle. A pass that starts nothing ends the drain, so a cancel this
         // dispatch already tried and lost is never retried here — the record is
         // kept for a later Ticket/retry (existing policy), not an in-dispatch
-        // delivery loop. The same-Ticket resend still no-ops while its own
-        // batch is in flight (2a2de80).
+        // delivery loop. The same-Ticket resend skips only a target whose own
+        // cancel is already in flight to this node (2a2de80); a settled lost
+        // sibling cancel on this node is still resent here.
         for (;;) {
           await settleRemoteCancelSendsToNode(node, ticket.id)
           const resends = [

@@ -4372,4 +4372,139 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       await shutdown(runtime)
     }
   }, 60_000)
+
+  it('resends a settled lost own-Ticket cancel while an older same-Ticket cancel is in flight', async () => {
+    // Same process, one Ticket on one remote worker. A required capability
+    // forces every placement onto N1 (capacity 1). A1 runs; its failed-report
+    // terminal cancel is *delayed and still in flight*. `Runtime.retry` places
+    // A2 without waiting for it (2a2de80), then A2's terminal cancel is lost
+    // (502) and settles while A1's cancel is still in flight. Ending A2 starts
+    // another delayed A1 cancel (superseded ended remote). The next retry must
+    // still resend the settled lost A2 cancel before A3's body: a blanket
+    // same-Ticket in-flight skip would hide it and leave the Worker holding A2.
+    const inbox = await startWorkerInbox()
+    const proxy = await startSelectiveCancelProxy(inbox.url, 9_000)
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-own-cancel-inflight-'))
+    homes.push(home)
+    const runtime = runtimeFor(
+      home,
+      holdingModel(new Map()),
+      60_000,
+      'cancel-own-inflight-required',
+    )
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: ['cancel-own-inflight-required'],
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      const ticketId = createTicket(runtime, 'cancel_own_inflight_resend')
+      await runtime.harness.launch(loadTicket(runtime, ticketId))
+      await waitFor(
+        () => inbox.assignments.some(event => event.ticketId === ticketId),
+        5_000,
+        'A1 to reach N1',
+      )
+      const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a1.node).toBe(REMOTE_NODE_ID)
+      expect(a1.state).toBe('running')
+
+      // Delay A1's terminal cancel so it is still in flight across the whole
+      // A2 -> A3 window; the Worker must never see it here.
+      proxy.delayIds.add(a1.id)
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'a1 remote failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.delayed.some(item => item.assignmentId === a1.id),
+        5_000,
+        'A1 terminal cancel to be delayed at the N1 proxy',
+      )
+      expect(stampIndex(inbox.stamps, 'cancel', a1.id)).toBe(-1)
+
+      // 2a2de80: the retry must not wait for A1's delayed cancel.
+      expect(await runtime.retry(ticketId, 'a2-retry')).toBeDefined()
+      await waitFor(
+        () => loadTicket(runtime, ticketId).assignments.length >= 2
+          && inbox.assignments.some(
+            event => assignmentIdOf(event) === loadTicket(runtime, ticketId).assignments.at(-1)!.id,
+          ),
+        5_000,
+        'A2 body to reach N1',
+      )
+      const a2 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a2.id).not.toBe(a1.id)
+      expect(a2.node).toBe(REMOTE_NODE_ID)
+      expect(a2.state).toBe('running')
+      // A2's body went out ahead of A1's delayed cancel (the tradeoff), and the
+      // in-flight window stayed open.
+      expect(stampIndex(inbox.stamps, 'cancel', a1.id)).toBe(-1)
+
+      // Lose A2's terminal cancel and let it settle. Ending A2 also starts a
+      // superseded A1 cancel, which stays delayed and in flight.
+      proxy.dropIds.add(a2.id)
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'a2 remote failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === a2.id),
+        5_000,
+        'A2 terminal cancel to be dropped at the N1 proxy',
+      )
+      // Let the lost send settle (A1's delayed cancel keeps the sticky held, so
+      // the slot alone is not an observable for this send).
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(inbox.cancels.some(event => event.assignmentId === a2.id)).toBe(false)
+      expect(stampIndex(inbox.stamps, 'cancel', a1.id)).toBe(-1)
+      // Stop dropping A2 so the dispatch-time resend can be delivered.
+      proxy.dropIds.delete(a2.id)
+
+      // A1's cancel is still in flight, so a blanket same-Ticket skip would
+      // start nothing here and A3's body would reach the Worker that still
+      // holds A2. The per-target skip must still resend A2's settled lost
+      // cancel before the body.
+      expect(await runtime.retry(ticketId, 'a3-retry')).toBeDefined()
+      await waitFor(
+        () => loadTicket(runtime, ticketId).assignments.length >= 3
+          && inbox.assignments.some(
+            event => assignmentIdOf(event) === loadTicket(runtime, ticketId).assignments.at(-1)!.id,
+          ),
+        8_000,
+        'A3 body to reach N1',
+      )
+      const a3 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a3.id).not.toBe(a2.id)
+      expect(a3.node).toBe(REMOTE_NODE_ID)
+
+      const a2CancelIndex = stampIndex(inbox.stamps, 'cancel', a2.id)
+      const bodyIndex = stampIndex(inbox.stamps, 'assignment', a3.id)
+      expect(a2CancelIndex).toBeGreaterThanOrEqual(0)
+      expect(bodyIndex).toBeGreaterThanOrEqual(0)
+      expect(a2CancelIndex).toBeLessThanOrEqual(bodyIndex)
+      expect(inbox.stamps[a2CancelIndex].at).toBeLessThanOrEqual(inbox.stamps[bodyIndex].at)
+      // The delayed A1 cancel is still in flight: this was not a settled-A1
+      // case, so the resend above really was driven by per-target tracking.
+      expect(stampIndex(inbox.stamps, 'cancel', a1.id)).toBe(-1)
+
+      // Same-process state: T1 open, A1/A2 ended, A3 running on N1. The failed
+      // reports never claim a successful cross-machine result.
+      const state = loadTicket(runtime, ticketId)
+      expect(state.ended).toBeUndefined()
+      expect(state.assignments.find(item => item.id === a2.id)?.state).toBe('ended')
+      expect(state.assignments.at(-1)?.id).toBe(a3.id)
+      expect(a3.state).toBe('running')
+    } finally {
+      await shutdown(runtime)
+    }
+  }, 60_000)
 })
