@@ -3850,4 +3850,121 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       await shutdown(runtime)
     }
   }, 60_000)
+
+  it('resends a settled lost terminal cancel before the same Ticket retries to the same worker', async () => {
+    // Dispatch-time resend skipping the *dispatching* Ticket is correct for a
+    // different-Ticket drive-by, but `Runtime.retry` reuses the same path for
+    // the Ticket being relaunched. Here A1's terminal cancel was lost and has
+    // already settled (sticky released, no in-flight batch, no barrier), so
+    // this is not the 2a2de80 in-flight skip. The same Ticket's local-first
+    // retry overflows A2 back to N1 while the local slot stays held; A1's
+    // cancel must be resent and delivered before A2's body reaches the Worker.
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDroppingProxy(inbox.url)
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-same-ticket-settled-resend-'))
+    homes.push(home)
+    const held = new Map<string, Gate>()
+    const runtime = runtimeFor(home, holdingModel(held))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      // Hold the only local slot so T1 has to overflow to N1.
+      const blockerId = createTicket(runtime, 'cancel_same_ticket_settled_resend_blocker')
+      held.set(blockerId, gate())
+      void runtime.harness.launch(loadTicket(runtime, blockerId))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held',
+      )
+
+      const ticketId = createTicket(runtime, 'cancel_same_ticket_settled_resend_t1')
+      await runtime.harness.launch(loadTicket(runtime, ticketId))
+      await waitFor(
+        () => inbox.assignments.some(event => event.ticketId === ticketId),
+        5_000,
+        'A1 to reach N1',
+      )
+      const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a1.node).toBe(REMOTE_NODE_ID)
+      expect(a1.state).toBe('running')
+
+      // Lose A1's failed-report terminal cancel. The settle path releases T1's
+      // remote sticky but the Worker still holds the ended Assignment.
+      proxy.dropping = true
+      expect(runtime.engine.report(ticketId, {
+        kind: 'failed',
+        text: 'remote worker failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === a1.id),
+        5_000,
+        'A1 terminal cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+        5_000,
+        'the N1 sticky slot to be released after the lost cancel',
+      )
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+      // Let the lost send fully settle: this regression is about a settled
+      // cancel, not a batch still in flight when retry was requested.
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(inbox.cancels.some(event => event.assignmentId === a1.id)).toBe(false)
+
+      // Keep the local slot held, restore forwarding, and retry the *same*
+      // Ticket. Local-first placement overflows A2 back to N1.
+      proxy.dropping = false
+      const droppedBeforeRetry = proxy.dropped
+        .filter(item => item.assignmentId === a1.id).length
+      await runtime.retry(ticketId, 'same-ticket-overflow-retry')
+      await waitFor(
+        () => loadTicket(runtime, ticketId).assignments.at(-1)?.state === 'running',
+        5_000,
+        'A2 to be running',
+      )
+      const retried = loadTicket(runtime, ticketId)
+      const a2 = retried.assignments.at(-1)!
+      expect(a2.id).not.toBe(a1.id)
+      expect(a2.node).toBe(REMOTE_NODE_ID)
+      expect(retried.ended).toBeUndefined()
+      expect(retried.assignments.find(item => item.id === a1.id)?.state).toBe('ended')
+
+      // Wait for both arrivals; asserting after only one would race. The
+      // same-Ticket resend started at dispatch time must order the cancel
+      // before the replacement body.
+      await waitFor(
+        () => stampIndex(inbox.stamps, 'cancel', a1.id) >= 0
+          && stampIndex(inbox.stamps, 'assignment', a2.id) >= 0,
+        10_000,
+        'A1 cancel and the same Ticket A2 body to reach N1',
+      )
+      const cancelIndex = stampIndex(inbox.stamps, 'cancel', a1.id)
+      const bodyIndex = stampIndex(inbox.stamps, 'assignment', a2.id)
+      expect(cancelIndex).toBeLessThanOrEqual(bodyIndex)
+      expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[bodyIndex].at)
+      // The resend was a fresh delivered send, not another dropped attempt.
+      expect(proxy.dropped.filter(item => item.assignmentId === a1.id).length)
+        .toBe(droppedBeforeRetry)
+
+      // Same-process retry: T1 stays open, A1 ended, A2 on N1. The failed
+      // reports never claim a successful cross-machine result.
+      expect(loadTicket(runtime, ticketId).ended).toBeUndefined()
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(true)
+      expect(runtime.placement.local.inFlight(HOST_PEER)).toBe(1)
+    } finally {
+      for (const hold of held.values()) hold.release()
+      await shutdown(runtime)
+    }
+  }, 60_000)
 })

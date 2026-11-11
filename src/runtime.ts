@@ -997,6 +997,55 @@ export class Runtime {
      * must not hide that. Only an actually delivered resend whose re-read has no
      * uncovered ended remote on any node consumes the record.
      */
+    const sameTicketCancelSendsInFlight = (node: string, ticketId: string): boolean => {
+      const byNode = remoteCancelSendsByNode.get(node)
+      if (!byNode) return false
+      for (const owner of byNode.values()) {
+        if (owner === ticketId) return true
+      }
+      return false
+    }
+    /**
+     * Re-send this Ticket's own uncovered ended remotes on `node` before its
+     * replacement body reaches the Worker.
+     *
+     * `resendOrphanedRemoteCancels` deliberately skips the dispatching Ticket:
+     * for a *different* Ticket that is a drive-by cancel. But `Runtime.retry`
+     * reuses the same dispatch path for the Ticket being relaunched. Its lost
+     * terminal cancel may already have settled, leaving no in-flight batch and
+     * no barrier, while the Worker still holds the ended Assignment. The
+     * relaunch is not a drive-by, so resend before the body and let the caller
+     * hold it until these new sends settle.
+     *
+     * A same-Ticket batch already in flight to this node is left alone: start
+     * nothing and wait for nothing, preserving the 2a2de80 tradeoff where a
+     * delayed/held keep-slot cancel must not block the replacement body. The
+     * record is kept on a lost send and consumed only when a delivered batch
+     * covers every ended remote in a re-read (`consumeOrphanedRemoteCancels`),
+     * so a later different Ticket, or a further later retry, can try again.
+     */
+    const resendOwnOrphanedRemoteCancels = (
+      node: string,
+      ticketId: string,
+    ): Promise<boolean>[] => {
+      if (!store.isOpen) return []
+      if (!orphanedRemoteTickets.has(ticketId)) return []
+      if (sameTicketCancelSendsInFlight(node, ticketId)) return []
+      const ticket = store.getDoc<Ticket>('ticket', ticketId)
+      if (!ticket) {
+        orphanedRemoteTickets.delete(ticketId)
+        return []
+      }
+      // The dispatching Ticket is being actively relaunched, so the
+      // paused/approval-held drive-by skip does not apply to its own resend.
+      const targets = endedRemoteAssignments(ticket).filter(target => target.node === node)
+      if (targets.length === 0) return []
+      const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
+      void Promise.all(sends).then(outcomes =>
+        consumeOrphanedRemoteCancels(ticketId, targets, outcomes.every(Boolean)),
+      )
+      return sends
+    }
     const resendOrphanedRemoteCancels = (node: string, dispatchingTicketId: string): void => {
       // No committed state to re-derive targets from after `finish()` closes
       // the Store; a dispatch this late must not throw on a closed handle.
@@ -1514,6 +1563,13 @@ export class Runtime {
         // settle. This is not a capacity barrier: only the wire body waits and
         // only when a recorded orphan targets this node.
         resendOrphanedRemoteCancels(node, ticket.id)
+        // The dispatching Ticket is not a drive-by: it is being actively
+        // relaunched. If its own lost terminal cancel already settled before
+        // this retry, there is no in-flight batch and no barrier, so resend its
+        // uncovered ended remotes on this node now. A same-Ticket batch still in
+        // flight to this node is left to the 2a2de80 tradeoff: start nothing
+        // and wait for nothing.
+        const ownResends = resendOwnOrphanedRemoteCancels(node, ticket.id)
         // Recovery/retry replacement: the Assignment is already placed (so the
         // sticky slot is kept), but the Worker must receive the superseded
         // Assignment's fail-soft cancel before this body. Consume the gate once.
@@ -1522,6 +1578,10 @@ export class Runtime {
           remoteDispatchBarriers.delete(ticket.id)
           await barrier
         }
+        // Hold this body until the new same-Ticket resends above settle, so the
+        // cancel is no later than the body. Already-in-flight same-Ticket
+        // batches were not started here and are not awaited (2a2de80).
+        if (ownResends.length > 0) await Promise.all(ownResends)
         // The per-Ticket gate above only covers this Ticket's own cancels. A
         // *different* Ticket may have just ended (in this process, or before a
         // restart) and its fail-soft cancel to this same node may still be in
