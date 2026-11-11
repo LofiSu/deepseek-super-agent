@@ -4202,4 +4202,174 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       await shutdown(runtime)
     }
   }, 60_000)
+
+  it('resends a cancel lost while a later Ticket waits on a post-wait resend', async () => {
+    // Same process, four Tickets on one remote worker. Local mesh capacity is
+    // 1 so T0, T1, and T2 overflow to N1 (capacity 4) and run. T0's terminal
+    // cancel is *delayed*, so T3, placed on N1, waits in the first
+    // `settleRemoteCancelSendsToNode` with its body still held. While T3 waits,
+    // T1's terminal cancel is lost (502) and settles; T1 is then switched from
+    // drop to delay so T3's post-wait resend of A1 is held rather than
+    // delivered. While T3 waits on that post-wait send, T2's terminal cancel is
+    // also lost (502) and settles. A single post-wait resend (b791f50) cannot
+    // see T2, so without a drain T3's body reaches the Worker that still holds
+    // the uncancelled A2.
+    const inbox = await startWorkerInbox()
+    const proxy = await startSelectiveCancelProxy(inbox.url, 1_600)
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-post-wait-loss-'))
+    homes.push(home)
+    const held = new Map<string, Gate>()
+    const runtime = runtimeFor(home, holdingModel(held))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 4,
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      // Hold the only local slot so every Ticket below overflows to N1.
+      const blockerId = createTicket(runtime, 'cancel_post_wait_loss_blocker')
+      held.set(blockerId, gate())
+      void runtime.harness.launch(loadTicket(runtime, blockerId))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held',
+      )
+
+      const launchOverflow = async (slug: string) => {
+        const ticketId = createTicket(runtime, slug)
+        await runtime.harness.launch(loadTicket(runtime, ticketId))
+        await waitFor(
+          () => inbox.assignments.some(event => event.ticketId === ticketId),
+          5_000,
+          `${slug} to reach N1`,
+        )
+        const assignment = loadTicket(runtime, ticketId).assignments.at(-1)!
+        expect(assignment.node).toBe(REMOTE_NODE_ID)
+        expect(assignment.state).toBe('running')
+        return { ticketId, assignment }
+      }
+
+      const t0 = await launchOverflow('cancel_post_wait_loss_t0')
+      const t1 = await launchOverflow('cancel_post_wait_loss_t1')
+      const t2 = await launchOverflow('cancel_post_wait_loss_t2')
+
+      // Delay T0's terminal cancel so T3 has an other-Ticket batch to wait on
+      // and T0's sticky stays held.
+      proxy.delayIds.add(t0.assignment.id)
+      expect(runtime.engine.report(t0.ticketId, {
+        kind: 'failed',
+        text: 't0 remote failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.delayed.some(item => item.assignmentId === t0.assignment.id),
+        5_000,
+        'T0 cancel to be delayed at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.remoteHasTicket(t0.ticketId),
+        2_000,
+        'T0 sticky to remain held during the delayed cancel',
+      )
+
+      // T3 is placed on N1 but its body must wait behind T0's delayed cancel.
+      const t3Id = createTicket(runtime, 'cancel_post_wait_loss_t3')
+      const t3Launch = runtime.harness.launch(loadTicket(runtime, t3Id))
+      void t3Launch.catch(() => undefined)
+      await waitFor(
+        () => loadTicket(runtime, t3Id).assignments.at(-1)?.node === REMOTE_NODE_ID,
+        5_000,
+        'T3 to be placed on N1',
+      )
+      expect(inbox.assignments.some(event => event.ticketId === t3Id)).toBe(false)
+
+      // While T3 is in the first wait, lose T1's terminal cancel and let it
+      // settle. Then switch T1 from drop to delay so T3's post-wait resend of
+      // A1 is held in flight.
+      proxy.dropIds.add(t1.assignment.id)
+      expect(runtime.engine.report(t1.ticketId, {
+        kind: 'failed',
+        text: 't1 remote failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === t1.assignment.id),
+        5_000,
+        'T1 terminal cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => !runtime.placement.remoteHasTicket(t1.ticketId),
+        5_000,
+        'T1 sticky to be released after the lost cancel settled',
+      )
+      proxy.dropIds.delete(t1.assignment.id)
+      proxy.delayIds.add(t1.assignment.id)
+
+      // T0's delayed cancel is delivered, T3's post-wait resend of A1 starts
+      // and is held, and the body is still not delivered.
+      await waitFor(
+        () => proxy.delayed.some(item => item.assignmentId === t1.assignment.id)
+          && !inbox.assignments.some(event => event.ticketId === t3Id),
+        8_000,
+        'A1 post-wait resend to be delayed with the T3 body still held',
+      )
+
+      // While T3 waits on that post-wait send, lose T2's terminal cancel and
+      // let it settle. This is the new orphan that appeared during the
+      // post-wait wait; restore forwarding afterward so the drain's resend can
+      // be delivered.
+      proxy.dropIds.add(t2.assignment.id)
+      expect(runtime.engine.report(t2.ticketId, {
+        kind: 'failed',
+        text: 't2 remote failed',
+        deliver: false,
+      }).surfaced).toBe(false)
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === t2.assignment.id),
+        5_000,
+        'T2 terminal cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => !runtime.placement.remoteHasTicket(t2.ticketId),
+        5_000,
+        'T2 sticky to be released after the lost cancel settled',
+      )
+      proxy.dropIds.delete(t2.assignment.id)
+
+      // A2's cancel must be resent and reach N1 before T3's body.
+      await waitFor(
+        () => inbox.cancels.some(event => event.assignmentId === t2.assignment.id)
+          && inbox.assignments.some(event => event.ticketId === t3Id),
+        10_000,
+        'A2 cancel and the T3 body to reach N1',
+      )
+      const a2CancelIndex = stampIndex(inbox.stamps, 'cancel', t2.assignment.id)
+      const a3 = loadTicket(runtime, t3Id).assignments.at(-1)!
+      const bodyIndex = stampIndex(inbox.stamps, 'assignment', a3.id)
+      expect(a2CancelIndex).toBeGreaterThanOrEqual(0)
+      expect(bodyIndex).toBeGreaterThanOrEqual(0)
+      expect(a2CancelIndex).toBeLessThanOrEqual(bodyIndex)
+      expect(inbox.stamps[a2CancelIndex].at).toBeLessThanOrEqual(inbox.stamps[bodyIndex].at)
+
+      // Same-process state: T2 open with A2 ended, T3/A3 running on N1. The
+      // failed reports never claim a successful cross-machine result.
+      const t2State = loadTicket(runtime, t2.ticketId)
+      expect(t2State.ended).toBeUndefined()
+      expect(t2State.assignments.find(item => item.id === t2.assignment.id)?.state).toBe('ended')
+      const t3State = loadTicket(runtime, t3Id)
+      expect(t3State.ended).toBeUndefined()
+      expect(a3.node).toBe(REMOTE_NODE_ID)
+      expect(a3.state).toBe('running')
+      expect(t3State.assignments.at(-1)?.id).toBe(a3.id)
+    } finally {
+      for (const hold of held.values()) hold.release()
+      await shutdown(runtime)
+    }
+  }, 60_000)
 })

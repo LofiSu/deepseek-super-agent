@@ -1006,6 +1006,18 @@ export class Runtime {
       return false
     }
     /**
+     * Key for a cancel target this dispatch already attempted.
+     *
+     * The post-wait drain may start a *new* orphan that appeared while the
+     * body was held, but it must never retry a target this dispatch already
+     * attempted and lost: a failing endpoint would spin the drain forever, and
+     * the orphan record is deliberately kept for a later Ticket/retry
+     * (existing policy). The owning Ticket is part of the key so the same
+     * Assignment id could never make one Ticket's attempt suppress another's.
+     */
+    const remoteCancelAttemptKey = (ticketId: string, assignmentId: string): string =>
+      `${ticketId}\u0000${assignmentId}`
+    /**
      * Re-send this Ticket's own uncovered ended remotes on `node` before its
      * replacement body reaches the Worker.
      *
@@ -1027,6 +1039,7 @@ export class Runtime {
     const resendOwnOrphanedRemoteCancels = (
       node: string,
       ticketId: string,
+      attempted?: Set<string>,
     ): Promise<boolean>[] => {
       if (!store.isOpen) return []
       if (!orphanedRemoteTickets.has(ticketId)) return []
@@ -1038,8 +1051,14 @@ export class Runtime {
       }
       // The dispatching Ticket is being actively relaunched, so the
       // paused/approval-held drive-by skip does not apply to its own resend.
-      const targets = endedRemoteAssignments(ticket).filter(target => target.node === node)
+      const targets = endedRemoteAssignments(ticket)
+        .filter(target => target.node === node)
+        .filter(target =>
+          !attempted?.has(remoteCancelAttemptKey(ticketId, target.id)))
       if (targets.length === 0) return []
+      for (const target of targets) {
+        attempted?.add(remoteCancelAttemptKey(ticketId, target.id))
+      }
       const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
       void Promise.all(sends).then(outcomes =>
         consumeOrphanedRemoteCancels(ticketId, targets, outcomes.every(Boolean)),
@@ -1049,6 +1068,7 @@ export class Runtime {
     const resendOrphanedRemoteCancels = (
       node: string,
       dispatchingTicketId: string,
+      attempted?: Set<string>,
     ): Promise<boolean>[] => {
       const started: Promise<boolean>[] = []
       // No committed state to re-derive targets from after `finish()` closes
@@ -1069,9 +1089,17 @@ export class Runtime {
         if (ticket.collab?.paused || pendingApproval(ticket)) continue
         // Only targets recorded on *this* node are in scope. If every ended
         // remote Assignment lives elsewhere, leave the record so a dispatch to
-        // that node can still resend it.
-        const targets = endedRemoteAssignments(ticket).filter(target => target.node === node)
+        // that node can still resend it. A target this dispatch already tried
+        // (and may have lost) is left to a later Ticket/retry, never retried
+        // here.
+        const targets = endedRemoteAssignments(ticket)
+          .filter(target => target.node === node)
+          .filter(target =>
+            !attempted?.has(remoteCancelAttemptKey(ticketId, target.id)))
         if (targets.length === 0) continue
+        for (const target of targets) {
+          attempted?.add(remoteCancelAttemptKey(ticketId, target.id))
+        }
         // Keep the record in place while these sends are in flight and only
         // consume it once every one succeeds. A lost send (fail-soft 502) must
         // leave the record so a *further* later dispatch to this node can
@@ -1562,20 +1590,30 @@ export class Runtime {
       },
       isRemoteNode: nodeId => placement.isRemote(nodeId),
       dispatchRemote: async (ticket, node) => {
+        // Cancel targets this dispatch has already attempted, keyed by owning
+        // Ticket + Assignment. The drain below may start a *new* orphan that
+        // appeared while the body was held, but a target this dispatch already
+        // tried (and lost) must not be retried here: the record stays for a
+        // later Ticket/retry, and a failing endpoint must not spin the drain.
+        const attemptedCancelTargets = new Set<string>()
         // A different Ticket's local replacement may have started cancels for
         // ended remote Assignments this Worker still holds; the fail-soft send
         // can have been lost. Re-send them now (tracked under the owning
         // Ticket), so the cross-Ticket wait below holds this body until they
         // settle. This is not a capacity barrier: only the wire body waits and
         // only when a recorded orphan targets this node.
-        resendOrphanedRemoteCancels(node, ticket.id)
+        resendOrphanedRemoteCancels(node, ticket.id, attemptedCancelTargets)
         // The dispatching Ticket is not a drive-by: it is being actively
         // relaunched. If its own lost terminal cancel already settled before
         // this retry, there is no in-flight batch and no barrier, so resend its
         // uncovered ended remotes on this node now. A same-Ticket batch still in
         // flight to this node is left to the 2a2de80 tradeoff: start nothing
         // and wait for nothing.
-        const ownResends = resendOwnOrphanedRemoteCancels(node, ticket.id)
+        const ownResends = resendOwnOrphanedRemoteCancels(
+          node,
+          ticket.id,
+          attemptedCancelTargets,
+        )
         // Recovery/retry replacement: the Assignment is already placed (so the
         // sticky slot is kept), but the Worker must receive the superseded
         // Assignment's fail-soft cancel before this body. Consume the gate once.
@@ -1594,23 +1632,28 @@ export class Runtime {
         // flight. With spare worker capacity the new body would otherwise reach
         // the worker while it still holds the old Assignment. Hold only this
         // body; placement and the keep-vs-release settle path already ran.
-        await settleRemoteCancelSendsToNode(node, ticket.id)
-        // A different Ticket can end *while* the wait above holds this body,
-        // and its fail-soft terminal cancel can start and be lost (502) during
-        // that wait. The start-of-dispatch resend ran before that cancel
-        // existed, so it could not see the new orphan; the wait then observes
-        // the failed send settle and returns. Re-run the orphan resends now,
-        // after the wait, and hold the body until these new sends and any
-        // still-in-flight other-Ticket sends settle. One post-wait attempt is
-        // enough: a further loss is left to a later Ticket/retry on this node
-        // (existing policy), never an in-dispatch delivery loop. The same-Ticket
-        // resend still no-ops while its own batch is in flight (2a2de80).
-        const postWaitResends = [
-          ...resendOrphanedRemoteCancels(node, ticket.id),
-          ...resendOwnOrphanedRemoteCancels(node, ticket.id),
-        ]
-        if (postWaitResends.length > 0) await Promise.all(postWaitResends)
-        await settleRemoteCancelSendsToNode(node, ticket.id)
+        //
+        // A Ticket can also end *while* such a wait holds this body, and its
+        // fail-soft terminal cancel can start and be lost (502) during the wait.
+        // The start-of-dispatch resend ran before that cancel existed, so it
+        // could not see the new orphan; the wait then observes the failed send
+        // settle and returns. Drain after *every* wait: re-run the resends for
+        // targets this dispatch has not already attempted and hold the body
+        // until those new sends (and any still-in-flight other-Ticket sends)
+        // settle. A pass that starts nothing ends the drain, so a cancel this
+        // dispatch already tried and lost is never retried here — the record is
+        // kept for a later Ticket/retry (existing policy), not an in-dispatch
+        // delivery loop. The same-Ticket resend still no-ops while its own
+        // batch is in flight (2a2de80).
+        for (;;) {
+          await settleRemoteCancelSendsToNode(node, ticket.id)
+          const resends = [
+            ...resendOrphanedRemoteCancels(node, ticket.id, attemptedCancelTargets),
+            ...resendOwnOrphanedRemoteCancels(node, ticket.id, attemptedCancelTargets),
+          ]
+          if (resends.length === 0) break
+          await Promise.all(resends)
+        }
         const assignment = ticket.assignments.at(-1)
         if (!assignment) return
         const payload = {
