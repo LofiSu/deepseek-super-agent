@@ -886,6 +886,99 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await shutdown(runtime)
   }, 60_000)
 
+  it('pumps a Ticket parked behind a pause-held terminal remote result', async () => {
+    const REQUIRED_CAPABILITY = 'held-terminal-capability'
+    const worker = await startWorkerInbox()
+    const hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-held-terminal-'))
+    homes.push(hostHome)
+    const runtime = runtimeFor(hostHome, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: worker.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    })
+    runtime.start({ assessPending: false })
+
+    // The required capability keeps every Assignment off the free local slot.
+    const firstTicketId = createTicket(runtime, 'held_terminal_a')
+    const firstLaunch = runtime.harness.launch(loadTicket(runtime, firstTicketId))
+    await waitFor(
+      () => worker.assignments.some(event => event.ticketId === firstTicketId),
+      5_000,
+      'T1 to reach the remote node',
+    )
+    const a1 = loadTicket(runtime, firstTicketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // Pausing freezes T1 after A1 is placed; the remote slot stays held.
+    expect(runtime.pause(firstTicketId).changed).toBe(true)
+
+    // The only eligible node is full, so T2 must park in the mesh FIFO.
+    const secondTicketId = createTicket(runtime, 'held_terminal_b')
+    const secondLaunch = runtime.harness.launch(loadTicket(runtime, secondTicketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${secondTicketId}`),
+      5_000,
+      'T2 to queue behind the busy node',
+    )
+    const a2 = loadTicket(runtime, secondTicketId).assignments.at(-1)!
+    expect(a2.state).toBe('pending')
+    expect(worker.assignments.some(event => assignmentIdOf(event) === a2.id)).toBe(false)
+
+    // The Worker finishes A1 while T1 is paused. The pause holds the terminal
+    // verdict and keeps A1 open, but the remote work is done, so the mesh slot
+    // must be freed and the parked FIFO woken. No other Ticket is launched or
+    // ended here to force a pump.
+    runtime.applyRemoteAssignmentResult({
+      peerId: WORKER_PEER,
+      ticketId: firstTicketId,
+      assignmentId: a1.id,
+      report: { kind: 'ready', text: 'remote work done', deliver: false },
+      deliveryKey: `deliv-held-terminal-${firstTicketId}`,
+      envelope: { from: WORKER_PEER, to: HOST_PEER, body: {} },
+    })
+
+    const paused = loadTicket(runtime, firstTicketId)
+    expect(paused.collab?.paused).toBeDefined()
+    expect(paused.ended).toBeUndefined()
+    expect(paused.assignments.at(-1)?.id).toBe(a1.id)
+    expect(paused.assignments.at(-1)?.state).toBe('running')
+    expect(paused.assignments.at(-1)?.report?.kind).toBe('ready')
+    expect(runtime.placement.remoteHasTicket(firstTicketId)).toBe(false)
+
+    // The freed slot wakes the parked head: T2 dequeues and reaches the node.
+    await waitFor(
+      () => worker.assignments.some(event => assignmentIdOf(event) === a2.id),
+      5_000,
+      'T2 to be dispatched to the freed node',
+    )
+    expect(runtime.log.text()).toContain(`[mesh] mesh.dequeued ticketId=${secondTicketId}`)
+    expect(runtime.log.text()).toContain(`[mesh] remote dispatch ticketId=${secondTicketId}`)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    expect(loadTicket(runtime, secondTicketId).assignments.at(-1)?.node).toBe(REMOTE_NODE_ID)
+    await secondLaunch
+
+    // T2 now holds the only slot, so a later T3 queues instead of jumping it.
+    const thirdTicketId = createTicket(runtime, 'held_terminal_c')
+    const thirdLaunch = runtime.harness.launch(loadTicket(runtime, thirdTicketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${thirdTicketId}`),
+      5_000,
+      'T3 to queue behind T2',
+    )
+    expect(worker.assignments.some(event => event.ticketId === thirdTicketId)).toBe(false)
+
+    thirdLaunch.catch(() => undefined)
+    firstLaunch.catch(() => undefined)
+    // Drain resolves the parked launches so shutdown does not wait on them.
+    await runtime.drain()
+    await shutdown(runtime)
+  }, 60_000)
+
   it('keeps a live replacement slot when the cancel releases an ended Assignment', async () => {
     const assignments: RemoteMeshAssignmentEvent[] = []
     const cancels: RemoteMeshAssignmentCancelEvent[] = []

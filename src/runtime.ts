@@ -2092,7 +2092,15 @@ export class Runtime {
       // end hook queued a release: a pause-held terminal verdict leaves the
       // Assignment open, and a vanished Ticket document has no hook to run.
       const endedByReport = Boolean(settled?.ended) || settledAssignment?.state === 'ended'
-      if (!endedByReport) this.placement.release(event.ticketId)
+      if (!endedByReport) {
+        this.placement.release(event.ticketId)
+        // Freeing the slot here runs no end hook, so nothing else wakes the
+        // mesh FIFO. Pump after the release so a Ticket parked because this
+        // node was full can take the freed capacity instead of letting a later
+        // launch jump it. Extra pumps are harmless: `pump` stops at the FIFO
+        // head when no slot is free.
+        this.harness.pumpQueue()
+      }
       this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
       return
     }
