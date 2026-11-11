@@ -979,6 +979,181 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await shutdown(runtime)
   }, 60_000)
 
+  it('dispatches a resumed unplaced Ticket through the mesh instead of the host', async () => {
+    const REQUIRED_CAPABILITY = 'resume-unplaced-capability'
+    const worker = await startWorkerInbox()
+    const hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-resume-unplaced-'))
+    homes.push(hostHome)
+    // Record local Worker turns: a resume that bypasses the mesh would start one
+    // for the parked Ticket on the host.
+    const localWorkerTurns: string[] = []
+    const model = new ScriptedModel(async request => {
+      if (request.role !== 'worker') return { text: 'router-ok' }
+      localWorkerTurns.push(field(lastPrompt(request), 'ticketId'))
+      return { text: 'worker-done' }
+    })
+    const runtime = runtimeFor(hostHome, model, 60_000, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: worker.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    })
+    runtime.start({ assessPending: false })
+
+    // The required capability keeps every Assignment off the free local slot.
+    const firstTicketId = createTicket(runtime, 'resume_unplaced_a')
+    const firstLaunch = runtime.harness.launch(loadTicket(runtime, firstTicketId))
+    await waitFor(
+      () => worker.assignments.some(event => event.ticketId === firstTicketId),
+      5_000,
+      'T1 to reach the remote node',
+    )
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // The only eligible node is full, so T2 parks in the mesh FIFO.
+    const secondTicketId = createTicket(runtime, 'resume_unplaced_b')
+    const secondLaunch = runtime.harness.launch(loadTicket(runtime, secondTicketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${secondTicketId}`),
+      5_000,
+      'T2 to queue behind the busy node',
+    )
+    const a2 = loadTicket(runtime, secondTicketId).assignments.at(-1)!
+    expect(a2.state).toBe('pending')
+    expect(a2.node).toBeUndefined()
+
+    // Pause freezes T2 while it is still in the FIFO.
+    expect(runtime.pause(secondTicketId).changed).toBe(true)
+
+    // T1's terminal result releases the slot and pumps. The paused T2 is
+    // skipped, so it is no longer in the FIFO when it is later resumed.
+    const a1 = loadTicket(runtime, firstTicketId).assignments.at(-1)!
+    runtime.applyRemoteAssignmentResult({
+      peerId: WORKER_PEER,
+      ticketId: firstTicketId,
+      assignmentId: a1.id,
+      report: { kind: 'ready', text: 'remote work done', deliver: true },
+      deliveryKey: `deliv-resume-unplaced-${firstTicketId}`,
+      envelope: { from: WORKER_PEER, to: HOST_PEER, body: {} },
+    })
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.dequeued ticketId=${secondTicketId}`),
+      5_000,
+      'paused T2 to be skipped by the pump',
+    )
+    expect(runtime.log.text()).toContain(`skipped=paused`)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(0)
+
+    // Resume must place the never-placed Assignment through the mesh: the body
+    // reaches the remote node and no local Worker turn runs for T2.
+    await runtime.resume(secondTicketId)
+    await waitFor(
+      () => worker.assignments.some(event => assignmentIdOf(event) === a2.id),
+      5_000,
+      'resumed T2 to be dispatched to the freed node',
+    )
+    expect(runtime.log.text()).toContain(`[mesh] remote dispatch ticketId=${secondTicketId}`)
+    expect(loadTicket(runtime, secondTicketId).assignments.at(-1)?.node).toBe(REMOTE_NODE_ID)
+    expect(localWorkerTurns).not.toContain(secondTicketId)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // T2 now holds the only slot, so a later T3 queues instead of jumping it.
+    const thirdTicketId = createTicket(runtime, 'resume_unplaced_c')
+    const thirdLaunch = runtime.harness.launch(loadTicket(runtime, thirdTicketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${thirdTicketId}`),
+      5_000,
+      'T3 to queue behind T2',
+    )
+    expect(worker.assignments.some(event => event.ticketId === thirdTicketId)).toBe(false)
+
+    thirdLaunch.catch(() => undefined)
+    secondLaunch.catch(() => undefined)
+    firstLaunch.catch(() => undefined)
+    await runtime.drain()
+    await shutdown(runtime)
+  }, 60_000)
+
+  it('leaves a resumed Ticket in the FIFO instead of running it locally and remotely', async () => {
+    const REQUIRED_CAPABILITY = 'resume-fifo-capability'
+    const worker = await startWorkerInbox()
+    const hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-resume-fifo-'))
+    homes.push(hostHome)
+    const localWorkerTurns: string[] = []
+    const model = new ScriptedModel(async request => {
+      if (request.role !== 'worker') return { text: 'router-ok' }
+      localWorkerTurns.push(field(lastPrompt(request), 'ticketId'))
+      return { text: 'worker-done' }
+    })
+    const runtime = runtimeFor(hostHome, model, 60_000, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: worker.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    })
+    runtime.start({ assessPending: false })
+
+    const firstTicketId = createTicket(runtime, 'resume_fifo_a')
+    const firstLaunch = runtime.harness.launch(loadTicket(runtime, firstTicketId))
+    await waitFor(
+      () => worker.assignments.some(event => event.ticketId === firstTicketId),
+      5_000,
+      'T1 to reach the remote node',
+    )
+
+    const secondTicketId = createTicket(runtime, 'resume_fifo_b')
+    const secondLaunch = runtime.harness.launch(loadTicket(runtime, secondTicketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${secondTicketId}`),
+      5_000,
+      'T2 to queue behind the busy node',
+    )
+    const a2 = loadTicket(runtime, secondTicketId).assignments.at(-1)!
+    expect(runtime.pause(secondTicketId).changed).toBe(true)
+
+    // Resume while T2 is still in the FIFO must not start a local Worker turn
+    // and must not add a second queue entry.
+    await runtime.resume(secondTicketId)
+    expect(runtime.log.text()).not.toContain(`[mesh] remote dispatch ticketId=${secondTicketId}`)
+    expect(localWorkerTurns).not.toContain(secondTicketId)
+    expect(runtime.log.text()).toContain(`mesh.queued ticketId=${secondTicketId}`)
+    expect(runtime.log.text()).not.toContain(`mesh.dequeued ticketId=${secondTicketId}`)
+
+    // When T1 finishes, the single FIFO entry dispatches T2 remotely. It must
+    // not also have run locally.
+    const a1 = loadTicket(runtime, firstTicketId).assignments.at(-1)!
+    runtime.applyRemoteAssignmentResult({
+      peerId: WORKER_PEER,
+      ticketId: firstTicketId,
+      assignmentId: a1.id,
+      report: { kind: 'ready', text: 'remote work done', deliver: true },
+      deliveryKey: `deliv-resume-fifo-${firstTicketId}`,
+      envelope: { from: WORKER_PEER, to: HOST_PEER, body: {} },
+    })
+    await waitFor(
+      () => worker.assignments.some(event => assignmentIdOf(event) === a2.id),
+      5_000,
+      'T2 to be dispatched to the freed node',
+    )
+    expect(runtime.log.text()).toContain(`[mesh] remote dispatch ticketId=${secondTicketId}`)
+    expect(localWorkerTurns).not.toContain(secondTicketId)
+    expect(
+      worker.assignments.filter(event => assignmentIdOf(event) === a2.id),
+    ).toHaveLength(1)
+    expect(runtime.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    secondLaunch.catch(() => undefined)
+    firstLaunch.catch(() => undefined)
+    await runtime.drain()
+    await shutdown(runtime)
+  }, 60_000)
+
   it('keeps a live replacement slot when the cancel releases an ended Assignment', async () => {
     const assignments: RemoteMeshAssignmentEvent[] = []
     const cancels: RemoteMeshAssignmentCancelEvent[] = []

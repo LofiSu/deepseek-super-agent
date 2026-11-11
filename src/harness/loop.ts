@@ -583,6 +583,14 @@ export class Harness {
     }
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new Error(`ticket ${ticket.id} has no assignment`)
+    // A pending Assignment with no node was never placed: it was parked in the
+    // mesh FIFO because no eligible node had a free slot, then paused. Starting
+    // a local Worker turn here would absorb required-capability work on the
+    // host, or race the FIFO and run the same Ticket both locally and remotely.
+    // Let `startOrQueue` / `pump` place it through `pickNode` instead.
+    const resumeThroughMesh = Boolean(this.opts.pickNode)
+      && assignment.state === 'pending'
+      && assignment.node === undefined
     const sessionId = workerSessionId(ticket.id)
     const since = ticket.collab?.resumes.at(-1)?.pausedAt
     const pending = since
@@ -597,7 +605,7 @@ export class Harness {
     this.opts.log(
       `[harness] ExecutorSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
     )
-    if (assignment.state === 'pending') {
+    if (assignment.state === 'pending' && !resumeThroughMesh) {
       this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
     }
 
@@ -659,6 +667,22 @@ export class Harness {
           ? this.opts.store.getDoc<Ticket>('ticket', ticket.id)
           : undefined
         if (!latest || latest.ended) return
+        if (resumeThroughMesh) {
+          // A concurrent pump may have placed the Assignment while the Router
+          // ran. Never start a second Worker turn for an Assignment the mesh
+          // already dispatched.
+          const current = latest.assignments.at(-1)
+          if (!current || current.state !== 'pending' || current.node !== undefined) return
+          // The Ticket may still be in the FIFO (a pump skipped it as paused).
+          // Clearing the pause is enough: wake the queue without adding a
+          // second entry. Otherwise it was skipped or never queued, so place it
+          // again through `startOrQueue`.
+          if (this.queued.some(entry => entry.ticketId === ticket.id)) {
+            this.pump()
+            return
+          }
+          return this.startOrQueue(ticket.id)
+        }
         return this.enqueue(sessionId, () => guarded(sessionId, 'worker', workerPrompt))
       })
       .then(() => undefined)
