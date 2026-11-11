@@ -1889,6 +1889,11 @@ export class Runtime {
       },
     })
     late.harness = harness
+    // A remote node becoming eligible again (offline/stale → heartbeat) is an
+    // external capacity event. Wake the Harness mesh FIFO so a parked retry or
+    // enqueueWorker can pick the returned node without waiting for an unrelated
+    // Worker turn to end. Extra pumps are harmless; an empty queue no-ops.
+    placement.setRemoteEligibleListener(() => harness.pumpQueue())
     const watchdog = new Watchdog({
       store,
       engine,

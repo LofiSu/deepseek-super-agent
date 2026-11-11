@@ -209,6 +209,12 @@ export interface RemoteMeshRegistryOptions {
   createTransport?: RemoteTransportFactory
   /** Maximum registered nodes. Defaults to 256. */
   maxNodes?: number
+  /**
+   * Notified with the node id when a registered node transitions from
+   * ineligible (offline or stale) to eligible on a heartbeat. Late wiring uses
+   * `setOnBecameEligible` instead. The registry never starts dispatch itself.
+   */
+  onBecameEligible?: (nodeId: string) => void
 }
 
 interface RemoteNodeRecord {
@@ -258,6 +264,7 @@ export class RemoteMeshRegistry {
   private readonly nodes = new Map<string, RemoteNodeRecord>()
   private readonly assignments = new Map<string, string>()
   private readonly transports = new Map<string, A2ATransport>()
+  private becameEligibleListener?: (nodeId: string) => void
 
   constructor(options: RemoteMeshRegistryOptions | string = {}) {
     const resolved: RemoteMeshRegistryOptions = typeof options === 'string'
@@ -276,6 +283,16 @@ export class RemoteMeshRegistry {
     this.createTransport = resolved.transportFactory
       ?? resolved.createTransport
       ?? defaultTransportFactory
+    this.becameEligibleListener = resolved.onBecameEligible
+  }
+
+  /**
+   * Replace the ineligible → eligible listener. The Runtime wires this after
+   * the Harness exists so a heartbeat that brings a node back can wake a
+   * parked mesh queue. Passing `undefined` removes the listener.
+   */
+  setOnBecameEligible(listener: ((nodeId: string) => void) | undefined): void {
+    this.becameEligibleListener = listener
   }
 
   /** Register a node. A duplicate id throws. The URL guard is the A2A transport's. */
@@ -311,14 +328,27 @@ export class RemoteMeshRegistry {
 
   /**
    * Record a heartbeat. A heartbeat also brings an offline node back online.
-   * Unknown ids return `false` instead of throwing.
+   * Unknown ids return `false` instead of throwing. A heartbeat that makes an
+   * ineligible node eligible again notifies the optional listener exactly once,
+   * after the registry state is updated.
    */
   heartbeat(id: string, at: number = this.clock()): boolean {
     const node = this.nodes.get(id)
     if (!node) return false
     if (!Number.isFinite(at)) return false
+    const now = this.clock()
+    const wasEligible = this.eligible(node, now)
     node.lastHeartbeatAt = at
     node.online = true
+    if (!wasEligible && this.eligible(node, now)) {
+      try {
+        this.becameEligibleListener?.(id)
+      } catch {
+        // The heartbeat already succeeded. A wake callback must not turn an
+        // accepted heartbeat into a failed delivery (the replay would not fire
+        // the transition again because the node is now eligible).
+      }
+    }
     return true
   }
 

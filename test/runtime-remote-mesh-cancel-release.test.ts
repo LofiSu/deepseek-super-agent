@@ -753,6 +753,78 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await shutdown(runtime)
   }, 60_000)
 
+  it('pumps a queued retry when a remote node becomes eligible again on heartbeat', async () => {
+    const REQUIRED_CAPABILITY = 'heartbeat-requeue-capability'
+    const worker = await startWorkerInbox()
+    const hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-heartbeat-requeue-'))
+    homes.push(hostHome)
+    const runtime = runtimeFor(hostHome, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: worker.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    })
+    runtime.start({ assessPending: false })
+
+    // A required capability keeps both Assignments off the free local slot.
+    const ticketId = createTicket(runtime, 'heartbeat_requeue')
+    await runtime.harness.launch(loadTicket(runtime, ticketId))
+    await waitFor(
+      () => worker.assignments.some(event => event.ticketId === ticketId),
+      5_000,
+      'A1 to reach the remote inbox',
+    )
+    const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(a1.node).toBe(REMOTE_NODE_ID)
+
+    // The only eligible node goes offline, then A1 ends without ending the
+    // Ticket. The fail-soft cancel cannot reach the offline worker.
+    const remote = runtime.placement.remote
+    if (!remote) throw new Error('missing remote registry')
+    expect(remote.markOffline(REMOTE_NODE_ID)).toBe(true)
+    expect(runtime.engine.report(ticketId, {
+      kind: 'failed',
+      text: 'a1 failed while the node was offline',
+      deliver: false,
+    }).surfaced).toBe(false)
+    await waitFor(
+      () => loadTicket(runtime, ticketId).assignments.find(item => item.id === a1.id)?.state === 'ended',
+      5_000,
+      'A1 to end',
+    )
+
+    // No eligible node remains, so the retry replacement parks in the FIFO.
+    const retry = runtime.retry(ticketId, 'retry after the node went offline')
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${ticketId}`),
+      5_000,
+      'the retry replacement to queue while the node is offline',
+    )
+    const a2 = loadTicket(runtime, ticketId).assignments.at(-1)!
+    expect(a2.id).not.toBe(a1.id)
+    expect(worker.assignments.some(event => assignmentIdOf(event) === a2.id)).toBe(false)
+
+    // The production "node is back" event. Nothing else ends or launches here,
+    // so only the heartbeat can wake the parked replacement.
+    expect(remote.heartbeat(REMOTE_NODE_ID)).toBe(true)
+    await waitFor(
+      () => worker.assignments.some(event => assignmentIdOf(event) === a2.id),
+      5_000,
+      'the queued replacement body to reach the returned node',
+    )
+    expect(runtime.log.text()).toContain(`[mesh] mesh.dequeued ticketId=${ticketId}`)
+    expect(runtime.log.text()).toContain(`[mesh] remote dispatch ticketId=${ticketId}`)
+    expect(loadTicket(runtime, ticketId).assignments.at(-1)?.node).toBe(REMOTE_NODE_ID)
+    // The queued launch (and therefore Runtime.retry) completes once the body
+    // is dispatched; no third Ticket was launched to force the pump.
+    await retry
+
+    await shutdown(runtime)
+  }, 60_000)
+
   it('keeps a live replacement slot when the cancel releases an ended Assignment', async () => {
     const assignments: RemoteMeshAssignmentEvent[] = []
     const cancels: RemoteMeshAssignmentCancelEvent[] = []

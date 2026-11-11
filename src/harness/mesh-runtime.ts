@@ -62,6 +62,7 @@ export function parseRemoteMeshNodesFromEnv(env: NodeJS.ProcessEnv): RemoteMeshE
  */
 export class WorkerPlacement {
   private remoteRegistry?: RemoteMeshRegistry
+  private remoteEligibleListener?: (nodeId: string) => void
 
   get remote(): RemoteMeshRegistry | undefined {
     return this.remoteRegistry
@@ -75,10 +76,23 @@ export class WorkerPlacement {
     this.remoteRegistry = remote
   }
 
+  /**
+   * Wire the wake callback for a remote node that becomes eligible again.
+   * Applied to the current registry (when one exists) and to a registry this
+   * placement creates later through `registerRemoteNode`.
+   */
+  setRemoteEligibleListener(listener: ((nodeId: string) => void) | undefined): void {
+    this.remoteEligibleListener = listener
+    this.remoteRegistry?.setOnBecameEligible(listener)
+  }
+
   /** Register a remote peer after worker inbox URL is known (tests / late bind). */
   registerRemoteNode(node: RemoteNodeRegistration): void {
     const registry = this.remoteRegistry ?? new RemoteMeshRegistry({ localPeerId: this.localNodeId })
-    if (!this.remoteRegistry) this.remoteRegistry = registry
+    if (!this.remoteRegistry) {
+      this.remoteRegistry = registry
+      registry.setOnBecameEligible(this.remoteEligibleListener)
+    }
     registry.register(node)
   }
 

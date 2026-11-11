@@ -465,6 +465,16 @@ export class Harness {
     this.pump()
   }
 
+  /**
+   * Wake the mesh queue after an external capacity event (a remote node became
+   * eligible again through a heartbeat). Extra pumps are harmless: `pump`
+   * stops at the FIFO head when no slot is free, and it can never start a
+   * Worker that is already active.
+   */
+  pumpQueue(): void {
+    this.pump()
+  }
+
   private startWorkerTurn(ticket: Ticket, node?: string): Promise<void> {
     const sessionId = workerSessionId(ticket.id)
     const assignment = ticket.assignments.at(-1)
