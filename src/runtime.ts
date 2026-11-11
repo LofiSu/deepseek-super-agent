@@ -2366,8 +2366,12 @@ export class Runtime {
    * and only a remote peer needs a cancel. This trusts persisted truth and
    * intentionally skips `pick`/eligibility so a now-stale peer is still
    * cancelled (the cancel send stays fail-soft). Paused and approval-held
-   * Tickets are skipped as well. A terminal Ticket is only considered for the
-   * ended-latest lost-cancel window below, never for a live running placement.
+   * Tickets still restore a live running reservation: recovery does not end,
+   * replace, or cancel that Assignment (ADR-004 deliberate stop), so without
+   * the reservation a later Ticket could be placed on the same capacity while
+   * the peer is still executing it. Their leftover/ended cancels stay skipped.
+   * A terminal Ticket is only considered for the ended-latest lost-cancel
+   * window below, never for a live running placement.
    *
    * Returns the Tickets whose reservation was rebuilt from an already-ended
    * remote Assignment rather than a running one. Two crash windows leave that
@@ -2380,7 +2384,7 @@ export class Runtime {
   private restoreRemoteStickyReservations(): Set<string> {
     const restoredFromEnded = new Set<string>()
     for (const ticket of this.store.listDocs<Ticket>('ticket')) {
-      if (ticket.collab?.paused || pendingApproval(ticket)) continue
+      const held = Boolean(ticket.collab?.paused) || pendingApproval(ticket)
       // Only an open Ticket can still own a live placement; a terminal Ticket
       // has no running Assignment to rebuild from.
       if (!ticket.ended) {
@@ -2393,6 +2397,10 @@ export class Runtime {
           )
         }
       }
+      // Paused and approval-held Tickets keep the live reservation restored
+      // above so the peer's running body still holds its capacity, but their
+      // leftover/ended cancels are never queued (drive-by policy).
+      if (held) continue
       // A crash in the window after recovery committed A1 `ended` but before
       // the queued `releaseSlot` sent its cancel leaves an ended remote
       // predecessor with a later open Assignment and no running one. The same

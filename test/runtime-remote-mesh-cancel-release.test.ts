@@ -1849,6 +1849,98 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await shutdown(runtimeB)
   }, 60_000)
 
+  it('restores a paused in-progress remote reservation after a process restart', async () => {
+    const REQUIRED_CAPABILITY = 'restart-paused-remote-capability'
+    const worker = await startWorkerInbox()
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-paused-remote-restart-'))
+    homes.push(home)
+    const scripted = (): ScriptedModel =>
+      new ScriptedModel(async request => {
+        if (request.role !== 'worker') return { text: 'router-ok' }
+        return { text: 'worker-done' }
+      })
+    const node = {
+      id: REMOTE_NODE_ID,
+      url: worker.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    }
+
+    // Runtime A: place T1 on the required-capability node, let the body arrive,
+    // then pause it before any terminal result and crash without cancelling.
+    const runtimeA = runtimeFor(home, scripted(), 60_000, REQUIRED_CAPABILITY)
+    runtimeA.placement.registerRemoteNode(node)
+    runtimeA.start({ assessPending: false })
+
+    const firstTicketId = createTicket(runtimeA, 'paused_remote_restart_a')
+    const firstLaunch = runtimeA.harness.launch(loadTicket(runtimeA, firstTicketId))
+    firstLaunch.catch(() => undefined)
+    await waitFor(
+      () => worker.assignments.some(event => event.ticketId === firstTicketId),
+      5_000,
+      'T1 to reach the remote node',
+    )
+    const pausedAssignment = loadTicket(runtimeA, firstTicketId).assignments.at(-1)!
+    expect(pausedAssignment.node).toBe(REMOTE_NODE_ID)
+    expect(pausedAssignment.state).toBe('running')
+    expect(runtimeA.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+
+    // Pause must keep the remote body running and send no cancel.
+    expect(runtimeA.pause(firstTicketId).changed).toBe(true)
+    expect(loadTicket(runtimeA, firstTicketId).assignments.at(-1)?.state).toBe('running')
+    expect(worker.cancels).toHaveLength(0)
+
+    // Crash the host without cancelling.
+    runtimeA.daemon.stop()
+    runtimeA.store.close()
+    expect(worker.cancels).toHaveLength(0)
+
+    // Runtime B: recovery must leave the paused Ticket and its running remote
+    // Assignment untouched, but rebuild the sticky reservation from persisted
+    // state so the peer's only slot stays occupied.
+    const runtimeB = runtimeFor(home, scripted(), 60_000, REQUIRED_CAPABILITY)
+    runtimeB.placement.registerRemoteNode(node)
+    runtimeB.start({ assessPending: false })
+
+    const recovered = loadTicket(runtimeB, firstTicketId)
+    expect(recovered.collab?.paused).toBeDefined()
+    // Not ended, not replaced, not relaunched: the same Assignment is running.
+    expect(recovered.assignments.map(item => item.id)).toEqual([pausedAssignment.id])
+    expect(recovered.assignments[0]?.state).toBe('running')
+    expect(recovered.assignments[0]?.node).toBe(REMOTE_NODE_ID)
+    expect(runtimeB.log.text()).not.toContain(`[recovery] relaunch ticketId=${firstTicketId}`)
+    expect(runtimeB.log.text()).toContain(
+      `[recovery] remote reservation restored ticketId=${firstTicketId} assignmentId=${pausedAssignment.id} node=${REMOTE_NODE_ID}`,
+    )
+    expect(runtimeB.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    expect(worker.cancels).toHaveLength(0)
+
+    // T2 cannot take the node while T1's paused remote still runs there: it
+    // parks in the mesh FIFO and is neither dispatched nor run on the host.
+    const secondTicketId = createTicket(runtimeB, 'paused_remote_restart_b')
+    const secondLaunch = runtimeB.harness.launch(loadTicket(runtimeB, secondTicketId))
+    secondLaunch.catch(() => undefined)
+    await waitFor(
+      () => runtimeB.log.text().includes(`mesh.queued ticketId=${secondTicketId}`),
+      5_000,
+      'T2 to queue behind the paused remote slot',
+    )
+    const secondAssignment = loadTicket(runtimeB, secondTicketId).assignments.at(-1)!
+    expect(secondAssignment.state).toBe('pending')
+    expect(secondAssignment.node).toBeUndefined()
+    expect(worker.assignments.some(event => event.ticketId === secondTicketId)).toBe(false)
+    expect(runtimeB.log.text()).not.toContain(`[mesh] remote dispatch ticketId=${secondTicketId}`)
+    expect(runtimeB.log.text()).not.toContain(`session=worker_${secondTicketId}`)
+    expect(runtimeB.placement.remote?.inFlight(REMOTE_NODE_ID)).toBe(1)
+    // T1 was not ended, replaced, or cancelled while T2 parked.
+    expect(loadTicket(runtimeB, firstTicketId).assignments.at(-1)?.state).toBe('running')
+    expect(worker.cancels).toHaveLength(0)
+
+    await shutdown(runtimeB)
+  }, 60_000)
+
   it('cancels an ended remote Assignment left behind by a mid-recovery crash', async () => {
     const assignments: RemoteMeshAssignmentEvent[] = []
     const cancels: RemoteMeshAssignmentCancelEvent[] = []
