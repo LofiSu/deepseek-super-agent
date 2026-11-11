@@ -3308,4 +3308,115 @@ describe('Runtime remote mesh cancel releases capacity', () => {
       await shutdown(runtime)
     }
   }, 60_000)
+
+  it('keeps a lost terminal sticky cancel when no local replacement exists', async () => {
+    // One remote worker behind a cancel-dropping proxy, local mesh capacity 1.
+    // A1 overflows to N1. A production successful report ends both A1 and T1,
+    // so `releaseSlot` runs through the sticky-path terminal cancel with no
+    // local replacement: it starts the fail-soft cancel and then releases the
+    // sticky. That send is lost (502), so the Worker still holds A1 while T1
+    // has no remote sticky and no local replacement. Unlike the a1d2d90
+    // last-attempt path there is no retry here, and unlike crash recovery this
+    // is the same process. If the terminal cancel is not recorded when it
+    // starts, a later Ticket overflowing to N1 has nothing to resend and its
+    // body reaches the Worker that still holds A1.
+    const inbox = await startWorkerInbox()
+    const proxy = await startCancelDroppingProxy(inbox.url)
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-cancel-sticky-terminal-lost-'))
+    homes.push(home)
+    const held = new Map<string, Gate>()
+    const runtime = runtimeFor(home, holdingModel(held))
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: proxy.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+    })
+    runtime.start({ assessPending: false })
+
+    try {
+      // Hold the only local slot so T1 has to overflow to N1.
+      const blockerId = createTicket(runtime, 'cancel_sticky_terminal_lost_blocker')
+      held.set(blockerId, gate())
+      void runtime.harness.launch(loadTicket(runtime, blockerId))
+      await waitFor(
+        () => runtime.placement.local.inFlight(HOST_PEER) === 1,
+        5_000,
+        'the local slot to be held',
+      )
+
+      const ticketId = createTicket(runtime, 'cancel_sticky_terminal_lost')
+      await runtime.harness.launch(loadTicket(runtime, ticketId))
+      await waitFor(
+        () => inbox.assignments.some(event => event.ticketId === ticketId),
+        5_000,
+        'A1 to reach N1',
+      )
+      const a1 = loadTicket(runtime, ticketId).assignments.at(-1)!
+      expect(a1.node).toBe(REMOTE_NODE_ID)
+      expect(a1.state).toBe('running')
+
+      // Terminal sticky-path cancel: the production successful report ends A1
+      // and the Ticket, so no local replacement is ever placed and no retry
+      // runs. Lose the cancel; keep-vs-release frees T1's remote sticky.
+      proxy.dropping = true
+      expect(runtime.engine.report(ticketId, {
+        kind: 'ready',
+        text: 'remote done',
+        deliver: false,
+      }).surfaced).toBe(false)
+      expect(loadTicket(runtime, ticketId).ended).toBeDefined()
+      await waitFor(
+        () => proxy.dropped.some(item => item.assignmentId === a1.id),
+        5_000,
+        'A1 cancel to be dropped at the N1 proxy',
+      )
+      await waitFor(
+        () => runtime.placement.remote?.inFlight(REMOTE_NODE_ID) === 0,
+        5_000,
+        'the N1 sticky slot to be released after the lost cancel',
+      )
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+      // Let the failed sticky-path cancel fully settle so the later dispatch
+      // cannot race its in-flight batch.
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(inbox.cancels.some(event => event.assignmentId === a1.id)).toBe(false)
+
+      // Keep the blocker held, restore forwarding, and overflow a later Ticket
+      // to N1. The terminal cancel must be resent from the kept orphan record,
+      // and the later body ordered after it.
+      proxy.dropping = false
+      const laterId = createTicket(runtime, 'cancel_sticky_terminal_lost_later')
+      await runtime.harness.launch(loadTicket(runtime, laterId))
+      const laterAssignment = loadTicket(runtime, laterId).assignments.at(-1)!
+      expect(laterAssignment.node).toBe(REMOTE_NODE_ID)
+
+      // Wait for both arrivals; asserting after only one would race.
+      await waitFor(
+        () => stampIndex(inbox.stamps, 'cancel', a1.id) >= 0
+          && stampIndex(inbox.stamps, 'assignment', laterAssignment.id) >= 0,
+        10_000,
+        'A1 cancel and the later Ticket body to reach the worker',
+      )
+      const cancelIndex = stampIndex(inbox.stamps, 'cancel', a1.id)
+      const laterIndex = stampIndex(inbox.stamps, 'assignment', laterAssignment.id)
+      expect(cancelIndex).toBeLessThanOrEqual(laterIndex)
+      expect(inbox.stamps[cancelIndex].at).toBeLessThanOrEqual(inbox.stamps[laterIndex].at)
+
+      // Still the terminal gap: T1 ended with no local replacement and no
+      // remote sticky, so this cannot pass through the a1d2d90 no-sticky
+      // last-attempt path or a crash leftover-restore path.
+      const current = loadTicket(runtime, ticketId)
+      expect(current.ended).toBeDefined()
+      expect(runtime.placement.remoteHasTicket(ticketId)).toBe(false)
+      expect(current.assignments.map(item => item.id)).toEqual([a1.id])
+      expect(current.assignments[0]?.state).toBe('ended')
+      expect(runtime.placement.local.inFlight(HOST_PEER)).toBe(1)
+    } finally {
+      for (const hold of held.values()) hold.release()
+      await shutdown(runtime)
+    }
+  }, 60_000)
 })

@@ -884,10 +884,17 @@ export class Runtime {
      * the send is tracked under that node so a later different Ticket's
      * `dispatchRemote` can order its body after it.
      */
-    const sendEndedRemoteCancel = (ticketId: string, target: Assignment): Promise<boolean> => {
+    const sendEndedRemoteCancel = (
+      ticketId: string,
+      target: Pick<Assignment, 'id' | 'node'>,
+      // Node to attribute the send to when the Assignment row did not record
+      // one; the sticky-path settle path only has the Ticket's current node.
+      fallbackNode?: string,
+    ): Promise<boolean> => {
+      const node = target.node ?? fallbackNode
       const settled = placement.cancelRemote(ticketId, target.id, {
         release: false,
-        ...(target.node !== undefined ? { nodeId: target.node } : {}),
+        ...(node !== undefined ? { nodeId: node } : {}),
       }).then(
         delivered => delivered,
         error => {
@@ -897,7 +904,7 @@ export class Runtime {
           return false
         },
       )
-      trackRemoteCancelSends(ticketId, [settled], target.node)
+      trackRemoteCancelSends(ticketId, [settled], node)
       return settled
     }
     /**
@@ -1134,66 +1141,93 @@ export class Runtime {
           // free the old slot and let a retry land on a different remote node;
           // the worker still holding the older Assignment is on the old node.
           const byId = new Map((ticket?.assignments ?? []).map(item => [item.id, item]))
-          const cancelSends = cancelAssignmentIds.map(id => {
-            const target = byId.get(id)
-            const send = placement.cancelRemote(ticketId, id, {
-              release: false,
-              ...(target?.node !== undefined ? { nodeId: target.node } : {}),
-            }).catch(error => {
-              log.info(
-                `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
-              )
-            })
-            trackRemoteCancelSends(ticketId, [send], target?.node ?? cancelNode)
-            return send
-          })
-          void Promise.all(cancelSends)
-            .finally(() => {
-              // `Runtime.finish()` (or a crash-simulation / teardown that closes
-              // SQLite directly) can close the Store while this fail-soft cancel
-              // send is still in flight. There is no committed state left to
-              // decide keep-vs-release from, and every Store read on a closed
-              // handle throws `database is not open`. This promise is voided, so
-              // letting that throw escape would surface as an unhandled
-              // rejection. Fail soft in memory instead: release the sticky slot
-              // (no live replacement can be proven) and notify the harness,
-              // neither of which needs the Store.
-              if (!store.isOpen) {
-                placement.release(ticketId)
-                notifyHarnessReleased(ticketId)
-                return
-              }
-              const current = store.getDoc<Ticket>('ticket', ticketId)
-              const currentLatest = current?.assignments.at(-1)
-              const superseded = current?.assignments
-                .slice(0, -1).reverse().find(item => item.state === 'ended')
-              const liveReplacement = current !== undefined
-                && !current.ended
-                && currentLatest !== undefined
-                && currentLatest.state !== 'ended'
-                && (currentLatest.state === 'running'
-                  || currentLatest.node !== undefined
-                  || currentLatest.startedAt !== undefined)
-                && superseded !== undefined
-                && placement.remoteHasTicket(ticketId)
-              if (liveReplacement && superseded && currentLatest) {
-                log.info(
-                  `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${superseded.id} replacementId=${currentLatest.id} reason=live-replacement`,
-                )
-                // The replacement's own wait may already be armed; arming is
-                // keyed per ticketId and resetting it to the live replacement
-                // is the same transfer the other late keep-slot paths make.
-                if (remoteResultTimeoutMs > 0) {
-                  log.info(
-                    `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${currentLatest.id}`,
-                  )
-                }
-                late.remoteResultWait?.arm(ticketId, currentLatest.id)
-              } else {
-                placement.release(ticketId)
-              }
+          // Record the Ticket as soon as these terminal cancels are started, not
+          // only after a loss is observed. A later dispatch can race the
+          // in-flight first send; if that send is then lost, the dispatch-time
+          // resend must already have a record to resend from.
+          if (cancelAssignmentIds.length > 0) orphanedRemoteTickets.add(ticketId)
+          const cancelSends = cancelAssignmentIds.map(id =>
+            sendEndedRemoteCancel(ticketId, byId.get(id) ?? { id }, cancelNode),
+          )
+          const settleAfterCancelSends = (delivered: boolean): void => {
+            // `Runtime.finish()` (or a crash-simulation / teardown that closes
+            // SQLite directly) can close the Store while this fail-soft cancel
+            // send is still in flight. There is no committed state left to
+            // decide keep-vs-release from, and every Store read on a closed
+            // handle throws `database is not open`. This promise is voided, so
+            // letting that throw escape would surface as an unhandled
+            // rejection. Fail soft in memory instead: release the sticky slot
+            // (no live replacement can be proven) and notify the harness,
+            // neither of which needs the Store. Leave the orphan record for the
+            // shutdown owners; there is no state left to consume it from here.
+            if (!store.isOpen) {
+              placement.release(ticketId)
               notifyHarnessReleased(ticketId)
-            })
+              return
+            }
+            const current = store.getDoc<Ticket>('ticket', ticketId)
+            const currentLatest = current?.assignments.at(-1)
+            const superseded = current?.assignments
+              .slice(0, -1).reverse().find(item => item.state === 'ended')
+            const liveReplacement = current !== undefined
+              && !current.ended
+              && currentLatest !== undefined
+              && currentLatest.state !== 'ended'
+              && (currentLatest.state === 'running'
+                || currentLatest.node !== undefined
+                || currentLatest.startedAt !== undefined)
+              && superseded !== undefined
+              && placement.remoteHasTicket(ticketId)
+            if (liveReplacement && superseded && currentLatest) {
+              log.info(
+                `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${superseded.id} replacementId=${currentLatest.id} reason=live-replacement`,
+              )
+              // The replacement's own wait may already be armed; arming is
+              // keyed per ticketId and resetting it to the live replacement
+              // is the same transfer the other late keep-slot paths make.
+              if (remoteResultTimeoutMs > 0) {
+                log.info(
+                  `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${currentLatest.id}`,
+                )
+              }
+              late.remoteResultWait?.arm(ticketId, currentLatest.id)
+              // The sticky slot is kept, so the sticky-slot paths own this
+              // Ticket's cancels; drop the record like the matching
+              // `remoteHasTicket` consume rule in `resendOrphanedRemoteCancels`.
+              orphanedRemoteTickets.delete(ticketId)
+            } else {
+              placement.release(ticketId)
+              // A lost terminal cancel with the sticky released must stay
+              // recorded: a later different Ticket placed on the same Worker
+              // has nothing else to resend, and the Worker still holds this
+              // ended Assignment.
+              if (!delivered) {
+                // Keep the record for the next same-node dispatch.
+              } else if (!current) {
+                // No committed Ticket remains, so the record can never produce
+                // a send.
+                orphanedRemoteTickets.delete(ticketId)
+              } else if (placement.remoteHasTicket(ticketId)) {
+                // A sticky gained while the send was in flight is owned by the
+                // sticky-slot paths.
+                orphanedRemoteTickets.delete(ticketId)
+              } else {
+                // Only ended remotes this delivered batch did not cover still
+                // need a later resend (for example an Assignment appended after
+                // the snapshot). Re-read committed state instead of trusting
+                // the snapshot.
+                const cancelledIds = new Set(cancelAssignmentIds)
+                const remaining = endedRemoteAssignments(current)
+                  .filter(target => !cancelledIds.has(target.id))
+                if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
+              }
+            }
+            notifyHarnessReleased(ticketId)
+          }
+          void Promise.all(cancelSends).then(
+            outcomes => settleAfterCancelSends(outcomes.every(Boolean)),
+            () => settleAfterCancelSends(false),
+          )
           return
         }
         // No remote sticky reservation: the Ticket's replacement is local (or
