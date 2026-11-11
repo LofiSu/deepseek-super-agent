@@ -825,6 +825,67 @@ describe('Runtime remote mesh cancel releases capacity', () => {
     await shutdown(runtime)
   }, 60_000)
 
+  it('pumps a parked Worker when a remote node is late-bound by register', async () => {
+    const REQUIRED_CAPABILITY = 'late-register-capability'
+    const worker = await startWorkerInbox()
+    const hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mesh-late-register-'))
+    homes.push(hostHome)
+    const runtime = runtimeFor(hostHome, holdingModel(new Map()), 60_000, REQUIRED_CAPABILITY)
+    runtime.start({ assessPending: false })
+
+    // No remote node exists yet and the required capability keeps the free
+    // local slot from absorbing the work, so the first launch parks in the FIFO.
+    const firstTicketId = createTicket(runtime, 'late_register_a')
+    const firstLaunch = runtime.harness.launch(loadTicket(runtime, firstTicketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${firstTicketId}`),
+      5_000,
+      'the first ticket to queue with no eligible node',
+    )
+    const a1 = loadTicket(runtime, firstTicketId).assignments.at(-1)!
+    expect(a1.state).toBe('pending')
+    expect(worker.assignments.some(event => assignmentIdOf(event) === a1.id)).toBe(false)
+
+    // The production late-bind event: the worker inbox URL is now known. No
+    // other ticket launches or ends here, so only the register hook can wake
+    // the parked FIFO.
+    runtime.placement.registerRemoteNode({
+      id: REMOTE_NODE_ID,
+      url: worker.url,
+      peerId: WORKER_PEER,
+      secret: SECRET,
+      capacity: 1,
+      capabilities: [REQUIRED_CAPABILITY],
+    })
+    await waitFor(
+      () => worker.assignments.some(event => assignmentIdOf(event) === a1.id),
+      5_000,
+      'the queued first-ticket body to reach the late-bound node',
+    )
+    expect(runtime.log.text()).toContain(`[mesh] mesh.dequeued ticketId=${firstTicketId}`)
+    expect(runtime.log.text()).toContain(`[mesh] remote dispatch ticketId=${firstTicketId}`)
+    expect(loadTicket(runtime, firstTicketId).assignments.at(-1)?.node).toBe(REMOTE_NODE_ID)
+    // The parked launch completes once the body is dispatched; no second Ticket
+    // was launched to force the pump.
+    await firstLaunch
+
+    // The late-bound node's only slot is now held by the first ticket, so a
+    // later ticket still queues behind it instead of jumping the FIFO.
+    const secondTicketId = createTicket(runtime, 'late_register_b')
+    const secondLaunch = runtime.harness.launch(loadTicket(runtime, secondTicketId))
+    await waitFor(
+      () => runtime.log.text().includes(`mesh.queued ticketId=${secondTicketId}`),
+      5_000,
+      'the second ticket to queue behind the busy late-bound node',
+    )
+    expect(worker.assignments.some(event => event.ticketId === secondTicketId)).toBe(false)
+
+    secondLaunch.catch(() => undefined)
+    // Drain resolves the parked second launch so shutdown does not wait on it.
+    await runtime.drain()
+    await shutdown(runtime)
+  }, 60_000)
+
   it('keeps a live replacement slot when the cancel releases an ended Assignment', async () => {
     const assignments: RemoteMeshAssignmentEvent[] = []
     const cancels: RemoteMeshAssignmentCancelEvent[] = []

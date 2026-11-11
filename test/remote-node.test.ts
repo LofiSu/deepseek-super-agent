@@ -300,7 +300,7 @@ describe('RemoteMeshRegistry placement', () => {
     expect(mesh.pick('t2', NOW + 60_001)).toBeUndefined()
   })
 
-  it('notifies the listener only when a heartbeat makes a node eligible again', () => {
+  it('notifies the listener when a node becomes eligible on register or heartbeat', () => {
     let now = NOW
     const mesh = new RemoteMeshRegistry({
       localPeerId: LOCAL,
@@ -309,31 +309,49 @@ describe('RemoteMeshRegistry placement', () => {
     })
     const woken: string[] = []
     mesh.setOnBecameEligible(id => woken.push(id))
-    mesh.register({ id: 'a', url: 'http://127.0.0.1:9/a2a', peerId: PEER, secret: SECRET })
+    const registration = {
+      id: 'a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: PEER,
+      secret: SECRET,
+    }
+    mesh.register(registration)
+
+    // A successful register inserts a brand-new eligible node, so it is the
+    // production late-bind "a placeable node just appeared" wake event.
+    expect(woken).toEqual(['a'])
+
+    // A duplicate id throws before insertion and must not wake anyone.
+    expect(() => mesh.register(registration)).toThrow('already registered')
+    expect(woken).toEqual(['a'])
+
+    // An invalid registration throws before insertion and must not wake anyone.
+    expect(() => mesh.register({ ...registration, id: '' })).toThrow('non-empty id')
+    expect(woken).toEqual(['a'])
 
     // Registration leaves the node eligible, so this heartbeat is not a transition.
     expect(mesh.heartbeat('a')).toBe(true)
-    expect(woken).toEqual([])
+    expect(woken).toEqual(['a'])
 
     // Offline → heartbeat is an ineligible → eligible transition.
     expect(mesh.markOffline('a')).toBe(true)
     expect(mesh.heartbeat('a')).toBe(true)
-    expect(woken).toEqual(['a'])
+    expect(woken).toEqual(['a', 'a'])
 
     // An already-eligible heartbeat does not wake anyone again.
     expect(mesh.heartbeat('a')).toBe(true)
-    expect(woken).toEqual(['a'])
+    expect(woken).toEqual(['a', 'a'])
 
     // Stale → heartbeat is the other ineligible → eligible transition.
     now = NOW + 1_001
     expect(mesh.pick('t1')?.id).toBeUndefined()
     expect(mesh.heartbeat('a')).toBe(true)
-    expect(woken).toEqual(['a', 'a'])
+    expect(woken).toEqual(['a', 'a', 'a'])
 
     // A heartbeat older than the stale window still leaves the node stale.
     now = NOW + 5_000
     expect(mesh.heartbeat('a', NOW)).toBe(true)
-    expect(woken).toEqual(['a', 'a'])
+    expect(woken).toEqual(['a', 'a', 'a'])
   })
 
   it('releases a stale/offline assignment so capacity frees and a node can be repicked', async () => {

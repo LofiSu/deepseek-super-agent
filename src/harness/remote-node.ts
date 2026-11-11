@@ -210,8 +210,9 @@ export interface RemoteMeshRegistryOptions {
   /** Maximum registered nodes. Defaults to 256. */
   maxNodes?: number
   /**
-   * Notified with the node id when a registered node transitions from
-   * ineligible (offline or stale) to eligible on a heartbeat. Late wiring uses
+   * Notified with the node id when a node becomes eligible: a successful
+   * register adds a new eligible node, and a heartbeat transitions an
+   * ineligible (offline or stale) node back to eligible. Late wiring uses
    * `setOnBecameEligible` instead. The registry never starts dispatch itself.
    */
   onBecameEligible?: (nodeId: string) => void
@@ -287,12 +288,27 @@ export class RemoteMeshRegistry {
   }
 
   /**
-   * Replace the ineligible → eligible listener. The Runtime wires this after
-   * the Harness exists so a heartbeat that brings a node back can wake a
-   * parked mesh queue. Passing `undefined` removes the listener.
+   * Replace the eligible-node listener. The Runtime wires this after the
+   * Harness exists so a heartbeat that brings a node back, or a late-bound
+   * register that adds an eligible node, can wake a parked mesh queue. Passing
+   * `undefined` removes the listener.
    */
   setOnBecameEligible(listener: ((nodeId: string) => void) | undefined): void {
     this.becameEligibleListener = listener
+  }
+
+  /**
+   * Notify the wake listener after registry state made a node eligible. The
+   * transition already happened, so a listener error must not turn an accepted
+   * register/heartbeat into a failed delivery (a replay would not fire again
+   * because the node is now eligible).
+   */
+  private notifyBecameEligible(nodeId: string): void {
+    try {
+      this.becameEligibleListener?.(nodeId)
+    } catch {
+      // See the method comment: the registry operation already succeeded.
+    }
   }
 
   /** Register a node. A duplicate id throws. The URL guard is the A2A transport's. */
@@ -323,6 +339,13 @@ export class RemoteMeshRegistry {
       lastHeartbeatAt: this.clock(),
     }
     this.nodes.set(id, record)
+    // A successful register always inserts a brand-new eligible node. Treat it
+    // as the ineligible → eligible transition the heartbeat path reports: a
+    // late-bound node (registerRemoteNode / mesh inbox handleRegister) is the
+    // production "a placeable node just appeared" event and must wake a parked
+    // FIFO without waiting for an unrelated Worker turn. Failed registers throw
+    // above, so they never reach this notification.
+    this.notifyBecameEligible(id)
     return this.view(record, record.lastHeartbeatAt)
   }
 
@@ -341,13 +364,7 @@ export class RemoteMeshRegistry {
     node.lastHeartbeatAt = at
     node.online = true
     if (!wasEligible && this.eligible(node, now)) {
-      try {
-        this.becameEligibleListener?.(id)
-      } catch {
-        // The heartbeat already succeeded. A wake callback must not turn an
-        // accepted heartbeat into a failed delivery (the replay would not fire
-        // the transition again because the node is now eligible).
-      }
+      this.notifyBecameEligible(id)
     }
     return true
   }
