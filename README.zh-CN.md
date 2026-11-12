@@ -42,6 +42,7 @@
 - [配置](#配置)
   - [模型](#模型)
   - [运行时设置](#运行时设置)
+  - [MCP 服务器](#mcp-服务器)
 - [Demo（真实信道）](#demo真实信道)
 - [安全与部署](#安全与部署)
 - [当前状态](#当前状态)
@@ -338,6 +339,23 @@ Router 和 Watchdog 适合用轻量模型，Worker 适合用更强的模型。�
 | `DS_AGENT_SANDBOX_READ_ISOLATION` | 关闭 | `1` / `true` / `strict` 启用严格读隔离。 |
 | `DS_AGENT_UI_TOKEN` | 未设置 | `ds-agent ui` 的 Bearer token，至少 16 个字符。 |
 
+### MCP 服务器
+
+Worker 可以调用以数据形式配置的外部 Model Context Protocol 服务器提供的工具。Router 与 Watchdog 看不到这些工具。
+
+```bash
+export DS_AGENT_MCP_SERVERS='[
+  {"name":"krene","command":"/absolute/path/to/krene-mcp","args":["serve"],"timeoutMs":120000}
+]'
+```
+
+- `name` 需匹配 `[A-Za-z0-9_-]`，以字母或数字开头，最长 32 个字符，必须唯一，且不能包含 `__`（命名空间分隔符）。`command` 是非空可执行文件（使用 `/absolute/path` 最稳妥，因为子进程会继承当前工作目录）。`args` 默认 `[]`，`env` 默认 `{}`，`timeoutMs` 默认 `120000`。
+- Worker 看到的工具名是 `mcp__<server>__<tool>`。文本仍是文本；image/resource payload 写入 `<DS_AGENT_HOME>/mcp/<server>/` 并以路径引用；超过 64 KB 的结果进入 spill，返回 `{ spillId, bytes, preview }`。
+- 子进程只继承 `PATH`、`HOME`、`LANG`、`TZ`、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`，以及该服务器自己的 `env`；MCP SDK 启动 transport 时还会从宿主补上它自己的安全默认值（`HOME`、`LOGNAME`、`PATH`、`SHELL`、`TERM`、`USER`）。凭据放进 `env`，不要放在 shell 里。名字像密钥的 `env` 值（例如 `KRENE_TOKEN`）会和其他凭据一样进入脱敏列表。
+- 无法读取的配置会记录 `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` 后忽略。连接失败或挂起的服务器会累加 `mcp.connect_error` 并被跳过；Runtime 和其他服务器继续工作。
+
+嵌入 Runtime 时，`RuntimeOptions.mcpServers` 接受同一个数组。
+
 ## Demo（真实信道）
 
 `pnpm demo` 是验收路径，只走真实信道：
@@ -405,7 +423,7 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 故意保留真实 issue
 - **长期记忆**：hot/cold 分层与混合召回可用；自然月尺度的行为有边界，尚未按真实月份测量。测量协议见 [docs/T48_MONTH_SCALE_PROTOCOL.md](docs/T48_MONTH_SCALE_PROTOCOL.md)。
 - **A2A**：HMAC-SHA256 HTTP transport 已实现；跨主机暴露与远端 dispatch 仍需运维者开启。
 - **Watchdog 漂移检查**：nudge/fail、规则与只读 `ds-agent health` 可用；更深的自然语言目标漂移检查仍较薄。
-- **延迟对照**：批处理压测 harness 会记录曲线；完整双层 vs 单 Session 对照仍未完成。
+- **延迟对照**：一次有日期记录的本机双层 vs 单 Session 运行见 [docs/BAKEOFF.md](docs/BAKEOFF.md)；这只是单个样本，不是基准测试。
 
 ## 文档
 
