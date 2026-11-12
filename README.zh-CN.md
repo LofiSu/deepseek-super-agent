@@ -350,9 +350,9 @@ export DS_AGENT_MCP_SERVERS='[
 ```
 
 - `name` 需匹配 `[A-Za-z0-9_-]`，以字母或数字开头，最长 32 个字符，必须唯一，且不能包含 `__`（命名空间分隔符）。`command` 是非空可执行文件（使用 `/absolute/path` 最稳妥，因为子进程会继承当前工作目录）。`args` 默认 `[]`，`env` 默认 `{}`，`timeoutMs` 默认 `120000`。
-- Worker 看到的工具名是 `mcp__<server>__<tool>`。文本仍是文本；image/resource payload 写入 `<DS_AGENT_HOME>/mcp/<server>/` 并以路径引用；超过 64 KB 的结果进入 spill，返回 `{ spillId, bytes, preview }`。
-- 子进程只继承 `PATH`、`HOME`、`LANG`、`TZ`、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`，以及该服务器自己的 `env`；MCP SDK 启动 transport 时还会从宿主补上它自己的安全默认值（`HOME`、`LOGNAME`、`PATH`、`SHELL`、`TERM`、`USER`）。凭据放进 `env`，不要放在 shell 里。名字像密钥的 `env` 值（例如 `KRENE_TOKEN`）会和其他凭据一样进入脱敏列表。
-- 无法读取的配置会记录 `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` 后忽略。连接失败或挂起的服务器会累加 `mcp.connect_error` 并被跳过；Runtime 和其他服务器继续工作。
+- Worker 看到的工具名是 `mcp__<server>__<tool>`。文本仍是文本；image/resource payload 写入 `<DS_AGENT_HOME>/mcp/<server>/` 并以路径引用。JSON 文本超过 65,536 个字符（UTF-16 code unit）的结果进入 spill，返回 `{ spillId, bytes, preview }`；其中 `bytes` 是写入 spill 的正文 UTF-8 字节数。
+- 子进程只继承 `PATH`、`HOME`、`LANG`、`TZ`、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`，以及该服务器自己的 `env`。在非 Windows 宿主上，MCP SDK 启动 transport 时还会从宿主补上它自己的安全默认值（`HOME`、`LOGNAME`、`PATH`、`SHELL`、`TERM`、`USER`）；在 Windows 上还会继承 `APPDATA`、`USERPROFILE`、`PROGRAMFILES` 等变量。凭据放进 `env`，不要放在 shell 里。名字像密钥且至少 8 个字符的 `env` 值（例如 `KRENE_TOKEN`）会进入脱敏列表；更短的值会原样保留。
+- 无法读取的配置会记录 `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` 后忽略。连接尝试被拒绝的服务器会累加 `mcp.connect_error` 并被跳过；在共享的列表截止时间到达时仍未连接的服务器会以 `reason=not-connected` 跳过，且不累加该计数。Runtime 和其他服务器继续工作。
 
 嵌入 Runtime 时，`RuntimeOptions.mcpServers` 接受同一个数组。
 
