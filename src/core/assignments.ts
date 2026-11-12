@@ -239,7 +239,7 @@ export class Assignments {
     ticket.inputs.push({
       id: this.host.repo.nextId('input'),
       kind: 'context',
-      text: `RECOVERED: assignment ${interruptedAssignmentIds.join(',')} was interrupted by a process restart. Continue from persisted state and assume prior side effects may already have occurred (at-least-once).`,
+      text: `RECOVERED: assignment ${interruptedAssignmentIds.join(',')} was interrupted by a process restart (including any in-flight delegate_agent specialist, which does not survive the process). Continue from persisted state and assume prior side effects may already have occurred (at-least-once).`,
       at,
       human: false,
     })
