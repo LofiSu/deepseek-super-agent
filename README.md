@@ -357,17 +357,21 @@ export DS_AGENT_MCP_SERVERS='[
   to `[]`, `env` to `{}`, and `timeoutMs` to `120000`.
 - Tools appear to Workers as `mcp__<server>__<tool>`. Text stays text;
   image/resource payloads are written to `<DS_AGENT_HOME>/mcp/<server>/` and
-  referenced by path; a result over 64 KB goes to spill and returns
-  `{ spillId, bytes, preview }`.
+  referenced by path. A result whose JSON text exceeds 65,536 characters
+  (UTF-16 code units) goes to spill and returns `{ spillId, bytes, preview }`;
+  `bytes` is the UTF-8 byte length of the spilled body.
 - The child process inherits only `PATH`, `HOME`, `LANG`, `TZ`, `HTTP_PROXY`,
-  `HTTPS_PROXY`, and `NO_PROXY`, plus the server's own `env`; the MCP SDK also
-  adds its own safe defaults (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`,
-  `USER`) from the host when it starts the transport. Put credentials in
-  `env`, not in your shell. Secret-named `env` values (for example
-  `KRENE_TOKEN`) join the redaction list like any other credential.
+  `HTTPS_PROXY`, and `NO_PROXY`, plus the server's own `env`. On non-Windows
+  hosts the MCP SDK also adds its own safe defaults (`HOME`, `LOGNAME`, `PATH`,
+  `SHELL`, `TERM`, `USER`); on Windows it additionally inherits variables such
+  as `APPDATA`, `USERPROFILE`, and `PROGRAMFILES`. Put credentials in `env`,
+  not in your shell. Secret-named `env` values of at least 8 characters (for
+  example `KRENE_TOKEN`) join the redaction list; shorter values are left as-is.
 - Unreadable configuration is logged as
-  `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` and ignored. A server that fails or
-  hangs while connecting increments `mcp.connect_error` and is omitted; the
+  `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` and ignored. A server whose
+  connection attempt rejects increments `mcp.connect_error` and is omitted. A
+  server still not connected when the shared listing deadline expires is
+  skipped with `reason=not-connected` and does not increment the counter. The
   runtime and the other servers keep working.
 
 `RuntimeOptions.mcpServers` accepts the same array when embedding the runtime.
