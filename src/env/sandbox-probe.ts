@@ -211,6 +211,32 @@ export function sandboxProbeFixturePaths(): { readonly loopback: string; readonl
 }
 
 /**
+ * `ps -p <pid>` exits nonzero with empty stdout both when the pid is gone
+ * (procps-ng) and when the invocation itself is unsupported (some BusyBox
+ * builds reject `-o state=` / `-p`). Empty stderr does not separate the two.
+ *
+ * Run the exact argv once against our own pid: if that cannot be spawned,
+ * exits nonzero, or yields no state, the invocation is unobservable and no
+ * target-pid result can prove a fixture died. Cached because the executable
+ * and argv do not change while this process runs.
+ */
+let psStateObservationSupported: boolean | undefined
+
+function canObserveProcessState(): boolean {
+  if (psStateObservationSupported !== undefined) return psStateObservationSupported
+  const self = spawnSync('ps', ['-o', 'state=', '-p', String(process.pid)], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  psStateObservationSupported
+    = self.error === undefined
+      && self.signal === null
+      && self.status === 0
+      && (self.stdout ?? '').trim() !== ''
+  return psStateObservationSupported
+}
+
+/**
  * The poll loop sleeps with `spawnSync`, which starves libuv: the child's
  * `exit` event (and `child.exitCode`) cannot fire while we wait. Read the
  * process table synchronously instead, so a fixture that dies immediately
@@ -218,14 +244,18 @@ export function sandboxProbeFixturePaths(): { readonly loopback: string; readonl
  * than waiting out the full deadline.
  */
 function fixtureProcessExited(pid: number): boolean {
+  // A `ps` that cannot report state also cannot prove the fixture died.
+  if (!canObserveProcessState()) return false
   const result = spawnSync('ps', ['-o', 'state=', '-p', String(pid)], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
   })
-  if (result.error) return false // cannot observe the process table; let the deadline decide
+  if (result.error || result.signal) return false // interrupted; let the deadline decide
   const state = (result.stdout ?? '').trim()
-  if (state === '') return true // no matching process
-  return state.startsWith('Z') // exited, waiting for this parent to reap it
+  // The invocation is known to work against this process, so an empty state
+  // now means the pid is gone (procps-ng exits 1) and `Z*` means it exited
+  // but has not been reaped yet. Both are safe to fail fast on.
+  return state === '' || state.startsWith('Z')
 }
 
 /** Wait for a fixture to write `file`, failing fast when its process dies. */

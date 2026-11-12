@@ -8,7 +8,15 @@
  * no `test/` directory, then prove a missing fixture fails fast.
  */
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -80,12 +88,35 @@ function makeLayout(withFixtures: boolean): string {
   return dir
 }
 
-function runLayout(dir: string): LayoutProbe {
+/**
+ * Keep each fixture alive without writing its output file for `delayMs`, so the
+ * probe's first liveness check lands while the process is still running.
+ */
+function delayFixtureWrites(dir: string, delayMs: number): void {
+  for (const name of ['sandbox-loopback-server.mjs', 'sandbox-external-pid-fixture.mjs']) {
+    const file = path.join(dir, 'src', 'env', 'fixtures', name)
+    const source = readFileSync(file, 'utf8')
+    writeFileSync(file, `await new Promise(resolve => setTimeout(resolve, ${delayMs}))\n${source}`, 'utf8')
+  }
+}
+
+/**
+ * PATH stub for hosts whose `ps` rejects `-o state=` / `-p` (some BusyBox
+ * builds): it runs, exits nonzero, and prints nothing.
+ */
+function makeFailingPsStub(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ds-agent-failing-ps-'))
+  roots.push(dir)
+  writeFileSync(path.join(dir, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  return dir
+}
+
+function runLayout(dir: string, extraEnv: NodeJS.ProcessEnv = {}): LayoutProbe {
   const result = spawnSync(process.execPath, ['--import', 'tsx', path.join(dir, 'run-probe.mjs')], {
     cwd: root,
     encoding: 'utf8',
     timeout: 60_000,
-    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+    env: { ...process.env, NODE_NO_WARNINGS: '1', ...extraEnv },
   })
   expect(result.status, result.stderr || result.stdout).toBe(0)
   return JSON.parse(result.stdout) as LayoutProbe
@@ -118,6 +149,20 @@ describe('sandbox probe fixture packaging', () => {
     const result = runLayout(dir)
     expect(result.present).toEqual({ loopback: true, externalPid: true })
     expect(result.loopbackPath.startsWith(path.join(dir, 'src', 'env', 'fixtures') + path.sep)).toBe(true)
+    expect(result.dimensions.network).toBe('enforced')
+    expect(result.dimensions.process).toBe('enforced')
+  })
+
+  it('does not treat a live fixture as dead when ps cannot report state', () => {
+    const dir = makeLayout(true)
+    delayFixtureWrites(dir, 1_000)
+    const stubDir = makeFailingPsStub()
+    const result = runLayout(dir, {
+      PATH: `${stubDir}${path.delimiter}${process.env.PATH ?? ''}`,
+    })
+    expect(result.present).toEqual({ loopback: true, externalPid: true })
+    // The fixtures are alive at the first liveness check. A `ps` that runs but
+    // cannot report state must be treated as unobservable, not as "exited".
     expect(result.dimensions.network).toBe('enforced')
     expect(result.dimensions.process).toBe('enforced')
   })
