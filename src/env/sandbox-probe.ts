@@ -192,7 +192,68 @@ function probeReadIsolation(
   return 'enforced'
 }
 
-const LOOPBACK_FIXTURE = join(import.meta.dirname, '../../test/fixtures/sandbox-loopback-server.mjs')
+/**
+ * Fixtures are copied next to the compiled module by `scripts/copy-assets.ts`
+ * (`src/env/fixtures` -> `dist/env/fixtures`). Resolving relative to this file
+ * keeps the published package independent of the source-only `test/` tree.
+ */
+const LOOPBACK_FIXTURE = join(import.meta.dirname, 'fixtures', 'sandbox-loopback-server.mjs')
+const EXTERNAL_PID_FIXTURE = join(import.meta.dirname, 'fixtures', 'sandbox-external-pid-fixture.mjs')
+
+const FIXTURE_DEADLINE_MS = 8_000
+/** First liveness check; an immediate module-not-found exit is caught here. */
+const FIXTURE_FIRST_LIVENESS_CHECK_MS = 100
+const FIXTURE_LIVENESS_INTERVAL_MS = 1_000
+
+/** Paths of the host-side probe fixtures; exported for packaging checks. */
+export function sandboxProbeFixturePaths(): { readonly loopback: string; readonly externalPid: string } {
+  return { loopback: LOOPBACK_FIXTURE, externalPid: EXTERNAL_PID_FIXTURE }
+}
+
+/**
+ * The poll loop sleeps with `spawnSync`, which starves libuv: the child's
+ * `exit` event (and `child.exitCode`) cannot fire while we wait. Read the
+ * process table synchronously instead, so a fixture that dies immediately
+ * (for example a missing module in a broken package layout) fails fast rather
+ * than waiting out the full deadline.
+ */
+function fixtureProcessExited(pid: number): boolean {
+  const result = spawnSync('ps', ['-o', 'state=', '-p', String(pid)], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  if (result.error) return false // cannot observe the process table; let the deadline decide
+  const state = (result.stdout ?? '').trim()
+  if (state === '') return true // no matching process
+  return state.startsWith('Z') // exited, waiting for this parent to reap it
+}
+
+/** Wait for a fixture to write `file`, failing fast when its process dies. */
+function waitForFixtureOutput<T>(
+  child: ReturnType<typeof spawn>,
+  file: string,
+  label: string,
+  parse: (raw: string) => T | undefined,
+): T {
+  if (child.pid == null) throw new Error(`${label} fixture failed to start`)
+  const pid = child.pid
+  const deadline = Date.now() + FIXTURE_DEADLINE_MS
+  let nextLivenessCheck = Date.now() + FIXTURE_FIRST_LIVENESS_CHECK_MS
+  while (Date.now() < deadline) {
+    if (existsSync(file)) {
+      const value = parse(readFileSync(file, 'utf8'))
+      if (value !== undefined) return value
+    }
+    if (Date.now() >= nextLivenessCheck) {
+      if (fixtureProcessExited(pid)) {
+        throw new Error(`${label} fixture exited before writing ${file}`)
+      }
+      nextLivenessCheck = Date.now() + FIXTURE_LIVENESS_INTERVAL_MS
+    }
+    spawnSync('sleep', ['0.02'], { stdio: 'ignore' })
+  }
+  throw new Error(`${label} fixture did not write ${file}`)
+}
 
 function withLoopbackFixture<T>(
   hooks: SandboxConfinementProbeHooks,
@@ -208,16 +269,10 @@ function withLoopbackFixture<T>(
     detached: false,
   })
   try {
-    const deadline = Date.now() + 8_000
-    while (Date.now() < deadline) {
-      if (existsSync(portFile)) {
-        const raw = readFileSync(portFile, 'utf8').trim()
-        const port = Number.parseInt(raw, 10)
-        if (Number.isFinite(port) && port > 0) return fn(port)
-      }
-      spawnSync('sleep', ['0.02'], { stdio: 'ignore' })
-    }
-    throw new Error('loopback fixture did not publish a port')
+    return fn(waitForFixtureOutput(child, portFile, 'loopback', (raw) => {
+      const port = Number.parseInt(raw.trim(), 10)
+      return Number.isFinite(port) && port > 0 ? port : undefined
+    }))
   } finally {
     if (child.pid != null) {
       try {
@@ -350,8 +405,6 @@ export function enforceRequiredSandboxOnHost(
   return enforceRequiredSandbox(env, baseProbePolicy(undefined, env))
 }
 
-const EXTERNAL_PID_FIXTURE = join(import.meta.dirname, '../../test/fixtures/sandbox-external-pid-fixture.mjs')
-
 /**
  * Process isolation: `kill -0 $PPID` inside wrapped bash targets the sandbox
  * parent (often the worker shell), not the host daemon — a false negative.
@@ -383,19 +436,14 @@ function probeProcessIsolation(
       return wrapped.status === 0 ? 'not_enforced' : 'enforced'
     }
     child = spawn(process.execPath, [EXTERNAL_PID_FIXTURE, pidFile], { stdio: 'ignore' })
-    const deadline = Date.now() + 8_000
-    let externalPid: number | undefined
-    while (Date.now() < deadline) {
-      if (existsSync(pidFile)) {
-        const parsed = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid?: number }
-        if (typeof parsed.pid === 'number') {
-          externalPid = parsed.pid
-          break
-        }
+    const externalPid = waitForFixtureOutput(child, pidFile, 'external PID', (raw) => {
+      try {
+        const parsed = JSON.parse(raw) as { pid?: number }
+        return typeof parsed.pid === 'number' ? parsed.pid : undefined
+      } catch {
+        return undefined // partial write; retry until the deadline
       }
-      spawnSync('sleep', ['0.02'], { stdio: 'ignore' })
-    }
-    if (externalPid === undefined) return 'probe_failed'
+    })
     const control = runUnsandboxed(`kill -0 ${externalPid}`)
     if (spawnFailed(control) || control.status !== 0) return 'probe_failed'
     const wrapped = runner(`kill -0 ${externalPid}`, policy, system)
