@@ -43,6 +43,17 @@ describe('T47 WorkerMeshRegistry', () => {
     expect(mesh.inFlight('a')).toBe(1)
   })
 
+  it('re-picks an online node in the same call after the sticky node goes offline', () => {
+    const mesh = new WorkerMeshRegistry([{ id: 'a', capacity: 1 }, { id: 'b', capacity: 1 }])
+    expect(mesh.pickNode('t1')?.id).toBe('a')
+    mesh.markOnline('a', false)
+    // The offline sticky assignment is released and the same call falls through
+    // to the least-loaded online node instead of returning undefined.
+    expect(mesh.pickNode('t1')?.id).toBe('b')
+    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.inFlight('b')).toBe(1)
+  })
+
   it('skips offline nodes and frees slots when a node leaves', () => {
     const mesh = new WorkerMeshRegistry([{ id: 'a', capacity: 1 }, { id: 'b', capacity: 1 }])
     mesh.markOnline('a', false)
@@ -474,7 +485,7 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
       log: line => runtime.log.info(line),
       jobDelayMs: 0,
       singleSession: true,
-      pickNode: ticketId => runtime.workerMesh.pickNode(ticketId)?.id,
+      pickNode: (ticketId, _ticket) => runtime.workerMesh.pickNode(ticketId)?.id,
     })
 
     await harness.launch(load(runtime, a.ticketId))
@@ -842,5 +853,45 @@ describe('Worker mesh capacity backpressure (P1-3)', () => {
     expect(events.some(event => event.startsWith(`${later.ticketId}:call1`))).toBe(true)
     expect(load(runtime, later.ticketId).ended?.outcome).toBe('ready')
     expect(runtime.workerMesh.inFlight('mesh-test')).toBe(0)
+  })
+
+  it('releases the mesh node when a queued Worker turn rejects asynchronously', async () => {
+    const events: string[] = []
+    const held = new Map<string, Gate>()
+    const runtime = start(events, held)
+    const blocker = createTicket(runtime, 'trg_qfail_blocker')
+    const failing = createTicket(runtime, 'trg_qfail_queued')
+    const later = createTicket(runtime, 'trg_qfail_later')
+    const first = gate()
+    held.set(blocker.ticketId, first)
+
+    // The blocker holds the only slot, so the next launch parks in the queue.
+    const blockerLaunch = runtime.harness.launch(load(runtime, blocker.ticketId))
+    await waitFor(() => events.includes(`${blocker.ticketId}:call1`), 'blocker worker start')
+    const queued = runtime.harness.launch(load(runtime, failing.ticketId))
+    await tick(20)
+    expect(runtime.log.text()).toContain(`mesh.queued ticketId=${failing.ticketId}`)
+
+    // Memory recall runs inside the scheduled Worker callback, so the queued
+    // turn rejects asynchronously after `pump` already reserved its mesh slot.
+    const originalQuery = runtime.longTermMemory.query.bind(runtime.longTermMemory)
+    vi.spyOn(runtime.longTermMemory, 'query').mockImplementation(query => {
+      if (query.ticketId === failing.ticketId) throw new Error('queued worker turn exploded')
+      return originalQuery(query)
+    })
+
+    first.release()
+    await blockerLaunch
+    await expect(settlesWithin(queued, 2_000)).resolves.toBe(true)
+    // The reserved slot must be returned; without it the queue stalls forever.
+    expect(runtime.workerMesh.inFlight('mesh-test')).toBe(0)
+    expect(runtime.log.text()).toContain(
+      `[harness] queued worker failed ticketId=${failing.ticketId} error=Error: queued worker turn exploded`,
+    )
+
+    const laterLaunch = runtime.harness.launch(load(runtime, later.ticketId))
+    await expect(settlesWithin(laterLaunch, 2_000)).resolves.toBe(true)
+    expect(events.some(event => event.startsWith(`${later.ticketId}:call1`))).toBe(true)
+    expect(load(runtime, later.ticketId).ended?.outcome).toBe('ready')
   })
 })

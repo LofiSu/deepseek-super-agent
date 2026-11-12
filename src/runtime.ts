@@ -8,6 +8,7 @@ import type {
   PauseOutcome,
   ResumeOutcome,
 } from './core/collab.ts'
+import { pendingApproval } from './core/collab.ts'
 import { assessWithMainAgent } from './core/assessment.ts'
 import { Engine } from './core/engine.ts'
 import { arbitrateSubscribers } from './core/intake.ts'
@@ -46,8 +47,16 @@ import { Metrics } from './metrics/metrics.ts'
 import { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
 import { LifecycleBus } from './core/lifecycle.ts'
 import { WorkerMeshRegistry } from './harness/mesh.ts'
+import { WorkerPlacement, requiredMeshCapabilities } from './harness/mesh-runtime.ts'
+import {
+  RemoteMeshResultWait,
+  remoteResultTimeoutMsFromEnv,
+} from './harness/remote-mesh-wait.ts'
+import { recordRemoteResult, remoteResultSeen } from './harness/remote-results.ts'
+import type { RemoteEligibleReason, RemoteMeshAssignmentResultEvent } from './harness/remote-node.ts'
+import type { WorkerReport } from './shared/ports.ts'
 import { Logger } from './shared/log.ts'
-import { threadKey, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
+import { threadKey, type Assignment, type Disposition, type ObjectRef, type ReceiveResult, type Thread, type Ticket, type Trigger, type TriggerTrust } from './shared/types.ts'
 import { Store } from './store/sqlite.ts'
 import { Watchdog } from './watchdog/watchdog.ts'
 import { settleSpeculation } from './speculate/silent.ts'
@@ -100,6 +109,11 @@ export interface RuntimeOptions {
    * or 100. `0` rejects instead of queueing.
    */
   meshQueue?: number
+  /**
+   * Max wait for remote `assignment_result` after dispatch is delivered.
+   * Overrides `DS_AGENT_REMOTE_RESULT_TIMEOUT_MS`.
+   */
+  remoteResultTimeoutMs?: number
   /** Extra Router shards. `DS_AGENT_SHARDS` JSON is merged in as well. */
   routerShards?: RouterShard[]
   /** T45 bake-off baseline: run one Worker chain with no Router turn. */
@@ -233,6 +247,11 @@ export const DEFAULT_MEMORY_COLD_MAX_ENTRIES = 200
 export const DEFAULT_MEMORY_COLD_MAX_AGE_DAYS = 3650
 /** Bounded in-process Worker backlog when every mesh slot is busy. */
 export const DEFAULT_MESH_QUEUE = 100
+/**
+ * Report kinds that end an Assignment (`src/core/assignments.ts`). A remote
+ * result with one of these is settled even when a pause holds its verdict.
+ */
+const REMOTE_ENDING_REPORT_KINDS = new Set(['ready', 'failed', 'dropped', 'blocked', 'waiting'])
 
 /**
  * Parse `DS_AGENT_MEMORY_MAX_ENTRIES` / `DS_AGENT_MEMORY_MAX_AGE_DAYS` as
@@ -360,6 +379,8 @@ export class Runtime {
   readonly instanceId: string
   readonly routerShards: RouterShardRegistry
   readonly workerMesh: WorkerMeshRegistry
+  /** Local + optional remote mesh placement (T47 runtime path). */
+  readonly placement: WorkerPlacement
   readonly longTermMemory: SpillBackedLongTermMemory
   /** Read-model lifecycle events for panels and CLI views. */
   readonly lifecycle: LifecycleBus
@@ -374,9 +395,33 @@ export class Runtime {
   private readonly admission: AdmissionRules
   /** Kept so finish() can close external MCP server processes. */
   private readonly tools: ToolRegistry
+  private readonly remoteResultWait?: RemoteMeshResultWait
+  /** Shared slot-release/cancel path, bound in the factory closure. */
+  private readonly releaseSlot: (ticketId: string) => void
+  /**
+   * In-flight fail-soft remote cancel sends, keyed by ticketId. Shared with the
+   * factory-side `releaseSlot` so a replacement launch can wait for a
+   * superseded Assignment's cancel to settle first.
+   */
+  private readonly remoteCancelSends: Map<string, Set<Promise<void>>>
+  /** Per-Ticket gates that hold a replacement's remote assignment body. */
+  private readonly remoteDispatchBarriers: Map<string, Promise<void>>
   private evalTimer: ReturnType<typeof setTimeout> | undefined
   /** Recovery scans persisted state once per Runtime; a restart builds a new one. */
   private recoveryAttempted = false
+  /**
+   * True only after the real persisted-state restore ran in `start()` (a
+   * `MockModel` deferral leaves it false: late-bind must not consume work that
+   * recovery deliberately deferred).
+   */
+  private recoveryRestoreDone = false
+  /**
+   * Remote node ids whose persisted sticky reservations were already rebuilt,
+   * either by `start()` or by the first late-bind of that node. A later
+   * heartbeat that merely makes an already-known node eligible again only
+   * pumps; it must not rerun the leftover/ended cancel restore.
+   */
+  private readonly reservationsRestoredForNodes = new Set<string>()
 
   private constructor(parts: {
     home: string
@@ -395,6 +440,7 @@ export class Runtime {
     instanceId: string
     routerShards: RouterShardRegistry
     workerMesh: WorkerMeshRegistry
+    placement: WorkerPlacement
     longTermMemory: SpillBackedLongTermMemory
     lifecycle: LifecycleBus
     a2aRouter: A2ARouter
@@ -404,6 +450,10 @@ export class Runtime {
     batchWindowMs: number
     admission: AdmissionRules
     tools: ToolRegistry
+    remoteResultWait?: RemoteMeshResultWait
+    releaseSlot: (ticketId: string) => void
+    remoteCancelSends: Map<string, Set<Promise<void>>>
+    remoteDispatchBarriers: Map<string, Promise<void>>
   }) {
     this.home = parts.home
     this.log = parts.log
@@ -421,6 +471,7 @@ export class Runtime {
     this.instanceId = parts.instanceId
     this.routerShards = parts.routerShards
     this.workerMesh = parts.workerMesh
+    this.placement = parts.placement
     this.longTermMemory = parts.longTermMemory
     this.lifecycle = parts.lifecycle
     this.a2aRouter = parts.a2aRouter
@@ -430,6 +481,10 @@ export class Runtime {
     this.batchWindowMs = parts.batchWindowMs
     this.admission = parts.admission
     this.tools = parts.tools
+    this.remoteResultWait = parts.remoteResultWait
+    this.releaseSlot = parts.releaseSlot
+    this.remoteCancelSends = parts.remoteCancelSends
+    this.remoteDispatchBarriers = parts.remoteDispatchBarriers
   }
 
   static create(opts: RuntimeOptions): Runtime {
@@ -514,6 +569,7 @@ export class Runtime {
     }
     for (const shard of opts.routerShards ?? []) routerShards.register(shard)
     const workerMesh = new WorkerMeshRegistry([{ id: instanceId, capacity: meshCapacity }])
+    const placement = WorkerPlacement.fromEnv(baseEnv, instanceId, workerMesh, line => log.info(line))
     // Retention keeps the durable index bounded: 1000 entries / 90 days by
     // default, with 0 disabling either dimension.
     const retention = memoryRetentionFromEnv(baseEnv, opts.memoryRetention)
@@ -571,7 +627,828 @@ export class Runtime {
       )
     }
     // Bound late because the host and the tool ports both reach the Harness.
-    const late: { harness?: Harness } = {}
+    const late: { harness?: Harness; remoteResultWait?: RemoteMeshResultWait } = {}
+    const remoteResultTimeoutMs = remoteResultTimeoutMsFromEnv(baseEnv, opts.remoteResultTimeoutMs)
+    late.remoteResultWait = new RemoteMeshResultWait(remoteResultTimeoutMs, (ticketId, assignmentId) => {
+      log.info(
+        `[mesh] remote result timeout ticketId=${ticketId} assignmentId=${assignmentId} timeoutMs=${remoteResultTimeoutMs}`,
+      )
+      // The timer belongs to the Assignment captured when it was armed. Every
+      // report path mutates the *latest* Assignment, so recovering or ending
+      // that Assignment can leave this timer pointing at a replacement. Failing
+      // the replacement for the old Assignment's missing result would be wrong.
+      //
+      // The Store can already be closed when this unref'd timer fires: a
+      // crash-simulation or teardown closes SQLite directly without
+      // `finish()`/`clearAll()`, and even `finish()` cannot stop a callback
+      // that has already started. Every Store read on a closed handle throws
+      // `database is not open`; this timer is fire-and-forget, so letting that
+      // escape becomes an uncaught exception that can take down the host or the
+      // test process. There is no state left to recover, so fail soft.
+      if (!store.isOpen) {
+        log.info(
+          `[mesh] remote result timeout ignored ticketId=${ticketId} assignmentId=${assignmentId} reason=store-closed`,
+        )
+        return
+      }
+      const ticket = store.getDoc<Ticket>('ticket', ticketId)
+      const armed = ticket?.assignments.find(item => item.id === assignmentId)
+      const latest = ticket?.assignments.at(-1)
+      const staleReason = !ticket
+        ? 'missing-ticket'
+        : ticket.ended
+          ? 'ticket-ended'
+          : !armed
+            ? 'missing-assignment'
+            : armed.state === 'ended'
+              ? 'assignment-ended'
+              : latest?.id !== assignmentId
+                ? 'assignment-replaced'
+                : undefined
+      if (staleReason) {
+        log.info(
+          `[mesh] remote result timeout ignored ticketId=${ticketId} assignmentId=${assignmentId} reason=${staleReason}`,
+        )
+        // A newer Assignment may already own this ticket's remote reservation:
+        // sticky placement keeps the slot, so a replacement that has claimed
+        // the node or started work must not lose capacity to the stale timer.
+        const liveReplacement = latest !== undefined
+          && latest.id !== assignmentId
+          && latest.state !== 'ended'
+          && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+          && placement.remoteHasTicket(ticketId)
+        if (liveReplacement) {
+          log.info(
+            `[mesh] remote result timeout kept slot ticketId=${ticketId} assignmentId=${assignmentId} replacementId=${latest?.id} reason=live-replacement`,
+          )
+          // The fired timer deleted itself (the wait is keyed per ticket) before
+          // this callback ran. A live replacement that has not yet armed its own
+          // wait would otherwise hold the sticky slot forever with no recovery.
+          // Transfer the wait to the replacement.
+          if (latest) {
+            if (remoteResultTimeoutMs > 0) {
+              log.info(
+                `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${latest.id}`,
+              )
+            }
+            late.remoteResultWait?.arm(ticketId, latest.id)
+          }
+          return
+        }
+        // Recovery can end the Assignment without going through `releaseMesh`.
+        // Free any capacity it left reserved; do not invent another way to end
+        // the Assignment or the Ticket.
+        placement.release(ticketId)
+        return
+      }
+      try {
+        engine.report(ticketId, {
+          kind: 'failed',
+          text: 'remote worker result timeout',
+          deliver: false,
+        })
+      } catch (error) {
+        log.info(
+          `[mesh] remote timeout report failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+        )
+        placement.release(ticketId)
+        return
+      }
+      // `report` may hold instead of ending, for example while the Ticket is
+      // paused: the failed verdict is persisted on the Assignment and only
+      // applied on resume. The timer deleted itself before firing, so without
+      // re-arming this Ticket would never time out again and its mesh slot
+      // would stay reserved forever. Check the post-report Assignment state
+      // rather than only `collab.paused` so every hold path is covered.
+      const reported = store.getDoc<Ticket>('ticket', ticketId)
+      const armedAfterReport = reported?.assignments.find(item => item.id === assignmentId)
+      if (reported && !reported.ended && armedAfterReport && armedAfterReport.state !== 'ended') {
+        log.info(
+          `[mesh] remote result timeout deferred ticketId=${ticketId} assignmentId=${assignmentId} reason=assignment-still-open`,
+        )
+        late.remoteResultWait?.arm(ticketId, assignmentId)
+      }
+    })
+    /**
+     * In-flight remote cancel sends per Ticket.
+     *
+     * `releaseSlot` deliberately does not await `cancelRemote`: the slot-settle
+     * `finally` remains the single owner of keep-vs-release. But a replacement
+     * must not reach a Worker that still holds a superseded ended Assignment
+     * before that fail-soft cancel has at least settled (sent, or failed soft).
+     * Recovery and `Runtime.retry` gate the replacement's remote body on these
+     * batches; slot release is not what they wait for.
+     */
+    const remoteCancelSends = new Map<string, Set<Promise<void>>>()
+    /**
+     * The same fail-soft cancel batches, additionally keyed by the node they
+     * target (value = owning ticketId + Assignment id). `remoteCancelSends` is
+     * per Ticket, so a later *different* Ticket launched onto the same worker
+     * cannot use it to order against an older Ticket's delayed cancel; this map
+     * is what that cross-Ticket wait reads. The Assignment id lets a same-Ticket
+     * dispatch tell an in-flight cancel for one ended Assignment from a settled
+     * lost cancel for another (see `resendOwnOrphanedRemoteCancels`). Only
+     * observers are added here, the cancel transport and slot accounting are
+     * untouched.
+     */
+    const remoteCancelSendsByNode = new Map<
+      string,
+      Map<Promise<void>, { ticketId: string; assignmentId: string }>
+    >()
+    /**
+     * Per-Ticket gate that holds a replacement's remote assignment body until
+     * the superseded Assignment's cancels settle. Placement already happened,
+     * so slot accounting is untouched; only the wire body waits.
+     */
+    const remoteDispatchBarriers = new Map<string, Promise<void>>()
+    /**
+     * Tickets whose ended remote Assignments a Worker may still hold because
+     * their cancel was lost.
+     *
+     * `cancelEndedRemoteAssignments` records a Ticket when local placement
+     * starts the fail-soft cancels. That send can itself be lost (the very
+     * failure this path exists for), and then a later different Ticket placed
+     * on the same Worker would reach it while it still holds the old
+     * Assignment. The record lets that later `dispatchRemote` re-send from
+     * committed state right before its own body; the node-keyed
+     * `remoteCancelSendsByNode` wait below then orders the body after the
+     * cancel. The keep-slot path records a Ticket when it *starts* its ended
+     * predecessor cancels too, even though a live replacement keeps the sticky:
+     * keeping the sticky must not hide a lost predecessor cancel.
+     *
+     * The record is consumed only once a delivered batch covers every ended
+     * remote left in committed state; a dispatch to a different node, or a lost
+     * re-send, leaves it in place so that node can still resend. A Ticket that
+     * has since gained a remote sticky is not dropped for that reason alone.
+     * The no-sticky `releaseSlot` backstop also drops the record once the local
+     * replacement ends, but only after its last-attempt cancels are actually
+     * delivered *and* a re-read has no uncovered ended remote left: a lost last
+     * attempt keeps the record so a later dispatch can still resend it. The
+     * set is therefore bounded by Tickets that still have an uncovered ended
+     * remote Assignment or a live local replacement, or
+     * whose last-attempt (or later dispatch-time) cancel has not yet been
+     * delivered.
+     */
+    const orphanedRemoteTickets = new Set<string>()
+    const trackRemoteCancelSends = (
+      ticketId: string,
+      assignmentId: string,
+      sends: Promise<unknown>[],
+      node: string | undefined,
+    ): void => {
+      if (sends.length === 0) return
+      let pending = remoteCancelSends.get(ticketId)
+      if (!pending) {
+        pending = new Set()
+        remoteCancelSends.set(ticketId, pending)
+      }
+      const batch = Promise.allSettled(sends).then(() => undefined)
+      pending.add(batch)
+      if (node !== undefined) {
+        let byNode = remoteCancelSendsByNode.get(node)
+        if (!byNode) {
+          byNode = new Map()
+          remoteCancelSendsByNode.set(node, byNode)
+        }
+        byNode.set(batch, { ticketId, assignmentId })
+      }
+      void batch.finally(() => {
+        pending.delete(batch)
+        if (pending.size === 0 && remoteCancelSends.get(ticketId) === pending) {
+          remoteCancelSends.delete(ticketId)
+        }
+        if (node !== undefined) {
+          const nodePending = remoteCancelSendsByNode.get(node)
+          nodePending?.delete(batch)
+          if (nodePending && nodePending.size === 0
+            && remoteCancelSendsByNode.get(node) === nodePending) {
+            remoteCancelSendsByNode.delete(node)
+          }
+        }
+      })
+    }
+    /**
+     * Wait until every fail-soft remote cancel send to `node` that belongs to a
+     * *different* Ticket has settled.
+     *
+     * The per-Ticket dispatch barrier fences a replacement against its own
+     * Ticket's cancels. It cannot see a later Ticket placed on the same worker,
+     * so with spare worker capacity that body would reach the worker while it
+     * still holds an older Ticket's ended Assignment. This is the cross-Ticket
+     * counterpart; only the wire body waits, placement and keep-vs-release are
+     * unchanged.
+     *
+     * The current Ticket's batches are excluded on purpose: `Runtime.retry`
+     * deliberately skips same-Ticket sends already in flight when it was called
+     * (so a held keep-slot cancel cannot deadlock a relaunch), and the
+     * per-Ticket barrier owns that ordering. Sends are fail-soft, so an
+     * unregistered, ineligible, or offline target settles instead of hanging
+     * the dispatch. The yield first makes a `releaseSlot` microtask queued in
+     * the same turn visible before deciding there is nothing to wait for.
+     */
+    const settleRemoteCancelSendsToNode = async (
+      node: string,
+      ticketId: string,
+    ): Promise<void> => {
+      await Promise.resolve()
+      for (;;) {
+        const byNode = remoteCancelSendsByNode.get(node)
+        if (!byNode) return
+        const pending = [...byNode]
+          .filter(([, owner]) => owner.ticketId !== ticketId)
+          .map(([batch]) => batch)
+        if (pending.length === 0) return
+        await Promise.allSettled(pending)
+      }
+    }
+    const notifyHarnessReleased = (ticketId: string): void => {
+      try {
+        late.harness?.release(ticketId)
+      } catch (error) {
+        log.info(`[hook] hook=harness-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    /**
+     * Every ended remote Assignment that a later Assignment superseded.
+     *
+     * The nearest ended row is not enough to authenticate the cancel: a Worker
+     * can still hold an older Assignment whose `assignment_cancel` never
+     * arrived. For example recovery in a previous process ended A1 and
+     * dispatched A2 on the same Worker, then a later recovery ended the running
+     * A2 and appended A3. Assignments are now A1 ended, A2 ended, A3 open; the
+     * Worker still running A1 must be told to stop it as well as A2.
+     *
+     * The same lost-cancel window exists without a later open Assignment: A1's
+     * cancel is lost, A2 runs in the same process, then A2 ends through the
+     * normal report/timeout/retry path and is itself `latest`. Those older
+     * ended rows still own remote reservations the Worker may hold, so return
+     * them there too. Duplicate cancels are fail-soft (the Worker ignores an
+     * unknown/already-ended id), and every send uses `{ release: false }` so
+     * the settle policy below remains the single owner of keep-vs-release.
+     */
+    const supersededRemoteAssignments = (snapshot: Ticket | undefined): Assignment[] => {
+      const latest = snapshot?.assignments.at(-1)
+      if (!snapshot || !latest) return []
+      return snapshot.assignments
+        .slice(0, -1)
+        .filter(item =>
+          item.state === 'ended'
+          && item.node !== undefined
+          && placement.isRemote(item.node))
+    }
+    /**
+     * Every ended remote Assignment whose worker may still hold it, including
+     * `latest` when it is itself an ended remote row.
+     *
+     * `supersededRemoteAssignments` stops at `latest` because the sticky-slot
+     * paths cancel `latest` separately. The no-sticky path has no sticky
+     * reservation to reason about, so it needs the whole set: a local
+     * replacement can supersede a remote Assignment whose cancel was lost, and
+     * the worker that still holds that historical Assignment must be told to
+     * stop even though the Ticket no longer reserves any remote slot.
+     */
+    const endedRemoteAssignments = (snapshot: Ticket | undefined): Assignment[] => {
+      const latest = snapshot?.assignments.at(-1)
+      const superseded = supersededRemoteAssignments(snapshot)
+      const latestEndedRemote = latest !== undefined
+        && latest.state === 'ended'
+        && latest.node !== undefined
+        && placement.isRemote(latest.node)
+        ? [latest]
+        : []
+      return [...superseded, ...latestEndedRemote]
+    }
+    /**
+     * Fail-soft, voided cancel for one ended remote Assignment. Targets the
+     * node recorded on that Assignment and leaves keep-vs-release untouched;
+     * the send is tracked under that node so a later different Ticket's
+     * `dispatchRemote` can order its body after it.
+     */
+    const sendEndedRemoteCancel = (
+      ticketId: string,
+      target: Pick<Assignment, 'id' | 'node'>,
+      // Node to attribute the send to when the Assignment row did not record
+      // one; the sticky-path settle path only has the Ticket's current node.
+      fallbackNode?: string,
+    ): Promise<boolean> => {
+      const node = target.node ?? fallbackNode
+      const settled = placement.cancelRemote(ticketId, target.id, {
+        release: false,
+        ...(node !== undefined ? { nodeId: node } : {}),
+      }).then(
+        delivered => delivered,
+        error => {
+          log.info(
+            `[mesh] remote cancel failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
+          )
+          return false
+        },
+      )
+      trackRemoteCancelSends(ticketId, target.id, [settled], node)
+      return settled
+    }
+    /**
+     * Drop an orphan record only when this batch actually covered every ended
+     * remote Assignment committed state still knows about.
+     *
+     * A live replacement holding the sticky does not own the record: the ended
+     * predecessor's cancel can still have been lost, and keeping the sticky must
+     * not hide that. A lost send keeps the record so a later same-node dispatch
+     * can resend it. A closed Store has no committed state to decide from and
+     * leaves the record to the shutdown owners (`finish()` never waits on cancel
+     * HTTP).
+     */
+    const consumeOrphanedRemoteCancels = (
+      ticketId: string,
+      cancelled: ReadonlyArray<Pick<Assignment, 'id'>>,
+      delivered: boolean,
+    ): void => {
+      if (!delivered) return
+      if (!store.isOpen) return
+      const current = store.getDoc<Ticket>('ticket', ticketId)
+      if (!current) {
+        // No committed Ticket remains, so the record can never produce a send.
+        orphanedRemoteTickets.delete(ticketId)
+        return
+      }
+      const cancelledIds = new Set(cancelled.map(target => target.id))
+      // Re-read committed state: only ended remotes this delivered batch did not
+      // cover still need a later resend. Any node keeps the record (f23e9e5).
+      const remaining = endedRemoteAssignments(current)
+        .filter(target => !cancelledIds.has(target.id))
+      if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
+    }
+    /**
+     * Tell every Worker that may still hold an ended remote Assignment for this
+     * Ticket to stop, without touching keep-vs-release.
+     *
+     * This is the no-sticky counterpart to the sticky-slot cancel paths: a
+     * local replacement means the Ticket will never reclaim a remote
+     * reservation, so the only reason to cancel an ended remote row is the
+     * Worker still holding it. `releaseSlot` also calls this when the local
+     * replacement ends, but that is too late: a later different Ticket can be
+     * placed on the same Worker while the local replacement still runs, and
+     * `dispatchRemote`'s cross-Ticket wait can only order after a cancel that
+     * has actually started. Sending at local placement starts it early; the
+     * node-attributed tracking then fences that later Ticket's body.
+     *
+     * `{ release: false }` leaves keep-vs-release to the sticky settle path,
+     * and the send is voided so `finish()` never waits on cancel HTTP.
+     * Duplicate sends stay fail-soft: the Worker ignores a cancel for an
+     * Assignment it already dropped.
+     */
+    const cancelEndedRemoteAssignments = (
+      ticketId: string,
+      ticket: Ticket | undefined = store.getDoc<Ticket>('ticket', ticketId),
+    ): { targets: Assignment[]; sends: Promise<boolean>[] } => {
+      const targets = endedRemoteAssignments(ticket)
+      if (targets.length === 0) return { targets, sends: [] }
+      // Keep the Ticket marked until the local replacement releases: this send
+      // is fail-soft, so a later different Ticket placed on the same Worker may
+      // still need to re-send before its own body reaches it.
+      orphanedRemoteTickets.add(ticketId)
+      const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
+      return { targets, sends }
+    }
+    /**
+     * Is this exact ended remote Assignment's cancel already being sent to
+     * `node` by this Ticket?
+     *
+     * Tracking is per Assignment, not per Ticket: a same-Ticket dispatch must
+     * still be able to resend a *settled lost* cancel for one Assignment while
+     * an older sibling cancel on the same Ticket and node is still in flight.
+     */
+    const cancelSendInFlightToNode = (
+      node: string,
+      ticketId: string,
+      assignmentId: string,
+    ): boolean => {
+      const byNode = remoteCancelSendsByNode.get(node)
+      if (!byNode) return false
+      for (const owner of byNode.values()) {
+        if (owner.ticketId === ticketId && owner.assignmentId === assignmentId) {
+          return true
+        }
+      }
+      return false
+    }
+    /**
+     * Key for a cancel target this dispatch already attempted.
+     *
+     * The post-wait drain may start a *new* orphan that appeared while the
+     * body was held, but it must never retry a target this dispatch already
+     * attempted and lost: a failing endpoint would spin the drain forever, and
+     * the orphan record is deliberately kept for a later Ticket/retry
+     * (existing policy). The owning Ticket is part of the key so the same
+     * Assignment id could never make one Ticket's attempt suppress another's.
+     */
+    const remoteCancelAttemptKey = (ticketId: string, assignmentId: string): string =>
+      `${ticketId}\u0000${assignmentId}`
+    /**
+     * Re-send this Ticket's own uncovered ended remotes on `node` before its
+     * replacement body reaches the Worker.
+     *
+     * `resendOrphanedRemoteCancels` deliberately skips the dispatching Ticket:
+     * for a *different* Ticket that is a drive-by cancel. But `Runtime.retry`
+     * reuses the same dispatch path for the Ticket being relaunched. Its lost
+     * terminal cancel may already have settled, leaving no in-flight batch and
+     * no barrier, while the Worker still holds the ended Assignment. The
+     * relaunch is not a drive-by, so resend before the body and let the caller
+     * hold it until these new sends settle.
+     *
+     * Only a target whose own cancel is already in flight to this node is left
+     * alone: starting a duplicate would let a delayed/held endpoint hold the
+     * duplicate too, and the caller awaits the sends started here, which would
+     * block the replacement body — the 2a2de80 tradeoff. An in-flight cancel
+     * for a *different* ended Assignment on the same Ticket does not suppress
+     * the resend of a settled lost one; the caller then awaits only the new
+     * sends, never the older in-flight batch. The record is kept on a lost send
+     * and consumed only when a delivered batch covers every ended remote in a
+     * re-read (`consumeOrphanedRemoteCancels`), so a later different Ticket, or
+     * a further later retry, can try again.
+     */
+    const resendOwnOrphanedRemoteCancels = (
+      node: string,
+      ticketId: string,
+      attempted?: Set<string>,
+    ): Promise<boolean>[] => {
+      if (!store.isOpen) return []
+      if (!orphanedRemoteTickets.has(ticketId)) return []
+      const ticket = store.getDoc<Ticket>('ticket', ticketId)
+      if (!ticket) {
+        orphanedRemoteTickets.delete(ticketId)
+        return []
+      }
+      // The dispatching Ticket is being actively relaunched, so the
+      // paused/approval-held drive-by skip does not apply to its own resend.
+      // Skip only targets whose own cancel is already in flight; a settled lost
+      // sibling cancel on this node must still be resent.
+      const targets = endedRemoteAssignments(ticket)
+        .filter(target => target.node === node)
+        .filter(target =>
+          !attempted?.has(remoteCancelAttemptKey(ticketId, target.id)))
+        .filter(target =>
+          !cancelSendInFlightToNode(node, ticketId, target.id))
+      if (targets.length === 0) return []
+      for (const target of targets) {
+        attempted?.add(remoteCancelAttemptKey(ticketId, target.id))
+      }
+      const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
+      void Promise.all(sends).then(outcomes =>
+        consumeOrphanedRemoteCancels(ticketId, targets, outcomes.every(Boolean)),
+      )
+      return sends
+    }
+    /**
+     * Re-send a Ticket's orphaned ended-remote cancels before a *different*
+     * Ticket's body reaches the same Worker.
+     *
+     * Local placement already started these cancels, but that send is
+     * fail-soft: when it was lost, the Worker still holds the old Assignment
+     * when a later Ticket is placed on the same node. Re-read committed state
+     * and send the targets for this node now; the node-keyed wait in
+     * `dispatchRemote` then holds the later body until they settle. The record
+     * is consumed only when a dispatch-time re-send to the owning node
+     * *succeeds*; a dispatch to a different node leaves it in place, and a lost
+     * same-node re-send also leaves it so a further later Ticket on the owning
+     * node can resend. The local replacement's own no-sticky `releaseSlot`
+     * backstop owns any later attempt. Paused or approval-held Tickets are left
+     * alone (and stay recorded, since no cancel was attempted).
+     *
+     * A live replacement that keeps a remote sticky does *not* own the record:
+     * its ended predecessor's cancel can still have been lost, and the sticky
+     * must not hide that. Only an actually delivered resend whose re-read has no
+     * uncovered ended remote on any node consumes the record.
+     */
+    const resendOrphanedRemoteCancels = (
+      node: string,
+      dispatchingTicketId: string,
+      attempted?: Set<string>,
+    ): Promise<boolean>[] => {
+      const started: Promise<boolean>[] = []
+      // No committed state to re-derive targets from after `finish()` closes
+      // the Store; a dispatch this late must not throw on a closed handle.
+      if (!store.isOpen) return started
+      for (const ticketId of orphanedRemoteTickets) {
+        if (ticketId === dispatchingTicketId) continue
+        const ticket = store.getDoc<Ticket>('ticket', ticketId)
+        if (!ticket) {
+          // No committed Ticket remains to derive targets from, so the record
+          // can never produce a send. Drop it rather than leak the id.
+          orphanedRemoteTickets.delete(ticketId)
+          continue
+        }
+        // Paused/approval-held Tickets are never cancelled as a drive-by. Keep
+        // the record: no send was attempted, and a later dispatch after
+        // recovery may still need to re-send it.
+        if (ticket.collab?.paused || pendingApproval(ticket)) continue
+        // Only targets recorded on *this* node are in scope. If every ended
+        // remote Assignment lives elsewhere, leave the record so a dispatch to
+        // that node can still resend it. A target this dispatch already tried
+        // (and may have lost) is left to a later Ticket/retry, never retried
+        // here.
+        const targets = endedRemoteAssignments(ticket)
+          .filter(target => target.node === node)
+          .filter(target =>
+            !attempted?.has(remoteCancelAttemptKey(ticketId, target.id)))
+        if (targets.length === 0) continue
+        for (const target of targets) {
+          attempted?.add(remoteCancelAttemptKey(ticketId, target.id))
+        }
+        // Keep the record in place while these sends are in flight and only
+        // consume it once every one succeeds. A lost send (fail-soft 502) must
+        // leave the record so a *further* later dispatch to this node can
+        // resend; deleting synchronously before the send settles would burn it
+        // on a resend that was itself lost. A concurrent same-node dispatch may
+        // start a duplicate cancel while this one is in flight, which is fine:
+        // the Worker ignores a cancel for an Assignment it already dropped, and
+        // `settleRemoteCancelSendsToNode` orders the later body after both.
+        const sends = targets.map(target => sendEndedRemoteCancel(ticketId, target))
+        started.push(...sends)
+        void Promise.all(sends).then(outcomes => {
+          // A lost same-node resend keeps the record (e240f87): a further later
+          // dispatch to this node must be able to resend it.
+          if (!outcomes.every(Boolean)) return
+          // The Store may have closed while the send was in flight. There is no
+          // committed state left to decide from, and the closed-Store path at
+          // the top of this function is a no-op; leave the record for the
+          // releaseSlot/finish paths that own shutdown.
+          if (!store.isOpen) return
+          const current = store.getDoc<Ticket>('ticket', ticketId)
+          if (!current) {
+            // No committed Ticket remains, so the record can never produce a
+            // send.
+            orphanedRemoteTickets.delete(ticketId)
+            return
+          }
+          // Paused/approval-held Tickets are never cancelled as a drive-by and
+          // stay recorded (existing policy).
+          if (current.collab?.paused || pendingApproval(current)) return
+          // Succeeding on *this* node must not consume ended remotes recorded on
+          // another node: a later dispatch there still has to resend before its
+          // body reaches the Worker that may still hold them. A remote sticky
+          // gained since (a live replacement) does not consume either; only a
+          // re-read with no uncovered ended remote left does.
+          const cancelledIds = new Set(targets.map(target => target.id))
+          const remaining = endedRemoteAssignments(current)
+            .filter(target => !cancelledIds.has(target.id))
+          if (remaining.length === 0) orphanedRemoteTickets.delete(ticketId)
+        })
+      }
+      return started
+    }
+    /**
+     * Free one ticket's Worker slot, then let the scheduler pump.
+     *
+     * A local slot is free synchronously, so `release` can pump immediately.
+     * A remote slot is only free after `cancelRemote` settles: `dispatchCancel`
+     * awaits the HTTP send and `WorkerPlacement.cancelRemote` releases the
+     * registry assignment in its `finally`. Pumping before that settles sees a
+     * still-full mesh, parks the head of the queue, and nothing would pump again
+     * once the cancel frees capacity. Notify after the cancel settles instead.
+     *
+     * Extra pumps are harmless: `Harness.release` skips a ticket whose Worker
+     * turn is still active, and `pump` reserves a slot before starting a turn.
+     */
+    const releaseSlot = (ticketId: string): void => {
+      try {
+        const ticket = store.getDoc<Ticket>('ticket', ticketId)
+        const latest = ticket?.assignments.at(-1)
+        const assignmentId = latest?.id
+        if (assignmentId && placement.remoteHasTicket(ticketId)) {
+          // Attribute these fail-soft cancels to the node they target while the
+          // sticky reservation still exists. A later different Ticket placed on
+          // the same node reads this to order its assignment body after them.
+          const cancelNode = placement.remoteNodeFor(ticketId)
+          // `releaseSlot` is also reached from `releaseNode` while the only
+          // Assignment is still the live running one (the Worker failed before
+          // it started). A newer open Assignment alone is therefore not proof
+          // of a replacement: require a prior ended Assignment it superseded.
+          const ended = ticket?.assignments.slice(0, -1).reverse().find(item => item.state === 'ended')
+          const liveReplacement = ticket !== undefined
+            && !ticket.ended
+            && latest !== undefined
+            && latest.state !== 'ended'
+            && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+            && ended !== undefined
+            && placement.remoteHasTicket(ticketId)
+          if (liveReplacement && ended) {
+            log.info(
+              `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${ended.id} replacementId=${latest?.id} reason=live-replacement`,
+            )
+            // `releaseMesh` already cleared the only per-ticket wait before this
+            // microtask ran. A live replacement that has not yet armed its own
+            // wait would otherwise hold the sticky slot forever with no recovery.
+            // Transfer the wait to the replacement, matching the stale-timeout
+            // and late dispatch keep-slot paths.
+            if (latest) {
+              if (remoteResultTimeoutMs > 0) {
+                log.info(
+                  `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${latest.id}`,
+                )
+              }
+              late.remoteResultWait?.arm(ticketId, latest.id)
+            }
+            // Still tell every ended remote worker Assignment to stop, but keep
+            // the sticky reservation so the live replacement does not lose its
+            // slot. A Worker may still hold an older predecessor whose cancel
+            // was lost, so send them all; duplicates stay fail-soft. Each
+            // cancel targets the node recorded on that Assignment: the sticky
+            // reservation may have moved to a different remote node after an
+            // earlier lost cancel freed it, and the worker that still holds the
+            // old Assignment is the one that must stop.
+            const keepSlotTargets = supersededRemoteAssignments(ticket)
+            // Record the Ticket as soon as these cancels are *started*, not only
+            // after a loss is observed. A later dispatch can race the in-flight
+            // first send; if that send is then lost, the dispatch-time resend
+            // must already have a record to resend from. Keeping the sticky with
+            // the live replacement does not consume it.
+            if (keepSlotTargets.length > 0) orphanedRemoteTickets.add(ticketId)
+            const keepSlotSends = keepSlotTargets.map(target =>
+              sendEndedRemoteCancel(ticketId, target, cancelNode),
+            )
+            void Promise.all(keepSlotSends).then(
+              outcomes => {
+                // Keep-vs-release is unchanged (the sticky stays with the live
+                // replacement); only decide whether a lost predecessor cancel
+                // must stay resendable.
+                consumeOrphanedRemoteCancels(
+                  ticketId,
+                  keepSlotTargets,
+                  outcomes.every(Boolean),
+                )
+                notifyHarnessReleased(ticketId)
+              },
+              () => notifyHarnessReleased(ticketId),
+            )
+            return
+          }
+          // No live replacement is visible yet, but the cancel send awaits the
+          // network. A genuine relaunch (for example `Runtime.retry`) can place,
+          // dispatch, and start a replacement while this send is in flight.
+          // Cancel without releasing, then decide after the send settles: a
+          // blind `release` here would steal the slot the replacement now runs
+          // on. Re-read the committed Ticket and apply the same live-replacement
+          // predicate as the synchronous keep-slot branch above.
+          //
+          // Cancel every Assignment that ran remotely and is being ended or
+          // superseded. `latest` can be a not-yet-live pending replacement
+          // (for example `recoverInterrupted` appends A2 before releasing A1's
+          // slot): authenticating the cancel for that pending id would leave the
+          // Assignment still running on the worker untouched. When `latest` is
+          // still open and predecessors already ended, every one of them owns a
+          // remote reservation the Worker may still hold.
+          //
+          // When `latest` itself is the ended Assignment (normal report/timeout/
+          // retry), its own cancel is required, but an older predecessor's
+          // cancel may also have been lost (A1 dropped, A2 ran and ended in the
+          // same process). Send every older ended remote id as well; duplicates
+          // stay fail-soft and `{ release: false }` keeps settle policy single.
+          const supersededEnded = supersededRemoteAssignments(ticket)
+          const cancelAssignmentIds = latest?.state !== 'ended'
+            ? (ended !== undefined
+              ? (supersededEnded.length > 0 ? supersededEnded.map(item => item.id) : [ended.id])
+              : assignmentId ? [assignmentId] : [])
+            : supersededEnded.length > 0
+              ? [...supersededEnded.map(item => item.id), ...(assignmentId ? [assignmentId] : [])]
+              : assignmentId ? [assignmentId] : []
+          // Resolve each id back to its Assignment so the cancel goes to the
+          // node that actually ran it (`assignment.node`), not the Ticket's
+          // current sticky reservation. A lost earlier cancel can conservatively
+          // free the old slot and let a retry land on a different remote node;
+          // the worker still holding the older Assignment is on the old node.
+          const byId = new Map((ticket?.assignments ?? []).map(item => [item.id, item]))
+          // Record the Ticket as soon as these terminal cancels are started, not
+          // only after a loss is observed. A later dispatch can race the
+          // in-flight first send; if that send is then lost, the dispatch-time
+          // resend must already have a record to resend from.
+          if (cancelAssignmentIds.length > 0) orphanedRemoteTickets.add(ticketId)
+          const cancelSends = cancelAssignmentIds.map(id =>
+            sendEndedRemoteCancel(ticketId, byId.get(id) ?? { id }, cancelNode),
+          )
+          const settleAfterCancelSends = (delivered: boolean): void => {
+            // `Runtime.finish()` (or a crash-simulation / teardown that closes
+            // SQLite directly) can close the Store while this fail-soft cancel
+            // send is still in flight. There is no committed state left to
+            // decide keep-vs-release from, and every Store read on a closed
+            // handle throws `database is not open`. This promise is voided, so
+            // letting that throw escape would surface as an unhandled
+            // rejection. Fail soft in memory instead: release the sticky slot
+            // (no live replacement can be proven) and notify the harness,
+            // neither of which needs the Store. Leave the orphan record for the
+            // shutdown owners; there is no state left to consume it from here.
+            if (!store.isOpen) {
+              placement.release(ticketId)
+              notifyHarnessReleased(ticketId)
+              return
+            }
+            const current = store.getDoc<Ticket>('ticket', ticketId)
+            const currentLatest = current?.assignments.at(-1)
+            const superseded = current?.assignments
+              .slice(0, -1).reverse().find(item => item.state === 'ended')
+            const liveReplacement = current !== undefined
+              && !current.ended
+              && currentLatest !== undefined
+              && currentLatest.state !== 'ended'
+              && (currentLatest.state === 'running'
+                || currentLatest.node !== undefined
+                || currentLatest.startedAt !== undefined)
+              && superseded !== undefined
+              && placement.remoteHasTicket(ticketId)
+            if (liveReplacement && superseded && currentLatest && current) {
+              log.info(
+                `[mesh] remote cancel kept slot ticketId=${ticketId} assignmentId=${superseded.id} replacementId=${currentLatest.id} reason=live-replacement`,
+              )
+              // The replacement's own wait may already be armed; arming is
+              // keyed per ticketId and resetting it to the live replacement
+              // is the same transfer the other late keep-slot paths make.
+              if (remoteResultTimeoutMs > 0) {
+                log.info(
+                  `[mesh] remote result wait armed ticketId=${ticketId} assignmentId=${currentLatest.id}`,
+                )
+              }
+              late.remoteResultWait?.arm(ticketId, currentLatest.id)
+              // Keep the sticky with the live replacement, but do not drop the
+              // record merely because the sticky was kept: a lost predecessor
+              // cancel must stay resendable by a later same-node dispatch.
+              consumeOrphanedRemoteCancels(
+                ticketId,
+                cancelAssignmentIds.map(id => ({ id })),
+                delivered,
+              )
+            } else {
+              placement.release(ticketId)
+              // A lost terminal cancel with the sticky released must stay
+              // recorded: a later different Ticket placed on the same Worker
+              // has nothing else to resend, and the Worker still holds this
+              // ended Assignment. Re-add rather than assume the record is
+              // still present: a delivered last-attempt batch (or a
+              // dispatch-time resend) can consume it while this batch waits on
+              // a delayed send of its own.
+              if (!delivered) {
+                orphanedRemoteTickets.add(ticketId)
+              } else {
+                // A sticky gained while the send was in flight does not
+                // consume the record by itself, and this batch may not cover
+                // every ended remote (for example an Assignment appended after
+                // the snapshot). Re-read committed state and drop the record
+                // only when it has no uncovered ended remote left.
+                consumeOrphanedRemoteCancels(
+                  ticketId,
+                  cancelAssignmentIds.map(id => ({ id })),
+                  delivered,
+                )
+              }
+            }
+            notifyHarnessReleased(ticketId)
+          }
+          void Promise.all(cancelSends).then(
+            outcomes => settleAfterCancelSends(outcomes.every(Boolean)),
+            () => settleAfterCancelSends(false),
+          )
+          return
+        }
+        // No remote sticky reservation: the Ticket's replacement is local (or
+        // there is none). A worker can still hold an older remote Assignment
+        // whose `assignment_cancel` was lost, for example a local-first retry
+        // that ran after a lost cancel conservatively freed the remote slot.
+        // Keep this as the backstop for a replacement that ends later; local
+        // placement already sent the same fail-soft cancels (duplicates are
+        // harmless). Local capacity below is still freed synchronously and
+        // `finish()` never waits on the HTTP send. The replacement is ending,
+        // so this is the last attempt — but a lost last attempt must not burn
+        // the orphan record: a later different Ticket placed on the same Worker
+        // still has to resend it. Consume the record only once every
+        // last-attempt send is delivered and committed state has no ended
+        // remote left that the batch did not cover.
+        const lastAttempt = cancelEndedRemoteAssignments(ticketId, ticket)
+        if (lastAttempt.sends.length === 0) {
+          // No ended-remote target exists, so the record can never produce a
+          // send.
+          orphanedRemoteTickets.delete(ticketId)
+        } else {
+          void Promise.all(lastAttempt.sends).then(outcomes => {
+            // A lost last attempt (fail-soft 502 / rejected HTTP) keeps the
+            // record so a later dispatch can resend it before its own body. A
+            // delivered batch consumes the record only when a re-read of
+            // committed state has no ended remote left that it did not cover.
+            // A remote sticky gained while the send was in flight (a live
+            // replacement) does not consume it: keeping the sticky must not
+            // hide an uncovered ended remote whose own terminal cancel was
+            // lost, for example A3 in the delayed-A1-cancel race.
+            consumeOrphanedRemoteCancels(
+              ticketId,
+              lastAttempt.targets,
+              outcomes.every(Boolean),
+            )
+          })
+        }
+        placement.release(ticketId)
+      } catch (error) {
+        log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
+      }
+      notifyHarnessReleased(ticketId)
+    }
     /**
      * Engine.report runs inside `Store.atomic`; the Ticket document is written
      * just before the hook, but the Store snapshot only becomes observable to
@@ -581,18 +1458,8 @@ export class Runtime {
      * A microtask runs after the synchronous transaction commits.
      */
     const releaseMesh = (ticketId: string): void => {
-      queueMicrotask(() => {
-        try {
-          workerMesh.release(ticketId)
-        } catch (error) {
-          log.info(`[hook] hook=mesh-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
-        }
-        try {
-          late.harness?.release(ticketId)
-        } catch (error) {
-          log.info(`[hook] hook=harness-release ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`)
-        }
-      })
+      late.remoteResultWait?.clear(ticketId)
+      queueMicrotask(() => releaseSlot(ticketId))
     }
     const host: Host = {
       repo: store,
@@ -758,15 +1625,238 @@ export class Runtime {
         const disposition = store.getDoc<Disposition>('disposition', ticket.originTriggerId)
         return disposition?.shards?.length ? disposition.shards : ['default']
       },
-      pickNode: ticketId => {
-        const node = workerMesh.pickNode(ticketId)
-        if (node) metrics.increment('mesh.assigned')
-        return node?.id
+      pickNode: (ticketId, ticket) => {
+        const need = requiredMeshCapabilities(baseEnv)
+        const nodeId = placement.pickNode(ticketId, need)
+        if (nodeId) {
+          metrics.increment('mesh.assigned')
+          // Local placement chosen (the returned id is the in-process node).
+          // The Ticket will not claim a remote sticky slot, so start the
+          // historical ended-remote cancels now instead of waiting for the
+          // local replacement to end. Fail-soft and voided; a later different
+          // Ticket dispatched to that node orders its body after them.
+          if (!placement.isRemote(nodeId)) cancelEndedRemoteAssignments(ticketId, ticket)
+        } else if (!placement.remoteHasTicket(ticketId)) {
+          // Queued for a local slot: the replacement will still be local, so
+          // start the same cancels early rather than at its eventual end.
+          cancelEndedRemoteAssignments(ticketId, ticket)
+        }
+        return nodeId
+      },
+      isRemoteNode: nodeId => placement.isRemote(nodeId),
+      dispatchRemote: async (ticket, node) => {
+        // Cancel targets this dispatch has already attempted, keyed by owning
+        // Ticket + Assignment. The drain below may start a *new* orphan that
+        // appeared while the body was held, but a target this dispatch already
+        // tried (and lost) must not be retried here: the record stays for a
+        // later Ticket/retry, and a failing endpoint must not spin the drain.
+        const attemptedCancelTargets = new Set<string>()
+        // A different Ticket's local replacement may have started cancels for
+        // ended remote Assignments this Worker still holds; the fail-soft send
+        // can have been lost. Re-send them now (tracked under the owning
+        // Ticket), so the cross-Ticket wait below holds this body until they
+        // settle. This is not a capacity barrier: only the wire body waits and
+        // only when a recorded orphan targets this node.
+        resendOrphanedRemoteCancels(node, ticket.id, attemptedCancelTargets)
+        // The dispatching Ticket is not a drive-by: it is being actively
+        // relaunched. If its own lost terminal cancel already settled before
+        // this retry, there is no in-flight batch for that target and no
+        // barrier, so resend its uncovered ended remotes on this node now. Only
+        // a target whose own cancel is still in flight is left to the 2a2de80
+        // tradeoff; another ended Assignment's settled lost cancel on this same
+        // Ticket is still resent.
+        const ownResends = resendOwnOrphanedRemoteCancels(
+          node,
+          ticket.id,
+          attemptedCancelTargets,
+        )
+        // Recovery/retry replacement: the Assignment is already placed (so the
+        // sticky slot is kept), but the Worker must receive the superseded
+        // Assignment's fail-soft cancel before this body. Consume the gate once.
+        const barrier = remoteDispatchBarriers.get(ticket.id)
+        if (barrier) {
+          remoteDispatchBarriers.delete(ticket.id)
+          await barrier
+        }
+        // Hold this body until the new same-Ticket resends above settle, so the
+        // cancel is no later than the body. Already-in-flight same-Ticket
+        // batches were not started here and are not awaited (2a2de80).
+        if (ownResends.length > 0) await Promise.all(ownResends)
+        // The per-Ticket gate above only covers this Ticket's own cancels. A
+        // *different* Ticket may have just ended (in this process, or before a
+        // restart) and its fail-soft cancel to this same node may still be in
+        // flight. With spare worker capacity the new body would otherwise reach
+        // the worker while it still holds the old Assignment. Hold only this
+        // body; placement and the keep-vs-release settle path already ran.
+        //
+        // A Ticket can also end *while* such a wait holds this body, and its
+        // fail-soft terminal cancel can start and be lost (502) during the wait.
+        // The start-of-dispatch resend ran before that cancel existed, so it
+        // could not see the new orphan; the wait then observes the failed send
+        // settle and returns. Drain after *every* wait: re-run the resends for
+        // targets this dispatch has not already attempted and hold the body
+        // until those new sends (and any still-in-flight other-Ticket sends)
+        // settle. A pass that starts nothing ends the drain, so a cancel this
+        // dispatch already tried and lost is never retried here — the record is
+        // kept for a later Ticket/retry (existing policy), not an in-dispatch
+        // delivery loop. The same-Ticket resend skips only a target whose own
+        // cancel is already in flight to this node (2a2de80); a settled lost
+        // sibling cancel on this node is still resent here.
+        for (;;) {
+          await settleRemoteCancelSendsToNode(node, ticket.id)
+          const resends = [
+            ...resendOrphanedRemoteCancels(node, ticket.id, attemptedCancelTargets),
+            ...resendOwnOrphanedRemoteCancels(node, ticket.id, attemptedCancelTargets),
+          ]
+          if (resends.length === 0) break
+          await Promise.all(resends)
+        }
+        const assignment = ticket.assignments.at(-1)
+        if (!assignment) return
+        const payload = {
+          assignmentId: assignment.id,
+          ticketId: ticket.id,
+          title: ticket.title,
+          brief: ticket.brief,
+          mandate: ticket.mandate,
+        }
+        const delivery = await placement.dispatch(ticket.id, payload)
+        if (delivery?.status !== 'delivered') {
+          const status = delivery?.status ?? 'none'
+          log.info(`[mesh] remote dispatch failed ticketId=${ticket.id} node=${node} status=${status}`)
+          // The send is asynchronous: a result may have been applied while it
+          // was awaiting, or recovery may have replaced the Assignment.
+          // `Assignments.report` always mutates the *latest* Assignment, so a
+          // late failure for a replaced Assignment must not report at all.
+          const current = store.getDoc<Ticket>('ticket', ticket.id)
+          const armed = current?.assignments.find(item => item.id === assignment.id)
+          const latest = current?.assignments.at(-1)
+          const skipReason = !current
+            ? 'missing-ticket'
+            : current.ended
+              ? 'ticket-ended'
+              : latest?.id !== assignment.id
+                ? 'assignment-replaced'
+                : armed?.state === 'ended'
+                  ? 'assignment-ended'
+                  : undefined
+          if (skipReason) {
+            // A newer Assignment may already own this ticket's remote
+            // reservation: sticky placement keeps the slot, so a replacement
+            // that has claimed the node or started work must not lose capacity
+            // to this stale failed send.
+            const liveReplacement = current !== undefined
+              && !current.ended
+              && latest !== undefined
+              && latest.id !== assignment.id
+              && latest.state !== 'ended'
+              && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+              && placement.remoteHasTicket(ticket.id)
+            if (liveReplacement) {
+              log.info(
+                `[mesh] remote dispatch failed kept slot ticketId=${ticket.id} assignmentId=${assignment.id} replacementId=${latest?.id} reason=live-replacement`,
+              )
+              // The wait is keyed by ticketId, so clearing here would disarm a
+              // live replacement that already armed its own result wait for the
+              // same ticket. But leaving the slot unarmed is worse: a
+              // replacement that has not armed yet would keep the sticky slot
+              // forever with no recovery timer. Transfer the wait onto the
+              // replacement, like the stale-timeout keep-slot path.
+              if (latest) {
+                if (remoteResultTimeoutMs > 0) {
+                  log.info(
+                    `[mesh] remote result wait armed ticketId=${ticket.id} assignmentId=${latest.id}`,
+                  )
+                }
+                late.remoteResultWait?.arm(ticket.id, latest.id)
+              }
+              return
+            }
+            placement.release(ticket.id)
+            late.remoteResultWait?.clear(ticket.id)
+            return
+          }
+          // The Harness already marked the Assignment started and placed. The
+          // transport leaves the sticky reservation to the caller, but nothing
+          // will ever report a result, so end the Assignment here through the
+          // same path as the remote result timeout. `deliver: false` keeps the
+          // Ticket open so it can retry with a new Assignment.
+          try {
+            engine.report(ticket.id, {
+              kind: 'failed',
+              text: `remote dispatch failed status=${status}`,
+              deliver: false,
+            })
+          } catch (error) {
+            log.info(
+              `[mesh] remote dispatch report failed ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+          placement.release(ticket.id)
+          late.remoteResultWait?.clear(ticket.id)
+          return
+        }
+        // Dispatch is asynchronous. A result may have been applied while the
+        // send was awaiting, or recovery may have replaced the Assignment.
+        // Arming now would later time out work that already finished (or a
+        // different, later Assignment), so re-read the committed state first.
+        const current = store.getDoc<Ticket>('ticket', ticket.id)
+        const armed = current?.assignments.find(item => item.id === assignment.id)
+        const latest = current?.assignments.at(-1)
+        const skipReason = !current
+          ? 'missing-ticket'
+          : current.ended
+            ? 'ticket-ended'
+            : latest?.id !== assignment.id
+              ? 'assignment-replaced'
+              : armed?.state === 'ended'
+                ? 'assignment-ended'
+                : undefined
+        if (skipReason) {
+          log.info(
+            `[mesh] remote result wait skipped ticketId=${ticket.id} assignmentId=${assignment.id} reason=${skipReason}`,
+          )
+          // A newer Assignment may already own this ticket's remote reservation:
+          // sticky placement keeps the slot, so a replacement that has claimed
+          // the node or started work must not lose capacity to this stale send.
+          const liveReplacement = current !== undefined
+            && !current.ended
+            && latest !== undefined
+            && latest.id !== assignment.id
+            && latest.state !== 'ended'
+            && (latest.state === 'running' || latest.node !== undefined || latest.startedAt !== undefined)
+            && placement.remoteHasTicket(ticket.id)
+          if (liveReplacement) {
+            log.info(
+              `[mesh] remote result wait kept slot ticketId=${ticket.id} assignmentId=${assignment.id} replacementId=${latest?.id} reason=live-replacement`,
+            )
+            // A1 never armed (arm happens after a successful current dispatch).
+            // A live replacement that has not yet armed its own wait would
+            // otherwise hold the sticky slot forever with no recovery. Transfer
+            // the wait, matching the stale-timeout and late-failed-dispatch
+            // keep-slot paths.
+            if (latest) {
+              if (remoteResultTimeoutMs > 0) {
+                log.info(
+                  `[mesh] remote result wait armed ticketId=${ticket.id} assignmentId=${latest.id}`,
+                )
+              }
+              late.remoteResultWait?.arm(ticket.id, latest.id)
+            }
+            return
+          }
+          placement.release(ticket.id)
+          return
+        }
+        if (remoteResultTimeoutMs > 0) {
+          log.info(
+            `[mesh] remote result wait armed ticketId=${ticket.id} assignmentId=${assignment.id}`,
+          )
+        }
+        late.remoteResultWait?.arm(ticket.id, assignment.id)
       },
       queueLimit: meshQueue,
-      releaseNode: ticketId => {
-        workerMesh.release(ticketId)
-      },
+      releaseNode: ticketId => releaseSlot(ticketId),
       repliedTo: ticketId => store.listReplies().some(
         reply => reply.ticketId === ticketId && reply.channel === 'imessage',
       ),
@@ -855,6 +1945,7 @@ export class Runtime {
       instanceId,
       routerShards,
       workerMesh,
+      placement,
       longTermMemory,
       lifecycle,
       a2aRouter,
@@ -864,7 +1955,20 @@ export class Runtime {
       batchWindowMs: opts.batchWindowMs ?? 0,
       admission,
       tools,
+      remoteResultWait: late.remoteResultWait,
+      releaseSlot: ticketId => releaseSlot(ticketId),
+      remoteCancelSends,
+      remoteDispatchBarriers,
     })
+    // A remote node becoming eligible (late register / mesh inbox `register`,
+    // or a heartbeat that brings an offline/stale node back) is an external
+    // capacity event. Rebuild any persisted sticky reservation `start()` could
+    // not see because the node was not registered yet, then wake the Harness
+    // mesh FIFO so a parked retry or enqueueWorker can pick the node without
+    // waiting for an unrelated Worker turn to end. Extra pumps are harmless; an
+    // empty queue no-ops, and only the first sighting of a node restores.
+    placement.setRemoteEligibleListener((nodeId, reason) =>
+      runtime.handleRemoteNodeEligible(nodeId, reason))
     // Gate-deferred work goes to the Main Agent, not to an automatic accept.
     fireRoutine = trigger => runtime.ingest(trigger)
     host.onAssessmentNeeded = () => runtime.assessPending()
@@ -883,6 +1987,157 @@ export class Runtime {
       runtime.ingest(trigger)
     })
     return runtime
+  }
+
+  /**
+   * Apply an authenticated inbound mesh worker result. Idempotent on
+   * `(peerId, deliveryKey)`. Does not start a listener; operators mount
+   * `createRemoteMeshHandler` themselves.
+   */
+  applyRemoteAssignmentResult(event: RemoteMeshAssignmentResultEvent): void {
+    if (!this.store.isOpen) return
+    const report = event.report as WorkerReport
+    if (typeof report?.kind !== 'string' || typeof report?.text !== 'string') {
+      this.log.info(`[mesh] remote result ignored ticketId=${event.ticketId} reason=bad-report`)
+      return
+    }
+    // An authenticated peer may only answer for the assignment it was given.
+    // Consuming the deliveryKey before this check would let any peer squat the
+    // key of a ticket it does not own, so unauthorized and stale results are
+    // dropped before `recordRemoteResult`.
+    const ticket = this.store.getDoc<Ticket>('ticket', event.ticketId)
+    const assignment = ticket?.assignments.at(-1)
+    const node = assignment?.node
+    const reason = !ticket
+      ? 'missing-ticket'
+      : !assignment || assignment.id !== event.assignmentId
+        ? 'stale-assignment'
+        : !node || !this.placement.isRemote(node)
+          ? 'not-remote'
+          : this.placement.remote?.get(node)?.peerId !== event.peerId
+            ? 'peer-mismatch'
+            : undefined
+    if (!ticket || !assignment || reason) {
+      this.log.info(
+        `[mesh] remote result ignored ticketId=${event.ticketId} assignmentId=${event.assignmentId} peerId=${event.peerId} reason=unauthorized-or-stale detail=${reason}`,
+      )
+      return
+    }
+    // A timeout (or a cancel) ends the Assignment without ending the Ticket, so
+    // the same Ticket can retry later. A late result for that ended Assignment
+    // must not be accepted: it would consume the deliveryKey, overwrite the
+    // terminal report, and a `ready`/`deliver` result could even end the Ticket.
+    // The Ticket-ended path below stays idempotent for already-closed work.
+    if (!ticket.ended && assignment.state === 'ended') {
+      this.log.info(
+        `[mesh] remote result ignored ticketId=${event.ticketId} assignmentId=${event.assignmentId} peerId=${event.peerId} reason=ended-assignment`,
+      )
+      return
+    }
+    // Idempotence is keyed on the persisted delivery marker, never on the
+    // report having been attempted. A key that already landed must not re-run
+    // `engine.report`: an ended Ticket rejects the second report, and a duplicate
+    // must never rewrite the terminal outcome.
+    if (remoteResultSeen(this.store, event.peerId, event.deliveryKey)) {
+      this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
+      // A duplicate is idempotent for the report, but it must not disarm a wait
+      // for work that is still running: replaying an at-least-once `progress`
+      // heartbeat would otherwise leave a hung Assignment with no timeout
+      // recovery and its mesh slot held forever. Match the live path: only
+      // finished remote work (ticket ended, assignment ended, or a pause-held
+      // terminal verdict) may clear the wait.
+      const recordedKind = assignment.report?.kind ?? report.kind
+      const heldTerminal = REMOTE_ENDING_REPORT_KINDS.has(recordedKind) && ticket.speculative !== true
+      const remoteWorkDone = Boolean(ticket.ended) || assignment.state === 'ended' || heldTerminal
+      if (remoteWorkDone) {
+        this.remoteResultWait?.clear(event.ticketId)
+      } else {
+        this.log.info(
+          `[mesh] remote result duplicate kept wait ticketId=${event.ticketId} assignmentId=${event.assignmentId}`,
+        )
+      }
+      return
+    }
+    // An already-ended Ticket has no live Assignment to report to. Keep
+    // accepting its authorized result as an idempotent archival copy.
+    if (ticket.ended) {
+      recordRemoteResult(this.store, {
+        ticketId: event.ticketId,
+        assignmentId: event.assignmentId,
+        report,
+        deliveryKey: event.deliveryKey,
+        peerId: event.peerId,
+      })
+      this.remoteResultWait?.clear(event.ticketId)
+      this.log.info(
+        `[mesh] remote result after ticket end ticketId=${event.ticketId} outcome=${ticket.ended.outcome}`,
+      )
+      this.placement.release(event.ticketId)
+      return
+    }
+    // Report first, then persist the delivery marker. Recording before the
+    // report made a throwing report permanently unretryable: the key looked
+    // handled while the outcome was lost. If `engine.report` throws here, keep
+    // the marker unwritten and leave the Assignment's timeout armed; that
+    // handler owns recovery and slot release, and the caller sees the error so
+    // it can replay the same deliveryKey.
+    try {
+      this.engine.report(event.ticketId, report)
+    } catch (error) {
+      this.log.info(
+        `[mesh] remote result report failed ticketId=${event.ticketId} assignmentId=${event.assignmentId} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+      throw error
+    }
+    recordRemoteResult(this.store, {
+      ticketId: event.ticketId,
+      assignmentId: event.assignmentId,
+      report,
+      deliveryKey: event.deliveryKey,
+      peerId: event.peerId,
+    })
+    // A non-ending heartbeat (`progress`) leaves the Assignment running: it
+    // must keep its result timeout armed and its mesh slot held, or a hung
+    // remote worker is never recovered (`test/runtime-remote-result-progress`).
+    // Re-read the Store after the report, because `engine.report` owns the
+    // terminal transition.
+    const settled = this.store.getDoc<Ticket>('ticket', event.ticketId)
+    const settledAssignment = settled?.assignments.at(-1)
+    const recordedKind = settledAssignment?.report?.kind ?? report.kind
+    // A terminal report held by a pause does not end the Assignment while it is
+    // held, but the remote work is done: resume applies the held verdict later,
+    // so capacity can be freed now. A speculative silent hold is different — the
+    // turn may still be live — and is excluded by `ticket.speculative`.
+    const heldTerminal = REMOTE_ENDING_REPORT_KINDS.has(recordedKind) && settled?.speculative !== true
+    const remoteWorkDone =
+      !settled || Boolean(settled.ended) || settledAssignment?.state === 'ended' || heldTerminal
+    if (remoteWorkDone) {
+      this.remoteResultWait?.clear(event.ticketId)
+      // When the report actually ended the latest Assignment or the Ticket,
+      // `onAssignmentEnded` / `onTicketEnded` already queued `releaseMesh` →
+      // `releaseSlot`. That microtask is the single owner of superseded/ended
+      // remote cancels (including an older A1 whose cancel was lost) and of the
+      // keep-vs-release settle policy. Clearing the sticky reservation here
+      // first would make it take the local no-cancel branch and the Worker would
+      // keep running A1. Only free capacity synchronously on the paths where no
+      // end hook queued a release: a pause-held terminal verdict leaves the
+      // Assignment open, and a vanished Ticket document has no hook to run.
+      const endedByReport = Boolean(settled?.ended) || settledAssignment?.state === 'ended'
+      if (!endedByReport) {
+        this.placement.release(event.ticketId)
+        // Freeing the slot here runs no end hook, so nothing else wakes the
+        // mesh FIFO. Pump after the release so a Ticket parked because this
+        // node was full can take the freed capacity instead of letting a later
+        // launch jump it. Extra pumps are harmless: `pump` stops at the FIFO
+        // head when no slot is free.
+        this.harness.pumpQueue()
+      }
+      this.log.info(`[mesh] remote result applied ticketId=${event.ticketId} assignmentId=${event.assignmentId}`)
+      return
+    }
+    this.log.info(
+      `[mesh] remote progress kept wait ticketId=${event.ticketId} assignmentId=${event.assignmentId}`,
+    )
   }
 
   private assessments = new Set<Promise<void>>()
@@ -1011,12 +2266,58 @@ export class Runtime {
       this.log.info('[recovery] deferred reason=mock-model')
       return
     }
+    // A fresh process has an empty sticky map. Rebuild it from persisted
+    // Assignment.node before recovery ends those Assignments so `releaseSlot`
+    // can send the remote cancel the dead process never sent.
+    const restoredFromEnded = this.restoreRemoteStickyReservations()
+    // Every node registered at this point had its persisted reservations
+    // rebuilt above (only registered nodes can be remote). Mark them so a later
+    // heartbeat for the same node only pumps. A node that appears *after* this
+    // scan (the production late-bind order) is missing from this set and gets
+    // its restore on the eligible-listener wake instead.
+    for (const node of this.placement.remote?.list() ?? []) {
+      this.reservationsRestoredForNodes.add(node.id)
+    }
+    this.recoveryRestoreDone = true
     let recovered: ReturnType<Engine['recoverInterrupted']>
     try {
       recovered = this.engine.recoverInterrupted()
     } catch (error) {
       this.log.info(`[recovery] failed error=${error instanceof Error ? error.message : String(error)}`)
       return
+    }
+    // The previous process may have committed recovery (ended Assignment, one
+    // RECOVERED prompt, one pending replacement) and died before its queued
+    // `releaseSlot` sent `assignment_cancel`. `recoverInterrupted` sees no
+    // running Assignment now, so it neither ends anyone nor queues that cancel
+    // again. Cancel the ended remote predecessor from the restored sticky
+    // reservation. Tickets recovery just ended in this `start()` already
+    // queued `releaseSlot` through `releaseMesh`, so skip them to avoid a
+    // duplicate cancel.
+    //
+    // Queue these before the launch loop: `launchRecovered` holds the
+    // replacement's remote body until the Ticket's cancel sends settle, and a
+    // leftover queued afterwards would not be visible to that barrier (the
+    // replacement would reach the Worker before the superseded cancel).
+    const newlyEnded = new Set(
+      recovered.filter(outcome => !outcome.relaunchOnly).map(outcome => outcome.ticketId),
+    )
+    for (const ticketId of restoredFromEnded) {
+      if (newlyEnded.has(ticketId)) continue
+      const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
+      // A successful report can already have ended the Ticket before the crash;
+      // the lost cancel for the ended remote `latest` (and any older superseded
+      // remote row) still has to go out. `leftoverRemoteCancelTarget` accepts
+      // the ended latest itself when the Ticket has no older predecessor.
+      if (!ticket || ticket.collab?.paused || pendingApproval(ticket)) continue
+      const predecessor = this.leftoverRemoteCancelTarget(ticket)
+      if (!predecessor) continue
+      this.log.info(
+        `[recovery] remote cancel queued ticketId=${ticketId} assignmentId=${predecessor.id} node=${predecessor.node}`,
+      )
+      // Run in a microtask like `releaseMesh`: recovery must return first, and
+      // a crash in this same window must leave the state recoverable again.
+      queueMicrotask(() => this.releaseSlot(ticketId))
     }
     for (const outcome of recovered) {
       const ticket = this.store.getDoc<Ticket>('ticket', outcome.ticketId)
@@ -1031,9 +2332,235 @@ export class Runtime {
   }
 
   /**
+   * The ended remote Assignment a still-open later Assignment superseded, if
+   * any. `releaseSlot` targets this same predecessor, so it is what a leftover
+   * restart cancel must authenticate.
+   */
+  private leftoverRemotePredecessor(ticket: Ticket): Assignment | undefined {
+    const latest = ticket.assignments.at(-1)
+    if (!latest || latest.state === 'ended') return undefined
+    return ticket.assignments
+      .slice(0, -1)
+      .reverse()
+      .find(item => item.state === 'ended' && item.node !== undefined && this.placement.isRemote(item.node))
+  }
+
+  /**
+   * The older ended remote Assignment a Ticket carries when `latest` itself is
+   * already ended. This is the crash window after an in-process report/timeout
+   * (or a successful report ending the Ticket) queued the 30903c9 cancel for
+   * every older ended remote and died before the HTTP send: `latest` was the
+   * ended row, so once the process is gone neither recovery nor
+   * `leftoverRemotePredecessor` sees a later open Assignment to justify a
+   * cancel. The persisted older ended remote row is the recoverable signal.
+   *
+   * The Ticket may still be open (failed/timeout report) or already terminal
+   * (successful report); paused and approval-held Tickets are filtered by the
+   * caller like the rest of recovery.
+   */
+  private endedLatestRemotePredecessor(ticket: Ticket): Assignment | undefined {
+    const latest = ticket.assignments.at(-1)
+    if (!latest || latest.state !== 'ended') return undefined
+    return ticket.assignments
+      .slice(0, -1)
+      .reverse()
+      .find(item => item.state === 'ended' && item.node !== undefined && this.placement.isRemote(item.node))
+  }
+
+  /**
+   * The ended remote `latest` row itself, when it is the only remote row a
+   * Ticket carries. A Ticket whose sole Assignment is the ended remote latest
+   * (a failed/timeout report that ended A1 while the Ticket stayed open, or a
+   * successful report that ended A1 and the Ticket) has no superseded
+   * predecessor, so `leftoverRemotePredecessor` and
+   * `endedLatestRemotePredecessor` both return undefined and the crash window
+   * before the queued `releaseSlot` sent A1's cancel would be lost. The ended
+   * latest is itself a sufficient restore/authenticate signal: `releaseSlot`
+   * already sends the cancel for an ended `latest` when it superseded nothing.
+   */
+  private endedLatestRemoteAssignment(ticket: Ticket): Assignment | undefined {
+    const latest = ticket.assignments.at(-1)
+    if (!latest || latest.state !== 'ended') return undefined
+    if (latest.node === undefined || !this.placement.isRemote(latest.node)) return undefined
+    return latest
+  }
+
+  /**
+   * The remote Assignment a leftover restart cancel must authenticate: the
+   * older superseded ended predecessor when one exists, otherwise the ended
+   * remote `latest` itself. A non-undefined value is the signal to queue
+   * `releaseSlot`, which sends `latest` plus every superseded ended remote row.
+   */
+  private leftoverRemoteCancelTarget(ticket: Ticket): Assignment | undefined {
+    return this.leftoverRemotePredecessor(ticket)
+      ?? this.endedLatestRemotePredecessor(ticket)
+      ?? this.endedLatestRemoteAssignment(ticket)
+  }
+
+  /**
+   * Rebuild the remote sticky map from persisted Assignment.node. Startup
+   * recovery on a new Runtime otherwise has no reservation, so `releaseSlot`
+   * takes the local branch and the worker that still runs the interrupted
+   * Assignment is never told to stop (ADR-004 restart path). Only in-memory
+   * remote placement is restored: the in-process worker died with the process,
+   * and only a remote peer needs a cancel. This trusts persisted truth and
+   * intentionally skips `pick`/eligibility so a now-stale peer is still
+   * cancelled (the cancel send stays fail-soft). Paused and approval-held
+   * Tickets still restore a live running reservation: recovery does not end,
+   * replace, or cancel that Assignment (ADR-004 deliberate stop), so without
+   * the reservation a later Ticket could be placed on the same capacity while
+   * the peer is still executing it. Their leftover/ended cancels stay skipped.
+   * A terminal Ticket is only considered for the ended-latest lost-cancel
+   * window below, never for a live running placement.
+   *
+   * Returns the Tickets whose reservation was rebuilt from an already-ended
+   * remote Assignment rather than a running one. Two crash windows leave that
+   * row behind: recovery ended the predecessor but died before the queued
+   * `releaseSlot` sent its cancel (a later open Assignment exists), or the
+   * process itself ended `latest`/the Ticket through a report and died before
+   * its queued cancels went out (no later open Assignment exists). Both must
+   * still send the lost cancel on this `start()`.
+   *
+   * `onlyNode` restricts both passes to Assignments recorded on that node. The
+   * late-bind wake uses it: `start()` ran before the node was registered, so it
+   * could not see these rows as remote. Passing no filter keeps the full
+   * startup scan unchanged.
+   */
+  private restoreRemoteStickyReservations(onlyNode?: string): Set<string> {
+    const restoredFromEnded = new Set<string>()
+    for (const ticket of this.store.listDocs<Ticket>('ticket')) {
+      const held = Boolean(ticket.collab?.paused) || pendingApproval(ticket)
+      // Only an open Ticket can still own a live placement; a terminal Ticket
+      // has no running Assignment to rebuild from.
+      if (!ticket.ended) {
+        for (const assignment of ticket.assignments) {
+          if (assignment.state !== 'running' || !assignment.node) continue
+          if (onlyNode !== undefined && assignment.node !== onlyNode) continue
+          if (!this.placement.isRemote(assignment.node)) continue
+          if (!this.placement.restoreRemoteTicket(ticket.id, assignment.node)) continue
+          this.log.info(
+            `[recovery] remote reservation restored ticketId=${ticket.id} assignmentId=${assignment.id} node=${assignment.node}`,
+          )
+        }
+      }
+      // Paused and approval-held Tickets keep the live reservation restored
+      // above so the peer's running body still holds its capacity, but their
+      // leftover/ended cancels are never queued (drive-by policy).
+      if (held) continue
+      // A crash in the window after recovery committed A1 `ended` but before
+      // the queued `releaseSlot` sent its cancel leaves an ended remote
+      // predecessor with a later open Assignment and no running one. The same
+      // lost-cancel window exists when `latest` itself is the ended row (an
+      // in-process failed/timeout report, or a successful report that ended the
+      // Ticket), including when that ended latest is the Ticket's only
+      // Assignment. Rebuild sticky from that target too so the next
+      // `releaseSlot` can reach the worker that still holds it. `bind` stays
+      // idempotent and never clobbers a reservation bound to a different node.
+      const predecessor = this.leftoverRemoteCancelTarget(ticket)
+      if (!predecessor?.node) continue
+      if (onlyNode !== undefined && predecessor.node !== onlyNode) continue
+      if (!this.placement.restoreRemoteTicket(ticket.id, predecessor.node)) continue
+      restoredFromEnded.add(ticket.id)
+      this.log.info(
+        `[recovery] remote reservation restored ticketId=${ticket.id} assignmentId=${predecessor.id} node=${predecessor.node} state=ended`,
+      )
+    }
+    return restoredFromEnded
+  }
+
+  /**
+   * Eligible-listener wake for a remote node: rebuild the persisted sticky
+   * reservations `start()` could not see, start any leftover cancel, then pump.
+   *
+   * The production late-bind order calls `Runtime.start()` *before*
+   * `placement.registerRemoteNode` / mesh-inbox `handleRegister`. At `start()`
+   * the node was unknown, so `placement.isRemote` was false and
+   * `restoreRemoteStickyReservations()` skipped the peer's live running
+   * Assignment. The node's register now fires this wake. Without the restore
+   * the paused/approval-held Ticket's remote Worker keeps running while a later
+   * (or already parked) Ticket is placed on the same capacity-1 node, and the
+   * leftover ended remote of an unpaused recovered Ticket is never cancelled
+   * before its replacement body is dispatched.
+   *
+   * Only the first sighting of a node after `start()` restores; a heartbeat
+   * that merely brings an already-known node back from ineligible → eligible
+   * only pumps, so it cannot start a duplicate leftover-cancel storm.
+   *
+   * A successful `register` always inserts a brand-new node (a duplicate id
+   * throws), so a register that follows `unregister` is another first sighting
+   * even though this id was marked before: `unregister` dropped every sticky
+   * assignment for the node, and only a fresh restore rebuilds them. The
+   * `reason` distinguishes that from the heartbeat pump.
+   */
+  private handleRemoteNodeEligible(nodeId: string, reason: RemoteEligibleReason): void {
+    try {
+      this.restoreLateBoundRemoteNode(nodeId, reason)
+    } catch (error) {
+      // The registry already accepted the register/heartbeat; a restore failure
+      // must not turn it into a failed delivery. The queue is still pumped.
+      this.log.info(
+        `[recovery] remote late-bind restore failed node=${nodeId} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    this.harness.pumpQueue()
+  }
+
+  /**
+   * Complete the sticky restore for a node that became known after `start()`.
+   *
+   * A `MockModel` process deferred recovery on purpose; late-bind must not
+   * consume that work, so the restore waits until a real `start()` has run.
+   * `start()` marks every node it already restored, and this marks the node on
+   * its first late-bind, so both the heartbeat re-eligibility path and a
+   * second wake stay quiet. A `register` wake is exempt from the mark: a
+   * successful register inserts a brand-new node, so after `unregister` (which
+   * dropped the node and all of its sticky assignments) it is a first sighting
+   * again and must rebuild the reservations and leftover cancels before the
+   * queue is pumped.
+   */
+  private restoreLateBoundRemoteNode(nodeId: string, reason: RemoteEligibleReason): void {
+    if (!this.recoveryRestoreDone || !this.store.isOpen) return
+    if (!this.placement.isRemote(nodeId)) return
+    const reRegistered = reason === 'register'
+    if (!reRegistered && this.reservationsRestoredForNodes.has(nodeId)) return
+    this.reservationsRestoredForNodes.add(nodeId)
+    const restoredFromEnded = this.restoreRemoteStickyReservations(nodeId)
+    for (const ticketId of restoredFromEnded) {
+      const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
+      // Same drive-by policy as `start()`: paused and approval-held Tickets
+      // keep their live reservation but never queue a leftover/ended cancel.
+      if (!ticket || ticket.collab?.paused || pendingApproval(ticket)) continue
+      const predecessor = this.leftoverRemoteCancelTarget(ticket)
+      if (!predecessor) continue
+      this.log.info(
+        `[recovery] remote cancel queued ticketId=${ticketId} assignmentId=${predecessor.id} node=${predecessor.node}`,
+      )
+      // Start the cancel *before* the pump below. A replacement already parked
+      // in the FIFO would otherwise dispatch its body onto the Worker that
+      // still holds the ended Assignment. Unlike `start()`, this hook is not
+      // inside a Store transaction, so the fail-soft send can begin now.
+      this.releaseSlot(ticketId)
+      // A replacement launch already in flight (recovery relaunch or retry) has
+      // a dispatch barrier from its own launch; replace it with one that also
+      // sees these just-started sends, so the pump cannot deliver the body
+      // before the Worker is told to stop the old Assignment.
+      this.setRemoteDispatchBarrier(ticketId, this.settleRemoteCancelSends(ticketId))
+    }
+  }
+
+  /**
    * Relaunch one recovered Ticket without letting a failure abort the others
    * or surface as an unhandled rejection. A launch failure changes no state:
    * the replacement stays `pending`, so a later restart can relaunch it.
+   *
+   * The launch itself still runs synchronously, so recovery stays synchronous
+   * and a crash right after `start()` leaves the replacement pending. Only the
+   * replacement's *remote assignment body* is held behind a dispatch barrier
+   * until every fail-soft `assignment_cancel` send for a superseded ended
+   * Assignment on this Ticket has settled. The Assignment is placed before
+   * that wait, so the existing keep-vs-release settle policy still sees a live
+   * replacement and keeps the sticky slot. A Worker that still holds the old
+   * Assignment is therefore told to stop before the new body reaches it.
    */
   private launchRecovered(ticketId: string, ticket: Ticket): void {
     const failed = (error: unknown): void => {
@@ -1041,10 +2568,50 @@ export class Runtime {
         `[recovery] launch failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
       )
     }
+    this.setRemoteDispatchBarrier(ticketId, this.settleRemoteCancelSends(ticketId))
     try {
       void this.harness.launch(ticket).catch(failed)
     } catch (error) {
       failed(error)
+    }
+  }
+
+  /**
+   * Hold the next remote assignment body for this Ticket until `barrier`
+   * settles. Dispatch consumes the barrier; if the replacement is placed
+   * locally (or never dispatches) the entry simply expires.
+   */
+  private setRemoteDispatchBarrier(ticketId: string, barrier: Promise<void>): void {
+    this.remoteDispatchBarriers.set(ticketId, barrier)
+    const expire = (): void => {
+      if (this.remoteDispatchBarriers.get(ticketId) === barrier) {
+        this.remoteDispatchBarriers.delete(ticketId)
+      }
+    }
+    void barrier.then(expire, expire)
+  }
+
+  /**
+   * Wait until every remote cancel send already in flight (or queued behind a
+   * `releaseSlot` microtask) for this Ticket has settled. Sends are fail-soft:
+   * an unregistered, ineligible, or offline node settles without throwing, so
+   * a launch never hangs on a cancel that cannot be delivered. No in-flight
+   * send means no added delay. `skip` excludes batches already in flight when a
+   * caller only wants to wait for sends its own yield is about to start.
+   */
+  private async settleRemoteCancelSends(
+    ticketId: string,
+    skip?: ReadonlySet<Promise<void>>,
+  ): Promise<void> {
+    // `releaseMesh` queues `releaseSlot` as a microtask; on this tick the send
+    // may not be registered yet. Yield once so those microtasks start their
+    // sends before deciding there is nothing to wait for.
+    await Promise.resolve()
+    for (;;) {
+      const pending = [...(this.remoteCancelSends.get(ticketId) ?? [])]
+        .filter(batch => !skip?.has(batch))
+      if (pending.length === 0) return
+      await Promise.allSettled(pending)
     }
   }
 
@@ -1325,7 +2892,23 @@ export class Runtime {
   async retry(ticketId: string, reason = 'retry'): Promise<Ticket | undefined> {
     this.engine.retryTicket(ticketId, reason)
     const ticket = this.store.getDoc<Ticket>('ticket', ticketId)
-    if (ticket && !ticket.ended) await this.harness.launch(ticket)
+    if (ticket && !ticket.ended) {
+      // An in-process end (report/timeout) may leave a superseded remote cancel
+      // queued behind a `releaseSlot` microtask. Do not put the new Assignment
+      // on a Worker before that send has at least started: the barrier flushes
+      // the queue and holds the body until sends that begin now settle.
+      //
+      // Sends already in flight when `retry` was requested are deliberately not
+      // awaited. They are owned by the keep-vs-release settle path, and blocking
+      // a genuine relaunch on a slow (or held) cancel would strand the
+      // replacement instead of letting it claim the slot the settle path keeps.
+      const alreadySending = new Set(this.remoteCancelSends.get(ticketId) ?? [])
+      this.setRemoteDispatchBarrier(
+        ticketId,
+        this.settleRemoteCancelSends(ticketId, alreadySending),
+      )
+      await this.harness.launch(ticket)
+    }
     return ticket
   }
 
@@ -1368,6 +2951,7 @@ export class Runtime {
       // The daemon timer, MCP child processes, and SQLite handle must all be
       // released even when a drain step rejects.
       this.daemon.stop()
+      this.remoteResultWait?.clearAll()
       try {
         await this.tools.close()
       } catch (error) {
