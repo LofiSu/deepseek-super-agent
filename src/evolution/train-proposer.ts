@@ -11,22 +11,6 @@ function missingTokens(text: string, known: readonly string[]): string[] {
   return [...new Set(words)].filter(word => !body.includes(word)).slice(0, 6)
 }
 
-function pickToken(input: {
-  failure: EvolutionEvalCase
-  positiveTokens: string[]
-  negativeTokens: string[]
-  useMemory: boolean
-  memory: import('./types.ts').PolicyMemoryCarrier
-}): { token: string; side: 'positive' | 'negative' } | null {
-  const { failure, positiveTokens, negativeTokens, useMemory, memory } = input
-  if (useMemory) {
-    const fromLesson = applyMemoryLessons(memory, failure.id, positiveTokens, negativeTokens)
-    if (fromLesson) return fromLesson
-  }
-  const extra = missingTokens(failure.report.text, positiveTokens)
-  return extra[0] ? { token: extra[0], side: 'positive' } : null
-}
-
 /** Deterministic train-failure proposals; optional policy-memory lesson fields (no fixture literals). */
 export class TrainFailureProposer implements CandidateProposer {
   constructor(private readonly useMemory = true) {}
@@ -53,59 +37,51 @@ export class TrainFailureProposer implements CandidateProposer {
     if (predicted === failure.expected) return null
 
     const tokens = strategyTokens(parentStrategy)
-    let positiveTokens = [...tokens.positiveTokens]
-    let negativeTokens = [...tokens.negativeTokens]
+    const positiveTokens = [...tokens.positiveTokens]
+    const negativeTokens = [...tokens.negativeTokens]
 
+    let side: 'positive' | 'negative'
     if (failure.expected === 'deliver' && predicted === 'discard') {
-      const picked = pickToken({ failure, positiveTokens, negativeTokens, useMemory: useMem, memory })
-      if (!picked || picked.side !== 'positive') {
-        const extra = missingTokens(failure.report.text, positiveTokens)
-        const alt = extra[0]
-        if (!alt) return null
-        try {
-          assertSafeToken(alt, 'proposed')
-        } catch {
-          return null
-        }
-        if (positiveTokens.includes(alt)) return null
-        positiveTokens = [...positiveTokens, alt]
-      } else {
-        const alt = picked.token
-        try {
-          assertSafeToken(alt, 'proposed')
-        } catch {
-          return null
-        }
-        if (positiveTokens.includes(alt)) return null
-        positiveTokens = [...positiveTokens, alt]
-      }
+      side = 'positive'
     } else if (failure.expected === 'discard' && predicted === 'deliver') {
-      const picked = useMem
-        ? applyMemoryLessons(memory, failure.id, positiveTokens, negativeTokens)
-        : null
-      const alt = picked?.side === 'negative' ? picked.token : missingTokens(failure.report.text, negativeTokens)[0]
-      if (!alt) return null
-      try {
-        assertSafeToken(alt, 'proposed')
-      } catch {
-        return null
-      }
-      if (negativeTokens.includes(alt)) return null
-      negativeTokens = [...negativeTokens, alt]
+      side = 'negative'
     } else {
       return null
     }
 
-    const directionKey = normalizeDirectionKey(positiveTokens, negativeTokens)
-    if (seenDirections.has(directionKey)) return null
-
-    return {
-      schemaVersion: EVOLUTION_SCHEMA_VERSION,
-      domain: DELIVER_GATE_DOMAIN,
-      positiveTokens,
-      negativeTokens,
-      clauseLocalPositive: parentStrategy.clauseLocalPositive,
+    // Try the memory lesson first, then every remaining token on the relevant
+    // side. An unsafe or already-seen candidate must not block the ones after it.
+    const relevant = side === 'positive' ? positiveTokens : negativeTokens
+    const candidates: string[] = []
+    if (useMem) {
+      const lesson = applyMemoryLessons(memory, failure.id, positiveTokens, negativeTokens)
+      if (lesson?.side === side) candidates.push(lesson.token)
     }
+    for (const token of missingTokens(failure.report.text, relevant)) {
+      if (!candidates.includes(token)) candidates.push(token)
+    }
+
+    for (const token of candidates) {
+      if (relevant.includes(token)) continue
+      try {
+        assertSafeToken(token, 'proposed')
+      } catch {
+        continue
+      }
+      const nextPositive = side === 'positive' ? [...positiveTokens, token] : positiveTokens
+      const nextNegative = side === 'negative' ? [...negativeTokens, token] : negativeTokens
+      const directionKey = normalizeDirectionKey(nextPositive, nextNegative)
+      if (seenDirections.has(directionKey)) continue
+      return {
+        schemaVersion: EVOLUTION_SCHEMA_VERSION,
+        domain: DELIVER_GATE_DOMAIN,
+        positiveTokens: nextPositive,
+        negativeTokens: nextNegative,
+        clauseLocalPositive: parentStrategy.clauseLocalPositive,
+      }
+    }
+
+    return null
   }
 }
 
