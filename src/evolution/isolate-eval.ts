@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolveEvaluatorArtifacts } from './evaluator-identity.ts'
 import type { DeliverGateStrategyV1, EvolutionEvalCase, SplitScore } from './types.ts'
 import type { EvolutionBudget } from './types.ts'
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-const childScript = path.join(repoRoot, 'scripts/evolution-eval-child.mjs')
+// Resolved for the current layout: repo scripts/ in a checkout, dist/scripts/
+// in a published package. The published child runs with plain node.
+const { repoRoot, childScript } = resolveEvaluatorArtifacts()
 const tsxCli = path.join(repoRoot, 'node_modules/tsx/dist/cli.mjs')
 
 export interface IsolatedEvalResult {
