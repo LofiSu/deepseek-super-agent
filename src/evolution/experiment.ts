@@ -19,6 +19,7 @@ import {
   markFinalTestClaimConsumed,
   releaseFinalTestClaimLock,
 } from './final-test-claim-lock.ts'
+import { acquireSearchRunLock, releaseSearchRunLock } from './search-run-lock.ts'
 
 export const BASELINE_PARENT_ID = 'baseline_immutable'
 
@@ -153,6 +154,10 @@ export function freezeCandidate(input: {
   runId?: string
   runReport?: EvolutionRunReport
 }): ExperimentState {
+  // Freeze and search share one exclusive lock, so a search run cannot continue
+  // against an experiment that is being frozen (and vice versa).
+  const searchLock = acquireSearchRunLock(input.home)
+  try {
   const state = loadExperiment(input.home)
   if (!state) throw new Error('no experiment')
   assertSearchAllowed(state)
@@ -199,6 +204,9 @@ export function freezeCandidate(input: {
   writeJsonAtomic(runReceiptPath(input.home), runReport)
   saveExperiment(input.home, state)
   return state
+  } finally {
+    releaseSearchRunLock(input.home, searchLock.lockToken)
+  }
 }
 
 export function recordFinalTest(home: string, record: ExperimentFinalTestRecord): ExperimentState {

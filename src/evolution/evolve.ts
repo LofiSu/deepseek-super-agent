@@ -194,6 +194,9 @@ async function runEvolutionLocked(
 ): Promise<EvolutionRunReport> {
   const { budget, dataset, evaluatorDigest } = ctx
   let experiment = loadExperiment(input.home)!
+  // Re-validate lifecycle under the search lock. A freeze/finalize can land in
+  // the window between the pre-lock check and lock acquisition.
+  assertSearchAllowed(experiment)
 
   const round = input.round ?? Math.max(1, experiment.seenDirections.length > 0 ? 2 : 1)
   const baseline = defaultBaselineStrategy()

@@ -1,5 +1,5 @@
 import type { BudgetLedger, ExperimentState } from './types.ts'
-import { loadExperiment, mutateExperiment } from './experiment.ts'
+import { assertSearchAllowed, loadExperiment, mutateExperiment } from './experiment.ts'
 
 export const EVAL_CALLS_PER_SEARCH_CANDIDATE = 2
 export const EVAL_CALLS_BASELINE_SEARCH = 2
@@ -47,6 +47,7 @@ export function reserveSearchEvalUnits(
   patch?: (state: ExperimentState) => void,
 ): ExperimentState {
   return mutateExperiment(home, state => {
+    assertSearchAllowed(state)
     const searchPool = state.budget.maxEvals - state.budget.reserveEvals
     if (searchUnitsUsed(state) + units > searchPool) {
       throw new Error(`budget exhausted: ${reason}`)
@@ -63,6 +64,7 @@ export function reserveEvalUnits(home: string, units: number, reason: string): E
 
 export function reserveBaselineSearchUnits(home: string): ExperimentState {
   return mutateExperiment(home, state => {
+    assertSearchAllowed(state)
     if (state.budget.baselineSearchReserved) return
     const searchPool = state.budget.maxEvals - state.budget.reserveEvals
     if (searchUnitsUsed(state) + EVAL_CALLS_BASELINE_SEARCH > searchPool) {
@@ -87,6 +89,17 @@ export function reserveFinalTestUnits(home: string): ExperimentState {
 
 export function recordChildEvalLaunch(home: string, count = 1): void {
   mutateExperiment(home, state => {
+    assertSearchAllowed(state)
+    state.budget.childEvalLaunches = (state.budget.childEvalLaunches ?? 0) + count
+  })
+}
+
+/**
+ * Post-freeze final-test path: search is already refused, so this is the one
+ * child-eval counter that may run on a frozen experiment.
+ */
+export function recordFinalTestChildEvalLaunch(home: string, count = 1): void {
+  mutateExperiment(home, state => {
     state.budget.childEvalLaunches = (state.budget.childEvalLaunches ?? 0) + count
   })
 }
@@ -96,6 +109,7 @@ export function bumpBudgetCounters(
   input: { timeouts?: number; errors?: number },
 ): void {
   mutateExperiment(home, state => {
+    assertSearchAllowed(state)
     if (input.timeouts) state.budget.timeouts += input.timeouts
     if (input.errors) state.budget.errors += input.errors
   })
@@ -112,6 +126,7 @@ export function persistExperimentCounters(
   },
 ): ExperimentState {
   return mutateExperiment(home, state => {
+    assertSearchAllowed(state)
     if (input.totalOpportunities !== undefined) {
       state.totalOpportunities = input.totalOpportunities
     }
