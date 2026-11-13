@@ -19,6 +19,12 @@ import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { loadRoutines, normalizeRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
+import {
+  loadProactiveConfig,
+  normalizeProactiveConfig,
+  ProactiveScheduler,
+  type ProactiveConfig,
+} from './harness/proactive.ts'
 import { MachineRegistry } from './harness/machines.ts'
 import { McpToolSource } from './harness/mcp.ts'
 import { parseMcpServers, type McpServerConfig } from './harness/mcp-config.ts'
@@ -91,6 +97,11 @@ export interface RuntimeOptions {
    * then `DS_AGENT_ROUTINES`.
    */
   routines?: RoutineSpec[]
+  /**
+   * Built-in idle self-wake. Defaults to `proactive.json` in `home`, which is
+   * off unless the owner sets `"enabled": true`. The model cannot edit it.
+   */
+  proactive?: ProactiveConfig
   /** Local A2A address and mesh node id. Defaults to `DS_AGENT_INSTANCE_ID` or `local`. */
   instanceId?: string
   /** Worker slots this process advertises. Defaults to `DS_AGENT_MESH_CAPACITY` or 4. */
@@ -356,6 +367,8 @@ export class Runtime {
   readonly skills?: SkillRegistry
   /** Owner-defined routines, due-checked by the daemon tick. */
   readonly routines?: RoutineScheduler
+  /** Owner-gated idle self-wake, due-checked by the same daemon pulse. */
+  readonly proactive: ProactiveScheduler
   /** Local A2A address and Worker mesh node id. */
   readonly instanceId: string
   readonly routerShards: RouterShardRegistry
@@ -392,6 +405,7 @@ export class Runtime {
     localAgents?: LocalAgentRegistry
     skills?: SkillRegistry
     routines?: RoutineScheduler
+    proactive: ProactiveScheduler
     instanceId: string
     routerShards: RouterShardRegistry
     workerMesh: WorkerMeshRegistry
@@ -418,6 +432,7 @@ export class Runtime {
     this.localAgents = parts.localAgents
     this.skills = parts.skills
     this.routines = parts.routines
+    this.proactive = parts.proactive
     this.instanceId = parts.instanceId
     this.routerShards = parts.routerShards
     this.workerMesh = parts.workerMesh
@@ -491,6 +506,11 @@ export class Runtime {
     if (routines) {
       log.info(`[routine] configured routines=${routines.list().map(routine => routine.id).join(',')}`)
     }
+    // Owner-controlled and off by default. A malformed file fails startup
+    // instead of silently turning proactive contact into an unknown state.
+    const proactiveConfig = opts.proactive === undefined
+      ? loadProactiveConfig(opts.home)
+      : normalizeProactiveConfig(opts.proactive)
     const instanceId = opts.instanceId?.trim() || baseEnv.DS_AGENT_INSTANCE_ID?.trim() || 'local'
     const rawCapacity = opts.meshCapacity ?? Number(baseEnv.DS_AGENT_MESH_CAPACITY)
     const meshCapacity = Number.isSafeInteger(rawCapacity) && rawCapacity > 0 ? rawCapacity : 4
@@ -527,6 +547,24 @@ export class Runtime {
         embeddingFloor: embeddingFloorFromEnv(baseEnv, opts.embeddingFloor),
       } : {}),
     })
+    // Same daemon pulse as routines, same ingress path. The scheduler has no
+    // timer of its own and only fires when the policy finds a real fact.
+    const proactive = new ProactiveScheduler({
+      now: () => Date.parse(now()),
+      store,
+      config: proactiveConfig,
+      env: baseEnv,
+      memoryFor: ticket => longTermMemory
+        .forThreads(ticket.threadKeys, 2, ticket.id)
+        .map(entry => entry.text),
+      fire: trigger => fireRoutine(trigger),
+      log: line => log.info(line),
+    })
+    log.info(
+      `[proactive] enabled=${proactiveConfig.enabled} intervalMinutes=${proactiveConfig.intervalMinutes} `
+      + `tz=${proactiveConfig.timezone} quiet=${proactiveConfig.quietStart}-${proactiveConfig.quietEnd} `
+      + `minIntervalMinutes=${proactiveConfig.minIntervalMinutes} maxPerDay=${proactiveConfig.maxPerDay}`,
+    )
     const lifecycle = new LifecycleBus(opts.lifecycleMaxEvents)
     const lifecycleRetention = lifecycleRetentionFor(opts.lifecycleRetention, lifecycle.maxEvents)
     // Restart replay: first bound any existing durable log, then fill the ring
@@ -773,6 +811,11 @@ export class Runtime {
       stopAnsweredDirectChat: (ticket, reason) => {
         engine.decide(ticket.originTriggerId, { kind: 'stop', ticketId: ticket.id, reason })
       },
+      stopProactiveTicket: (ticket, reason) => {
+        // The proactive envelope is a Router-owned message, not Worker work.
+        // A missing disposition is not fatal: ingest always writes one.
+        engine.decide(ticket.originTriggerId, { kind: 'stop', ticketId: ticket.id, reason })
+      },
       memory: ticket => {
         // Direct chats are private threads: recall only memories that belong to
         // the same conversation. Cross-ticket recall stays for repository work.
@@ -837,7 +880,14 @@ export class Runtime {
       // A watchdog fail is a terminal path too: settle the speculative workdir.
       settle: (sessionId, verdict) => settleSpeculation(env, sessionId, verdict),
     })
-    const daemon = new Daemon(watchdog, line => log.info(line), machines, undefined, routines)
+    const daemon = new Daemon(
+      watchdog,
+      line => log.info(line),
+      machines,
+      undefined,
+      routines,
+      proactive,
+    )
     const runtime = new Runtime({
       home: opts.home,
       log,
@@ -852,6 +902,7 @@ export class Runtime {
       ...(localAgents ? { localAgents } : {}),
       skills,
       ...(routines ? { routines } : {}),
+      proactive,
       instanceId,
       routerShards,
       workerMesh,
@@ -975,16 +1026,21 @@ export class Runtime {
    * Start the daemon timer. `assessPending: false` also disables every later
    * assessment path (including `onAssessmentNeeded` from flushEvals), so a
    * MockModel process leaves Gate-deferred work queued instead of consuming it.
-   * `routines: true` is only for long-lived serving processes: a one-shot CLI
-   * command must not fire owner-level work whose channel loop is not running.
+   * `routines: true` / `proactive: true` are only for long-lived serving
+   * processes: a one-shot CLI command must not fire owner-level work whose
+   * channel loop is not running. The proactive scheduler is still disabled
+   * unless `proactive.json` enables it.
    */
-  start(options: { assessPending?: boolean; routines?: boolean } = {}): void {
+  start(options: { assessPending?: boolean; routines?: boolean; proactive?: boolean } = {}): void {
     this.assessmentsEnabled = options.assessPending !== false
     // The Router layer is resident: every configured shard gets its Session
     // before recovery, assessment, or the first Trigger.
     this.armResidentRouters()
     this.recoverInterrupted()
-    this.daemon.start({ routines: options.routines === true })
+    this.daemon.start({
+      routines: options.routines === true,
+      proactive: options.proactive === true,
+    })
     if (this.assessmentsEnabled) {
       // Resume Gate-deferred work left in SQLite by a previous process.
       this.assessPending()

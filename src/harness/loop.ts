@@ -8,6 +8,7 @@ import type { SkillInfo } from '../env/skills.ts'
 import { systemPrompt, type PromptFiles } from './prompts.ts'
 import type { LocalAgentInfo } from '../env/local-agents.ts'
 import { directChatThread, routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
+import { isProactiveTicket } from './proactive.ts'
 import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
@@ -46,6 +47,11 @@ export interface HarnessOptions {
   repliedTo?: (ticketId: string) => boolean
   /** End a direct-chat ticket the Router already answered, before a Worker starts. */
   stopAnsweredDirectChat?: (ticket: Ticket, reason: string) => void
+  /**
+   * End a proactive messaging envelope after its Router turn. There is no
+   * Worker follow-up: if the Router stayed silent, the ticket ends silently.
+   */
+  stopProactiveTicket?: (ticket: Ticket, reason: string) => void
   /** Cross-ticket recall lines injected into Router and Worker turns. */
   memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string; refs?: ObjectRef[] }[]
   /** Owner-editable persona, standing instructions, and owner context. */
@@ -83,6 +89,7 @@ export function normalizeQueueLimit(value: number | undefined): number {
 export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = []): string {
   const mode = ticket.speculative ? 'speculative' : 'normal'
   const directChat = directChatThread(ticket)
+  const proactive = isProactiveTicket(ticket)
   return [
     ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
     `ticketId=${ticket.id}`,
@@ -90,9 +97,17 @@ export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = 
     `title=${ticket.title}`,
     // The title is capped at 80 characters; a direct chat needs the whole
     // message because the Router answers it without a Worker reading the brief.
-    ...(directChat ? [`message=${ticket.brief}`] : []),
+    // A proactive wake carries the concrete fact the same way.
+    ...(directChat || proactive ? [`message=${ticket.brief}`] : []),
     `mode=${mode}`,
     'decision=accepted-by-gate',
+    ...(proactive ? [
+      'proactive=true',
+      'This is an idle self-wake in an existing private thread. There is no Worker follow-up.',
+      'Send at most one short message only if the fact above is genuinely useful.',
+      'Do not send an acknowledgement, a ticket inventory, or a request for a reply; do not mention that this was a scheduled check.',
+      'If nothing is useful, call assess_trigger kind=stop and do not reply.',
+    ] : []),
     ...extraLines,
     // A direct iMessage is a conversation, not a thread ticket: the Router may
     // answer it briefly instead of leaving a vetoed message unanswered. Group
@@ -236,6 +251,15 @@ export class Harness {
     // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
     // Capacity is picked after the Routers so a veto never consumes a slot.
     const startWorker = (): Promise<void> | undefined => {
+      // A proactive idle wake is a messaging envelope, not a work request: the
+      // Router's one turn is the whole deliverable. End it even when the
+      // Router stayed silent, so no Worker is ever spawned for it.
+      if (isProactiveTicket(ticket)) {
+        const latest = this.opts.store.getDoc<Ticket>('ticket', ticket.id)
+        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=proactive-message`)
+        if (!latest?.ended) this.opts.stopProactiveTicket?.(ticket, 'proactive message turn complete')
+        return undefined
+      }
       // A direct chat the Router already answered is finished. Give the
       // conversation no Worker even when the Router forgot assess_trigger
       // stop: a conversational reply is the whole deliverable.
