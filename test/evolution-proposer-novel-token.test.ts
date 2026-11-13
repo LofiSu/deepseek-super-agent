@@ -42,6 +42,72 @@ describe('proposer generic token extraction', () => {
   })
 })
 
+describe('proposer failure target resolution', () => {
+  function fixture() {
+    const baseline = defaultBaselineStrategy()
+    const retired = {
+      id: 'tr-retired-widget',
+      speculative: true,
+      report: { kind: 'ready' as const, text: 'widget relay stabilized after deploy.' },
+      expected: 'deliver' as const,
+    }
+    const other = {
+      id: 'tr-other-checkout',
+      speculative: true,
+      report: { kind: 'ready' as const, text: 'uniquelexeme completed the rollout.' },
+      expected: 'deliver' as const,
+    }
+    const proposer = new TrainFailureProposer(false)
+    const baseInput = {
+      baseline,
+      parentStrategy: baseline,
+      trainFailures: [retired, other],
+      memory: emptyCarrier('e', 0),
+      seed: 7,
+    }
+    return { baseline, retired, other, proposer, baseInput }
+  }
+
+  it('returns null for the policy-memory none selection instead of using the first failure', () => {
+    const { proposer, baseInput } = fixture()
+
+    const next = proposer.propose({
+      ...baseInput,
+      failureCaseId: 'none',
+      seenDirections: new Set(),
+    })
+
+    // null means no candidate at all, so the first failure's `widget` is never added.
+    expect(next).toBeNull()
+  })
+
+  it('returns null for an unknown failure id instead of using the first failure', () => {
+    const { proposer, baseInput } = fixture()
+
+    const next = proposer.propose({
+      ...baseInput,
+      failureCaseId: 'tr-does-not-exist',
+      seenDirections: new Set(),
+    })
+
+    expect(next).toBeNull()
+  })
+
+  it('still proposes from the matching failure when its id is selected', () => {
+    const { baseline, retired, proposer, baseInput } = fixture()
+
+    const next = proposer.propose({
+      ...baseInput,
+      failureCaseId: retired.id,
+      seenDirections: new Set(),
+    })
+
+    expect(next).not.toBeNull()
+    expect(addedTokens(next!.positiveTokens ?? [], baseline.positiveTokens ?? [])).toEqual(['widget'])
+    expect(next!.clauseLocalPositive).toBe(baseline.clauseLocalPositive)
+  })
+})
+
 describe('proposer remaining-token fallback', () => {
   it('tries remaining positive tokens after a seen direction on deliver miss', () => {
     const baseline = defaultBaselineStrategy()

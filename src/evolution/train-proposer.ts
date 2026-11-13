@@ -27,8 +27,10 @@ export class TrainFailureProposer implements CandidateProposer {
   }): DeliverGateStrategyV1 | null {
     const { parentStrategy, trainFailures, memory, failureCaseId, seenDirections } = input
     const useMem = input.useMemory ?? this.useMemory
+    // Only an exact match may become the target. An exhausted/unknown selection
+    // (for example the policy-memory `'none'` signal) must not silently fall
+    // back to the first train failure.
     const failure = trainFailures.find(item => item.id === failureCaseId)
-      ?? trainFailures[0]
     if (!failure) return null
     const predicted = evaluateDeliverGateStrategy(parentStrategy, {
       speculative: failure.speculative,
