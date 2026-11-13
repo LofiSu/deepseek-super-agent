@@ -366,14 +366,21 @@ async function runEvolutionLocked(
       candidateId,
     })
 
-    experiment = reserveSearchEvalUnits(
-      input.home,
-      EVAL_CALLS_PER_SEARCH_CANDIDATE,
-      'candidate_child_eval',
-      state => {
-        state.totalCandidatesGenerated += 1
-      },
-    )
+    try {
+      experiment = reserveSearchEvalUnits(
+        input.home,
+        EVAL_CALLS_PER_SEARCH_CANDIDATE,
+        'candidate_child_eval',
+        state => {
+          state.totalCandidatesGenerated += 1
+        },
+      )
+    } catch (error) {
+      // The search pool ran dry: stop proposing candidates for this run and fall
+      // through to write the run report for candidates already evaluated.
+      if (error instanceof Error && error.message.startsWith('budget exhausted:')) break
+      throw error
+    }
 
     const outcome = await evaluateCandidateSearch(
       input.home,
