@@ -7,6 +7,7 @@ import { freezeCandidate, loadExperiment } from '../src/evolution/experiment.ts'
 import { runFinalTestOnce } from '../src/evolution/finalize.ts'
 import { approvePromotion, rollbackPromotion } from '../src/evolution/promotion.ts'
 import { parseDeliverGateStrategy } from '../src/evolution/strategy-gate.ts'
+import { compileBoundedPattern, tokensToBoundedPattern } from '../src/evolution/safe-pattern.ts'
 import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
 import { resolveDeliverGate } from '../src/speculate/resolve-gate.ts'
 import { fileURLToPath } from 'node:url'
@@ -58,6 +59,34 @@ describe('evolution security and ABC final test', () => {
       negativePattern: '\\b(?:no)\\b',
       clauseLocalPositive: true,
     })).toThrow()
+  })
+
+  it('rejects nested brace quantifiers in legacy patterns', () => {
+    const nestedBrace = '\\b(?:(a{1,}){1,}$)\\b'
+    expect(() => compileBoundedPattern(nestedBrace)).toThrow()
+    expect(() => compileBoundedPattern('\\b(?:a{1,})\\b')).toThrow()
+    expect(() => compileBoundedPattern('\\b(?:(a{1,}){1,})\\b')).toThrow()
+    expect(() => compileBoundedPattern('\\b(?:a{2,4})\\b')).toThrow()
+
+    expect(() => parseDeliverGateStrategy({
+      schemaVersion: 1,
+      domain: 'deliver-gate-v1',
+      positivePattern: nestedBrace,
+      negativePattern: '\\b(?:no)\\b',
+      clauseLocalPositive: true,
+    })).toThrow()
+
+    const legitimate = tokensToBoundedPattern(['widget', 'relay'])
+    expect(compileBoundedPattern(legitimate)).toBeInstanceOf(RegExp)
+    expect(compileBoundedPattern(tokensToBoundedPattern(["don't", 'foo-bar', 'two words'])))
+      .toBeInstanceOf(RegExp)
+    expect(() => parseDeliverGateStrategy({
+      schemaVersion: 2,
+      domain: 'deliver-gate-v1',
+      positiveTokens: ['widget', 'relay'],
+      negativeTokens: ['no'],
+      clauseLocalPositive: true,
+    })).not.toThrow()
   })
 
   it('rejects second final test and search after finalize', async () => {
