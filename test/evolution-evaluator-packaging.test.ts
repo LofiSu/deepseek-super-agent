@@ -11,7 +11,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // The evaluator child now resolves source vs dist artifacts, which changes its
 // bytes and therefore the digest. The other three hashed files are unchanged;
 // see the report for the old-to-new digest check.
-const SOURCE_EVALUATOR_DIGEST = '180ab65e579752c5e784c1b3866e36a8147b21dd5647ebc6031267fc75c28500'
+const SOURCE_EVALUATOR_DIGEST = 'ba63149be01c117234aa661aa9447e295032732c037c5769bec69342c1819012'
 
 interface EvaluatorArtifacts {
   repoRoot: string
