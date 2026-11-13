@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { allowlistedEnv } from '../env/sanitize.ts'
 import { resolveEvaluatorArtifacts } from './evaluator-identity.ts'
 import type { DeliverGateStrategyV1, EvolutionEvalCase, SplitScore } from './types.ts'
 import { DEFAULT_EVOLUTION_BUDGET, type EvolutionBudget } from './types.ts'
@@ -47,6 +48,28 @@ export function writeJsonAtomic(filePath: string, value: unknown): void {
 }
 
 /**
+ * Environment for the trusted evaluator child.
+ *
+ * The child is offline and reads only the files named on argv, so it needs a
+ * minimal environment rather than the parent's. Start from the shared allowlist
+ * (`allowlistedEnv` drops secret-named entries even when listed) and overlay the
+ * eval directory as HOME/TMPDIR. `NODE_OPTIONS`, `NODE_PATH`,
+ * `NODE_EXTRA_REQUIRE_EXTENSIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*`,
+ * and provider credentials are therefore absent rather than blank.
+ */
+export function buildEvaluatorChildEnv(
+  evalDir: string,
+  parentEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...allowlistedEnv(parentEnv),
+    NODE_NO_WARNINGS: '1',
+    HOME: evalDir,
+    TMPDIR: evalDir,
+  }
+}
+
+/**
  * Run scoring in a separate OS process with temp files only (strategy JSON v1 — no
  * untrusted code execution in the child).
  */
@@ -70,15 +93,9 @@ export async function isolatedEvaluateSplit(
     const child = spawn(process.execPath, childArgs, {
       cwd: repoRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        NODE_NO_WARNINGS: '1',
-        // Do not pass secrets into the child; offline evaluator only.
-        DS_AGENT_API_KEY: '',
-        DS_AGENT_API_BASE: '',
-        HOME: evalDir,
-        TMPDIR: evalDir,
-      },
+      // Do not pass secrets or Node injection variables into the child; the
+      // offline evaluator only needs the allowlisted basics plus evalDir.
+      env: buildEvaluatorChildEnv(evalDir),
     })
     let stdout = ''
     let stderr = ''
