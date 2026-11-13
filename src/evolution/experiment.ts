@@ -183,6 +183,9 @@ export function freezeCandidate(input: {
   if (!candidate || candidate.status !== 'evaluated') {
     throw new Error('freeze requires evaluated candidate from persisted run')
   }
+  if (candidate.reward !== 'success') {
+    throw new Error(`train gate not satisfied; freeze refused (reward=${candidate.reward})`)
+  }
   const artifact = loadArtifactRecord(input.home, input.candidateId)
   if (artifact.strategyDigest !== candidate.strategyDigest) {
     throw new Error('candidate strategy digest mismatch vs archive')

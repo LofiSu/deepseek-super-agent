@@ -69,6 +69,9 @@ export function approvePromotion(input: {
   if (candidate.status !== 'evaluated') {
     throw new Error(`candidate ${input.candidateId} status=${candidate.status}; cannot promote`)
   }
+  if (candidate.reward !== 'success') {
+    throw new Error(`train gate not satisfied; promotion refused (reward=${candidate.reward})`)
+  }
 
   const resolvedArtifact = resolveInside(input.home, input.artifactPath)
   const onDisk = JSON.parse(fs.readFileSync(resolvedArtifact, 'utf8')) as EvolutionCandidateRecord

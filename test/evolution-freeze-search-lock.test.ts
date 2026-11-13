@@ -51,7 +51,9 @@ function searchOnce(home: string, token: string, round = 1) {
 describe('search and freeze are mutually exclusive', () => {
   it('re-checks lifecycle after acquiring the search lock (TOCTOU)', async () => {
     const home = tempHome()
-    const first = await searchOnce(home, 'alphaunique')
+    // `checkout` fixes the baseline's only train miss (tr-007), so the candidate
+    // is admitted by the train gate before the lock checks run.
+    const first = await searchOnce(home, 'checkout')
     const winner = first.candidates.find(candidate => candidate.status === 'evaluated')
     expect(winner).toBeDefined()
     expect(loadExperiment(home)!.phase).toBe('search')
@@ -97,7 +99,7 @@ describe('search and freeze are mutually exclusive', () => {
 
   it('refuses to freeze while a search run holds the lock', async () => {
     const home = tempHome()
-    const first = await searchOnce(home, 'alphaunique')
+    const first = await searchOnce(home, 'checkout')
     const winner = first.candidates.find(candidate => candidate.status === 'evaluated')
     expect(winner).toBeDefined()
 

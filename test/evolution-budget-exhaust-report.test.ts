@@ -40,7 +40,9 @@ describe('search budget exhaustion still persists a run report', () => {
       budget: { maxCandidates: 4, maxEvals: 6, evalTimeoutMs: 20_000, reserveEvals: 2 },
       stopOnFirstSuccess: false,
       selector: 'simplified-greedy',
-      injectCandidates: [withToken('alphaunique'), withToken('betaunique')],
+      // `checkout` fixes the baseline's only train miss (tr-007) so the first
+      // candidate passes the train gate; the second is never evaluated.
+      injectCandidates: [withToken('checkout'), withToken('betaunique')],
     })
 
     const evaluated = report.candidates.filter(item => item.status === 'evaluated')
