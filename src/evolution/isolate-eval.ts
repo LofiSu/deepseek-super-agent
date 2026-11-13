@@ -16,6 +16,27 @@ export interface IsolatedEvalResult {
   timedOut?: boolean
 }
 
+export interface EvalChildPaths {
+  strategyPath: string
+  splitPath: string
+  splitName: string
+}
+
+/**
+ * Arguments after `process.execPath` for the evaluator child.
+ *
+ * Load tsx with `--import` so the evaluator is a direct child of this process.
+ * The tsx CLI (`node node_modules/tsx/dist/cli.mjs`) spawns a second Node
+ * process for the script, so killing the CLI on timeout leaves the evaluator
+ * grandchild running. `--import tsx` keeps the script in the spawned process,
+ * and SIGKILL then ends it.
+ */
+export function evalChildArgs(paths: EvalChildPaths, hasTsxCli = fs.existsSync(tsxCli)): string[] {
+  return hasTsxCli
+    ? ['--import', 'tsx', childScript, paths.strategyPath, paths.splitPath, paths.splitName]
+    : [childScript, paths.strategyPath, paths.splitPath, paths.splitName]
+}
+
 export function writeJsonAtomic(filePath: string, value: unknown): void {
   const dir = path.dirname(filePath)
   fs.mkdirSync(dir, { recursive: true })
@@ -43,9 +64,7 @@ export async function isolatedEvaluateSplit(
   writeJsonAtomic(splitPath, { cases })
 
   return new Promise(resolve => {
-    const childArgs = fs.existsSync(tsxCli)
-      ? [tsxCli, childScript, strategyPath, splitPath, splitName]
-      : [childScript, strategyPath, splitPath, splitName]
+    const childArgs = evalChildArgs({ strategyPath, splitPath, splitName })
     const child = spawn(process.execPath, childArgs, {
       cwd: repoRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
