@@ -77,7 +77,10 @@ describe('experiment persistence (E2E counters)', () => {
       budget: tight,
     })
     const mid = loadExperiment(home)!
-    expect(mid.totalCandidatesGenerated).toBe(1)
+    // A single run may now emit more than one distinct direction (remaining-token
+    // fallback). The experiment cap still forbids exceeding maxCandidates.
+    expect(mid.totalCandidatesGenerated).toBeGreaterThanOrEqual(1)
+    expect(mid.totalCandidatesGenerated).toBeLessThanOrEqual(2)
 
     await runEvolution({
       home,
