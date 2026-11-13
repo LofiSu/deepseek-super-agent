@@ -10,11 +10,11 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { RUNTIME_ASSETS } from './copy-assets.ts'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const distEntry = path.join(root, 'dist', 'cli', 'main.js')
-const distRules = path.join(root, 'dist', 'watchdog', 'rules.json')
 const failures: string[] = []
 let passed = 0
 
@@ -64,12 +64,40 @@ check('pnpm build exits 0', build.status === 0, build.output)
 if (build.status !== 0) finish()
 
 check('dist/cli/main.js exists', existsSync(distEntry), `missing ${distEntry}`)
-check('dist/watchdog/rules.json exists', existsSync(distRules), `missing ${distRules}`)
+for (const asset of RUNTIME_ASSETS) {
+  const distAsset = path.join(root, 'dist', asset)
+  const srcAsset = path.join(root, 'src', asset)
+  check(`dist/${asset} exists`, existsSync(distAsset), `missing ${distAsset}`)
+  check(
+    `dist/${asset} matches src asset`,
+    existsSync(distAsset) && readFileSync(distAsset, 'utf8') === readFileSync(srcAsset, 'utf8'),
+    `compare ${distAsset}`,
+  )
+}
+
+// The shipped probe resolves its fixtures from beside the compiled module. This
+// is the production path that the source-only test/fixtures tree cannot serve.
+const probeModule = pathToFileURL(path.join(root, 'dist', 'env', 'sandbox-probe.js')).href
+const probeRuntime = run('node', ['--input-type=module', '-e', [
+  `import { existsSync } from 'node:fs'`,
+  `import { sandboxProbeFixturePaths } from ${JSON.stringify(probeModule)}`,
+  `const paths = sandboxProbeFixturePaths()`,
+  `console.log(JSON.stringify({ loopback: existsSync(paths.loopback), externalPid: existsSync(paths.externalPid), loopbackPath: paths.loopback }))`,
+].join(';')])
+let probeLayout: { loopback?: boolean; externalPid?: boolean; loopbackPath?: string } = {}
+try {
+  probeLayout = JSON.parse(probeRuntime.output) as typeof probeLayout
+} catch {
+  // Reported by the check below.
+}
+check('compiled sandbox probe loads', probeRuntime.status === 0, probeRuntime.output)
 check(
-  'dist/watchdog/rules.json matches src asset',
-  existsSync(distRules)
-    && readFileSync(distRules, 'utf8') === readFileSync(path.join(root, 'src', 'watchdog', 'rules.json'), 'utf8'),
-  `compare ${distRules}`,
+  'compiled sandbox probe resolves fixtures inside dist',
+  probeLayout.loopback === true
+    && probeLayout.externalPid === true
+    && typeof probeLayout.loopbackPath === 'string'
+    && probeLayout.loopbackPath.startsWith(path.join(root, 'dist', 'env', 'fixtures') + path.sep),
+  probeRuntime.output,
 )
 
 const binTarget = pkg.bin?.['ds-agent']
@@ -102,7 +130,9 @@ console.log('package smoke: checking tarball contents')
 const pack = run('npm', ['pack', '--dry-run'])
 check('npm pack --dry-run exits 0', pack.status === 0, pack.output)
 check('tarball file list contains dist/cli/main.js', pack.output.includes('dist/cli/main.js'), pack.output)
-check('tarball file list contains dist/watchdog/rules.json', pack.output.includes('dist/watchdog/rules.json'), pack.output)
+for (const asset of RUNTIME_ASSETS) {
+  check(`tarball file list contains dist/${asset}`, pack.output.includes(`dist/${asset}`), pack.output)
+}
 check('tarball file list contains package.json (bin entry)', pack.output.includes('package.json'), pack.output)
 check(
   'bin target is in the files whitelist',

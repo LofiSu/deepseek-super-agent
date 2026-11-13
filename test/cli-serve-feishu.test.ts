@@ -105,6 +105,10 @@ class FakeFeishuSource implements FeishuLoopSource {
     return this.cursor
   }
 
+  restoreCursor(cursorMs: number): void {
+    this.cursor = cursorMs
+  }
+
   async pull(): Promise<readonly Trigger[]> {
     this.pulls += 1
     if (this.pulls <= this.failFirst) throw new Error(`pull failed #${this.pulls}`)

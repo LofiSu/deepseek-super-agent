@@ -17,6 +17,12 @@ import {
   type ImessageApi,
 } from '../channels/imessage.ts'
 import { Outbox, type OutboundAdapter } from '../channels/outbox-adapter.ts'
+import {
+  ingestResidentTrigger,
+  ResidentIngressAbortedError,
+  ResidentIngressRejectedError,
+  residentIngressLimitFromEnv,
+} from './channel-resident-gate.ts'
 import type { Runtime } from '../runtime.ts'
 import type { Trigger } from '../shared/types.ts'
 
@@ -131,6 +137,7 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
   const allowAny = options.allowAny === true
   const intervalMs = Math.max(1, options.intervalMs ?? DEFAULT_IMESSAGE_INTERVAL_MS)
   const maxBackoffMs = Math.max(intervalMs, options.maxBackoffMs ?? 30_000)
+  const ingressLimit = residentIngressLimitFromEnv(process.env)
   const log = (line: string): void => runtime.log.info(line)
 
   const outbox = new Outbox(
@@ -162,18 +169,38 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
         }
         const from = cursor
         const pulled = await source.pull(from)
-        for (const trigger of coalesceTriggers(pulled.triggers)) {
+        let cursorBlockedByIngress = false
+        // Drop ids this runtime already persisted before coalescing. On a
+        // replay after a crash between ingest and the cursor write, the batch
+        // still contains an already-ingested message; folding a *new* message
+        // into that id would make `Runtime.ingest` treat the merged text as a
+        // duplicate and silently keep the old text. Filtering first means the
+        // new message keeps its own id. This mirrors `Runtime.duplicate`.
+        const fresh = pulled.triggers.filter(
+          trigger => runtime.store.getDoc<Trigger>('trigger', trigger.id) === undefined,
+        )
+        for (const trigger of coalesceTriggers(fresh)) {
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[imessage] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
-            // The opt-in model Slow Path lives behind ingestAsync; rules mode
-            // stays exactly the sync path, so this is a no-op by default.
-            await runtime.ingestAsync(trigger)
+            await ingestResidentTrigger(runtime, trigger, {
+              limit: ingressLimit,
+              signal: options.signal,
+              log,
+              channel: 'imessage',
+            })
           } catch (error) {
             log(`[imessage] ingest failed ${messageOf(error)}`)
+            if (
+              error instanceof ResidentIngressRejectedError
+              || error instanceof ResidentIngressAbortedError
+            ) {
+              cursorBlockedByIngress = true
+              break
+            }
           }
         }
-        if (pulled.lastRowId > from) {
+        if (pulled.lastRowId > from && !cursorBlockedByIngress) {
           cursor = pulled.lastRowId
           runtime.store.putDoc('imessage_cursor', 'cursor', { rowId: cursor })
         }
