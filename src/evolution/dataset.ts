@@ -38,8 +38,7 @@ function readManifest(datasetRoot: string): EvolutionSplitManifest {
   return manifest
 }
 
-function readSplit(root: string, rel: string): EvolutionEvalCase[] {
-  const file = path.join(root, rel)
+function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
   return parsed.cases
@@ -52,6 +51,47 @@ function canonicalSplitPath(datasetRoot: string, rel: string): string {
     return fs.realpathSync(absolute)
   } catch {
     return absolute
+  }
+}
+
+type SplitName = 'train' | 'validation' | 'finaltest'
+
+interface ConfinedSplits {
+  train: string
+  validation: string
+  finaltest: string
+}
+
+/**
+ * Search-phase isolation: every split path in the manifest must stay inside the
+ * real dataset root. Resolves with `realpathSync` when the target exists, so
+ * `..` escapes, absolute paths outside the root, and symlinks pointing outside
+ * the root are all rejected before any split file is opened. A missing in-root
+ * path is resolved lexically and left to fail at the existing read site.
+ */
+function resolveSplitInsideRoot(root: string, rel: string, split: SplitName): string {
+  const absolute = path.resolve(root, rel)
+  let resolved: string
+  try {
+    resolved = fs.realpathSync(absolute)
+  } catch {
+    resolved = absolute
+  }
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(
+      split === 'finaltest'
+        ? `finaltest split escapes the dataset root: ${split}`
+        : `search split escapes the dataset root: ${split}`,
+    )
+  }
+  return resolved
+}
+
+function confineSplits(root: string, manifest: EvolutionSplitManifest): ConfinedSplits {
+  return {
+    train: resolveSplitInsideRoot(root, manifest.splits.train, 'train'),
+    validation: resolveSplitInsideRoot(root, manifest.splits.validation, 'validation'),
+    finaltest: resolveSplitInsideRoot(root, manifest.splits.finaltest, 'finaltest'),
   }
 }
 
@@ -89,12 +129,16 @@ function assertSearchSplitsDoNotAliasFinaltest(
   }
 }
 
-function datasetDigestFromManifest(datasetRoot: string, manifest: EvolutionSplitManifest): string {
-  const manifestPath = path.join(datasetRoot, 'manifest.json')
+function datasetDigestFromManifest(
+  root: string,
+  manifest: EvolutionSplitManifest,
+  splits: ConfinedSplits,
+): string {
+  const manifestPath = path.join(root, 'manifest.json')
   const parts = [
     sha256File(manifestPath),
-    sha256File(path.join(datasetRoot, manifest.splits.train)),
-    sha256File(path.join(datasetRoot, manifest.splits.validation)),
+    sha256File(splits.train),
+    sha256File(splits.validation),
     manifest.splitDigests.finaltest,
   ]
   return stableJsonDigest(parts)
@@ -102,13 +146,15 @@ function datasetDigestFromManifest(datasetRoot: string, manifest: EvolutionSplit
 
 /** Search phase: never reads finaltest.json. */
 export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset {
-  const manifest = readManifest(datasetRoot)
-  assertSearchSplitsDoNotAliasFinaltest(datasetRoot, manifest)
-  const train = readSplit(datasetRoot, manifest.splits.train)
-  const validation = readSplit(datasetRoot, manifest.splits.validation)
-  const datasetDigest = datasetDigestFromManifest(datasetRoot, manifest)
+  const root = fs.realpathSync(path.resolve(datasetRoot))
+  const manifest = readManifest(root)
+  const splits = confineSplits(root, manifest)
+  assertSearchSplitsDoNotAliasFinaltest(root, manifest)
+  const train = readSplit(splits.train, manifest.splits.train)
+  const validation = readSplit(splits.validation, manifest.splits.validation)
+  const datasetDigest = datasetDigestFromManifest(root, manifest, splits)
   return {
-    root: datasetRoot,
+    root,
     manifest,
     train,
     validation,
@@ -119,13 +165,14 @@ export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset 
 
 /** Finalization only: loads sealed split C after claim. */
 export function loadFinaltestSplit(datasetRoot: string): EvolutionEvalCase[] {
-  const manifest = readManifest(datasetRoot)
-  const file = path.join(datasetRoot, manifest.splits.finaltest)
+  const root = fs.realpathSync(path.resolve(datasetRoot))
+  const manifest = readManifest(root)
+  const file = resolveSplitInsideRoot(root, manifest.splits.finaltest, 'finaltest')
   const digest = sha256File(file)
   if (digest !== manifest.splitDigests.finaltest) {
     throw new Error('finaltest file digest mismatch vs manifest')
   }
-  return readSplit(datasetRoot, manifest.splits.finaltest)
+  return readSplit(file, manifest.splits.finaltest)
 }
 
 export function loadEvolutionDataset(datasetRoot: string): LoadedEvolutionDataset {

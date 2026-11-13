@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { loadEvolutionDataset, loadSearchDatasetOnly } from '../src/evolution/dataset.ts'
 
 const CANARY = 'SECRET_HOLDOUT_TOKEN'
+const OUTSIDE_CANARY = 'SECRET_OUTSIDE_TOKEN'
 
 function writeSplit(file: string, id: string, text: string): void {
   fs.writeFileSync(
@@ -61,6 +62,40 @@ function captureReads(): { reads: string[]; restore: () => void } {
   }
 }
 
+/**
+ * Dataset root plus a sibling `outside/` directory holding a canary split, so
+ * a manifest can point a split out of the root via `..` or a symlink.
+ */
+function makeEscapingDataset(splits: { train: string; validation: string }): TempDataset & {
+  outsideFile: string
+} {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-split-escape-'))
+  const root = path.join(parent, 'dataset')
+  const outside = path.join(parent, 'outside')
+  fs.mkdirSync(root)
+  fs.mkdirSync(outside)
+  writeSplit(path.join(root, 'train.json'), 't1', 'train case does not leak')
+  writeSplit(path.join(root, 'validation.json'), 'v1', 'validation case does not leak')
+  writeSplit(path.join(root, 'finaltest.json'), 'f1', `held-out case ${CANARY}`)
+  const outsideFile = path.join(outside, 'leaked.json')
+  writeSplit(outsideFile, 'x1', `escaped case ${OUTSIDE_CANARY}`)
+  fs.writeFileSync(
+    path.join(root, 'manifest.json'),
+    JSON.stringify({
+      schemaVersion: 2,
+      domain: 'deliver-gate-v1',
+      splits: {
+        train: splits.train,
+        validation: splits.validation,
+        finaltest: 'finaltest.json',
+      },
+      splitDigests: { train: '', validation: '', finaltest: 'unused-by-search-phase' },
+      seed: 20260308,
+    }),
+  )
+  return { root, outsideFile, cleanup: () => fs.rmSync(parent, { recursive: true, force: true }) }
+}
+
 /** Rejected loads must stop after the manifest — no split file is opened. */
 function expectRejectedBeforeSplitRead(loader: () => unknown): void {
   const { reads, restore } = captureReads()
@@ -72,6 +107,19 @@ function expectRejectedBeforeSplitRead(loader: () => unknown): void {
   expect(reads.map(p => path.basename(String(p)))).toEqual(['manifest.json'])
 }
 
+/** An escaped split is rejected after the manifest and before the outside file is opened. */
+function expectRootEscapeRejected(loader: () => unknown, escapedFile: string): void {
+  const { reads, restore } = captureReads()
+  try {
+    expect(loader).toThrow(/escapes the dataset root/)
+  } finally {
+    restore()
+  }
+  const readPaths = reads.map(p => path.resolve(String(p)))
+  expect(readPaths).not.toContain(path.resolve(escapedFile))
+  expect(reads.map(p => path.basename(String(p)))).toEqual(['manifest.json'])
+}
+
 describe('regression: search splits cannot alias finaltest (PR168)', () => {
   const cleanups: Array<() => void> = []
   afterEach(() => {
@@ -80,6 +128,12 @@ describe('regression: search splits cannot alias finaltest (PR168)', () => {
 
   function dataset(splits: { train: string; validation: string }): TempDataset {
     const temp = makeDataset(splits)
+    cleanups.push(temp.cleanup)
+    return temp
+  }
+
+  function escapingDataset(splits: { train: string; validation: string }) {
+    const temp = makeEscapingDataset(splits)
     cleanups.push(temp.cleanup)
     return temp
   }
@@ -124,12 +178,47 @@ describe('regression: search splits cannot alias finaltest (PR168)', () => {
     expectRejectedBeforeSplitRead(() => loadEvolutionDataset(root))
   })
 
+  it('rejects a train split that escapes the dataset root via ..', () => {
+    const { root, outsideFile } = escapingDataset({
+      train: '../outside/leaked.json',
+      validation: 'validation.json',
+    })
+    expectRootEscapeRejected(() => loadSearchDatasetOnly(root), outsideFile)
+  })
+
+  it('rejects a validation split that escapes the dataset root via ..', () => {
+    const { root, outsideFile } = escapingDataset({
+      train: 'train.json',
+      validation: '../outside/leaked.json',
+    })
+    expectRootEscapeRejected(() => loadSearchDatasetOnly(root), outsideFile)
+  })
+
+  it('rejects an in-root split symlink whose target is outside the dataset root', () => {
+    const { root, outsideFile } = escapingDataset({
+      train: 'train-link.json',
+      validation: 'validation.json',
+    })
+    fs.symlinkSync(outsideFile, path.join(root, 'train-link.json'))
+    expectRootEscapeRejected(() => loadSearchDatasetOnly(root), outsideFile)
+  })
+
   it('still loads an honest dataset with three distinct files', () => {
-    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    const { root } = escapingDataset({ train: 'train.json', validation: 'validation.json' })
     const data = loadSearchDatasetOnly(root)
     expect(data.train.map(c => c.id)).toEqual(['t1'])
     expect(data.validation.map(c => c.id)).toEqual(['v1'])
     const searchText = [...data.train, ...data.validation].map(c => c.report.text).join('\n')
     expect(searchText).not.toContain(CANARY)
+    expect(searchText).not.toContain(OUTSIDE_CANARY)
+  })
+
+  it('still loads an honest in-root split from a subdirectory', () => {
+    const { root } = dataset({ train: 'splits/train.json', validation: 'validation.json' })
+    fs.mkdirSync(path.join(root, 'splits'))
+    writeSplit(path.join(root, 'splits', 'train.json'), 't2', 'nested train case does not leak')
+    const data = loadSearchDatasetOnly(root)
+    expect(data.train.map(c => c.id)).toEqual(['t2'])
+    expect(data.validation.map(c => c.id)).toEqual(['v1'])
   })
 })
