@@ -1,4 +1,5 @@
 import { renderOutbound } from '../channels/norms.ts'
+import { OUTBOX_RETRY_BASE_KEY, PROACTIVE_RETRY_BASE_MS } from '../channels/outbox-adapter.ts'
 import { maySurface } from '../speculate/gate.ts'
 import type { Ticket } from '../shared/types.ts'
 import type { Host } from './host.ts'
@@ -7,6 +8,13 @@ export class Replies {
   constructor(private readonly host: Host) {}
 
   acknowledge(ticket: Ticket, threadKey?: string): void {
+    // A proactive idle wake is already a message. A canned "Acknowledged"
+    // before the Router decides would be exactly the noise this feature must
+    // not send, so the Router's one turn is the only possible output.
+    if (ticket.channels.some(channel => channel.address?.proactive === '1')) {
+      this.host.log(`[reply] ack-suppressed ticketId=${ticket.id} channel=proactive reason=conversational`)
+      return
+    }
     // iMessage is a live conversation: a canned English acknowledgement before
     // the Router has even decided whether there is work is noise, and it cannot
     // be retracted when the Router vetoes (the sender sees "Working on it."
@@ -30,7 +38,14 @@ export class Replies {
     const ref = channelFor(ticket, threadKey)
     const channel = ref?.source ?? 'cli'
     const thread = ref?.thread ?? 'local'
-    const target = ref?.address ?? {}
+    // A proactive idle message is not urgent: a transient send failure must
+    // wait minutes, not seconds. This reserved target key is consumed by the
+    // Outbox and ignored by the channel adapters.
+    const proactive = ticket.channels.some(item => item.address?.proactive === '1')
+    const target: Record<string, string> = {
+      ...(ref?.address ?? {}),
+      ...(proactive ? { [OUTBOX_RETRY_BASE_KEY]: String(PROACTIVE_RETRY_BASE_MS) } : {}),
+    }
     const rendered = renderOutbound(channel, text, ticket.id)
     // A direct chat reads like texting: one long block feels like a letter.
     // Split at paragraph/sentence boundaries into at most three bubbles.

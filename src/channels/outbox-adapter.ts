@@ -26,6 +26,20 @@ export interface OutboxResult {
 }
 
 const MAX_ATTEMPTS = 5
+/**
+ * Proactive rows carry a reserved target key so a transient failure waits
+ * minutes, not seconds. The key is ignored by every channel adapter; it only
+ * changes this dispatcher's backoff.
+ */
+export const OUTBOX_RETRY_BASE_KEY = '__ds_retry_base_ms'
+export const PROACTIVE_RETRY_BASE_MS = 10 * 60_000
+const DEFAULT_RETRY_BASE_MS = 1_000
+const DEFAULT_RETRY_CAP_MS = 60_000
+
+function retryBaseMs(row: OutboxRow): number {
+  const raw = Number(row.target[OUTBOX_RETRY_BASE_KEY])
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_RETRY_BASE_MS
+}
 
 export interface OutboxOptions {
   log?: (line: string) => void
@@ -120,7 +134,12 @@ export class Outbox {
           failed += 1
           this.log(`[outbox] failed outboxId=${row.id} channel=${row.channel} attempts=${attempts} error=${message}`)
         } else {
-          const delay = Math.min(60_000, 1_000 * 2 ** attempts)
+          const base = retryBaseMs(row)
+          // Standard rows keep the historical 1s..60s curve. A proactive row
+          // starts at 10 minutes; its cap scales with the base so a restart
+          // cannot turn one failed contact into a tight retry burst.
+          const cap = base > DEFAULT_RETRY_BASE_MS ? base * 8 : DEFAULT_RETRY_CAP_MS
+          const delay = Math.min(cap, base * 2 ** attempts)
           const nextAttemptAt = new Date(Date.now() + delay).toISOString()
           this.store.markOutboxRetry(row.id, message, nextAttemptAt, attempts)
           this.log(

@@ -371,9 +371,10 @@ async function serve(home: string): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
   try {
-    // Only the long-lived serving process ticks owner routines; one-shot
-    // commands (approve, retry, chat, resume, emit) must not fire them.
-    runtime.start({ assessPending: canAssess, routines: true })
+    // Only the long-lived serving process ticks owner routines and the
+    // owner-gated idle wake; one-shot commands (approve, retry, chat, resume,
+    // emit) must not fire them.
+    runtime.start({ assessPending: canAssess, routines: true, proactive: true })
   } catch (error) {
     channels?.abort()
     channels?.close()
