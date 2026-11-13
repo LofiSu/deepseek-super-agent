@@ -23,4 +23,8 @@ export function assertValidEvolutionBudget(budget: Partial<EvolutionBudget>, lab
   if (evalTimeoutMs !== undefined && evalTimeoutMs < 1) {
     throw new Error(`${label}: evalTimeoutMs must be >= 1`)
   }
+  const maxOutputBytes = budget.maxOutputBytes
+  if (maxOutputBytes !== undefined && maxOutputBytes < 1) {
+    throw new Error(`${label}: maxOutputBytes must be >= 1`)
+  }
 }

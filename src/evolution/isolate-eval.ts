@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { resolveEvaluatorArtifacts } from './evaluator-identity.ts'
 import type { DeliverGateStrategyV1, EvolutionEvalCase, SplitScore } from './types.ts'
-import type { EvolutionBudget } from './types.ts'
+import { DEFAULT_EVOLUTION_BUDGET, type EvolutionBudget } from './types.ts'
 
 // Resolved for the current layout: repo scripts/ in a checkout, dist/scripts/
 // in a published package. The published child runs with plain node.
@@ -55,8 +55,9 @@ export async function isolatedEvaluateSplit(
   strategy: DeliverGateStrategyV1,
   splitName: 'train' | 'validation' | 'finaltest',
   cases: EvolutionEvalCase[],
-  budget: Pick<EvolutionBudget, 'evalTimeoutMs'>,
+  budget: Pick<EvolutionBudget, 'evalTimeoutMs' | 'maxOutputBytes'>,
 ): Promise<IsolatedEvalResult> {
+  const maxOutputBytes = budget.maxOutputBytes ?? DEFAULT_EVOLUTION_BUDGET.maxOutputBytes ?? 65_536
   const evalDir = path.join(workDir, 'eval', `${splitName}-${Date.now()}`)
   fs.mkdirSync(evalDir, { recursive: true })
   const strategyPath = path.join(evalDir, 'strategy.json')
@@ -81,33 +82,50 @@ export async function isolatedEvaluateSplit(
     })
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', chunk => { stdout += String(chunk) })
-    child.stderr.on('data', chunk => { stderr += String(chunk) })
-    const timer = setTimeout(() => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const settle = (result: IsolatedEvalResult): void => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      resolve(result)
+    }
+    // Cap each stream independently: a noisy or replaced child must not grow
+    // parent memory without bound, and truncated output is never a score.
+    const append = (stream: 'stdout' | 'stderr', current: string, chunk: unknown): string => {
+      if (settled) return current
+      const next = current + String(chunk)
+      if (next.length <= maxOutputBytes) return next
       child.kill('SIGKILL')
-      resolve({ ok: false, timedOut: true, error: 'eval_timeout' })
+      settle({ ok: false, error: `eval_output_limit: ${stream} exceeded ${maxOutputBytes} bytes` })
+      return next.slice(0, maxOutputBytes)
+    }
+    child.stdout.on('data', chunk => { stdout = append('stdout', stdout, chunk) })
+    child.stderr.on('data', chunk => { stderr = append('stderr', stderr, chunk) })
+    timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      settle({ ok: false, timedOut: true, error: 'eval_timeout' })
     }, budget.evalTimeoutMs)
     child.on('close', code => {
-      clearTimeout(timer)
+      if (settled) return
       const line = stdout.trim().split('\n').filter(Boolean).at(-1) ?? ''
       try {
         const parsed = JSON.parse(line) as { ok: boolean; score?: SplitScore; error?: string }
         if (!parsed.ok) {
-          resolve({ ok: false, error: parsed.error ?? `child_exit_${code} ${stderr.slice(0, 200)}` })
+          settle({ ok: false, error: parsed.error ?? `child_exit_${code} ${stderr.slice(0, 200)}` })
           return
         }
         if (!parsed.score || !Number.isFinite(parsed.score.accuracy)) {
-          resolve({ ok: false, error: 'malformed_score' })
+          settle({ ok: false, error: 'malformed_score' })
           return
         }
-        resolve({ ok: true, score: parsed.score })
+        settle({ ok: true, score: parsed.score })
       } catch {
-        resolve({ ok: false, error: `malformed_child_output code=${code}` })
+        settle({ ok: false, error: `malformed_child_output code=${code}` })
       }
     })
     child.on('error', err => {
-      clearTimeout(timer)
-      resolve({ ok: false, error: err.message })
+      settle({ ok: false, error: err.message })
     })
   })
 }
