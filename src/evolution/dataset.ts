@@ -66,8 +66,9 @@ interface ConfinedSplits {
  * Search-phase isolation: every split path in the manifest must stay inside the
  * real dataset root. Resolves with `realpathSync` when the target exists, so
  * `..` escapes, absolute paths outside the root, and symlinks pointing outside
- * the root are all rejected before any split file is opened. A missing in-root
- * path is resolved lexically and left to fail at the existing read site.
+ * the root are all rejected before any split file is opened. A missing train or
+ * validation path is resolved lexically and left to fail at the read site; a
+ * missing finaltest path fails closed during search (see the content check).
  */
 function resolveSplitInsideRoot(root: string, rel: string, split: SplitName): string {
   const absolute = path.resolve(root, rel)
@@ -106,7 +107,7 @@ function isSameExistingFile(a: string, b: string): boolean {
   }
 }
 
-/** True only for an existing regular file; missing paths are left to the read site. */
+/** True only for an existing regular file. */
 function isExistingRegularFile(file: string): boolean {
   try {
     return fs.statSync(file).isFile()
@@ -125,7 +126,9 @@ const SHA256_HEX = /^[0-9a-f]{64}$/
  * match it before comparing search splits. When the manifest carries a dummy
  * digest, hash finaltest's bytes for the identity check only. Hashing is a
  * checksum read: finaltest cases are never parsed or returned during search.
- * Missing files are skipped and left to the existing read-site failure.
+ * Search fails closed when the confined finaltest path is missing or not a
+ * regular file: otherwise hiding the holdout would disable the identity check
+ * while a byte-identical train/validation copy still leaks it.
  */
 function assertSearchSplitsDoNotCopyFinaltestContent(
   datasetRoot: string,
@@ -133,7 +136,9 @@ function assertSearchSplitsDoNotCopyFinaltestContent(
 ): void {
   const declared = manifest.splitDigests.finaltest.toLowerCase()
   const finaltest = canonicalSplitPath(datasetRoot, manifest.splits.finaltest)
-  if (!isExistingRegularFile(finaltest)) return
+  if (!isExistingRegularFile(finaltest)) {
+    throw new Error('finaltest file missing during search')
+  }
   const actualFinaltestDigest = sha256File(finaltest)
   if (SHA256_HEX.test(declared) && actualFinaltestDigest !== declared) {
     throw new Error('finaltest file digest mismatch vs manifest')

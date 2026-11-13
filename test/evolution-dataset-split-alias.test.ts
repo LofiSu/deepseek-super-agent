@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { sha256File } from '../src/evolution/digest.ts'
-import { loadEvolutionDataset, loadSearchDatasetOnly } from '../src/evolution/dataset.ts'
+import { loadEvolutionDataset, loadFinaltestSplit, loadSearchDatasetOnly } from '../src/evolution/dataset.ts'
 
 const CANARY = 'SECRET_HOLDOUT_TOKEN'
 const OUTSIDE_CANARY = 'SECRET_OUTSIDE_TOKEN'
@@ -312,5 +312,45 @@ describe('regression: search splits cannot alias finaltest (PR168)', () => {
     const data = loadSearchDatasetOnly(root)
     expect(data.train.map(c => c.id)).toEqual(['t2'])
     expect(data.validation.map(c => c.id)).toEqual(['v1'])
+  })
+
+  it('rejects search when an honest-digest holdout is hidden behind a byte-identical train copy', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+    copyFinaltestOver(root, 'train')
+    const finaltest = path.join(root, 'finaltest.json')
+    const hidden = path.join(root, 'finaltest.json.hidden')
+    fs.renameSync(finaltest, hidden)
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(/finaltest file missing during search/)
+
+    // Restoring the holdout and an honest train leaves a loadable dataset for finalize.
+    fs.renameSync(hidden, finaltest)
+    writeSplit(path.join(root, 'train.json'), 't1', 'train case does not leak')
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('rejects search when a dummy-digest holdout is hidden behind a byte-identical train copy', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    copyFinaltestOver(root, 'train')
+    const hidden = path.join(root, 'finaltest.json.hidden')
+    fs.renameSync(path.join(root, 'finaltest.json'), hidden)
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(/finaltest file missing during search/)
+  })
+
+  it('rejects search when finaltest is missing even without any content copy', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+    fs.rmSync(path.join(root, 'finaltest.json'))
+
+    const { reads, restore } = captureReads()
+    try {
+      expect(() => loadSearchDatasetOnly(root)).toThrow(/finaltest file missing during search/)
+    } finally {
+      restore()
+    }
+    // The missing holdout is rejected at search, not deferred to finalize.
+    expect(reads.map(p => path.basename(String(p)))).toEqual(['manifest.json'])
   })
 })
