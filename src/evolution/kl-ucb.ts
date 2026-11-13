@@ -50,12 +50,14 @@ export function klUcbMaxqAllFailure(trials: number, totalT: number, c = 0): numb
   return 1 - Math.exp(-rhs / trials)
 }
 
-/** All-success arm (s=n, n≥1): q* = exp(-rhs/n). */
+/**
+ * All-success arm (s=n, n≥1): KL(1, q) = -log(q) is zero at q=1 and the
+ * constraint n·KL(1, q) <= rhs holds there, so the maximum feasible q is 1.
+ */
 export function klUcbMaxqAllSuccess(trials: number, totalT: number, c = 0): number {
   assertKlInputs(trials, trials, totalT, c)
   if (trials <= 0) return 1
-  const rhs = klUcbRhs(totalT, c)
-  return Math.exp(-rhs / trials)
+  return 1
 }
 
 /** Maximize q such that n * KL(s/n, q) <= rhs (binary search). */

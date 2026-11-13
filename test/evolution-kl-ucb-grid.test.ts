@@ -4,6 +4,7 @@ import {
   bernoulliKl,
   klUcbMaxq,
   klUcbMaxqAllFailure,
+  klUcbMaxqAllSuccess,
   klUcbSelect,
   stableTieBreak,
 } from '../src/evolution/kl-ucb.ts'
@@ -22,6 +23,12 @@ describe('Bernoulli KL endpoints and indices (general, no special cases)', () =>
     const viaSearch = klUcbMaxq(0, 1, 1, 0)
     expect(analytical).toBeCloseTo(0.5, 8)
     expect(viaSearch).toBeCloseTo(analytical, 10)
+  })
+
+  it('s=n endpoint is the maximum feasible q', () => {
+    expect(klUcbMaxqAllSuccess(1, 3, 0)).toBe(1)
+    expect(klUcbMaxq(1, 1, 3, 0)).toBe(1)
+    expect(klUcbMaxq(3, 3, 10, 0)).toBe(1)
   })
 
   it.each([
