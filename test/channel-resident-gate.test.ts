@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_RESIDENT_INGRESS_LIMIT,
   ingestResidentTrigger,
   ResidentIngressAbortedError,
   ResidentIngressRejectedError,
@@ -184,6 +185,32 @@ describe('channel-resident-gate', () => {
   it('documents limit 0 as explicit unbounded opt-out', () => {
     expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '0' })).toBe(0)
     expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '8' })).toBe(8)
+    expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '256' })).toBe(
+      DEFAULT_RESIDENT_INGRESS_LIMIT,
+    )
+    expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '  0  ' })).toBe(0)
     expect(residentIngressLimitFromEnv({})).toBeGreaterThan(0)
+    expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '' })).toBe(
+      DEFAULT_RESIDENT_INGRESS_LIMIT,
+    )
+    expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '   ' })).toBe(
+      DEFAULT_RESIDENT_INGRESS_LIMIT,
+    )
+  })
+
+  it('rejects malformed numeric prefixes instead of silently truncating', () => {
+    // `Number.parseInt` accepts a leading decimal run and ignores the rest;
+    // a typo must never shrink or remove the backpressure bound. Only "0"
+    // requests the unbounded opt-out.
+    for (const raw of ['0abc', '0x10', '1e3', '7.5', '1_000', '+8', '-0', '0.0', '256abc', 'abc', '-1']) {
+      expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: raw }), raw).toBe(
+        DEFAULT_RESIDENT_INGRESS_LIMIT,
+      )
+    }
+  })
+
+  it('accepts leading zeros on a true decimal without treating them as octal', () => {
+    expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '08' })).toBe(8)
+    expect(residentIngressLimitFromEnv({ DS_AGENT_RESIDENT_INGRESS_LIMIT: '000' })).toBe(0)
   })
 })

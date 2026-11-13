@@ -31,8 +31,13 @@ export class ResidentIngressAbortedError extends Error {
 export function residentIngressLimitFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.DS_AGENT_RESIDENT_INGRESS_LIMIT?.trim()
   if (raw === undefined || raw === '') return DEFAULT_RESIDENT_INGRESS_LIMIT
+  // `Number.parseInt` would silently accept a prefix ("0abc" → 0,
+  // "1e3" → 1), which can shrink or remove the bound on an operator typo.
+  // Require the whole trimmed string to be decimal digits; only then "0"
+  // means the explicit unbounded opt-out.
+  if (!/^[0-9]+$/.test(raw)) return DEFAULT_RESIDENT_INGRESS_LIMIT
   const value = Number.parseInt(raw, 10)
-  if (!Number.isSafeInteger(value) || value < 0) return DEFAULT_RESIDENT_INGRESS_LIMIT
+  if (!Number.isSafeInteger(value)) return DEFAULT_RESIDENT_INGRESS_LIMIT
   return value
 }
 
