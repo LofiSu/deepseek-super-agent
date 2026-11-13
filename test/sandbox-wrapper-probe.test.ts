@@ -1,4 +1,8 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   assertRequiredSandboxDimensions,
@@ -181,5 +185,134 @@ describe('sandbox read isolation requires a readable canary', () => {
     )
     expect(probe.dimensions.write).toBe('enforced')
     expect(probe.dimensions.read).toBe('not_enforced')
+  })
+})
+
+describe('sandbox probe requires the forbidden parent to be visible', () => {
+  type VisibilityMode = 'write' | 'read'
+
+  /**
+   * A wrapper that never binds `os.tmpdir()` (as `linuxStrictArgv` does for a
+   * TMPDIR outside `/tmp`) leaves the forbidden sibling directory out of the
+   * namespace. These hooks run the official probe commands under real bash but
+   * remove that directory first, so the redirect fails because the parent is
+   * absent, not because a write was denied.
+   */
+  function invisibleParentHooks(mode: VisibilityMode): SandboxConfinementProbeHooks {
+    let forbiddenDir: string | undefined
+    const recallForbiddenDir = (command: string): string | undefined => {
+      const match = /'([^']*[/\\]forbidden[/\\]probe-write\.txt)'/.exec(command)
+      if (match) forbiddenDir = dirname(match[1]!)
+      return forbiddenDir
+    }
+    const hideForbiddenDir = (command: string): void => {
+      const dir = recallForbiddenDir(command)
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true })
+    }
+    return {
+      runWrapped: (command, policy) => {
+        if (command.includes('ds-agent-sandbox-negative-probe')) {
+          recallForbiddenDir(command)
+          // Keep the write dimension enforced so the read path is tested alone.
+          if (mode === 'read') return fakeResult(0)
+          hideForbiddenDir(command)
+          return realBash(command)
+        }
+        if (command.includes('test -d') || command.includes('test -r')) {
+          hideForbiddenDir(command)
+          return realBash(command)
+        }
+        if (command.includes('fetch(')) return fakeResult(policy.allowNetwork === true ? 0 : 1)
+        return realBash(command)
+      },
+      runUnsandboxed: realBash,
+      loopbackPort: 19_881,
+    }
+  }
+
+  it('write is probe_failed, never enforced, when the forbidden directory is not mounted', () => {
+    const probe = probeSandboxConfinement(
+      linuxBwrapSystem(),
+      invisibleParentHooks('write'),
+      { enabled: true },
+    )
+    expect(probe.positiveExecOk).toBe(true)
+    expect(probe.positiveWriteOk).toBe(true)
+    expect(probe.dimensions.write).toBe('probe_failed')
+    expect(probe.dimensions.write).not.toBe('enforced')
+    expect(probe.negativeWriteBlocked).toBe(false)
+    expect(probe.outcome).toBe('probe_failed')
+    expect(() => assertRequiredSandboxDimensions(probe, {})).toThrow(UserError)
+  })
+
+  it('read is probe_failed, never enforced, when the canary directory is not mounted', () => {
+    const probe = probeSandboxConfinement(
+      linuxBwrapSystem(),
+      invisibleParentHooks('read'),
+      strictReadPolicy,
+    )
+    expect(probe.dimensions.write).toBe('enforced')
+    expect(probe.dimensions.read).toBe('probe_failed')
+    expect(probe.dimensions.read).not.toBe('enforced')
+  })
+})
+
+const REAL_LINUX_BWRAP = process.platform === 'linux'
+  && spawnSync('which', ['bwrap'], { stdio: 'ignore' }).status === 0
+
+const SOURCE_PROBE_MODULE = fileURLToPath(new URL('../src/env/sandbox-probe.ts', import.meta.url))
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+
+/**
+ * On-host companion to the hook-based regressions: run the real probe with
+ * `TMPDIR` outside `/tmp`, where strict bwrap binds only `/tmp` read-only and
+ * therefore never mounts the probe tree. A child process sets `TMPDIR` before
+ * `os.tmpdir()` is first read, matching the verified defect.
+ */
+describe.skipIf(!REAL_LINUX_BWRAP)('sandbox probe with TMPDIR outside /tmp (on host)', () => {
+  it('reports probe_failed for write and read instead of enforced', () => {
+    let outside: string
+    try {
+      outside = mkdtempSync(join(homedir(), '.ds-agent-tmpdir-outside-'))
+    } catch {
+      return // no writable location outside /tmp on this host
+    }
+    try {
+      const script = join(outside, 'run-probe.mjs')
+      writeFileSync(
+        script,
+        `import { probeSandboxConfinement } from ${JSON.stringify(SOURCE_PROBE_MODULE)}
+const probe = probeSandboxConfinement(undefined, {}, { enabled: true, readIsolation: true, allowNetwork: true })
+process.stdout.write(JSON.stringify({
+  write: probe.dimensions.write,
+  read: probe.dimensions.read,
+  outcome: probe.outcome,
+  positiveExecOk: probe.positiveExecOk,
+  positiveWriteOk: probe.positiveWriteOk,
+}))
+`,
+        'utf8',
+      )
+      const result = spawnSync(process.execPath, ['--import', 'tsx', script], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: { ...process.env, TMPDIR: outside, NODE_NO_WARNINGS: '1' },
+      })
+      expect(result.status, result.stderr || result.stdout).toBe(0)
+      const parsed = JSON.parse(result.stdout) as {
+        write: string
+        read: string
+        outcome: string
+        positiveExecOk: boolean
+        positiveWriteOk: boolean
+      }
+      expect(parsed.positiveExecOk).toBe(true)
+      expect(parsed.positiveWriteOk).toBe(true)
+      expect(parsed.write).toBe('probe_failed')
+      expect(parsed.read).toBe('probe_failed')
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 })

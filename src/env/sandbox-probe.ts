@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { UserError } from '../shared/errors.ts'
 import { readIsolationFromEnv, wrapBashCommand, type SandboxPolicy, type SandboxSystem } from './seccomp.ts'
 
@@ -64,6 +64,12 @@ export interface SandboxConfinementProbe {
 }
 
 const EXIT_WRITE_SUCCEEDED_OUTSIDE = 12
+/**
+ * Distinct from both 0 and `EXIT_WRITE_SUCCEEDED_OUTSIDE`: a wrapper that did
+ * not mount the forbidden directory cannot prove a write was denied, so the
+ * dimension must fail closed as `probe_failed` rather than `enforced`.
+ */
+const EXIT_FORBIDDEN_PARENT_INVISIBLE = 13
 
 export function probeSandboxWrapper(
   system: SandboxSystem = defaultSystem(),
@@ -153,7 +159,11 @@ function spawnFailed(result: SpawnSyncReturns<string>): boolean {
 
 function negativeWriteProbeCommand(forbiddenFile: string): string {
   const target = shellQuote(forbiddenFile)
+  const parentDir = shellQuote(dirname(forbiddenFile))
   return [
+    // A redirect into an unmounted parent fails because the directory is absent,
+    // not because the sandbox denied the write. Require the parent to be visible.
+    `test -d ${parentDir} || exit ${EXIT_FORBIDDEN_PARENT_INVISIBLE}`,
     `rm -f ${target}`,
     `if (echo ds-agent-sandbox-negative-probe > ${target}) 2>/dev/null; then`,
     `  if test -f ${target}; then exit ${EXIT_WRITE_SUCCEEDED_OUTSIDE}; fi`,
@@ -180,6 +190,11 @@ function probeReadIsolation(
   const runner = runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
   const path = shellQuote(forbiddenFile)
   const readCommand = `test -r ${path} && cat ${path} >/dev/null`
+  // A canary whose parent directory was never mounted is absent, not hidden.
+  // Require the parent to be visible inside the wrapper before crediting
+  // read isolation, otherwise an unmounted path would read as `enforced`.
+  const visibility = runner(`test -d ${shellQuote(dirname(forbiddenFile))}`, policy, system)
+  if (spawnFailed(visibility) || visibility.status !== 0) return 'probe_failed'
   // Positive control: a wrapped read that fails proves isolation only when the
   // same file is readable unsandboxed. A missing canary means the earlier
   // negative-write probe removed it, not that the sandbox hid it.
