@@ -32,6 +32,9 @@ function feishuTrigger(id: string, ms: number): Trigger {
 class BurstFeishu implements FeishuLoopSource {
   pulls = 0
   cursorMs = 0
+  restoreCursor(cursorMs: number): void {
+    this.cursorMs = cursorMs
+  }
   async pull(): Promise<readonly Trigger[]> {
     this.pulls += 1
     if (this.pulls === 1) {
@@ -107,7 +110,15 @@ describe('deployment serve resident e2e (loopback mocks)', () => {
         once: false,
       },
       createFeishuClient: () => client,
-      runFeishu: opts => runFeishuLoop({ ...opts, createSource: () => ({ pulls: 0, cursorMs: 0, async pull() { return [] } }) }),
+      runFeishu: opts => runFeishuLoop({
+        ...opts,
+        createSource: () => ({
+          pulls: 0,
+          cursorMs: 0,
+          restoreCursor() {},
+          async pull() { return [] },
+        }),
+      }),
     })
     await new Promise(r => setTimeout(r, 30))
     channels.abort()

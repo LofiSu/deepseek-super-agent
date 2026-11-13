@@ -107,6 +107,8 @@ export interface FeishuLoopSource {
   pull(): Promise<readonly Trigger[]>
   /** Highest `create_time` (ms) observed so far, or the seed when none was seen. */
   readonly cursorMs: number
+  /** Reset the pull cursor after a blocked ingress window so the next pull replays it. */
+  restoreCursor(cursorMs: number): void
 }
 
 export interface FeishuLoopOptions {
@@ -137,6 +139,8 @@ export interface FeishuLoopOptions {
   signal?: AbortSignal
   /** Upper bound for the exponential retry delay after a failed poll. */
   maxBackoffMs?: number
+  /** Max wait when ingress is saturated before rejecting (default 60s). */
+  saturateWaitMs?: number
 }
 
 export type FeishuLoopStopReason = 'once' | 'aborted'
@@ -218,6 +222,10 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
     for (;;) {
       if (aborted()) break
       try {
+        // Remember where this pull started. `FeishuSource.pull` advances its
+        // in-memory cursor while walking the batch, before the loop ingests
+        // anything; a blocked trigger must not be skipped on the next poll.
+        const cursorBeforePull = source.cursorMs
         const triggers = await source.pull()
         let cursorBlockedByIngress = false
         for (const trigger of triggers) {
@@ -229,6 +237,7 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
               signal: options.signal,
               log,
               channel: 'feishu',
+              ...(options.saturateWaitMs === undefined ? {} : { saturateWaitMs: options.saturateWaitMs }),
             })
           } catch (error) {
             log(`[feishu] ingest failed ${messageOf(error)}`)
@@ -243,18 +252,25 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
         }
         // Persist only after the pulled triggers were ingested, matching the
         // iMessage loop: a crashed ingest window is retried on the next pull.
-        const advanced = source.cursorMs
-        if (
-          !cursorBlockedByIngress
-          && Number.isFinite(advanced)
-          && advanced > 0
-          && (cursor === undefined || advanced > cursor)
-        ) {
-          cursor = advanced
-          runtime.store.putDoc(CURSOR_KIND, CURSOR_ID, {
-            chatId,
-            lastCreateTimeMs: cursor,
-          } satisfies FeishuCursorDoc)
+        // On a blocked window also roll the source back to where this pull
+        // started, so the next pull re-reads the whole uningested span rather
+        // than only the source's one-second overlap. Already-ingested ids are
+        // deduped by `Runtime.ingest`, so replaying them is safe.
+        if (cursorBlockedByIngress) {
+          source.restoreCursor(cursorBeforePull)
+        } else {
+          const advanced = source.cursorMs
+          if (
+            Number.isFinite(advanced)
+            && advanced > 0
+            && (cursor === undefined || advanced > cursor)
+          ) {
+            cursor = advanced
+            runtime.store.putDoc(CURSOR_KIND, CURSOR_ID, {
+              chatId,
+              lastCreateTimeMs: cursor,
+            } satisfies FeishuCursorDoc)
+          }
         }
         await runtime.jobsSettled().catch(error => {
           log(`[feishu] settle error ${messageOf(error)}`)

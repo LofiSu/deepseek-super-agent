@@ -29,6 +29,9 @@ class CountingFeishuSource implements FeishuLoopSource {
   get cursorMs(): number {
     return this.cursor
   }
+  restoreCursor(cursorMs: number): void {
+    this.cursor = cursorMs
+  }
   async pull(): Promise<readonly Trigger[]> {
     this.pulls += 1
     if (this.failPull !== undefined && this.pulls >= this.failPull) {
@@ -41,6 +44,43 @@ class CountingFeishuSource implements FeishuLoopSource {
       return this.batch
     }
     return []
+  }
+}
+
+/**
+ * Behaves like the production `FeishuSource`: each pull filters by the current
+ * in-memory cursor with only a one-second overlap and advances the cursor to
+ * the newest message in the returned batch.
+ */
+class WindowFeishuSource implements FeishuLoopSource {
+  pulls = 0
+  readonly batches: string[][] = []
+  private cursor: number
+
+  constructor(private readonly messages: readonly Trigger[], initialCursorMs: number) {
+    this.cursor = initialCursorMs
+  }
+
+  get cursorMs(): number {
+    return this.cursor
+  }
+
+  restoreCursor(cursorMs: number): void {
+    this.cursor = cursorMs
+  }
+
+  async pull(): Promise<readonly Trigger[]> {
+    this.pulls += 1
+    const startTimeSec = Math.max(0, Math.floor((this.cursor - 1_000) / 1_000))
+    const seen = this.messages.filter(
+      item => Math.floor(Date.parse(item.at) / 1_000) >= startTimeSec,
+    )
+    this.batches.push(seen.map(item => item.id))
+    for (const item of seen) {
+      const at = Date.parse(item.at)
+      if (Number.isFinite(at) && at > this.cursor) this.cursor = at
+    }
+    return seen
   }
 }
 
@@ -171,6 +211,79 @@ describe('deployment resident channel lifecycle', () => {
     const cursor = rt.store.getDoc<{ chatId: string; lastCreateTimeMs: number }>('feishu_cursor', 'cursor')
     expect(cursor).toBeUndefined()
     await rt.finish()
+  })
+
+  it('feishu loop replays the uningested window after a saturation rejection', async () => {
+    // `runFeishuLoop` reads the ingress cap from process.env.
+    const previousLimit = process.env.DS_AGENT_RESIDENT_INGRESS_LIMIT
+    process.env.DS_AGENT_RESIDENT_INGRESS_LIMIT = '1'
+    try {
+      const rt = Runtime.create({
+        home: tempHome(),
+        model: new MockModel(),
+        jobDelayMs: 0,
+        watchdogIntervalMs: 60_000,
+        env: {
+          ...process.env,
+          DS_AGENT_ALLOW_MOCK_FIXTURE: '1',
+          DS_AGENT_GROUP_ALLOWLIST: 'oc_test',
+          DS_AGENT_RESIDENT_INGRESS_LIMIT: '1',
+        },
+      })
+      rt.start()
+      const rejectedMs = 1_761_958_800_000
+      const laterMs = rejectedMs + 2_500
+      const source = new WindowFeishuSource(
+        [feishuTrigger('om_rejected', rejectedMs), feishuTrigger('om_later', laterMs)],
+        rejectedMs - 6_000,
+      )
+
+      // Occupy the only ingress slot so the first inbound trigger waits out the
+      // short cap and is rejected; release it once the loop logs the failure.
+      expect(rt.tryResidentIngressBegin(1)).toBe(true)
+      const controller = new AbortController()
+      const loop = runFeishuLoop({
+        runtime: rt,
+        chatId: 'oc_test',
+        client: noNetworkFeishu(),
+        createSource: () => source,
+        intervalMs: 5,
+        saturateWaitMs: 25,
+        signal: controller.signal,
+      })
+
+      const deadline = Date.now() + 3_000
+      let released = false
+      while (Date.now() < deadline) {
+        if (!released && rt.log.text().includes('[feishu] ingest failed')) {
+          rt.residentIngressEnd()
+          released = true
+        }
+        if (rt.store.listDocs<Trigger>('trigger').length >= 2) break
+        await new Promise(r => setTimeout(r, 5))
+      }
+      controller.abort()
+      await Promise.race([
+        loop,
+        new Promise<never>((_r, reject) => setTimeout(() => reject(new Error('loop hang')), 5_000)),
+      ])
+
+      expect(released).toBe(true)
+      // Both triggers are more than the one-second overlap apart. The pull after
+      // the rejection must still return the uningested older trigger.
+      expect(source.batches[0]).toEqual(['feishu_om_rejected', 'feishu_om_later'])
+      expect(source.batches[1]).toEqual(['feishu_om_rejected', 'feishu_om_later'])
+      // Replaying the window is safe: Runtime dedupes by Trigger id.
+      expect(rt.store.listDocs<Trigger>('trigger').map(item => item.id).sort())
+        .toEqual(['feishu_om_later', 'feishu_om_rejected'])
+      // The durable cursor is persisted only for the successful window.
+      expect(rt.store.getDoc<{ chatId: string; lastCreateTimeMs: number }>('feishu_cursor', 'cursor'))
+        .toEqual({ chatId: 'oc_test', lastCreateTimeMs: laterMs })
+      await rt.finish()
+    } finally {
+      if (previousLimit === undefined) delete process.env.DS_AGENT_RESIDENT_INGRESS_LIMIT
+      else process.env.DS_AGENT_RESIDENT_INGRESS_LIMIT = previousLimit
+    }
   })
 
   it('feishu loop logs poll errors and exits cleanly on abort', async () => {
