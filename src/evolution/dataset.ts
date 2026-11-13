@@ -45,6 +45,33 @@ function readSplit(root: string, rel: string): EvolutionEvalCase[] {
   return parsed.cases
 }
 
+/** Resolve a split path under the dataset root, following symlinks when it exists. */
+function canonicalSplitPath(datasetRoot: string, rel: string): string {
+  const absolute = path.resolve(datasetRoot, rel)
+  try {
+    return fs.realpathSync(absolute)
+  } catch {
+    return absolute
+  }
+}
+
+/**
+ * Search-phase isolation: train and validation must not identify the same file
+ * as finaltest (same name, `./` alias, or symlink target). Runs before any
+ * search split is read so an aliased finaltest is never opened unclaimed.
+ */
+function assertSearchSplitsDoNotAliasFinaltest(
+  datasetRoot: string,
+  manifest: EvolutionSplitManifest,
+): void {
+  const finaltest = canonicalSplitPath(datasetRoot, manifest.splits.finaltest)
+  for (const split of ['train', 'validation'] as const) {
+    if (canonicalSplitPath(datasetRoot, manifest.splits[split]) === finaltest) {
+      throw new Error(`search split aliases the finaltest file: ${split}`)
+    }
+  }
+}
+
 function datasetDigestFromManifest(datasetRoot: string, manifest: EvolutionSplitManifest): string {
   const manifestPath = path.join(datasetRoot, 'manifest.json')
   const parts = [
@@ -59,6 +86,7 @@ function datasetDigestFromManifest(datasetRoot: string, manifest: EvolutionSplit
 /** Search phase: never reads finaltest.json. */
 export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset {
   const manifest = readManifest(datasetRoot)
+  assertSearchSplitsDoNotAliasFinaltest(datasetRoot, manifest)
   const train = readSplit(datasetRoot, manifest.splits.train)
   const validation = readSplit(datasetRoot, manifest.splits.validation)
   const datasetDigest = datasetDigestFromManifest(datasetRoot, manifest)
