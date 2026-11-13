@@ -15,7 +15,7 @@ export interface LoadedSearchDataset {
   train: EvolutionEvalCase[]
   validation: EvolutionEvalCase[]
   datasetDigest: string
-  /** From manifest only — finaltest file not read during search. */
+  /** Declared in the manifest; the search phase never parses finaltest cases. */
   finaltestDigest: string
 }
 
@@ -120,9 +120,11 @@ const SHA256_HEX = /^[0-9a-f]{64}$/
 /**
  * Search-phase isolation: a search split must not be a byte-identical copy of
  * finaltest. Distinct paths and inodes still leak held-out cases if the bytes
- * match, so hash the search splits. Prefer the manifest's real finaltest digest
- * and never open the held-out file when one is declared; only when the manifest
- * carries a dummy digest do we hash finaltest's bytes for the identity check.
+ * match, so hash the search splits. A declared SHA-256 is a commitment, so hash
+ * the actual finaltest file and reject a manifest whose declared digest does not
+ * match it before comparing search splits. When the manifest carries a dummy
+ * digest, hash finaltest's bytes for the identity check only. Hashing is a
+ * checksum read: finaltest cases are never parsed or returned during search.
  * Missing files are skipped and left to the existing read-site failure.
  */
 function assertSearchSplitsDoNotCopyFinaltestContent(
@@ -130,14 +132,13 @@ function assertSearchSplitsDoNotCopyFinaltestContent(
   manifest: EvolutionSplitManifest,
 ): void {
   const declared = manifest.splitDigests.finaltest.toLowerCase()
-  let finaltestDigest: string
-  if (SHA256_HEX.test(declared)) {
-    finaltestDigest = declared
-  } else {
-    const finaltest = canonicalSplitPath(datasetRoot, manifest.splits.finaltest)
-    if (!isExistingRegularFile(finaltest)) return
-    finaltestDigest = sha256File(finaltest)
+  const finaltest = canonicalSplitPath(datasetRoot, manifest.splits.finaltest)
+  if (!isExistingRegularFile(finaltest)) return
+  const actualFinaltestDigest = sha256File(finaltest)
+  if (SHA256_HEX.test(declared) && actualFinaltestDigest !== declared) {
+    throw new Error('finaltest file digest mismatch vs manifest')
   }
+  const finaltestDigest = SHA256_HEX.test(declared) ? declared : actualFinaltestDigest
   for (const split of ['train', 'validation'] as const) {
     const splitFile = canonicalSplitPath(datasetRoot, manifest.splits[split])
     if (!isExistingRegularFile(splitFile)) continue
@@ -189,7 +190,10 @@ function datasetDigestFromManifest(
   return stableJsonDigest(parts)
 }
 
-/** Search phase: never reads finaltest.json. */
+/**
+ * Search phase: parses only train/validation. The finaltest file may be
+ * hashed to verify its manifest commitment, but its cases are never parsed.
+ */
 export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset {
   const root = fs.realpathSync(path.resolve(datasetRoot))
   const manifest = readManifest(root)

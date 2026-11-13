@@ -92,25 +92,37 @@ describe('regression: reviewer blockers (PR168)', () => {
     })
   })
 
-  describe('C search never reads finaltest bytes', () => {
-    it('loadSearchDatasetOnly does not open finaltest.json', () => {
-      const realRead = fs.readFileSync.bind(fs)
-      const calls: string[] = []
-      const spy = fs.readFileSync as typeof fs.readFileSync
-      ;(fs as { readFileSync: typeof fs.readFileSync }).readFileSync = ((
-        p: fs.PathOrFileDescriptor,
-        options?: Parameters<typeof fs.readFileSync>[1],
-      ) => {
-        calls.push(String(p))
-        return options === undefined ? realRead(p) : realRead(p, options)
-      }) as typeof fs.readFileSync
-      try {
-        const data = loadSearchDatasetOnly(datasetRoot)
-        expect(data.train.length).toBeGreaterThan(0)
-        expect(calls.some(c => c.endsWith('finaltest.json'))).toBe(false)
-      } finally {
-        fs.readFileSync = spy
+  describe('C search never parses or returns finaltest cases', () => {
+    it('loadSearchDatasetOnly returns only train/validation cases, no holdout ids/text', () => {
+      const data = loadSearchDatasetOnly(datasetRoot)
+      expect(data.train.length).toBeGreaterThan(0)
+      expect(data.validation.length).toBeGreaterThan(0)
+      const cases = [...data.train, ...data.validation]
+      const ids = cases.map(c => c.id)
+      for (const holdoutId of ['ho-001', 'ho-002', 'ho-003', 'ho-004']) {
+        expect(ids).not.toContain(holdoutId)
       }
+      const searchText = cases.map(c => c.report.text).join('\n')
+      expect(searchText).not.toContain('Valuable fix for checkout')
+      expect(searchText).not.toContain('Cannot complete without credentials')
+    })
+
+    it('loadSearchDatasetOnly does not parse finaltest cases', () => {
+      const realParse = JSON.parse
+      const parsed: string[] = []
+      JSON.parse = ((text: string, ...rest: unknown[]) => {
+        parsed.push(String(text))
+        return (realParse as unknown as (...args: unknown[]) => unknown)(text, ...rest)
+      }) as typeof JSON.parse
+      try {
+        loadSearchDatasetOnly(datasetRoot)
+      } finally {
+        JSON.parse = realParse
+      }
+      // The manifest and the two search splits were parsed...
+      expect(parsed.length).toBeGreaterThan(0)
+      // ...but never the held-out split's cases.
+      expect(parsed.some(text => text.includes('"ho-001"'))).toBe(false)
     })
   })
 

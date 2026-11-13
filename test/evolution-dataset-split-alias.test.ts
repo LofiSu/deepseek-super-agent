@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { sha256File } from '../src/evolution/digest.ts'
 import { loadEvolutionDataset, loadSearchDatasetOnly } from '../src/evolution/dataset.ts'
 
 const CANARY = 'SECRET_HOLDOUT_TOKEN'
@@ -21,7 +22,10 @@ interface TempDataset {
   cleanup: () => void
 }
 
-function makeDataset(splits: { train: string; validation: string }): TempDataset {
+function makeDataset(
+  splits: { train: string; validation: string },
+  finaltestDigest = 'unused-by-search-phase',
+): TempDataset {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-split-alias-'))
   writeSplit(path.join(root, 'train.json'), 't1', 'train case does not leak')
   writeSplit(path.join(root, 'validation.json'), 'v1', 'validation case does not leak')
@@ -36,11 +40,29 @@ function makeDataset(splits: { train: string; validation: string }): TempDataset
         validation: splits.validation,
         finaltest: 'finaltest.json',
       },
-      splitDigests: { train: '', validation: '', finaltest: 'unused-by-search-phase' },
+      splitDigests: { train: '', validation: '', finaltest: finaltestDigest },
       seed: 20260308,
     }),
   )
   return { root, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) }
+}
+
+/** Rewrite only the declared finaltest digest, simulating a lying manifest. */
+function setDeclaredFinaltestDigest(root: string, digest: string): void {
+  const manifestPath = path.join(root, 'manifest.json')
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+    splitDigests: { finaltest: string }
+  }
+  manifest.splitDigests.finaltest = digest
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest))
+}
+
+/**
+ * A valid-looking SHA-256 that belongs to a different file of the same dataset,
+ * while `finaltest.json` still holds the real canary holdout.
+ */
+function digestOfSiblingFile(root: string, name: string): string {
+  return sha256File(path.join(root, name))
 }
 
 function captureReads(): { reads: string[]; restore: () => void } {
@@ -239,6 +261,38 @@ describe('regression: search splits cannot alias finaltest (PR168)', () => {
     })
     fs.symlinkSync(outsideFile, path.join(root, 'train-link.json'))
     expectRootEscapeRejected(() => loadSearchDatasetOnly(root), outsideFile)
+  })
+
+  it('rejects a lying valid finaltest digest even when train copies the holdout', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    writeSplit(path.join(root, 'dummy-finaltest.json'), 'easy', 'dummy holdout')
+    // Valid SHA-256, but of another file: the manifest lies about the holdout.
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'dummy-finaltest.json'))
+    copyFinaltestOver(root, 'train')
+    expect(() => loadSearchDatasetOnly(root)).toThrow(/finaltest file digest mismatch/)
+    expect(() => loadEvolutionDataset(root)).toThrow(/finaltest file digest mismatch/)
+  })
+
+  it('rejects a valid-looking wrong finaltest digest without any content copy', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'validation.json'))
+    expect(() => loadSearchDatasetOnly(root)).toThrow(/finaltest file digest mismatch/)
+  })
+
+  it('rejects a lying finaltest digest through loadEvolutionDataset too', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'validation.json'))
+    expect(() => loadEvolutionDataset(root)).toThrow(/finaltest file digest mismatch/)
+  })
+
+  it('still loads an honest dataset whose declared digest matches finaltest', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+    const data = loadSearchDatasetOnly(root)
+    expect(data.train.map(c => c.id)).toEqual(['t1'])
+    expect(data.validation.map(c => c.id)).toEqual(['v1'])
+    const searchText = [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+    expect(searchText).not.toContain(CANARY)
   })
 
   it('still loads an honest dataset with three distinct files', () => {
