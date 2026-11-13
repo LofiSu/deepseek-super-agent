@@ -92,6 +92,11 @@ export function approvePromotion(input: {
     throw new Error('validation gate not satisfied; promotion refused')
   }
 
+  const finalScore = experiment.finalTest.scores.find(score => score.split === 'finaltest')
+  if (!finalScore || finalScore.total < 1 || finalScore.accuracy < 1) {
+    throw new Error('final test gate not satisfied; promotion refused')
+  }
+
   writeJsonAtomic(promotedStrategyPath(input.home), strategy)
   const record: PromotionRecord = {
     approvedAt: new Date().toISOString(),
