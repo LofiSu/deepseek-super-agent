@@ -105,6 +105,20 @@ describe('regression: search splits cannot alias finaltest (PR168)', () => {
     expectRejectedBeforeSplitRead(() => loadSearchDatasetOnly(root))
   })
 
+  it('rejects a train split that is a hard link to the finaltest file', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    fs.rmSync(path.join(root, 'train.json'))
+    fs.linkSync(path.join(root, 'finaltest.json'), path.join(root, 'train.json'))
+    expectRejectedBeforeSplitRead(() => loadSearchDatasetOnly(root))
+  })
+
+  it('rejects a validation split that is a hard link to the finaltest file', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    fs.rmSync(path.join(root, 'validation.json'))
+    fs.linkSync(path.join(root, 'finaltest.json'), path.join(root, 'validation.json'))
+    expectRejectedBeforeSplitRead(() => loadSearchDatasetOnly(root))
+  })
+
   it('rejects the alias through loadEvolutionDataset too', () => {
     const { root } = dataset({ train: 'finaltest.json', validation: 'validation.json' })
     expectRejectedBeforeSplitRead(() => loadEvolutionDataset(root))

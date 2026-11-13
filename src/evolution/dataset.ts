@@ -55,18 +55,35 @@ function canonicalSplitPath(datasetRoot: string, rel: string): string {
   }
 }
 
+/** Same on-disk file? Compares dev+inode, which also catches hard links. */
+function isSameExistingFile(a: string, b: string): boolean {
+  try {
+    const statA = fs.statSync(a)
+    const statB = fs.statSync(b)
+    return statA.dev === statB.dev && statA.ino === statB.ino
+  } catch {
+    return false
+  }
+}
+
 /**
  * Search-phase isolation: train and validation must not identify the same file
- * as finaltest (same name, `./` alias, or symlink target). Runs before any
- * search split is read so an aliased finaltest is never opened unclaimed.
+ * as finaltest (same name, `./` alias, symlink target, or hard link). Runs
+ * before any search split is read so an aliased finaltest is never opened
+ * unclaimed.
  */
 function assertSearchSplitsDoNotAliasFinaltest(
   datasetRoot: string,
   manifest: EvolutionSplitManifest,
 ): void {
+  const finaltestAbsolute = path.resolve(datasetRoot, manifest.splits.finaltest)
   const finaltest = canonicalSplitPath(datasetRoot, manifest.splits.finaltest)
   for (const split of ['train', 'validation'] as const) {
-    if (canonicalSplitPath(datasetRoot, manifest.splits[split]) === finaltest) {
+    const splitAbsolute = path.resolve(datasetRoot, manifest.splits[split])
+    if (
+      canonicalSplitPath(datasetRoot, manifest.splits[split]) === finaltest ||
+      isSameExistingFile(splitAbsolute, finaltestAbsolute)
+    ) {
       throw new Error(`search split aliases the finaltest file: ${split}`)
     }
   }
