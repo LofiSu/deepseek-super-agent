@@ -6,7 +6,12 @@ import { describe, expect, it } from 'vitest'
 import { FeishuClient } from '../src/channels/feishu.ts'
 import { runFeishuLoop, type FeishuLoopSource } from '../src/cli/feishu.ts'
 import { runImessageLoop } from '../src/cli/channel-loop.ts'
-import { ImessageSource, type ImessageApi, type ImessageInbound } from '../src/channels/imessage.ts'
+import {
+  ImessageSource,
+  imessageTrigger,
+  type ImessageApi,
+  type ImessageInbound,
+} from '../src/channels/imessage.ts'
 import { MockModel } from '../src/harness/model.ts'
 import { Runtime } from '../src/runtime.ts'
 import type { Trigger } from '../src/shared/types.ts'
@@ -92,6 +97,35 @@ function runtime(): Runtime {
     watchdogIntervalMs: 60_000,
     env: { ...process.env, DS_AGENT_ALLOW_MOCK_FIXTURE: '1', DS_AGENT_GROUP_ALLOWLIST: 'oc_test' },
   })
+}
+
+const IMESSAGE_HANDLE = '+15550000000'
+
+/** Runtime whose admission allowlists the fake iMessage sender. */
+function imessageRuntime(): Runtime {
+  return Runtime.create({
+    home: tempHome(),
+    model: new MockModel(),
+    jobDelayMs: 0,
+    watchdogIntervalMs: 60_000,
+    env: {
+      ...process.env,
+      DS_AGENT_ALLOW_MOCK_FIXTURE: '1',
+      DS_AGENT_ACTOR_ALLOWLIST: IMESSAGE_HANDLE,
+    },
+  })
+}
+
+function aliceInbound(rowId: number, guid: string, text: string): ImessageInbound {
+  return {
+    rowId,
+    guid,
+    text,
+    handle: IMESSAGE_HANDLE,
+    service: 'iMessage',
+    chatGuid: `iMessage;-;${IMESSAGE_HANDLE}`,
+    at: new Date(1_761_958_800_000 + rowId * 1_000).toISOString(),
+  }
 }
 
 function feishuTrigger(id: string, ms: number): Trigger {
@@ -303,6 +337,76 @@ describe('deployment resident channel lifecycle', () => {
     controller.abort()
     await loop
     expect(rt.log.text()).toContain('[feishu] poll error')
+    await rt.finish()
+  })
+
+  it('imessage loop ingests a new message instead of coalescing it into a replayed id', async () => {
+    const rt = imessageRuntime()
+    rt.start()
+    // A prior successful poll persisted the cursor at row 5.
+    rt.store.putDoc('imessage_cursor', 'cursor', { rowId: 5 })
+    // Models a crash after ingesting row 6 but before the cursor write: the
+    // trigger is durable, the cursor still points behind it.
+    await rt.ingestAsync(imessageTrigger(aliceInbound(6, 'GUID-A', '第一句')))
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-A')?.text).toBe('第一句')
+    expect(rt.store.getDoc<{ rowId: number }>('imessage_cursor', 'cursor')).toEqual({ rowId: 5 })
+
+    const api = new FakeImessage([
+      aliceInbound(6, 'GUID-A', '第一句'),
+      aliceInbound(7, 'GUID-B', '第二句'),
+    ])
+    const ingested: string[] = []
+    const base = rt.ingestAsync.bind(rt)
+    rt.ingestAsync = async (trigger: Trigger) => {
+      ingested.push(trigger.id)
+      return base(trigger)
+    }
+
+    await runImessageLoop({
+      runtime: rt,
+      source: new ImessageSource(api),
+      api,
+      dbPath: 'unused.db',
+      intervalMs: 5,
+      once: true,
+    })
+
+    // The replay must not fold row 7 into the already-ingested row 6 id, or
+    // Runtime would answer `duplicate` and row 7's text would be lost.
+    expect(ingested).toEqual(['imessage_GUID-B'])
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-A')?.text).toBe('第一句')
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-B')?.text).toBe('第二句')
+    expect(rt.store.getDoc<{ rowId: number }>('imessage_cursor', 'cursor')).toEqual({ rowId: 7 })
+    await rt.finish()
+  })
+
+  it('imessage loop still coalesces a first-seen consecutive 1:1 burst', async () => {
+    const rt = imessageRuntime()
+    rt.start()
+    const api = new FakeImessage([
+      aliceInbound(6, 'GUID-A', '第一句'),
+      aliceInbound(7, 'GUID-B', '第二句'),
+    ])
+    const ingested: string[] = []
+    const base = rt.ingestAsync.bind(rt)
+    rt.ingestAsync = async (trigger: Trigger) => {
+      ingested.push(trigger.id)
+      return base(trigger)
+    }
+
+    await runImessageLoop({
+      runtime: rt,
+      source: new ImessageSource(api),
+      api,
+      dbPath: 'unused.db',
+      intervalMs: 5,
+      once: true,
+    })
+
+    expect(ingested).toEqual(['imessage_GUID-A'])
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-A')?.text).toBe('第一句\n第二句')
+    expect(rt.store.getDoc<Trigger>('trigger', 'imessage_GUID-B')).toBeUndefined()
+    expect(rt.store.getDoc<{ rowId: number }>('imessage_cursor', 'cursor')).toEqual({ rowId: 7 })
     await rt.finish()
   })
 

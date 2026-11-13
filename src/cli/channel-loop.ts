@@ -170,7 +170,16 @@ export async function runImessageLoop(options: ImessageLoopOptions): Promise<Ime
         const from = cursor
         const pulled = await source.pull(from)
         let cursorBlockedByIngress = false
-        for (const trigger of coalesceTriggers(pulled.triggers)) {
+        // Drop ids this runtime already persisted before coalescing. On a
+        // replay after a crash between ingest and the cursor write, the batch
+        // still contains an already-ingested message; folding a *new* message
+        // into that id would make `Runtime.ingest` treat the merged text as a
+        // duplicate and silently keep the old text. Filtering first means the
+        // new message keeps its own id. This mirrors `Runtime.duplicate`.
+        const fresh = pulled.triggers.filter(
+          trigger => runtime.store.getDoc<Trigger>('trigger', trigger.id) === undefined,
+        )
+        for (const trigger of coalesceTriggers(fresh)) {
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[imessage] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
