@@ -106,11 +106,55 @@ function isSameExistingFile(a: string, b: string): boolean {
   }
 }
 
+/** True only for an existing regular file; missing paths are left to the read site. */
+function isExistingRegularFile(file: string): boolean {
+  try {
+    return fs.statSync(file).isFile()
+  } catch {
+    return false
+  }
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
+/**
+ * Search-phase isolation: a search split must not be a byte-identical copy of
+ * finaltest. Distinct paths and inodes still leak held-out cases if the bytes
+ * match, so hash the search splits. Prefer the manifest's real finaltest digest
+ * and never open the held-out file when one is declared; only when the manifest
+ * carries a dummy digest do we hash finaltest's bytes for the identity check.
+ * Missing files are skipped and left to the existing read-site failure.
+ */
+function assertSearchSplitsDoNotCopyFinaltestContent(
+  datasetRoot: string,
+  manifest: EvolutionSplitManifest,
+): void {
+  const declared = manifest.splitDigests.finaltest.toLowerCase()
+  let finaltestDigest: string
+  if (SHA256_HEX.test(declared)) {
+    finaltestDigest = declared
+  } else {
+    const finaltest = canonicalSplitPath(datasetRoot, manifest.splits.finaltest)
+    if (!isExistingRegularFile(finaltest)) return
+    finaltestDigest = sha256File(finaltest)
+  }
+  for (const split of ['train', 'validation'] as const) {
+    const splitFile = canonicalSplitPath(datasetRoot, manifest.splits[split])
+    if (!isExistingRegularFile(splitFile)) continue
+    if (sha256File(splitFile) === finaltestDigest) {
+      throw new Error(
+        `search split aliases the finaltest file: ${split} (byte-identical contents)`,
+      )
+    }
+  }
+}
+
 /**
  * Search-phase isolation: train and validation must not identify the same file
  * as finaltest (same name, `./` alias, symlink target, or hard link). Runs
  * before any search split is read so an aliased finaltest is never opened
- * unclaimed.
+ * unclaimed. After those path checks, a byte-identical copy (distinct path and
+ * inode) is rejected too.
  */
 function assertSearchSplitsDoNotAliasFinaltest(
   datasetRoot: string,
@@ -127,6 +171,7 @@ function assertSearchSplitsDoNotAliasFinaltest(
       throw new Error(`search split aliases the finaltest file: ${split}`)
     }
   }
+  assertSearchSplitsDoNotCopyFinaltestContent(datasetRoot, manifest)
 }
 
 function datasetDigestFromManifest(

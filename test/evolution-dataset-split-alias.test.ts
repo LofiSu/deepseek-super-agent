@@ -96,6 +96,20 @@ function makeEscapingDataset(splits: { train: string; validation: string }): Tem
   return { root, outsideFile, cleanup: () => fs.rmSync(parent, { recursive: true, force: true }) }
 }
 
+/**
+ * Replace a split with a byte-identical copy of finaltest: a distinct path and
+ * inode, so only a content check can catch it. The copy carries the canary —
+ * exactly the held-out material that must never reach search.
+ */
+function copyFinaltestOver(root: string, split: 'train' | 'validation'): void {
+  const target = path.join(root, `${split}.json`)
+  fs.copyFileSync(path.join(root, 'finaltest.json'), target)
+  const finaltestStat = fs.statSync(path.join(root, 'finaltest.json'))
+  const copyStat = fs.statSync(target)
+  expect(copyStat.dev === finaltestStat.dev && copyStat.ino === finaltestStat.ino).toBe(false)
+  expect(fs.readFileSync(target, 'utf8')).toContain(CANARY)
+}
+
 /** Rejected loads must stop after the manifest — no split file is opened. */
 function expectRejectedBeforeSplitRead(loader: () => unknown): void {
   const { reads, restore } = captureReads()
@@ -171,6 +185,30 @@ describe('regression: search splits cannot alias finaltest (PR168)', () => {
     fs.rmSync(path.join(root, 'validation.json'))
     fs.linkSync(path.join(root, 'finaltest.json'), path.join(root, 'validation.json'))
     expectRejectedBeforeSplitRead(() => loadSearchDatasetOnly(root))
+  })
+
+  it('rejects a train split that is a byte-identical copy of finaltest', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    copyFinaltestOver(root, 'train')
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /search split aliases the finaltest file: train/,
+    )
+  })
+
+  it('rejects a validation split that is a byte-identical copy of finaltest', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    copyFinaltestOver(root, 'validation')
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /search split aliases the finaltest file: validation/,
+    )
+  })
+
+  it('rejects a byte-identical finaltest copy through loadEvolutionDataset too', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'validation.json' })
+    copyFinaltestOver(root, 'train')
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /search split aliases the finaltest file: train/,
+    )
   })
 
   it('rejects the alias through loadEvolutionDataset too', () => {
