@@ -8,7 +8,7 @@ import type {
   EvolutionRunReport,
   FrozenSelection,
 } from './types.ts'
-import { writeJsonAtomic, readJsonFile, resolveInsideDir, resolveTrustedEvolutionRoot } from './io.ts'
+import { writeJsonAtomic, writeJsonExclusive, readJsonFile, resolveInsideDir, resolveTrustedEvolutionRoot } from './io.ts'
 import { DEFAULT_EVOLUTION_BUDGET } from './types.ts'
 import { evolutionArchiveRoot, evolutionRunsDir } from './archive.ts'
 import { sealArtifactDigest } from './archive.ts'
@@ -114,7 +114,12 @@ export function createExperiment(input: {
     klArms: [],
     frozenRunReceipt: null,
   }
-  saveExperiment(input.home, state)
+  // Create-only: never replace a live experiment (and its reserved budget).
+  writeJsonExclusive(
+    experimentPath(input.home),
+    state,
+    'experiment already exists; refusing to overwrite',
+  )
   return state
 }
 

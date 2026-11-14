@@ -4,7 +4,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { writeSynthDataset } from '../src/evolution/synth-fixture.ts'
 import { runEvolution } from '../src/evolution/evolve.ts'
-import { loadExperiment } from '../src/evolution/experiment.ts'
+import { loadExperiment, createExperiment } from '../src/evolution/experiment.ts'
 import { acquireSearchRunLock, releaseSearchRunLock } from '../src/evolution/search-run-lock.ts'
 
 function klTrialsFromState(home: string): number {
@@ -139,6 +139,63 @@ describe('concurrent search lock', () => {
       selector: 'simplified-greedy',
       budget: { maxCandidates: 2, maxEvals: 20, evalTimeoutMs: 10_000, reserveEvals: 4, maxCandidatesThisRun: 1 },
     })).rejects.toThrow(/search run lock/)
+    // A failed lock acquisition must not leave durable experiment state.
+    expect(fs.existsSync(path.join(home, 'evolution', 'experiment.json'))).toBe(false)
+    expect(loadExperiment(home)).toBeNull()
     releaseSearchRunLock(home, lock.lockToken)
+  })
+
+  it('refuses a second createExperiment and preserves identity and budget', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-create-only-home-'))
+    homes.push(home)
+    const first = createExperiment({
+      home,
+      datasetDigest: 'dataset-digest',
+      evaluatorDigest: 'evaluator-digest',
+      seed: 7,
+      budget: {
+        maxCandidates: 2,
+        maxEvals: 20,
+        evalTimeoutMs: 5_000,
+        reserveEvals: 4,
+        usedEvals: 6,
+      },
+    })
+
+    expect(() => createExperiment({
+      home,
+      datasetDigest: 'other-dataset',
+      evaluatorDigest: 'other-evaluator',
+      seed: 99,
+      budget: { maxCandidates: 9, maxEvals: 90, evalTimeoutMs: 9_000, reserveEvals: 9 },
+    })).toThrow(/experiment already exists/)
+
+    const after = loadExperiment(home)!
+    expect(after.experimentId).toBe(first.experimentId)
+    expect(after.datasetDigest).toBe('dataset-digest')
+    expect(after.evaluatorDigest).toBe('evaluator-digest')
+    expect(after.seed).toBe(7)
+    expect(after.budget).toEqual(first.budget)
+    expect(after.budget.usedEvals).toBe(6)
+  })
+
+  it('creates and runs an experiment on a fresh unlocked home', async () => {
+    const datasetRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-fresh-ds-'))
+    datasets.push(datasetRoot)
+    writeSynthDataset(datasetRoot)
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-fresh-home-'))
+    homes.push(home)
+
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      selector: 'simplified-greedy',
+      budget: { maxCandidates: 2, maxEvals: 20, evalTimeoutMs: 10_000, reserveEvals: 4, maxCandidatesThisRun: 1 },
+    })
+
+    const exp = loadExperiment(home)!
+    expect(exp.experimentId).toBe(report.experimentId)
+    expect(exp.phase).toBe('search')
+    expect(report.candidates.length).toBeGreaterThan(0)
   })
 })

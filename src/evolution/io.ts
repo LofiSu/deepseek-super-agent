@@ -30,6 +30,44 @@ export function writeJsonAtomic(filePath: string, value: unknown): void {
   fs.renameSync(tmp, target)
 }
 
+/**
+ * Create-only JSON write. Uses `wx` so an existing target makes the call fail
+ * with EEXIST instead of being overwritten; two concurrent creators cannot both
+ * win. A partially written file is removed on write failure.
+ */
+export function writeJsonExclusive(filePath: string, value: unknown, existsMessage = 'file already exists'): void {
+  const absolute = path.resolve(filePath)
+  const dir = path.dirname(absolute)
+  fs.mkdirSync(dir, { recursive: true })
+  const dirReal = fs.realpathSync(dir)
+  const target = path.join(dirReal, path.basename(absolute))
+  const body = JSON.stringify(value, null, 2)
+  let fd: number
+  try {
+    fd = fs.openSync(target, 'wx')
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException
+    if (err?.code === 'EEXIST') throw new Error(existsMessage)
+    throw error
+  }
+  try {
+    fs.writeSync(fd, body, 0, 'utf8')
+  } catch (error) {
+    try {
+      fs.closeSync(fd)
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(target)
+    } catch {
+      /* ignore */
+    }
+    throw error
+  }
+  fs.closeSync(fd)
+}
+
 export function writeJsonInsideTrustedRoot(trustedRoot: string, relativeName: string, value: unknown): void {
   const root = fs.realpathSync(trustedRoot)
   const target = path.resolve(root, relativeName)

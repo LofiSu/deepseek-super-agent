@@ -137,47 +137,50 @@ export interface EvolveRunInput {
 export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunReport> {
   const budget = input.budget ?? DEFAULT_EVOLUTION_BUDGET
   assertValidEvolutionBudget(budget)
+  // Read-only dataset/evaluator work stays outside the exclusive search lock.
   const dataset = loadSearchDatasetOnly(input.datasetRoot)
   const evaluatorDigest = computeEvaluatorDigest()
-  let experiment = loadExperiment(input.home)
-  if (!experiment) {
-    experiment = createExperiment({
-      home: input.home,
-      datasetDigest: dataset.datasetDigest,
-      evaluatorDigest,
-      seed: dataset.manifest.seed,
-      budget: {
-        maxCandidates: budget.maxCandidates,
-        maxEvals: budget.maxEvals,
-        evalTimeoutMs: budget.evalTimeoutMs,
-        maxOutputBytes: budget.maxOutputBytes ?? 65_536,
-        reserveEvals: budget.reserveEvals ?? 8,
-        usedEvals: 0,
-        errors: 0,
-        timeouts: 0,
-        providerCalls: 0,
-      },
-    })
-  } else {
-    assertSearchAllowed(experiment)
-    assertBudgetFrozen(experiment, budget)
-  }
-  assertSearchAllowed(experiment)
-  if (experiment.datasetDigest !== dataset.datasetDigest) {
-    throw new Error('dataset digest mismatch for experiment')
-  }
-  if (experiment.evaluatorDigest !== evaluatorDigest) {
-    throw new Error('evaluator digest mismatch for experiment')
-  }
 
+  // Take the search lock before any experiment.json read-create-write. A failed
+  // acquisition must not leave a durable experiment behind, and a stale creator
+  // must not be able to replace the identity of a run that already holds it.
   const searchLock = acquireSearchRunLock(input.home)
   try {
-  return await runEvolutionLocked(input, {
-    budget,
-    dataset,
-    evaluatorDigest,
-    experiment,
-  })
+    let experiment = loadExperiment(input.home)
+    if (!experiment) {
+      experiment = createExperiment({
+        home: input.home,
+        datasetDigest: dataset.datasetDigest,
+        evaluatorDigest,
+        seed: dataset.manifest.seed,
+        budget: {
+          maxCandidates: budget.maxCandidates,
+          maxEvals: budget.maxEvals,
+          evalTimeoutMs: budget.evalTimeoutMs,
+          maxOutputBytes: budget.maxOutputBytes ?? 65_536,
+          reserveEvals: budget.reserveEvals ?? 8,
+          usedEvals: 0,
+          errors: 0,
+          timeouts: 0,
+          providerCalls: 0,
+        },
+      })
+    }
+    assertSearchAllowed(experiment)
+    assertBudgetFrozen(experiment, budget)
+    if (experiment.datasetDigest !== dataset.datasetDigest) {
+      throw new Error('dataset digest mismatch for experiment')
+    }
+    if (experiment.evaluatorDigest !== evaluatorDigest) {
+      throw new Error('evaluator digest mismatch for experiment')
+    }
+
+    return await runEvolutionLocked(input, {
+      budget,
+      dataset,
+      evaluatorDigest,
+      experiment,
+    })
   } finally {
     releaseSearchRunLock(input.home, searchLock.lockToken)
   }
