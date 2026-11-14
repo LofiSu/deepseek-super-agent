@@ -53,7 +53,7 @@
 | A6 | outbound concierge calling（代打商户电话） | S4/S6：TechCrunch 报道 concierge 功能 | media | `missing` / `environment-blocked` | 需要电话网络与商户侧流程；无实现 |
 | A7 | 群聊 / shared agent，含无账号参与者 | S4/S6：共享 Instinct 加入朋友群聊，朋友可以没有账号 | media | `missing`（群聊准入是 `main` 的另一件事） | `src/ingress/filter.ts` 有 `DS_AGENT_GROUP_ALLOWLIST`，Feishu 把 `chat_id` 映射到 `address.group`；但“共享 agent + 无账号 participant + principal 分层”没有实现。不要把 group admission 当成 shared agent |
 | A8 | clock / timer wake | S4/S5：clock 可以启动它；S9：6:00 扫描后可决定沉默 | teardown/media | `main` | `src/harness/routines.ts`：interval / UTC daily schedule，daemon tick，first-tick arm，长间隔只补一次；`test/routines.test.ts`。注意这是 owner-authored routine，不是 Instinct 的内部“可自行醒来”策略 |
-| A9 | connector / event wake（mail、calendar、documents、location） | S4/S5：事件可唤醒，平台侧先做 safety check | teardown | `missing` | 无 connector event source。routines 只有 clock；没有 Gmail/Calendar/Docs/location watcher |
+| A9 | connector / event wake（mail、calendar、documents、location） | S4/S5：事件可唤醒，平台侧先做 safety check | teardown | `PR-only`（本 PR） | `src/connectors/wake.ts`：复用 Daemon pulse，把一条具体事件交给 `Runtime.ingest`；默认关闭，首轮只回填索引不唤醒，共享 `proactive.json` quiet hours，并受 DROP_SELF/allowlist、私有线程、每日上限约束。离线 fake 测试通过；真实 Google 账号未验收 |
 | A10 | unfinished-task follow-up | S4/S5/S10：跟进用户搁下的事；S10 的原话 *Did you book Vancouver, or do you still want a hand?* | teardown | `PR-only`（本 PR） | 本 PR 的 `src/harness/proactive.ts` 在检测到 report question / pending approval / blocked state 时，才通过 `Runtime.ingest` 发一条短跟进；默认关闭，真实 Feishu 未验收。`main` 上仍是 `missing` |
 | A11 | personalized recommendations only when truly useful | S12（Muse 官方门槛，S9/S10 对 Instinct 的行为观察）：有实质新信息才打扰；无新信息保持沉默 | official/media | `missing` | 无推荐/价格追踪/日历变化引擎。本 PR 只做了“沉默默认”的主动联系门禁，不等于推荐系统 |
 | A12 | 白天发送、夜间安静 | S10：17 次主动全部在 08:57–19:20；S9：6:00 可扫描但不说话 | teardown/media | `PR-only`（本 PR） | `proactive.json` 默认 quiet hours 23:00–08:00（Asia/Shanghai）；未合并前 `main` 无此能力 |
@@ -66,7 +66,7 @@
 |---|---|---|---|---|---|
 | B1 | 持久人物记忆（可被后续 turn 召回） | S4/S5/S11 | teardown | `main`（等价，不是同一实现） | `src/memory/long-term.ts`：SQLite LTM、spill、Chain of Recall、ACL、hot/cold retention；`test/long-term-memory.test.ts`、`test/memory-graph.test.ts`、`test/memory-recall-eval.test.ts` |
 | B2 | git-tracked markdown memory + 可追溯历史 | S4/S5/S11：git-tracked markdown files；S11 独立探测得到同一形状 | teardown | `missing` | 本仓库是 SQLite + JSONL，不是 git-tracked markdown；没有“修正后旧事实留在 git history”的产品面。等价物是 LTM 历史与 session journal，但不是同一能力 |
-| B3 | 可查询的 connector data index | S4/S5：Gmail 等连接器数据进入 indexed layer，背后是 query interface；断开连接后是否清空未测 | teardown | `missing` | 无 Gmail/Slack/Notion connector，也没有 connector data index |
+| B3 | 可查询的 connector data index | S4/S5：Gmail 等连接器数据进入 indexed layer，背后是 query interface；断开连接后是否清空未测 | teardown | `PR-only`（本 PR） | `src/connectors/index-store.ts`：独立 `connector` document kind 与查询接口，不写 `ltm`、不要求 reader ticket；`pnpm ds-agent connectors query`。默认关闭；真实 Google 数据未验收 |
 | B4 | fill-only credential vault | S4/S5：可把密码/卡号填进表单，但不能读回；密码不经过消息通道 | teardown | `missing` | 无 credential vault。现有 `src/env/sanitize.ts` 只是 secret redaction sentinel，不是“能填不能读”的独立 store |
 | B5 | 每日 reconciliation / 记忆整理 | S5/S11：约每日一次 | teardown | `missing` | 无定时 reconciliation；LTM 只有写入、召回、retention pruning |
 
@@ -74,7 +74,7 @@
 
 | # | Connector | Instinct 公开证据 | 等级 | ds-agent 状态 | 备注 |
 |---|---|---|---|---|---|
-| C1 | Google Workspace：Calendar、Gmail、Drive、Docs、Sheets、Slides、Tasks | S2 官方隐私页逐项点名；S4/S5 说连接器数据进入 indexed layer | official | `missing` | 无 Google OAuth / Workspace adapter。七个产品名是官方原文，不把“43 families”里的其他名字补进来 |
+| C1 | Google Workspace：Calendar、Gmail、Drive、Docs、Sheets、Slides、Tasks | S2 官方隐私页逐项点名；S4/S5 说连接器数据进入 indexed layer | official | `PR-only`（本 PR） | `src/connectors/`：七个公开产品名的只读映射、OAuth refresh-token 配置、默认关闭的 Daemon 轮询；离线 fake `fetch` 测试通过，真实 Google OAuth/账号未验收。没有 Slack/Notion 或其他未列名 connector |
 | C2 | 工具/动作总量口径 | S4/S5：官方 help index **43 families / 571 actions**；teardown 自己的枚举 **39 / 569**；live page 上另有名字合计 **577**，其中 **335** 有完整 manual page；其余 242 各有 stated reason | teardown | `missing`（无可比 surface） | 名称数量不是验收标准。本仓库 tool surface 是 `src/harness/tools.ts` 的显式 tool list，远小于 Instinct 的 CLI grammar；不要用“577”当能力声明 |
 | C3 | Slack | 本机缓存 S1–S15 未给出具名证据 | — | 不列入验收 | 如果后续拿到官方 help index 的具名页，再补 evidence grade；当前不能声称 Instinct 的 Slack 连接器已被验证，也不能声称本仓库支持 |
 | C4 | Notion | 同上，未具名 | — | 不列入验收 | 同上 |
@@ -112,13 +112,14 @@
 | P2 | remote mesh runtime placement / assignment results | #165 | `PR-only` | 多节点 Worker 放置；不是 Instinct 的 cloud browser 或 hosted identity |
 | P3 | deployment docs / loopback sandbox probes | #167 | `PR-only` | 部署与安全探测；不是 Instinct connector 能力 |
 | P4 | native controlled evolution | #168 | `PR-only` | 自改进/策略演化；不是本清单的 Instinct inventory 项 |
+| P5 | Google Workspace connectors + connector index + event wake | 本 PR（`feat/instinct-connectors-index` → `feat/instinct-idle-proactive`） | `PR-only` | 七个 Google Workspace 只读映射；`connectors.json` 由 owner 启用，缺失即关闭；独立 connector 索引不写 LTM；wake 复用 Daemon pulse 与 `Runtime.ingest`。只做离线 fake API/OAuth 测试；**真实 Google 账号、OAuth 同意、Workspace API 未验收** |
 
 > #166、#164、#163 也是 open PR（longitudinal harness、recovery boundary、sandbox health），但没有改变本清单的 `main` 状态；不把它们当作已合并能力。
 
 ## 9. 结论
 
 - **已具备（`main`）**：iMessage 通道、clock/timer routines、长期记忆与 ACL、irreversible action 的 approval hold、CLI/Feishu/GitHub 等多通道运行时，以及默认关闭的 sandbox/redaction 边界。每项都有 cited test 或文档依据。
-- **本 PR 新增但未验收**：owner-gated idle self-wake（A10/A12）。它默认关闭，只在已有私聊线程里、有具体新事实时才可能发一条短消息；真实通道发送等待 owner。
-- **明确缺失**：WhatsApp/SMS/email/电话、群聊 shared agent、connector event wake、Google Workspace/Slack/Notion connector、connector data index、fill-only vault、cloud browser、三答案 approval card、payment、receipt、deletion surface、推荐系统。
+- **本 PR 新增但未验收**：owner-gated idle self-wake（A10/A12），以及 Google Workspace connector 索引与事件唤醒（A9/B3/C1）。两者都默认关闭；connector 只在已有私聊线程、具体事件达到 usefulness 门槛且通过 admission/quiet-hours/cap 时才可能进入 `Runtime.ingest`。真实 Feishu/iMessage 发送、Google OAuth 与 Workspace API 均等待 owner 实测。
+- **明确缺失**：WhatsApp/SMS/email/电话、群聊 shared agent、fill-only vault、cloud browser、三答案 approval card、payment、receipt、deletion surface、推荐系统。Slack/Notion 仍不列入验收（无具名来源），本 PR 也没有实现它们。
 - **不能靠代码等价**：hosted identity、电话网络、merchant partnerships、用户 Mac/iMessage 账号。它们被标为 `environment-blocked`，不冒充完成。
 - **不猜测**：Instinct 的 27-section instruction body、main agent host、model id、control-plane schema、desktop app 与四个 policy section 没有公开正文；本仓库不复制、不假装对齐。

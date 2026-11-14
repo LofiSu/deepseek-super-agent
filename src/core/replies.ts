@@ -8,11 +8,17 @@ export class Replies {
   constructor(private readonly host: Host) {}
 
   acknowledge(ticket: Ticket, threadKey?: string): void {
-    // A proactive idle wake is already a message. A canned "Acknowledged"
-    // before the Router decides would be exactly the noise this feature must
-    // not send, so the Router's one turn is the only possible output.
-    if (ticket.channels.some(channel => channel.address?.proactive === '1')) {
-      this.host.log(`[reply] ack-suppressed ticketId=${ticket.id} channel=proactive reason=conversational`)
+    // A proactive idle wake or a connector event is already a message. A
+    // canned "Acknowledged" before the Router decides would be exactly the
+    // noise these features must not send, so the Router's one turn is the only
+    // possible output.
+    const wakeMarker = ticket.channels.map(channel => channel.address?.proactive === '1'
+      ? 'proactive'
+      : channel.address?.connector === '1'
+        ? 'connector'
+        : undefined).find(Boolean)
+    if (wakeMarker) {
+      this.host.log(`[reply] ack-suppressed ticketId=${ticket.id} channel=${wakeMarker} reason=conversational`)
       return
     }
     // iMessage is a live conversation: a canned English acknowledgement before

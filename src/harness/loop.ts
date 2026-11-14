@@ -9,6 +9,7 @@ import { systemPrompt, type PromptFiles } from './prompts.ts'
 import type { LocalAgentInfo } from '../env/local-agents.ts'
 import { directChatThread, routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
 import { isProactiveTicket } from './proactive.ts'
+import { isConnectorWakeTicket } from '../connectors/wake.ts'
 import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
@@ -101,6 +102,7 @@ export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = 
   const mode = ticket.speculative ? 'speculative' : 'normal'
   const directChat = directChatThread(ticket)
   const proactive = isProactiveTicket(ticket)
+  const connector = isConnectorWakeTicket(ticket)
   return [
     ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
     `ticketId=${ticket.id}`,
@@ -108,8 +110,8 @@ export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = 
     `title=${ticket.title}`,
     // The title is capped at 80 characters; a direct chat needs the whole
     // message because the Router answers it without a Worker reading the brief.
-    // A proactive wake carries the concrete fact the same way.
-    ...(directChat || proactive ? [`message=${ticket.brief}`] : []),
+    // A proactive or connector wake carries the concrete fact the same way.
+    ...(directChat || proactive || connector ? [`message=${ticket.brief}`] : []),
     `mode=${mode}`,
     'decision=accepted-by-gate',
     ...(proactive ? [
@@ -117,6 +119,13 @@ export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = 
       'This is an idle self-wake in an existing private thread. There is no Worker follow-up.',
       'Send at most one short message only if the fact above is genuinely useful.',
       'Do not send an acknowledgement, a ticket inventory, or a request for a reply; do not mention that this was a scheduled check.',
+      'If nothing is useful, call assess_trigger kind=stop and do not reply.',
+    ] : []),
+    ...(connector ? [
+      'connector=true',
+      'This is a connector event wake in an existing private thread. There is no Worker follow-up.',
+      'Send at most one short message only if this event needs the owner now.',
+      'Do not send an acknowledgement, a status line, or a request for a reply; do not mention connectors, polling, or that this was an automatic check.',
       'If nothing is useful, call assess_trigger kind=stop and do not reply.',
     ] : []),
     ...extraLines,
@@ -262,13 +271,14 @@ export class Harness {
     // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
     // Capacity is picked after the Routers so a veto never consumes a slot.
     const startWorker = (): Promise<void> | undefined => {
-      // A proactive idle wake is a messaging envelope, not a work request: the
-      // Router's one turn is the whole deliverable. End it even when the
-      // Router stayed silent, so no Worker is ever spawned for it.
-      if (isProactiveTicket(ticket)) {
+      // A proactive idle wake or a connector event is a messaging envelope,
+      // not a work request: the Router's one turn is the whole deliverable.
+      // End it even when the Router stayed silent, so no Worker is spawned.
+      if (isProactiveTicket(ticket) || isConnectorWakeTicket(ticket)) {
         const latest = this.opts.store.getDoc<Ticket>('ticket', ticket.id)
-        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=proactive-message`)
-        if (!latest?.ended) this.opts.stopProactiveTicket?.(ticket, 'proactive message turn complete')
+        const kind = isConnectorWakeTicket(ticket) ? 'connector-message' : 'proactive-message'
+        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=${kind}`)
+        if (!latest?.ended) this.opts.stopProactiveTicket?.(ticket, `${kind} turn complete`)
         return undefined
       }
       // A direct chat the Router already answered is finished. Give the

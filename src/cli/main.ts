@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
@@ -17,6 +19,10 @@ import { redactSecrets, secretValues } from '../env/sanitize.ts'
 import { LOCAL_AGENTS_FILE, loadLocalAgents } from '../env/local-agents.ts'
 import { SKILLS_DIR, SKILL_FILE, SkillRegistry } from '../env/skills.ts'
 import { loadRoutines, ROUTINES_ENV, ROUTINES_FILE } from '../harness/routines.ts'
+import { CONNECTORS_FILE, loadConnectorConfig } from '../connectors/config.ts'
+import { ConnectorIndex } from '../connectors/index-store.ts'
+import { loadConnectorWakeState } from '../connectors/wake.ts'
+import { CONNECTOR_KINDS, isGoogleService, type ConnectorKind } from '../connectors/types.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
 import type { A2AEnvelope } from '../channels/a2a.ts'
@@ -184,6 +190,11 @@ function help(): void {
   pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
   pnpm ds-agent recovery-effects <ticketId> [retry|acknowledge <effectId>] [--json]
                             # inspect or resolve one uncertain external effect on an ended Ticket
+  pnpm ds-agent connectors [status] [--json]  # Google Workspace connector config and index stats
+  pnpm ds-agent connectors query "invoice" [--service gmail] [--kind message]
+                            [--since ISO] [--wake-only] [--limit 10] [--json]
+                            # read the connector data index; separate from long-term memory
+                            # connectors.json is absent/off by default; no network is used here
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -402,10 +413,10 @@ async function serve(home: string): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
   try {
-    // Only the long-lived serving process ticks owner routines and the
-    // owner-gated idle wake; one-shot commands (approve, retry, chat, resume,
-    // emit) must not fire them.
-    runtime.start({ assessPending: canAssess, routines: true, proactive: true })
+    // Only the long-lived serving process ticks owner routines, the
+    // owner-gated idle wake, and connector polling. One-shot commands
+    // (approve, retry, chat, resume, emit) must not fire them.
+    runtime.start({ assessPending: canAssess, routines: true, proactive: true, connectors: true })
   } catch (error) {
     channels?.abort()
     channels?.close()
@@ -973,6 +984,10 @@ async function main(): Promise<void> {
     console.log(redact(buildSystemPrompt(input)))
     return
   }
+  if (cmd === 'connectors') {
+    runConnectorsCommand(home, sub)
+    return
+  }
   if (cmd === 'routines') {
     const routines = loadRoutines(home, process.env)
     if (process.argv.includes('--json')) {
@@ -1024,6 +1039,97 @@ async function main(): Promise<void> {
     return
   }
   throw new Error(`unknown command ${cmd}`)
+}
+
+function runConnectorsCommand(home: string, sub: string | undefined): void {
+  const store = new Store(home)
+  try {
+    const config = loadConnectorConfig(home, process.env)
+    if (sub === 'query') {
+      const text = bare(4, ['service', 'kind', 'since', 'limit']).join(' ').trim()
+      const service = option('service')
+      if (service !== undefined && !isGoogleService(service)) {
+        throw new Error(`unknown connector service ${service}`)
+      }
+      const kind = option('kind')
+      if (kind !== undefined && !CONNECTOR_KINDS.includes(kind as ConnectorKind)) {
+        throw new Error(`unknown connector kind ${kind}`)
+      }
+      const since = option('since')
+      const limitRaw = option('limit')
+      const limit = limitRaw === undefined ? undefined : Number(limitRaw)
+      if (limit !== undefined && !Number.isFinite(limit)) throw new Error('--limit must be a number')
+      const records = new ConnectorIndex(store).query({
+        ...(text ? { text } : {}),
+        ...(service !== undefined ? { service } : {}),
+        ...(kind !== undefined ? { kind: kind as ConnectorKind } : {}),
+        ...(since !== undefined ? { since } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(process.argv.includes('--wake-only') ? { wakeOnly: true } : {}),
+      })
+      if (process.argv.includes('--json')) {
+        console.log(JSON.stringify(records, null, 2))
+        return
+      }
+      if (records.length === 0) {
+        console.log('no connector records')
+        return
+      }
+      for (const record of records) {
+        console.log(`${record.occurredAt}\t${record.service}:${record.kind}\t${record.id}\t${record.title}`)
+      }
+      return
+    }
+    if (sub !== undefined && sub !== 'status') {
+      throw new Error('connectors needs "status" or "query": ds-agent connectors [status] | query "text"')
+    }
+    const stats = new ConnectorIndex(store).stats()
+    const state = loadConnectorWakeState(store)
+    const credentialSource = config.google.credentialsFile ?? config.google.credentialsEnv ?? '-'
+    const credentialReady = config.google.credentialsFile !== undefined
+      ? fs.existsSync(path.isAbsolute(config.google.credentialsFile)
+        ? config.google.credentialsFile
+        : path.join(home, config.google.credentialsFile))
+      : config.google.credentialsEnv !== undefined
+        ? Boolean(process.env[config.google.credentialsEnv]?.trim())
+        : false
+    const summary = {
+      home,
+      configFile: `${CONNECTORS_FILE}${fs.existsSync(path.join(home, CONNECTORS_FILE)) ? '' : ' (absent)'}`,
+      enabled: config.enabled,
+      services: config.google.services,
+      credentialSource,
+      credentialReady,
+      poll: config.poll,
+      index: config.index,
+      wake: config.wake,
+      stats,
+      wakeState: {
+        lastCheckAt: state.lastCheckAt === undefined ? undefined : new Date(state.lastCheckAt).toISOString(),
+        lastWakeAt: state.lastWakeAt === undefined ? undefined : new Date(state.lastWakeAt).toISOString(),
+        wakes: state.wakes.length,
+        notified: state.notified.length,
+      },
+    }
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(summary, null, 2))
+      return
+    }
+    console.log(`connectors ${config.enabled ? 'enabled' : 'disabled'} (${summary.configFile})`)
+    console.log(`  services: ${config.google.services.join(',')}`)
+    console.log(`  credentials: ${credentialSource} ${credentialReady ? 'present' : 'missing'}`)
+    console.log(`  poll: every ${config.poll.intervalMinutes}m max=${config.poll.maxRecordsPerPoll}`)
+    console.log(`  index: ${stats.count} records maxRecords=${config.index.maxRecords} maxAgeDays=${config.index.maxAgeDays}`)
+    console.log(
+      `  wake: ${config.wake.enabled ? 'enabled' : 'disabled'} `
+      + `services=${config.wake.services.join(',')} target=${config.wake.source}:${config.wake.thread}`,
+    )
+    if (state.lastCheckAt !== undefined) {
+      console.log(`  lastCheckAt: ${new Date(state.lastCheckAt).toISOString()}`)
+    }
+  } finally {
+    store.close()
+  }
 }
 
 function sessionLine(session: SessionRow): string {

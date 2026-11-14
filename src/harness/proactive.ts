@@ -375,14 +375,7 @@ export class ProactiveScheduler {
   }
 
   private inQuietHours(at: number): boolean {
-    const config = this.opts.config
-    const start = parseMinutes(config.quietStart)
-    const end = parseMinutes(config.quietEnd)
-    if (start === end) return false
-    const now = localMinutes(at, config.timezone)
-    return start < end
-      ? now >= start && now < end
-      : now >= start || now < end
+    return withinQuietHours(at, this.opts.config)
   }
 
   private loadState(): ProactiveState {
@@ -627,6 +620,21 @@ export function isProactiveTicket(ticket: Ticket): boolean {
 export function dayKey(at: number, timezone: string): string {
   const offset = TIMEZONES[timezone] ?? 0
   return new Date(at + offset * 60_000).toISOString().slice(0, 10)
+}
+
+/**
+ * Shared quiet-hours check for any owner-gated proactive contact. Connector
+ * wakes use the same `proactive.json` window; a second quiet-hours definition
+ * would let one feature talk while the other promises silence.
+ */
+export function withinQuietHours(at: number, config: ProactiveConfig): boolean {
+  const start = parseMinutes(config.quietStart)
+  const end = parseMinutes(config.quietEnd)
+  if (start === end) return false
+  const now = localMinutes(at, config.timezone)
+  return start < end
+    ? now >= start && now < end
+    : now >= start || now < end
 }
 
 function localMinutes(at: number, timezone: string): number {
