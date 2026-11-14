@@ -51,6 +51,38 @@ export function loadPromotedStrategy(home: string): DeliverGateStrategyV1 | null
     throw new Error('frozen run receipt digest mismatch vs promotion')
   }
 
+  // Re-apply the same admission gates approvePromotion enforces, against the
+  // experiment-sealed frozen receipt. Promotion artifacts on disk are only as
+  // trustworthy as the experiment state that admitted them, so a planted
+  // promotion record or a swapped on-disk receipt cannot activate a candidate
+  // the experiment itself would have refused.
+  const sealedReport = experiment.frozenRunReceipt
+  if (!sealedReport) {
+    throw new Error('promotion consumer requires the experiment-sealed frozen run receipt')
+  }
+  if (stableJsonDigest(receipt) !== stableJsonDigest(sealedReport)) {
+    throw new Error('frozen run receipt does not match the experiment-sealed receipt')
+  }
+
+  const candidate = sealedReport.candidates.find(item => item.candidateId === record.candidateId)
+  if (!candidate) {
+    throw new Error(`promotion unknown candidate ${record.candidateId}`)
+  }
+  if (candidate.status !== 'evaluated') {
+    throw new Error(`promotion candidate status=${candidate.status}; cannot load`)
+  }
+  if (candidate.reward !== 'success') {
+    throw new Error(`train gate not satisfied; promotion refused (reward=${candidate.reward})`)
+  }
+  const validation = candidate.scores.find(score => score.split === 'validation')
+  if (!validation || validation.accuracy < 1) {
+    throw new Error('validation gate not satisfied; promotion refused')
+  }
+  const finalScore = experiment.finalTest.scores.find(score => score.split === 'finaltest')
+  if (!finalScore || finalScore.total < 1 || finalScore.accuracy < 1) {
+    throw new Error('final test gate not satisfied; promotion refused')
+  }
+
   const raw = readJsonFile<unknown>(strategyFile, evolutionRoot)
   const strategy = parseDeliverGateStrategy(raw)
   const strategyDigest = stableJsonDigest(strategy)
