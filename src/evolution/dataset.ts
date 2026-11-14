@@ -89,12 +89,46 @@ function assertValidSpeculativeFlags(cases: EvolutionEvalCase[], rel: string): v
   }
 }
 
+/**
+ * `report` is scored as `{ kind: string; text: string; deliver?: boolean }`.
+ * The gate reads `report.kind` and `report.text`, and compares `report.deliver`
+ * with `===`. A missing, `null`, or non-object report crashes the scorer; a
+ * non-string `kind` or `text` either crashes or silently changes the
+ * prediction; and a present but non-boolean `deliver` (e.g. `"false"`, `0`,
+ * `1`) misses the exact boolean comparison and takes the wrong branch. None of
+ * this is repairable by the failure proposer, so reject the split when it is
+ * read. `deliver` is optional and may be omitted; `kind` stays an open string
+ * (unknown kinds already fail closed in the gate); extra keys are ignored.
+ */
+function assertValidReports(cases: EvolutionEvalCase[], rel: string): void {
+  for (const testCase of cases) {
+    const report: unknown = testCase?.report
+    if (typeof report !== 'object' || report === null || Array.isArray(report)) {
+      throw new Error(`split has invalid report: ${rel}`)
+    }
+    const { kind, text, deliver } = report as {
+      kind?: unknown
+      text?: unknown
+      deliver?: unknown
+    }
+    if (typeof kind !== 'string' || typeof text !== 'string') {
+      throw new Error(`split has invalid report: ${rel}`)
+    }
+    if (Object.prototype.hasOwnProperty.call(report, 'deliver')) {
+      if (deliver !== true && deliver !== false) {
+        throw new Error(`split has invalid report: ${rel}`)
+      }
+    }
+  }
+}
+
 function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
   assertUniqueCaseIds(parsed.cases, rel)
   assertValidExpectedLabels(parsed.cases, rel)
   assertValidSpeculativeFlags(parsed.cases, rel)
+  assertValidReports(parsed.cases, rel)
   return parsed.cases
 }
 

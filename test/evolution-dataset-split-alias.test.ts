@@ -29,16 +29,26 @@ interface WrittenCase {
   speculative?: unknown
   /** Omit `speculative` entirely from the row. */
   omitSpeculative?: boolean
+  /**
+   * Arbitrary value so invalid report shapes (wrong type, custom kind/text,
+   * non-boolean deliver) can be written. When omitted, an honest
+   * `{ kind: 'ready', text }` is written.
+   */
+  report?: unknown
+  /** Omit `report` entirely from the row. */
+  omitReport?: boolean
 }
 
 function writeSplitCases(file: string, cases: WrittenCase[]): void {
   fs.writeFileSync(
     file,
     JSON.stringify({
-      cases: cases.map(({ id, text, expected, omitExpected, speculative, omitSpeculative }) => {
-        const row: Record<string, unknown> = {
-          id,
-          report: { kind: 'ready', text },
+      cases: cases.map(testCase => {
+        const { id, text, expected, omitExpected, speculative, omitSpeculative, omitReport } =
+          testCase
+        const row: Record<string, unknown> = { id }
+        if (!omitReport) {
+          row.report = 'report' in testCase ? testCase.report : { kind: 'ready', text }
         }
         if (!omitSpeculative) row.speculative = speculative === undefined ? true : speculative
         if (!omitExpected) row.expected = expected === undefined ? 'deliver' : expected
@@ -1423,5 +1433,253 @@ describe('regression: a split must carry a valid speculative flag (PR168)', () =
       true,
       true,
     ])
+  })
+})
+
+describe('regression: a split must carry a valid report (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  const TRAIN_INVALID = /^split has invalid report: train\.json$/
+  const VALIDATION_INVALID = /^split has invalid report: validation\.json$/
+  const FINALTEST_INVALID = /^split has invalid report: finaltest\.json$/
+
+  function dataset(
+    train: WrittenCase[],
+    validation: WrittenCase[],
+    finaltest?: WrittenCase[],
+  ): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    writeSplitCases(path.join(temp.root, 'train.json'), train)
+    writeSplitCases(path.join(temp.root, 'validation.json'), validation)
+    if (finaltest) writeSplitCases(path.join(temp.root, 'finaltest.json'), finaltest)
+    return temp
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  const HONEST_TRAIN: WrittenCase = { id: 't1', text: 'honest train row' }
+  const HONEST_VALIDATION: WrittenCase = { id: 'v1', text: 'honest validation row' }
+
+  function expectTrainReportRejected(badCase: WrittenCase): void {
+    const { root } = dataset(
+      [badCase, { id: 'ok', text: 'honest unique row' }],
+      [HONEST_VALIDATION],
+    )
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(TRAIN_INVALID)
+    }
+    // No train, validation, or finaltest cases were returned at search.
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  }
+
+  it('rejects a train split whose report.deliver is the string "false"', () => {
+    expectTrainReportRejected({
+      id: 'bad',
+      text: 'discard-like text',
+      speculative: false,
+      report: { kind: 'ready', text: 'Could not reproduce on main.', deliver: 'false' },
+    })
+  })
+
+  const INVALID_DELIVER: Array<[string, unknown]> = [
+    ['numeric 0', 0],
+    ['numeric 1', 1],
+    ['null', null],
+    ['the string "true"', 'true'],
+  ]
+
+  it.each(INVALID_DELIVER)(
+    'rejects a train split whose report.deliver is %s',
+    (_label, deliver) => {
+      expectTrainReportRejected({
+        id: 'bad',
+        text: 'row with a present non-boolean deliver',
+        report: { kind: 'ready', text: 'Could not reproduce on main.', deliver },
+      })
+    },
+  )
+
+  const INVALID_REPORTS: Array<[string, WrittenCase]> = [
+    ['omits report', { id: 'bad', text: 'missing report', omitReport: true }],
+    ['sets report to null', { id: 'bad', text: 'null report', report: null }],
+    ['sets report to a string', { id: 'bad', text: 'string report', report: 'ready' }],
+    ['sets report to an array', { id: 'bad', text: 'array report', report: [] }],
+  ]
+
+  it.each(INVALID_REPORTS)('rejects a train split that %s', (_label, badCase) => {
+    expectTrainReportRejected(badCase)
+  })
+
+  const INVALID_REPORT_FIELDS: Array<[string, WrittenCase]> = [
+    [
+      'omits report.kind',
+      { id: 'bad', text: 'missing kind', report: { text: 'ready text without a kind' } },
+    ],
+    [
+      'sets report.kind to null',
+      { id: 'bad', text: 'null kind', report: { kind: null, text: 'null kind text' } },
+    ],
+    [
+      'sets report.text to a number',
+      { id: 'bad', text: 'numeric text', report: { kind: 'ready', text: 1 } },
+    ],
+    [
+      'sets report.text to null',
+      { id: 'bad', text: 'null text', report: { kind: 'ready', text: null } },
+    ],
+  ]
+
+  it.each(INVALID_REPORT_FIELDS)('rejects a train split that %s', (_label, badCase) => {
+    expectTrainReportRejected(badCase)
+  })
+
+  it('rejects a validation split whose report.deliver is the string "false"', () => {
+    const { root } = dataset(
+      [HONEST_TRAIN],
+      [
+        {
+          id: 'vbad',
+          text: 'validation row with a string deliver',
+          speculative: false,
+          report: { kind: 'ready', text: 'Could not reproduce on main.', deliver: 'false' },
+        },
+      ],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(VALIDATION_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(VALIDATION_INVALID)
+  })
+
+  it('keeps search working when only the sealed finaltest report is invalid', () => {
+    const { root } = dataset(
+      [HONEST_TRAIN],
+      [HONEST_VALIDATION],
+      [
+        {
+          id: 'f-bad',
+          text: `held-out case ${CANARY}`,
+          speculative: false,
+          report: { kind: 'ready', text: 'Could not reproduce on main.', deliver: 'false' },
+        },
+        { id: 'f2', text: 'honest holdout' },
+      ],
+    )
+    // Honest commitment so finalize reaches the split instead of a digest error.
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(() => loadFinaltestSplit(root)).toThrow(FINALTEST_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(FINALTEST_INVALID)
+  })
+
+  it('still loads honest reports at search and finalize', () => {
+    const { root } = dataset(
+      [
+        { id: 't1', text: 'omitted optional deliver' },
+        {
+          id: 't2',
+          text: 'boolean deliver true',
+          report: { kind: 'ready', text: 'Fixed and ready.', deliver: true },
+        },
+        {
+          id: 't3',
+          text: 'boolean deliver false',
+          speculative: false,
+          report: { kind: 'ready', text: 'Could not reproduce on main.', deliver: false },
+        },
+        {
+          id: 't4',
+          text: 'failed kind',
+          report: { kind: 'failed', text: 'worker crashed' },
+        },
+        {
+          id: 't5',
+          text: 'dropped kind',
+          report: { kind: 'dropped', text: 'cancelled' },
+        },
+        {
+          id: 't6',
+          text: 'unknown extra report key',
+          report: { kind: 'ready', text: 'Ready for review.', note: 'extra keys are ignored' },
+        },
+      ],
+      [
+        { id: 'v1', text: 'honest validation one' },
+        {
+          id: 'v2',
+          text: 'honest validation two',
+          report: { kind: 'ready', text: 'Found the regression; fixed.', deliver: true },
+        },
+      ],
+      [{ id: 'f1', text: 'honest holdout', report: { kind: 'ready', text: 'Fixed.', deliver: false } }],
+    )
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1', 't2', 't3', 't4', 't5', 't6'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1', 'v2'])
+    expect(search.train.map(c => c.report.kind)).toEqual([
+      'ready',
+      'ready',
+      'ready',
+      'failed',
+      'dropped',
+      'ready',
+    ])
+    expect(search.train.map(c => c.report.deliver)).toEqual([
+      undefined,
+      true,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    ])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads the committed fixture reports at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train).toHaveLength(7)
+    expect(search.validation).toHaveLength(4)
+    for (const testCase of [...search.train, ...search.validation]) {
+      expect(typeof testCase.report.kind).toBe('string')
+      expect(typeof testCase.report.text).toBe('string')
+      if ('deliver' in testCase.report) {
+        expect(typeof testCase.report.deliver).toBe('boolean')
+      }
+    }
+    expect(searchText(search)).not.toContain('ho-001')
+
+    expect(loadFinaltestSplit(FIXTURE_DATASET_ROOT).map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest).toHaveLength(4)
   })
 })
