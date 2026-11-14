@@ -7,6 +7,7 @@ import { runEvolution } from '../src/evolution/evolve.ts'
 import { freezeCandidate, loadExperiment } from '../src/evolution/experiment.ts'
 import { runFinalTestOnce } from '../src/evolution/finalize.ts'
 import { approvePromotion, promotedStrategyPath } from '../src/evolution/promotion.ts'
+import { claimConsumedPath } from '../src/evolution/final-test-claim-lock.ts'
 import { sha256File, stableJsonDigest } from '../src/evolution/digest.ts'
 import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
 import type { DeliverGateStrategyV1 } from '../src/evolution/types.ts'
@@ -31,7 +32,10 @@ function tempDir(prefix: string): string {
  * makes the candidate strictly improve on the train baseline. Every variant
  * still misses the held-out finaltest cases.
  */
-function writeFinalTestRegressionDataset(targetDir: string): string {
+function writeFinalTestRegressionDataset(
+  targetDir: string,
+  firstFinaltestCaseId = 'ft-no-alpha',
+): string {
   fs.mkdirSync(targetDir, { recursive: true })
   const train = {
     cases: [
@@ -74,7 +78,7 @@ function writeFinalTestRegressionDataset(targetDir: string): string {
   const finaltest = {
     cases: [
       {
-        id: 'ft-no-alpha',
+        id: firstFinaltestCaseId,
         speculative: true,
         report: { kind: 'ready', text: 'beta patch is ready.' },
         expected: 'deliver',
@@ -163,6 +167,85 @@ describe('promotion final-test gate', () => {
       artifactPath,
     })).toThrow(/final test gate/i)
     expect(fs.existsSync(promotedStrategyPath(home))).toBe(false)
+  })
+})
+
+describe('finalize loading failure aborts the one-shot claim', () => {
+  it('closes the claim when the holdout split overlaps a search split', async () => {
+    // The holdout reuses the train case id `tr-alpha` with different bytes, so
+    // search and freeze still succeed (finaltest is never parsed there). Only
+    // loadFinaltestSplit, after the claim, rejects the dataset.
+    const datasetRoot = tempDir('evo-finaltest-overlap-ds-')
+    datasets.push(datasetRoot)
+    writeFinalTestRegressionDataset(datasetRoot, 'tr-alpha')
+    const home = tempDir('evo-finaltest-overlap-home-')
+    homes.push(home)
+
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      injectCandidates: [regressionStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const candidate = report.candidates.find(item => item.status === 'evaluated')
+    expect(candidate).toBeDefined()
+    expect(candidate!.reward).toBe('success')
+    freezeCandidate({ home, candidateId: candidate!.candidateId, runId: report.runId })
+    expect(loadExperiment(home)!.phase).toBe('frozen')
+
+    await expect(runFinalTestOnce({
+      home,
+      datasetRoot,
+      candidateId: candidate!.candidateId,
+    })).rejects.toThrow(/finaltest split shares case ids with train/)
+
+    const after = loadExperiment(home)!
+    expect(after.finalTestClaim?.state).toBe('FAILED')
+    expect(after.phase).toBe('finalized')
+    expect(after.finalTest).toBeNull()
+    expect(fs.existsSync(claimConsumedPath(home))).toBe(true)
+
+    // The lock and the one-shot claim are spent: the retry is rejected as
+    // already finalized/consumed, never as a lock still held by this process.
+    let retryError = ''
+    try {
+      await runFinalTestOnce({ home, datasetRoot, candidateId: candidate!.candidateId })
+    } catch (error) {
+      retryError = error instanceof Error ? error.message : String(error)
+    }
+    expect(retryError).toMatch(/finalized|consumed|duplicate|already/i)
+    expect(retryError).not.toMatch(/lock held by another process/)
+    expect(loadExperiment(home)!.finalTestClaim?.state).toBe('FAILED')
+  })
+
+  it('still finalizes an honest disjoint holdout', async () => {
+    const datasetRoot = tempDir('evo-finaltest-disjoint-ds-')
+    datasets.push(datasetRoot)
+    writeFinalTestRegressionDataset(datasetRoot)
+    const home = tempDir('evo-finaltest-disjoint-home-')
+    homes.push(home)
+
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      injectCandidates: [regressionStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const candidate = report.candidates.find(item => item.status === 'evaluated')
+    expect(candidate).toBeDefined()
+    freezeCandidate({ home, candidateId: candidate!.candidateId, runId: report.runId })
+
+    const finalTest = await runFinalTestOnce({
+      home,
+      datasetRoot,
+      candidateId: candidate!.candidateId,
+    })
+    expect(finalTest.scores).toHaveLength(1)
+    const after = loadExperiment(home)!
+    expect(after.finalTestClaim?.state).toBe('SUCCEEDED')
+    expect(after.phase).toBe('finalized')
+    expect(after.finalTest).not.toBeNull()
+    expect(fs.existsSync(claimConsumedPath(home))).toBe(true)
   })
 })
 

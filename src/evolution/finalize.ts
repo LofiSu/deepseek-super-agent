@@ -95,7 +95,13 @@ export async function runFinalTestOnce(input: {
       abortFinalTestClaim(input.home, lockToken, 'artifact strategy digest mismatch')
     }
 
-    const finaltest = loadFinaltestSplit(input.datasetRoot)
+    let finaltest: ReturnType<typeof loadFinaltestSplit>
+    try {
+      finaltest = loadFinaltestSplit(input.datasetRoot)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      abortFinalTestClaim(input.home, lockToken, message)
+    }
 
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-finaltest-'))
     let score: SplitScore
@@ -130,7 +136,17 @@ export async function runFinalTestOnce(input: {
     markFinalTestConsumed(input.home, true, lockToken)
     return { scores: [score], ledgerId: ledger.ledgerId }
   } catch (error) {
-    if (error instanceof Error && error.message.includes('final test claim')) throw error
+    // Any post-claim throw that did not take an explicit abort path above (for
+    // example loadSearchDatasetOnly or reserveFinalTestUnits) must not leave the
+    // one-shot claim open with an unconsumed OS lock. A throw that already went
+    // through abortFinalTestClaim has marked the claim FAILED and consumed the
+    // lock, so rethrow it untouched instead of aborting a second time.
+    const state = loadExperiment(input.home)
+    const claimState = state?.finalTestClaim?.state
+    if (claimState === 'CLAIMED' || claimState === 'RUNNING') {
+      const message = error instanceof Error ? error.message : String(error)
+      abortFinalTestClaim(input.home, lockToken, message)
+    }
     throw error
   }
 }
