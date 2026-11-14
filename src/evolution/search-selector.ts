@@ -19,11 +19,18 @@ export function selectFailureCasePolicyMemory(input: {
   memory: PolicyMemoryCarrier
   seenDirections: Set<string>
   retiredFailureIds: Set<string>
+  /** Failure ids whose proposer returned null earlier in this run. */
+  exhaustedFailureIds?: Set<string>
   opportunity: number
   seed: number
 }): string | null {
   const viable = input.trainFailures.filter(f => {
     if (input.retiredFailureIds.has(f.id)) return false
+    // A failure whose proposer already returned null cannot be proposed again in
+    // this run; retrying it would spend the candidate loop on the same arm while
+    // other train failures still have proposable tokens. Lesson preference below
+    // only considers this viable set, so an exhausted id wins over a stale lesson.
+    if (input.exhaustedFailureIds?.has(f.id)) return false
     for (const lesson of input.memory.lessons) {
       if (lesson.status === 'retired' && lesson.targets.includes(f.id)) return false
     }
@@ -51,6 +58,8 @@ export function selectArmId(input: {
   memory: PolicyMemoryCarrier
   seenDirections: Set<string>
   retiredFailureIds: Set<string>
+  /** Policy-memory only: failure ids that already yielded no proposal this run. */
+  exhaustedFailureIds?: Set<string>
   totalOpportunities: number
   roundNovelAttempted: number
   novelQuota: number
@@ -70,6 +79,7 @@ export function selectArmId(input: {
       memory: input.memory,
       seenDirections: input.seenDirections,
       retiredFailureIds: input.retiredFailureIds,
+      exhaustedFailureIds: input.exhaustedFailureIds,
       opportunity: input.totalOpportunities,
       seed: input.seed,
     })

@@ -261,6 +261,10 @@ async function runEvolutionLocked(
   const maxThisRound = budget.maxCandidates
   let injectIndex = 0
   const retiredFailureIds = collectRetiredFailureIds(memory)
+  // Run-local: policy-memory failures whose proposer returned null. They are not
+  // persisted as lessons or KL observations; they only stop this run from
+  // re-selecting an arm that cannot propose while other failures still can.
+  const exhaustedNoProposalIds = new Set<string>()
 
   for (let step = 0; step < maxThisRound; step += 1) {
     experiment = loadExperiment(input.home)!
@@ -287,6 +291,7 @@ async function runEvolutionLocked(
         memory,
         seenDirections,
         retiredFailureIds,
+        exhaustedFailureIds: exhaustedNoProposalIds,
         totalOpportunities: experiment.totalOpportunities,
         roundNovelAttempted,
         novelQuota,
@@ -310,6 +315,16 @@ async function runEvolutionLocked(
 
     if (!strategy) {
       const noProposalCandidateId = `cand_none_${round}_${step}`
+      // Policy-memory: remember that this selected failure has no proposal so
+      // later steps skip it while other train failures remain viable. The first
+      // row below is still emitted as skipped_invalid for evidence.
+      if (
+        selectorUsesMemory(selector)
+        && !injectedThisStep
+        && failureCaseId !== 'none'
+      ) {
+        exhaustedNoProposalIds.add(failureCaseId)
+      }
       // A selected KL-UCB arm that cannot propose must not stay "cold": the
       // novel-quota cold filter and discover-min-cold both ignore skip
       // observations, so they would keep re-selecting this arm while other

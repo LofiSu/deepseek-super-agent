@@ -177,6 +177,74 @@ describe('kl-ucb no-proposal cold arms', () => {
   })
 })
 
+describe('policy-memory exhausted arms after no proposal', () => {
+  function policyMemoryPick(exhausted: Set<string>) {
+    return selectArmId({
+      mode: 'policy-memory',
+      arms,
+      trainFailures: failures,
+      memory: emptyCarrier('e', 1),
+      seenDirections: new Set(),
+      retiredFailureIds: new Set(),
+      exhaustedFailureIds: exhausted,
+      totalOpportunities: 1,
+      roundNovelAttempted: 0,
+      novelQuota: NEW_DIRECTION_QUOTA_PER_RUN,
+      seed: 1,
+      discoverMinColdArms: 2,
+    })
+  }
+
+  it('skips an exhausted failure and picks the next viable one', () => {
+    const pick = policyMemoryPick(new Set(['tr-a']))
+    expect(pick.failureCaseId).toBe('tr-b')
+  })
+
+  it('returns the none sentinel when every failure is exhausted', () => {
+    const pick = policyMemoryPick(new Set(['tr-a', 'tr-b']))
+    expect(pick.failureCaseId).toBe('none')
+    expect(pick.selectionReason).toContain('no viable')
+  })
+
+  it('runEvolution does not spend the loop on a silent first failure', async () => {
+    const datasetRoot = tempDir('evo-pm-noproposal-ds-')
+    writeNoProposalDataset(datasetRoot, 0)
+    const home = tempDir('evo-pm-noproposal-home-')
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      selector: 'policy-memory',
+      stopOnFirstSuccess: false,
+      budget: {
+        maxCandidates: 6,
+        maxEvals: 24,
+        evalTimeoutMs: 20_000,
+        reserveEvals: 2,
+        maxCandidatesThisRun: 6,
+      },
+    })
+
+    // The silent arm is tried once (its null proposal is recorded), then skipped.
+    const silentRows = report.candidates.filter(candidate => candidate.failureCaseId === 'tr-silent')
+    expect(silentRows).toHaveLength(1)
+    expect(silentRows[0]!.status).toBe('skipped_invalid')
+    expect(silentRows[0]!.selectionReason).toContain('no_proposal')
+    const silentIndex = report.candidates.indexOf(silentRows[0]!)
+    const laterSilent = report.candidates
+      .slice(silentIndex + 1)
+      .filter(candidate => candidate.failureCaseId === 'tr-silent')
+    expect(laterSilent).toHaveLength(0)
+
+    // A proposable train failure is reached and evaluated.
+    const reached = report.candidates.filter(
+      candidate =>
+        (candidate.failureCaseId === 'tr-orbit' || candidate.failureCaseId === 'tr-glimmer')
+        && candidate.status === 'evaluated',
+    )
+    expect(reached.length).toBeGreaterThan(0)
+  })
+})
+
 describe('simplified-greedy round-robin across failure arms', () => {
   const rotationFailures = ['tr-a', 'tr-b', 'tr-c'].map(id => ({
     id,
