@@ -379,6 +379,32 @@ function assertSearchSplitsHaveDisjointCaseIds(
   }
 }
 
+/**
+ * Holdout isolation at the case-id level, checked only when finaltest is loaded
+ * for finalize. Search never parses finaltest, so a distinct-bytes holdout row
+ * whose id already exists in train or validation passes the path/inode/hash
+ * alias checks yet is not independent evidence: finalize would score a row the
+ * search phase already saw. Compare ids exactly — no trimming, no case-folding.
+ * Reading the search splits here is finalize-only; `loadSearchDatasetOnly`
+ * still never parses finaltest.
+ */
+function assertFinaltestIdsDoNotOverlapSearchSplits(
+  root: string,
+  manifest: EvolutionSplitManifest,
+  finaltest: EvolutionEvalCase[],
+): void {
+  const finaltestIds = new Set(finaltest.map(testCase => testCase.id))
+  const splits = confineSplits(root, manifest)
+  const train = readSplit(splits.train, manifest.splits.train)
+  if (train.some(testCase => finaltestIds.has(testCase.id))) {
+    throw new Error('finaltest split shares case ids with train')
+  }
+  const validation = readSplit(splits.validation, manifest.splits.validation)
+  if (validation.some(testCase => finaltestIds.has(testCase.id))) {
+    throw new Error('finaltest split shares case ids with validation')
+  }
+}
+
 function datasetDigestFromManifest(
   root: string,
   manifest: EvolutionSplitManifest,
@@ -431,7 +457,9 @@ export function loadFinaltestSplit(datasetRoot: string): EvolutionEvalCase[] {
   if (digest !== expected) {
     throw new Error('finaltest file digest mismatch vs manifest')
   }
-  return readSplit(file, manifest.splits.finaltest)
+  const finaltest = readSplit(file, manifest.splits.finaltest)
+  assertFinaltestIdsDoNotOverlapSearchSplits(root, manifest, finaltest)
+  return finaltest
 }
 
 export function loadEvolutionDataset(datasetRoot: string): LoadedEvolutionDataset {

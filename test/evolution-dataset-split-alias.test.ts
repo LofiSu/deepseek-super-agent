@@ -896,6 +896,228 @@ describe('regression: train and validation case ids are disjoint during search (
   })
 })
 
+describe('regression: finaltest case ids are disjoint from the search splits (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  const TRAIN_OVERLAP = /^finaltest split shares case ids with train$/
+  const VALIDATION_OVERLAP = /^finaltest split shares case ids with validation$/
+
+  /**
+   * Dataset whose three splits hold caller-chosen cases. Distinct files with
+   * different bytes pass the existing path/inode/hash alias checks, so only the
+   * finalize-time case-id check can catch a holdout id already in a search split.
+   */
+  function casesDataset(
+    train: WrittenCase[],
+    validation: WrittenCase[],
+    finaltest: WrittenCase[],
+  ): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    writeSplitCases(path.join(temp.root, 'train.json'), train)
+    writeSplitCases(path.join(temp.root, 'validation.json'), validation)
+    writeSplitCases(path.join(temp.root, 'finaltest.json'), finaltest)
+    return temp
+  }
+
+  /** Honest finaltest commitment so finalize reaches the split, not a digest error. */
+  function setHonestFinaltestDigest(root: string): void {
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('loads search but rejects a finaltest id that repeats a train id at finalize', () => {
+    const { root } = casesDataset(
+      [
+        { id: 't-unique', text: 'train only' },
+        { id: 'shared-id', text: 'search copy of the shared case' },
+      ],
+      [{ id: 'v-unique', text: 'validation only' }],
+      [
+        { id: 'shared-id', text: `holdout copy with different bytes ${CANARY}` },
+        { id: 'f-unique', text: 'honest holdout' },
+      ],
+    )
+    // Distinct files, distinct bytes: only the case-id check can catch this.
+    expect(fs.readFileSync(path.join(root, 'train.json'), 'utf8')).not.toBe(
+      fs.readFileSync(path.join(root, 'finaltest.json'), 'utf8'),
+    )
+    setHonestFinaltestDigest(root)
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t-unique', 'shared-id'])
+    expect(search.validation.map(c => c.id)).toEqual(['v-unique'])
+    expect(searchText(search)).not.toContain(CANARY)
+    expect(JSON.stringify(search)).not.toContain('holdout copy')
+
+    expect(() => loadFinaltestSplit(root)).toThrow(TRAIN_OVERLAP)
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_OVERLAP)
+    // The search-only train/validation message is not reused for the holdout.
+    expect(() => loadFinaltestSplit(root)).not.toThrow(
+      /^search splits share case ids: train and validation$/,
+    )
+  })
+
+  it('loads search but rejects a finaltest id that repeats a validation id at finalize', () => {
+    const { root } = casesDataset(
+      [{ id: 't-unique', text: 'train only' }],
+      [
+        { id: 'v-unique', text: 'validation only' },
+        { id: 'shared-id', text: 'search copy of the shared case in validation' },
+      ],
+      [{ id: 'shared-id', text: `holdout copy with different bytes ${CANARY}` }],
+    )
+    setHonestFinaltestDigest(root)
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t-unique'])
+    expect(search.validation.map(c => c.id)).toEqual(['v-unique', 'shared-id'])
+    expect(searchText(search)).not.toContain(CANARY)
+    expect(JSON.stringify(search)).not.toContain('holdout copy')
+
+    expect(() => loadFinaltestSplit(root)).toThrow(VALIDATION_OVERLAP)
+    expect(() => loadEvolutionDataset(root)).toThrow(VALIDATION_OVERLAP)
+  })
+
+  it('rejects an overlapping holdout id even when it appears in both search splits', () => {
+    const { root } = casesDataset(
+      [{ id: 'shared-id', text: 'train copy' }],
+      [{ id: 'shared-id2', text: 'validation copy' }],
+      [
+        { id: 'shared-id', text: 'holdout row matching train' },
+        { id: 'shared-id2', text: 'holdout row matching validation' },
+      ],
+    )
+    setHonestFinaltestDigest(root)
+
+    expect(loadSearchDatasetOnly(root).train.map(c => c.id)).toEqual(['shared-id'])
+    expect(() => loadFinaltestSplit(root)).toThrow(TRAIN_OVERLAP)
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_OVERLAP)
+  })
+
+  it('compares ids exactly: a case-only difference stays distinct at finalize', () => {
+    const { root } = casesDataset(
+      [{ id: 'T1', text: 'train uppercase id' }],
+      [{ id: 'v1', text: 'validation one' }],
+      [{ id: 't1', text: 'holdout lowercase id' }],
+    )
+    setHonestFinaltestDigest(root)
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['T1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['t1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['t1'])
+  })
+
+  it('still loads honest disjoint ids at search and finalize', () => {
+    const { root } = casesDataset(
+      [{ id: 't-unique', text: 'train only' }],
+      [{ id: 'v-unique', text: 'validation only' }],
+      [{ id: 'f-unique', text: `honest holdout ${CANARY}` }],
+    )
+    setHonestFinaltestDigest(root)
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t-unique'])
+    expect(search.validation.map(c => c.id)).toEqual(['v-unique'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f-unique'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f-unique'])
+  })
+
+  it('still loads the committed fixture at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual([
+      'tr-001', 'tr-002', 'tr-003', 'tr-004', 'tr-005', 'tr-006', 'tr-007',
+    ])
+    expect(search.validation.map(c => c.id)).toEqual(['va-001', 'va-002', 'va-003', 'va-004'])
+    expect(searchText(search)).not.toContain('ho-001')
+
+    expect(loadFinaltestSplit(FIXTURE_DATASET_ROOT).map(c => c.id)).toEqual([
+      'ho-001', 'ho-002', 'ho-003', 'ho-004',
+    ])
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
+      'ho-001', 'ho-002', 'ho-003', 'ho-004',
+    ])
+  })
+
+  it('still rejects a train/validation id overlap at search', () => {
+    const { root } = casesDataset(
+      [{ id: 'shared-id', text: 'train copy' }],
+      [{ id: 'shared-id', text: 'validation copy with different bytes' }],
+      [{ id: 'f1', text: 'honest holdout' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /^search splits share case ids: train and validation$/,
+    )
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /^search splits share case ids: train and validation$/,
+    )
+  })
+
+  it('still rejects a finaltest split that repeats an id at finalize', () => {
+    const { root } = casesDataset(
+      [{ id: 't1', text: 'train one' }],
+      [{ id: 'v1', text: 'validation one' }],
+      [
+        { id: 'f-dup', text: 'first holdout' },
+        { id: 'f-dup', text: 'second holdout with the same id' },
+      ],
+    )
+    setHonestFinaltestDigest(root)
+
+    expect(loadSearchDatasetOnly(root).train.map(c => c.id)).toEqual(['t1'])
+    expect(() => loadFinaltestSplit(root)).toThrow(/^split has duplicate case ids: finaltest\.json$/)
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /^split has duplicate case ids: finaltest\.json$/,
+    )
+  })
+
+  it('still rejects a reserved "none" finaltest id at finalize', () => {
+    const { root } = casesDataset(
+      [{ id: 't1', text: 'train one' }],
+      [{ id: 'v1', text: 'validation one' }],
+      [{ id: 'none', text: 'holdout row using the sentinel id' }],
+    )
+    setHonestFinaltestDigest(root)
+
+    expect(loadSearchDatasetOnly(root).train.map(c => c.id)).toEqual(['t1'])
+    expect(() => loadFinaltestSplit(root)).toThrow(/^split has invalid case id: /)
+    expect(() => loadEvolutionDataset(root)).toThrow(/^split has invalid case id: /)
+  })
+
+  it('still rejects an empty finaltest id at finalize', () => {
+    const { root } = casesDataset(
+      [{ id: 't1', text: 'train one' }],
+      [{ id: 'v1', text: 'validation one' }],
+      [{ id: '', text: 'holdout row with an empty id' }],
+    )
+    setHonestFinaltestDigest(root)
+
+    expect(loadSearchDatasetOnly(root).train.map(c => c.id)).toEqual(['t1'])
+    expect(() => loadFinaltestSplit(root)).toThrow(/^split has invalid case id: /)
+    expect(() => loadEvolutionDataset(root)).toThrow(/^split has invalid case id: /)
+  })
+})
+
 describe('regression: a split cannot repeat a case id (PR168)', () => {
   const cleanups: Array<() => void> = []
   afterEach(() => {
