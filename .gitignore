@@ -13,6 +13,7 @@ uploads
 .claude/settings.local.json
 local-agents.json
 routines.json
+browser-errands.json
 
 __pycache__/
 

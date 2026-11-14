@@ -85,7 +85,7 @@
 
 | # | 能力项 | Instinct 公开证据 | 等级 | ds-agent 状态 | 本仓库路径 / 验收依据 |
 |---|---|---|---|---|---|
-| D1 | cloud browser errands（leased cloud browser，可用已保存登录） | S4/S5：browser work 走 leased cloud browser，不是本机 Chrome | teardown | `missing` / `environment-blocked` | 无 hosted browser。可接受的等价方向是本地/远程 browser adapter + 明确 approval；需要托管浏览器或用户本机权限 |
+| D1 | cloud browser errands（leased cloud browser，可用已保存登录） | S4/S5：browser work 走 leased cloud browser，不是本机 Chrome | teardown | `PR-only`（本 PR）/ hosted `environment-blocked` | `src/env/browser-errands.ts`、`src/harness/tools.ts`、`test/browser-errands.test.ts`、`docs/BROWSER_ERRANDS.md`：owner-gated 的本地 command 或远程 HTTP driver 等价，只做 navigate/read/fill/extract；默认 **off**；无托管浏览器、无已保存登录、无真实站点验收。submit/purchase/send/delete/account-settings 被 adapter 与 driver 拒绝，不绕过现有 approval hold |
 | D2 | approval card：approve / deny / dismiss，绑定“屏幕上显示的原文” | S4/S5：三答案；绑定 exact text；改写后要重新批准；没有 editable plan view | teardown | `missing`（状态机是 `main`，卡片不是） | `docs/APPROVALS.md`、`src/core/collab.ts`：现有流程是 Worker `request_approval` → hold → CLI `approve/deny`；没有 dismiss、没有结构化 action id、没有“绑定 exact text”的卡片 |
 | D3 | irreversible actions 必须走 approval，模型不能自行批准 | S4/S5；S3 的 external send / payment 条款 | official/teardown | `main` | `src/harness/tools.ts` 的 `request_approval` + `src/core/collab.ts` 的 pending hold；`test/approvals.test.ts` 覆盖 approve/deny、审批等待不被 watchdog 误杀、决策不可由聊天文本伪造 |
 | D4 | payment / credential vault 可填不可读 | S4/S5 | teardown | `missing` | 无 vault、无支付 adapter |
@@ -112,13 +112,14 @@
 | P2 | remote mesh runtime placement / assignment results | #165 | `PR-only` | 多节点 Worker 放置；不是 Instinct 的 cloud browser 或 hosted identity |
 | P3 | deployment docs / loopback sandbox probes | #167 | `PR-only` | 部署与安全探测；不是 Instinct connector 能力 |
 | P4 | native controlled evolution | #168 | `PR-only` | 自改进/策略演化；不是本清单的 Instinct inventory 项 |
+| P5 | browser errand adapter（本地 command / 远程 HTTP driver 等价） | 本 PR（`feat/instinct-browser-errands`） | `PR-only` | 默认 **off**；只做 navigate/read/fill/extract；无 submit、无凭据 vault、无已保存登录；只用 fake driver 与 loopback HTTP server 验收，**无真实站点或托管 cloud browser 验收**；irreversible 动作仍走现有 `request_approval` |
 
 > #166、#164、#163 也是 open PR（longitudinal harness、recovery boundary、sandbox health），但没有改变本清单的 `main` 状态；不把它们当作已合并能力。
 
 ## 9. 结论
 
 - **已具备（`main`）**：iMessage 通道、clock/timer routines、长期记忆与 ACL、irreversible action 的 approval hold、CLI/Feishu/GitHub 等多通道运行时，以及默认关闭的 sandbox/redaction 边界。每项都有 cited test 或文档依据。
-- **本 PR 新增但未验收**：owner-gated idle self-wake（A10/A12）。它默认关闭，只在已有私聊线程里、有具体新事实时才可能发一条短消息；真实通道发送等待 owner。
-- **明确缺失**：WhatsApp/SMS/email/电话、群聊 shared agent、connector event wake、Google Workspace/Slack/Notion connector、connector data index、fill-only vault、cloud browser、三答案 approval card、payment、receipt、deletion surface、推荐系统。
+- **本 PR 新增但未验收**：owner-gated idle self-wake（A10/A12，`feat/instinct-idle-proactive`）；以及 browser errand adapter（D1，`feat/instinct-browser-errands`）。两者都默认关闭，只有 owner 配置后才启用；前者只做离线 fake transport 测试，后者只做 fake driver 与 loopback HTTP 测试。真实通道发送、真实站点浏览、托管 cloud browser 都等待 owner。
+- **明确缺失**：WhatsApp/SMS/email/电话、群聊 shared agent、connector event wake、Google Workspace/Slack/Notion connector、connector data index、fill-only vault、三答案 approval card、payment、receipt、deletion surface、推荐系统；托管 cloud browser 仍属 `environment-blocked`，D1 只提供本地/远程 driver 等价且为 `PR-only`。
 - **不能靠代码等价**：hosted identity、电话网络、merchant partnerships、用户 Mac/iMessage 账号。它们被标为 `environment-blocked`，不冒充完成。
 - **不猜测**：Instinct 的 27-section instruction body、main agent host、model id、control-plane schema、desktop app 与四个 policy section 没有公开正文；本仓库不复制、不假装对齐。
