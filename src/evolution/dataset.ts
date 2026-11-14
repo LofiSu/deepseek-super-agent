@@ -58,10 +58,27 @@ function assertUniqueCaseIds(cases: EvolutionEvalCase[], rel: string): void {
   }
 }
 
+/**
+ * `expected` is the scored label, and every strategy prediction is exactly
+ * `'deliver'` or `'discard'`. A typo, wrong case, missing, empty, or non-string
+ * label still produces a row that scores as incorrect and cannot be repaired by
+ * the failure proposer, so it silently poisons accuracy instead of failing.
+ * Reject it when the split is read. No trimming or case-folding: only the two
+ * exact enum strings are valid.
+ */
+function assertValidExpectedLabels(cases: EvolutionEvalCase[], rel: string): void {
+  for (const testCase of cases) {
+    if (testCase?.expected !== 'deliver' && testCase?.expected !== 'discard') {
+      throw new Error(`split has invalid expected label: ${rel}`)
+    }
+  }
+}
+
 function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
   assertUniqueCaseIds(parsed.cases, rel)
+  assertValidExpectedLabels(parsed.cases, rel)
   return parsed.cases
 }
 

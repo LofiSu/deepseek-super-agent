@@ -18,19 +18,25 @@ const OUTSIDE_CANARY = 'SECRET_OUTSIDE_TOKEN'
 interface WrittenCase {
   id: string
   text: string
-  expected?: 'deliver' | 'discard'
+  /** Arbitrary value so invalid labels (wrong case, null, "") can be written. */
+  expected?: unknown
+  /** Omit `expected` entirely from the row. */
+  omitExpected?: boolean
 }
 
 function writeSplitCases(file: string, cases: WrittenCase[]): void {
   fs.writeFileSync(
     file,
     JSON.stringify({
-      cases: cases.map(({ id, text, expected }) => ({
-        id,
-        speculative: true,
-        report: { kind: 'ready', text },
-        expected: expected ?? 'deliver',
-      })),
+      cases: cases.map(({ id, text, expected, omitExpected }) => {
+        const row: Record<string, unknown> = {
+          id,
+          speculative: true,
+          report: { kind: 'ready', text },
+        }
+        if (!omitExpected) row.expected = expected === undefined ? 'deliver' : expected
+        return row
+      }),
     }),
   )
 }
@@ -1044,6 +1050,183 @@ describe('regression: a split cannot repeat a case id (PR168)', () => {
       'ho-003',
       'ho-004',
     ])
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+  })
+})
+
+describe('regression: a split must carry a valid expected label (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  const TRAIN_INVALID = /^split has invalid expected label: train\.json$/
+  const VALIDATION_INVALID = /^split has invalid expected label: validation\.json$/
+  const FINALTEST_INVALID = /^split has invalid expected label: finaltest\.json$/
+
+  function dataset(
+    train: WrittenCase[],
+    validation: WrittenCase[],
+    finaltest?: WrittenCase[],
+  ): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    writeSplitCases(path.join(temp.root, 'train.json'), train)
+    writeSplitCases(path.join(temp.root, 'validation.json'), validation)
+    if (finaltest) writeSplitCases(path.join(temp.root, 'finaltest.json'), finaltest)
+    return temp
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('rejects a train split whose expected label is the wrong case', () => {
+    const { root } = dataset(
+      [
+        { id: 'bad', text: 'wrong-case label', expected: 'Deliver' },
+        { id: 'ok', text: 'honest unique row', expected: 'discard' },
+      ],
+      [{ id: 'v1', text: 'validation one', expected: 'deliver' }],
+    )
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(TRAIN_INVALID)
+    }
+    // No train, validation, or finaltest cases were returned at search.
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  })
+
+  it('rejects a train split whose expected label is not an enum value', () => {
+    const { root } = dataset(
+      [
+        { id: 'bad', text: 'not-a-label', expected: 'yes' },
+        { id: 'ok', text: 'honest unique row', expected: 'discard' },
+      ],
+      [{ id: 'v1', text: 'validation one', expected: 'deliver' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(TRAIN_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  })
+
+  it('rejects a train split that omits expected', () => {
+    const { root } = dataset(
+      [
+        { id: 'bad', text: 'missing label', omitExpected: true },
+        { id: 'ok', text: 'honest unique row', expected: 'discard' },
+      ],
+      [{ id: 'v1', text: 'validation one', expected: 'deliver' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(TRAIN_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  })
+
+  it('rejects a train split with a null expected label', () => {
+    const { root } = dataset(
+      [
+        { id: 'bad', text: 'null label', expected: null },
+        { id: 'ok', text: 'honest unique row', expected: 'discard' },
+      ],
+      [{ id: 'v1', text: 'validation one', expected: 'deliver' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(TRAIN_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  })
+
+  it('rejects a train split with an empty expected label', () => {
+    const { root } = dataset(
+      [
+        { id: 'bad', text: 'empty label', expected: '' },
+        { id: 'ok', text: 'honest unique row', expected: 'discard' },
+      ],
+      [{ id: 'v1', text: 'validation one', expected: 'deliver' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(TRAIN_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  })
+
+  it('rejects a validation split with an invalid expected label', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one', expected: 'deliver' }],
+      [{ id: 'vbad', text: 'wrong-case validation label', expected: 'Deliver' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(VALIDATION_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(VALIDATION_INVALID)
+  })
+
+  it('keeps search working when only the sealed finaltest label is invalid', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one', expected: 'deliver' }],
+      [{ id: 'v1', text: 'validation one', expected: 'discard' }],
+      [
+        { id: 'f1', text: `held-out case ${CANARY}`, expected: 'Deliver' },
+        { id: 'f2', text: 'honest holdout', expected: 'discard' },
+      ],
+    )
+    // Honest commitment so finalize reaches the split instead of a digest error.
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(() => loadFinaltestSplit(root)).toThrow(FINALTEST_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(FINALTEST_INVALID)
+  })
+
+  it('still loads honest labels at search and finalize', () => {
+    const { root } = dataset(
+      [
+        { id: 't1', text: 'deliver label', expected: 'deliver' },
+        { id: 't2', text: 'discard label', expected: 'discard' },
+      ],
+      [
+        { id: 'v1', text: 'validation deliver', expected: 'deliver' },
+        { id: 'v2', text: 'validation discard', expected: 'discard' },
+      ],
+      [{ id: 'f1', text: 'honest holdout', expected: 'discard' }],
+    )
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.expected)).toEqual(['deliver', 'discard'])
+    expect(search.validation.map(c => c.expected)).toEqual(['deliver', 'discard'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads the committed fixture with honest labels at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train).toHaveLength(7)
+    expect(search.validation).toHaveLength(4)
+    for (const testCase of [...search.train, ...search.validation]) {
+      expect(['deliver', 'discard']).toContain(testCase.expected)
+    }
+    expect(searchText(search)).not.toContain('ho-001')
+
     expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
       'ho-001',
       'ho-002',
