@@ -16,23 +16,27 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
 })
 
-function runCli(home: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
+function runCli(
+  home: string,
+  args: string[],
+  extraEnv: NodeJS.ProcessEnv = {},
+): { status: number | null; stdout: string; stderr: string } {
   const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli/main.ts', ...args], {
     cwd: process.cwd(),
     encoding: 'utf8',
-    env: { ...process.env, DS_AGENT_HOME: home, NODE_NO_WARNINGS: '1' },
+    env: { ...process.env, DS_AGENT_HOME: home, NODE_NO_WARNINGS: '1', ...extraEnv },
   })
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
 }
 
 describe('ds-agent prompt', () => {
-  it('prints one row per layer with its source', () => {
+  it('prints one row per section with its source', () => {
     const home = tempHome()
-    fs.writeFileSync(path.join(home, 'PERSONA.md'), 'Dry wit.\n')
+    fs.writeFileSync(path.join(home, 'SOUL.md'), 'Dry wit.\n')
     const result = runCli(home, ['prompt', '--layers'])
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toMatch(/identity\s+\d+ chars\s+built-in/)
-    expect(result.stdout).toMatch(/persona\s+\d+ chars\s+.*PERSONA\.md/)
+    expect(result.stdout).toMatch(/who-you-are\s+\d+ chars\s+built-in/)
+    expect(result.stdout).toMatch(/soul\s+\d+ chars\s+<home>\/SOUL\.md/)
     expect(result.stdout).toMatch(/role\s+\d+ chars\s+built-in/)
   })
 
@@ -50,12 +54,37 @@ describe('ds-agent prompt', () => {
     expect(result.stdout).not.toContain('reply_user')
   })
 
-  it('emits layers as JSON when asked', () => {
+  it('emits sections as JSON when asked', () => {
     const result = runCli(tempHome(), ['prompt', '--layers', '--json'])
     expect(result.status, result.stderr).toBe(0)
-    const layers = JSON.parse(result.stdout) as { id: string; text: string }[]
-    expect(layers[0]?.id).toBe('identity')
-    expect(layers.at(-1)?.id).toBe('role')
+    const sections = JSON.parse(result.stdout) as { id: string; source: string; text: string }[]
+    expect(sections[0]?.id).toBe('who-you-are')
+    expect(sections.at(-1)?.id).toBe('role')
+    expect(sections[0]).toHaveProperty('source')
+    expect(sections[0]).toHaveProperty('text')
+  })
+
+  it('labels a deprecated PERSONA.md fallback', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'PERSONA.md'), 'Legacy voice.\n')
+    const result = runCli(home, ['prompt', '--layers'])
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toMatch(/soul\s+\d+ chars\s+<home>\/PERSONA\.md \(deprecated fallback\)/)
+  })
+
+  it('labels an environment seed', () => {
+    const result = runCli(tempHome(), ['prompt', '--layers'], { DS_AGENT_SOUL: 'Seeded voice.' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toMatch(/soul\s+\d+ chars\s+env:DS_AGENT_SOUL/)
+  })
+
+  it('redacts a secret from a prompt file', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'USER.md'), 'api key: supersecret123\n')
+    const result = runCli(home, ['prompt'], { DS_AGENT_API_KEY: 'supersecret123' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).not.toContain('supersecret123')
+    expect(result.stdout).toContain('[redacted]')
   })
 
   it('shows the configured local specialists in the team layer', () => {

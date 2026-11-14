@@ -6,7 +6,9 @@ import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
-import { buildSystemPrompt, describePromptLayers, loadPromptFiles } from '../harness/prompts.ts'
+import { buildSystemPrompt, describePromptSections, loadPrompts } from '../harness/prompts.ts'
+import { parseMcpServers } from '../harness/mcp-config.ts'
+import { redactSecrets, secretValues } from '../env/sanitize.ts'
 import { LOCAL_AGENTS_FILE, loadLocalAgents } from '../env/local-agents.ts'
 import { SKILLS_DIR, SKILL_FILE, SkillRegistry } from '../env/skills.ts'
 import { loadRoutines, ROUTINES_ENV, ROUTINES_FILE } from '../harness/routines.ts'
@@ -104,6 +106,28 @@ function withEngine<T>(
   } finally {
     store.close()
   }
+}
+
+/**
+ * The same secret list the runtime redacts with: secret-named environment
+ * values plus the env blocks of configured MCP servers. Prompt files are owner
+ * text, so inspection output must not leak a credential the owner pasted in.
+ */
+function promptRedactor(env: NodeJS.ProcessEnv): (text: string) => string {
+  let mcpEnvs: NodeJS.ProcessEnv[] = []
+  const raw = env.DS_AGENT_MCP_SERVERS?.trim()
+  if (raw) {
+    try {
+      mcpEnvs = parseMcpServers(JSON.parse(raw)).map(config => config.env)
+    } catch {
+      mcpEnvs = []
+    }
+  }
+  const secrets = [...new Set([
+    ...secretValues(env),
+    ...mcpEnvs.flatMap(values => secretValues(values)),
+  ])].sort((a, b) => b.length - a.length)
+  return text => redactSecrets(text, secrets)
 }
 
 function help(): void {
@@ -870,24 +894,28 @@ async function main(): Promise<void> {
       ...(agent.description ? { description: agent.description } : {}),
     }))
     const skills = SkillRegistry.fromHome(home)
+    const { files, sources } = loadPrompts(home, process.env, line => console.error(line))
     const input = {
       role: role as Role,
-      ...loadPromptFiles(home, process.env),
+      ...files,
+      sources,
       ...(agents.length ? { localAgents: agents } : {}),
       ...(skills.size ? { skills: skills.list() } : {}),
     }
-    const layers = describePromptLayers(input)
+    const redact = promptRedactor(process.env)
+    const sections = describePromptSections(input)
+      .map(section => ({ ...section, text: redact(section.text) }))
     if (process.argv.includes('--json')) {
-      console.log(JSON.stringify(layers, null, 2))
+      console.log(JSON.stringify(sections, null, 2))
       return
     }
     if (process.argv.includes('--layers')) {
-      for (const layer of layers) {
-        console.log(`${layer.id.padEnd(14)}${layer.text.length} chars  ${layer.source}`)
+      for (const section of sections) {
+        console.log(`${section.id.padEnd(20)}${section.text.length} chars  ${section.source}`)
       }
       return
     }
-    console.log(buildSystemPrompt(input))
+    console.log(redact(buildSystemPrompt(input)))
     return
   }
   if (cmd === 'routines') {
