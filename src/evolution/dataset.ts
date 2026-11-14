@@ -74,11 +74,27 @@ function assertValidExpectedLabels(cases: EvolutionEvalCase[], rel: string): voi
   }
 }
 
+/**
+ * `speculative` selects which strategy-gate path scores the row, and the gate
+ * branches on truthiness (`!ticket.speculative`). A typo string, `null`, `0`,
+ * `1`, or an omitted flag therefore picks a path the dataset author did not
+ * mean, and the proposer cannot repair a schema defect. Only the exact booleans
+ * `true` and `false` are valid; no coercion, trimming, or truthiness.
+ */
+function assertValidSpeculativeFlags(cases: EvolutionEvalCase[], rel: string): void {
+  for (const testCase of cases) {
+    if (testCase?.speculative !== true && testCase?.speculative !== false) {
+      throw new Error(`split has invalid speculative flag: ${rel}`)
+    }
+  }
+}
+
 function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
   assertUniqueCaseIds(parsed.cases, rel)
   assertValidExpectedLabels(parsed.cases, rel)
+  assertValidSpeculativeFlags(parsed.cases, rel)
   return parsed.cases
 }
 

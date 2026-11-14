@@ -22,18 +22,25 @@ interface WrittenCase {
   expected?: unknown
   /** Omit `expected` entirely from the row. */
   omitExpected?: boolean
+  /**
+   * Arbitrary value so invalid speculative flags (string, null, 0, 1) can be
+   * written. When omitted, an honest boolean `true` is written.
+   */
+  speculative?: unknown
+  /** Omit `speculative` entirely from the row. */
+  omitSpeculative?: boolean
 }
 
 function writeSplitCases(file: string, cases: WrittenCase[]): void {
   fs.writeFileSync(
     file,
     JSON.stringify({
-      cases: cases.map(({ id, text, expected, omitExpected }) => {
+      cases: cases.map(({ id, text, expected, omitExpected, speculative, omitSpeculative }) => {
         const row: Record<string, unknown> = {
           id,
-          speculative: true,
           report: { kind: 'ready', text },
         }
+        if (!omitSpeculative) row.speculative = speculative === undefined ? true : speculative
         if (!omitExpected) row.expected = expected === undefined ? 'deliver' : expected
         return row
       }),
@@ -1232,6 +1239,189 @@ describe('regression: a split must carry a valid expected label (PR168)', () => 
       'ho-002',
       'ho-003',
       'ho-004',
+    ])
+  })
+})
+
+describe('regression: a split must carry a valid speculative flag (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  const TRAIN_INVALID = /^split has invalid speculative flag: train\.json$/
+  const VALIDATION_INVALID = /^split has invalid speculative flag: validation\.json$/
+  const FINALTEST_INVALID = /^split has invalid speculative flag: finaltest\.json$/
+
+  function dataset(
+    train: WrittenCase[],
+    validation: WrittenCase[],
+    finaltest?: WrittenCase[],
+  ): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    writeSplitCases(path.join(temp.root, 'train.json'), train)
+    writeSplitCases(path.join(temp.root, 'validation.json'), validation)
+    if (finaltest) writeSplitCases(path.join(temp.root, 'finaltest.json'), finaltest)
+    return temp
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('rejects a train split with a string "true" speculative flag', () => {
+    const { root } = dataset(
+      [
+        { id: 'bad', text: 'string true flag', speculative: 'true' },
+        { id: 'ok', text: 'honest unique row', speculative: true },
+      ],
+      [{ id: 'v1', text: 'validation one', speculative: true }],
+    )
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(TRAIN_INVALID)
+    }
+    // No train, validation, or finaltest cases were returned at search.
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  })
+
+  it('rejects a train split with a string "false" speculative flag', () => {
+    // "false" is truthy, so it would silently take the speculative path.
+    const { root } = dataset(
+      [
+        { id: 'bad', text: 'string false flag', speculative: 'false' },
+        { id: 'ok', text: 'honest unique row', speculative: true },
+      ],
+      [{ id: 'v1', text: 'validation one', speculative: true }],
+    )
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(TRAIN_INVALID)
+    }
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+  })
+
+  const INVALID_TRAIN_FLAGS: Array<[string, WrittenCase]> = [
+    ['omits speculative', { id: 'bad', text: 'missing flag', omitSpeculative: true }],
+    ['sets speculative to null', { id: 'bad', text: 'null flag', speculative: null }],
+    ['sets speculative to 0', { id: 'bad', text: 'zero flag', speculative: 0 }],
+    ['sets speculative to 1', { id: 'bad', text: 'one flag', speculative: 1 }],
+  ]
+
+  it.each(INVALID_TRAIN_FLAGS)(
+    'rejects a train split that %s',
+    (_label, badCase) => {
+      const { root } = dataset(
+        [badCase, { id: 'ok', text: 'honest unique row', speculative: true }],
+        [{ id: 'v1', text: 'validation one', speculative: true }],
+      )
+
+      let searchResult: unknown = null
+      try {
+        searchResult = loadSearchDatasetOnly(root)
+      } catch (error) {
+        expect((error as Error).message).toMatch(TRAIN_INVALID)
+      }
+      expect(searchResult).toBeNull()
+      expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_INVALID)
+    },
+  )
+
+  it('rejects a validation split with a string "false" speculative flag', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one', speculative: true }],
+      [{ id: 'vbad', text: 'string false validation flag', speculative: 'false' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(VALIDATION_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(VALIDATION_INVALID)
+  })
+
+  it('keeps search working when only the sealed finaltest flag is invalid', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one', speculative: true }],
+      [{ id: 'v1', text: 'validation one', speculative: true }],
+      [
+        { id: 'f1', text: `held-out case ${CANARY}`, speculative: 'true' },
+        { id: 'f2', text: 'honest holdout', speculative: true },
+      ],
+    )
+    // Honest commitment so finalize reaches the split instead of a digest error.
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(() => loadFinaltestSplit(root)).toThrow(FINALTEST_INVALID)
+    expect(() => loadEvolutionDataset(root)).toThrow(FINALTEST_INVALID)
+  })
+
+  it('still loads honest boolean flags at search and finalize', () => {
+    const { root } = dataset(
+      [
+        { id: 't1', text: 'speculative train row', speculative: true },
+        { id: 't2', text: 'non-speculative train row', speculative: false },
+      ],
+      [
+        { id: 'v1', text: 'speculative validation row', speculative: true },
+        { id: 'v2', text: 'non-speculative validation row', speculative: false },
+      ],
+      [
+        { id: 'f1', text: 'speculative holdout', speculative: true },
+        { id: 'f2', text: 'non-speculative holdout', speculative: false },
+      ],
+    )
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.speculative)).toEqual([true, false])
+    expect(search.validation.map(c => c.speculative)).toEqual([true, false])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => [c.id, c.speculative])).toEqual([
+      ['f1', true],
+      ['f2', false],
+    ])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.speculative)).toEqual([true, false])
+  })
+
+  it('still loads the committed fixture with boolean flags at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train).toHaveLength(7)
+    expect(search.validation).toHaveLength(4)
+    for (const testCase of [...search.train, ...search.validation]) {
+      expect(typeof testCase.speculative).toBe('boolean')
+    }
+    expect(searchText(search)).not.toContain('ho-001')
+
+    expect(loadFinaltestSplit(FIXTURE_DATASET_ROOT).map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.speculative)).toEqual([
+      true,
+      true,
+      true,
+      true,
     ])
   })
 })
