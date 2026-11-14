@@ -7,9 +7,11 @@ import {
   MAX_PROMPT_FILE_CHARS,
   MAX_PROMPT_TOTAL_CHARS,
   buildSystemPrompt,
+  describePromptLayers,
   describePromptSections,
   loadPromptFiles,
   loadPrompts,
+  systemPrompt,
 } from '../src/harness/prompts.ts'
 
 const homes: string[] = []
@@ -283,5 +285,29 @@ describe('prompt file loading', () => {
     const home = tempHome()
     fs.writeFileSync(path.join(home, 'SOUL.md'), 'x'.repeat(MAX_PROMPT_FILE_CHARS + 500))
     expect(loadPromptFiles(home).soul).toHaveLength(MAX_PROMPT_FILE_CHARS)
+  })
+})
+
+describe('programmatic compatibility', () => {
+  it('maps the deprecated persona key to soul', () => {
+    const prompt = systemPrompt('router', { persona: 'Legacy voice.' })
+    expect(prompt).toContain('Legacy voice.')
+    expect(prompt).toContain('<file id="soul">')
+  })
+
+  it('maps the deprecated owner key to user', () => {
+    const prompt = systemPrompt('router', { owner: 'Name: Sam. Timezone: Europe/Oslo.' })
+    expect(prompt).toContain('Name: Sam. Timezone: Europe/Oslo.')
+    expect(prompt).toContain('<file id="user">')
+  })
+
+  it('keeps the instructions key as standing instructions', () => {
+    const prompt = systemPrompt('router', { instructions: 'Never book before 9am.' })
+    expect(prompt).toContain('Never book before 9am.')
+    expect(prompt).toContain('<file id="standing-instructions">')
+  })
+
+  it('keeps the describePromptLayers alias', () => {
+    expect(describePromptLayers({ role: 'router' })).toEqual(describePromptSections({ role: 'router' }))
   })
 })
