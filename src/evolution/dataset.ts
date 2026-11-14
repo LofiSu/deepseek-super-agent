@@ -119,6 +119,16 @@ function isExistingRegularFile(file: string): boolean {
 const SHA256_HEX = /^[0-9a-f]{64}$/
 
 /**
+ * Normalize a declared SHA-256 so search and finalize agree: `sha256File` emits
+ * lowercase hex, so a 64-hex commitment compares after lowercasing. A dummy or
+ * otherwise non-hex value returns `null` and is compared exactly as declared.
+ */
+function declaredSha256Hex(declared: string): string | null {
+  const normalized = declared.toLowerCase()
+  return SHA256_HEX.test(normalized) ? normalized : null
+}
+
+/**
  * Search-phase isolation: a search split must not be a byte-identical copy of
  * finaltest. Distinct paths and inodes still leak held-out cases if the bytes
  * match, so hash the search splits. A declared SHA-256 is a commitment, so hash
@@ -134,16 +144,16 @@ function assertSearchSplitsDoNotCopyFinaltestContent(
   datasetRoot: string,
   manifest: EvolutionSplitManifest,
 ): void {
-  const declared = manifest.splitDigests.finaltest.toLowerCase()
+  const declaredHex = declaredSha256Hex(manifest.splitDigests.finaltest)
   const finaltest = canonicalSplitPath(datasetRoot, manifest.splits.finaltest)
   if (!isExistingRegularFile(finaltest)) {
     throw new Error('finaltest file missing during search')
   }
   const actualFinaltestDigest = sha256File(finaltest)
-  if (SHA256_HEX.test(declared) && actualFinaltestDigest !== declared) {
+  if (declaredHex !== null && actualFinaltestDigest !== declaredHex) {
     throw new Error('finaltest file digest mismatch vs manifest')
   }
-  const finaltestDigest = SHA256_HEX.test(declared) ? declared : actualFinaltestDigest
+  const finaltestDigest = declaredHex ?? actualFinaltestDigest
   for (const split of ['train', 'validation'] as const) {
     const splitFile = canonicalSplitPath(datasetRoot, manifest.splits[split])
     if (!isExistingRegularFile(splitFile)) continue
@@ -223,7 +233,10 @@ export function loadFinaltestSplit(datasetRoot: string): EvolutionEvalCase[] {
   const manifest = readManifest(root)
   const file = resolveSplitInsideRoot(root, manifest.splits.finaltest, 'finaltest')
   const digest = sha256File(file)
-  if (digest !== manifest.splitDigests.finaltest) {
+  // Same normalization as search: uppercase/mixed-case hex commitments match the
+  // lowercase file hash; a dummy declared value must match it exactly.
+  const expected = declaredSha256Hex(manifest.splitDigests.finaltest) ?? manifest.splitDigests.finaltest
+  if (digest !== expected) {
     throw new Error('finaltest file digest mismatch vs manifest')
   }
   return readSplit(file, manifest.splits.finaltest)

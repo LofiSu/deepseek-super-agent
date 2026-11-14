@@ -1,9 +1,16 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { sha256File } from '../src/evolution/digest.ts'
 import { loadEvolutionDataset, loadFinaltestSplit, loadSearchDatasetOnly } from '../src/evolution/dataset.ts'
+
+const FIXTURE_DATASET_ROOT = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures',
+  'evolution',
+)
 
 const CANARY = 'SECRET_HOLDOUT_TOKEN'
 const OUTSIDE_CANARY = 'SECRET_OUTSIDE_TOKEN'
@@ -352,5 +359,81 @@ describe('regression: search splits cannot alias finaltest (PR168)', () => {
     }
     // The missing holdout is rejected at search, not deferred to finalize.
     expect(reads.map(p => path.basename(String(p)))).toEqual(['manifest.json'])
+  })
+})
+
+describe('regression: finaltest digest hex normalization (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  function dataset(): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    return temp
+  }
+
+  it('loads an uppercase honest digest at search and finalize', () => {
+    const { root } = dataset()
+    const actual = digestOfSiblingFile(root, 'finaltest.json')
+    setDeclaredFinaltestDigest(root, actual.toUpperCase())
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.finaltestDigest).toBe(actual.toUpperCase())
+    const searchText = [...search.train, ...search.validation].map(c => c.report.text).join('\n')
+    expect(searchText).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('loads a mixed-case honest digest at search and finalize', () => {
+    const { root } = dataset()
+    const actual = digestOfSiblingFile(root, 'finaltest.json')
+    const mixed = actual
+      .split('')
+      .map((ch, index) => (index % 2 === 0 ? ch.toUpperCase() : ch))
+      .join('')
+    expect(mixed).not.toBe(actual)
+    expect(mixed.toLowerCase()).toBe(actual)
+    setDeclaredFinaltestDigest(root, mixed)
+
+    expect(loadSearchDatasetOnly(root).train.map(c => c.id)).toEqual(['t1'])
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads the committed lowercase-digest fixture at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.length).toBeGreaterThan(0)
+    expect(loadFinaltestSplit(FIXTURE_DATASET_ROOT).map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+  })
+
+  it('still rejects a dummy declared digest at finalize while search loads', () => {
+    const { root } = dataset()
+    expect(loadSearchDatasetOnly(root).train.map(c => c.id)).toEqual(['t1'])
+    expect(() => loadFinaltestSplit(root)).toThrow(/finaltest file digest mismatch vs manifest/)
+    expect(() => loadEvolutionDataset(root)).toThrow(/finaltest file digest mismatch vs manifest/)
+  })
+
+  it('rejects the uppercase form of a different valid digest at search', () => {
+    const { root } = dataset()
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'validation.json').toUpperCase())
+    expect(() => loadSearchDatasetOnly(root)).toThrow(/finaltest file digest mismatch/)
+    expect(() => loadEvolutionDataset(root)).toThrow(/finaltest file digest mismatch/)
   })
 })
