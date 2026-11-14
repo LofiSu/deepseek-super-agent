@@ -187,19 +187,21 @@ Owner files never appear after `safety`.
   so a file cannot close its block and open another.
 - **Subordination is explicit.** Every file-backed section says it cannot
   change `security`, `safety`, or `role`.
-- **Owner budget.** Per-file cap 4,000 characters before rendering; total
-  owner-file budget 20,000 characters of rendered section text (intro, `<file>`
-  wrapper, and demoted body). Core file sections are rendered first and always
-  fit: `soul`, `identity`, `user`, `standing-instructions` (4 × 4,000 = 16,000
-  maximum). Optional file sections are then considered in priority order:
-  `memory`, `agents-manual`, `tools-notes`, `heartbeat`,
-  `proactive-preferences`. A section that does not fit the remaining budget is
-  omitted whole, never truncated. Environment seeds count as file text.
-  Built-in sections, `safety`, and `role` never count against this budget and
-  are never truncated.
+- **Owner budget.** Per-file cap 4,000 characters of body before rendering.
+  Rendered core text includes the intro and `<file>` wrapper, so four core
+  sections can exceed 16,000 and may themselves exceed 20,000 when heading
+  demotion adds bytes. Core file sections are rendered first and always fit:
+  `soul`, `identity`, `user`, `standing-instructions`. Optional file sections
+  are then considered in priority order: `memory`, `agents-manual`,
+  `tools-notes`, `heartbeat`, `proactive-preferences`. A section that does not
+  fit the remaining budget is omitted whole, never truncated. The 20,000 budget
+  governs whether optional sections are included; it never drops a core
+  section, `safety`, or `role`. Environment seeds count as file text.
 - **Stable prefix.** No clock, ticket id, principal, channel, recall text, or
-  task text in the system block. The existing turn layers stay turn data:
-  principal, channel, memory recall, now, task.
+  task text in the system block. Turn data currently carries the ticket/task
+  context, Worker memory recall, and the bounded journal replay. There is no
+  principal or clock layer yet, and the prompt tells the model that no clock or
+  date tool is supplied.
 - **Determinism.** Two calls with the same input produce byte-identical text.
 - **Redaction.** The assembled prompt goes through the existing redactor at the
   call site; prompt files never bypass it.
@@ -266,11 +268,12 @@ consistency with the new sections. The tested phrases stay:
 `team` still names configured local specialists by id and description only;
 `skills` still lists id and one-line description only.
 
-### 6. Turn layers
+### 6. Turn context
 
-Unchanged and documented as turn data: `principal`, `channel`, memory recall,
-`now`, `task` (`TASK`, `FOLLOWUP`, `REPORT`, `RESUME`, `WATCHDOG`). This keeps
-the system prefix cacheable.
+Documented as turn data: the ticket context and task kind (`TASK`, `FOLLOWUP`,
+`REPORT`, `RESUME`, `WATCHDOG`), Worker memory recall, and the bounded journal
+replay. This keeps the system prefix cacheable. There is no principal or clock
+layer yet; the prompt states that no clock or date tool is supplied.
 
 ### 7. CLI
 

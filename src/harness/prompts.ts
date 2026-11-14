@@ -205,11 +205,20 @@ function demoteHeadings(text: string): string {
   }).join('\n')
 }
 
-/** Remove every wrapper tag so a file cannot close its block and open another. */
+/**
+ * Remove every wrapper tag so a file cannot close its block and open another.
+ * Replacing one tag can join the pieces of another, so keep going until the
+ * text stops changing; every change shortens it, so the loop terminates.
+ */
 function stripFileTags(text: string): string {
-  return text
-    .replace(/<\/?file\b[^>]*>/gi, '')
-    .replace(/<\/?(?:persona|instructions|owner)\b[^>]*>/gi, '')
+  let out = text
+  for (;;) {
+    const next = out
+      .replace(/<\/?file\b[^>]*>/gi, '')
+      .replace(/<\/?(?:persona|instructions|owner)\b[^>]*>/gi, '')
+    if (next === out) return out
+    out = next
+  }
 }
 
 function block(tag: PromptSectionId, body: string, intro: string): string {

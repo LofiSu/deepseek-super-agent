@@ -21,10 +21,19 @@ function runCli(
   args: string[],
   extraEnv: NodeJS.ProcessEnv = {},
 ): { status: number | null; stdout: string; stderr: string } {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    DS_AGENT_HOME: home,
+    NODE_NO_WARNINGS: '1',
+    ...extraEnv,
+  }
+  for (const key of ['DS_AGENT_SOUL', 'DS_AGENT_PERSONA', 'DS_AGENT_IDENTITY', 'DS_AGENT_OWNER', 'DS_AGENT_INSTRUCTIONS']) {
+    if (extraEnv[key] === undefined) delete env[key]
+  }
   const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli/main.ts', ...args], {
     cwd: process.cwd(),
     encoding: 'utf8',
-    env: { ...process.env, DS_AGENT_HOME: home, NODE_NO_WARNINGS: '1', ...extraEnv },
+    env,
   })
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
 }
@@ -95,6 +104,20 @@ describe('ds-agent prompt', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).not.toContain('supersecret123')
     expect(result.stdout).toContain('[redacted]')
+  })
+
+  it('does not inherit a soul seed from the test runner environment', () => {
+    const previous = process.env.DS_AGENT_SOUL
+    process.env.DS_AGENT_SOUL = 'Inherited seed.'
+    try {
+      const result = runCli(tempHome(), ['prompt', '--layers'])
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toMatch(/soul\s+\d+ chars\s+built-in default soul/)
+      expect(result.stdout).not.toContain('Inherited seed.')
+    } finally {
+      if (previous === undefined) delete process.env.DS_AGENT_SOUL
+      else process.env.DS_AGENT_SOUL = previous
+    }
   })
 
   it('shows the configured local specialists in the team layer', () => {
