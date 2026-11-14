@@ -172,7 +172,7 @@ Router 是全局序点：它负责对话、批处理 Trigger 和分派。Worker 
 - **审批**：Worker 可以调用 `request_approval`，提交一个精确的外发动作并暂停执行，而不是直接做。Ticket 挂起，Router 询问主人，`ds-agent approve` / `ds-agent deny` 记录决定并走正常路径恢复。模型只能申请、不能决定；聊天里说“可以”不构成批准。详见 [docs/APPROVALS.md](docs/APPROVALS.md)。
 - **Routines**：`routines.json` 按每 N 分钟，或在指定 UTC 时间和星期几每天一次，在指定信道和 Thread 投递一条 prompt。长时间停机后只补一次，不回放每个错过的时段。Routine 走正常 ingress 与规则；模型不能创建或修改。详见 [docs/ROUTINES.md](docs/ROUTINES.md)。
 - **技能**：主人在 `skills/<id>/SKILL.md` 写一份操作手册，无需改代码。Prompt 只带 id 与描述索引（上限 2000 字符），`read_skill` 按需加载正文。技能不能授予工具或扩大角色权限。详见 [docs/SKILLS.md](docs/SKILLS.md)。
-- **Prompt Stack**：身份、主人声音、常驻指令、主人资料、团队、技能、渠道、规则、记忆指引、表达风格、角色契约按依赖顺序装配。agent home 里的 `PERSONA.md`、`AGENTS.md`、`USER.md` 用于微调可编辑层。`ds-agent prompt --layers` 显示每一层及其来源。详见 [docs/PROMPTS.md](docs/PROMPTS.md)。
+- **Prompt 架构**：一条稳定的系统 prompt，由 33 个有序 section 组成，外加九个由主人编写的运行时文件：`SOUL.md`、`IDENTITY.md`、`USER.md`、`INSTRUCTIONS.md`、`AGENTS.md`、`MEMORY.md`、`TOOLS.md`、`HEARTBEAT.md` 和 `PROACTIVE_PREFERENCES.md`。`SOUL.md` 可省略：内置默认声音始终会渲染。核心文件 section 始终保留；在 20,000 字符预算下，可选 section 整体省略；每个文件上限为 4,000 字符。`PERSONA.md` 仍作为已弃用的 soul 回退加载。`ds-agent prompt --layers` 显示每个 section 及其来源。详见 [docs/PROMPTS.md](docs/PROMPTS.md)。
 
 ### 信道
 

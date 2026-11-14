@@ -50,7 +50,8 @@ description: Check whether production is healthy after a deploy; report only fai
   advertised.
 
 Skills are loaded once at `Runtime.create`. Restart the agent after editing a
-skill, the same as `PERSONA.md`.
+skill, the same as `SOUL.md`. Older installs may still use `PERSONA.md`; it
+loads as a deprecated soul fallback.
 
 ## How the agent uses one
 

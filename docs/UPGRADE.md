@@ -119,6 +119,25 @@ sqlite3 "$HOME/ds-agent-backup-YYYYMMDDTHHMMSSZ.db" \
 6. Run `ds-agent health` and a normal command before restarting the daemon.
 7. Keep the pre-upgrade backup until the new version has served traffic.
 
+## Prompt files
+
+No database migration is involved. The prompt architecture changed from a
+twelve-layer stack to one composed prompt with nine owner-written runtime files.
+After upgrading:
+
+- Rename `PERSONA.md` to `SOUL.md`. The old name still loads as a deprecated
+  fallback and logs a warning, so nothing breaks, but the new name is the
+  supported one.
+- Move standing house rules from `AGENTS.md` to `INSTRUCTIONS.md`. `AGENTS.md`
+  now holds durable operating notes about the workspace; `PERSONA.md` and
+  `AGENTS.md` still load, but their roles changed.
+- `DS_AGENT_PERSONA` still seeds the soul; prefer `DS_AGENT_SOUL`.
+  `DS_AGENT_INSTRUCTIONS` now seeds `INSTRUCTIONS.md`.
+- Optional files (`MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`,
+  `PROACTIVE_PREFERENCES.md`) are new and can stay absent.
+- Prompt files are read once at startup. Restart the agent after editing them.
+  `ds-agent prompt --layers` shows which file supplied each section.
+
 ## Restore
 
 Restore is an offline, replace-in-place operation. **Stop the target process.**
