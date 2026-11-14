@@ -7,8 +7,8 @@ import { applyMemoryLessons } from './policy-memory.ts'
 
 function missingTokens(text: string, known: readonly string[]): string[] {
   const words = text.toLowerCase().match(/[a-z][a-z0-9'-]{2,}/g) ?? []
-  const body = known.join(' ')
-  return [...new Set(words)].filter(word => !body.includes(word)).slice(0, 6)
+  const knownExact = new Set(known.map(token => token.toLowerCase()))
+  return [...new Set(words)].filter(word => !knownExact.has(word)).slice(0, 6)
 }
 
 /** Deterministic train-failure proposals; optional policy-memory lesson fields (no fixture literals). */

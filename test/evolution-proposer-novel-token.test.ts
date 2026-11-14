@@ -3,6 +3,9 @@ import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
 import { TrainFailureProposer } from '../src/evolution/train-proposer.ts'
 import { emptyCarrier } from '../src/evolution/policy-memory.ts'
 import { normalizeDirectionKey } from '../src/evolution/safe-pattern.ts'
+import { evaluateDeliverGateStrategy } from '../src/evolution/strategy-gate.ts'
+import { DELIVER_GATE_DOMAIN } from '../src/evolution/types.ts'
+import type { DeliverGateStrategyV1 } from '../src/evolution/types.ts'
 import { randomUUID } from 'node:crypto'
 
 function addedTokens(actual: readonly string[], baseline: readonly string[]): string[] {
@@ -108,6 +111,104 @@ describe('proposer failure target resolution', () => {
   })
 })
 
+describe('proposer exact token membership', () => {
+  it('proposes a short positive word that is only a substring of an existing token', () => {
+    const baseline = defaultBaselineStrategy()
+    const failure = {
+      id: 'tr-substring-positive',
+      speculative: true,
+      report: { kind: 'ready', text: 'pass' },
+      expected: 'deliver' as const,
+    }
+    const proposer = new TrainFailureProposer(false)
+    const next = proposer.propose({
+      baseline,
+      parentStrategy: baseline,
+      trainFailures: [failure],
+      memory: emptyCarrier('e', 0),
+      seed: 7,
+      failureCaseId: failure.id,
+      seenDirections: new Set(),
+    })
+
+    expect(next).not.toBeNull()
+    expect(addedTokens(next!.positiveTokens ?? [], baseline.positiveTokens ?? [])).toEqual(['pass'])
+    expect(next!.positiveTokens).toContain('passing')
+    expect(next!.positiveTokens).toContain('passed')
+    expect(evaluateDeliverGateStrategy(next!, {
+      speculative: true,
+      report: { kind: 'ready', text: 'pass' },
+    })).toBe('deliver')
+  })
+
+  it('proposes a negative word that is only a substring of an existing negative token', () => {
+    const parent: DeliverGateStrategyV1 = {
+      schemaVersion: 2,
+      domain: DELIVER_GATE_DOMAIN,
+      positiveTokens: ['ok'],
+      negativeTokens: ['stable'],
+      clauseLocalPositive: true,
+    }
+    const failure = {
+      id: 'tr-substring-negative',
+      speculative: true,
+      report: { kind: 'ready', text: 'ok able' },
+      expected: 'discard' as const,
+    }
+    const proposer = new TrainFailureProposer(false)
+    const next = proposer.propose({
+      baseline: parent,
+      parentStrategy: parent,
+      trainFailures: [failure],
+      memory: emptyCarrier('e', 0),
+      seed: 7,
+      failureCaseId: failure.id,
+      seenDirections: new Set(),
+    })
+
+    expect(next).not.toBeNull()
+    expect(addedTokens(next!.negativeTokens ?? [], parent.negativeTokens ?? [])).toEqual(['able'])
+    expect(addedTokens(next!.positiveTokens ?? [], parent.positiveTokens ?? [])).toEqual([])
+    expect(evaluateDeliverGateStrategy(next!, {
+      speculative: true,
+      report: { kind: 'ready', text: 'ok able' },
+    })).toBe('discard')
+  })
+
+  it('does not treat a component of a multi-word token as already known', () => {
+    const parent: DeliverGateStrategyV1 = {
+      schemaVersion: 2,
+      domain: DELIVER_GATE_DOMAIN,
+      positiveTokens: ['ok'],
+      negativeTokens: ['no change', 'not valuable'],
+      clauseLocalPositive: true,
+    }
+    const failure = {
+      id: 'tr-multi-word-component',
+      speculative: true,
+      report: { kind: 'ready', text: 'ok change' },
+      expected: 'discard' as const,
+    }
+    const proposer = new TrainFailureProposer(false)
+    const next = proposer.propose({
+      baseline: parent,
+      parentStrategy: parent,
+      trainFailures: [failure],
+      memory: emptyCarrier('e', 0),
+      seed: 7,
+      failureCaseId: failure.id,
+      seenDirections: new Set(),
+    })
+
+    expect(next).not.toBeNull()
+    expect(addedTokens(next!.negativeTokens ?? [], parent.negativeTokens ?? [])).toEqual(['change'])
+    expect(evaluateDeliverGateStrategy(next!, {
+      speculative: true,
+      report: { kind: 'ready', text: 'ok change' },
+    })).toBe('discard')
+  })
+})
+
 describe('proposer remaining-token fallback', () => {
   it('tries remaining positive tokens after a seen direction on deliver miss', () => {
     const baseline = defaultBaselineStrategy()
@@ -174,13 +275,16 @@ describe('proposer remaining-token fallback', () => {
 
     const first = proposer.propose({ ...baseInput, seenDirections: new Set() })
     expect(first).not.toBeNull()
-    expect(addedTokens(first!.negativeTokens ?? [], baseline.negativeTokens ?? [])).toEqual(['widget'])
+    // Exact membership: `fix` is a positive token, not an exact negative one
+    // (`wontfix` / `won't fix` are separate alternatives), so it is the first
+    // extracted candidate for this discard miss.
+    expect(addedTokens(first!.negativeTokens ?? [], baseline.negativeTokens ?? [])).toEqual(['fix'])
     expect(first!.clauseLocalPositive).toBe(baseline.clauseLocalPositive)
 
     const firstKey = directionKey(first)
     const second = proposer.propose({ ...baseInput, seenDirections: new Set([firstKey]) })
     expect(second).not.toBeNull()
-    expect(addedTokens(second!.negativeTokens ?? [], baseline.negativeTokens ?? [])).toEqual(['relay'])
+    expect(addedTokens(second!.negativeTokens ?? [], baseline.negativeTokens ?? [])).toEqual(['widget'])
     expect(directionKey(second)).not.toBe(firstKey)
   })
 })
