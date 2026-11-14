@@ -309,8 +309,30 @@ async function runEvolutionLocked(
     }
 
     if (!strategy) {
+      const noProposalCandidateId = `cand_none_${round}_${step}`
+      // A selected KL-UCB arm that cannot propose must not stay "cold": the
+      // novel-quota cold filter and discover-min-cold both ignore skip
+      // observations, so they would keep re-selecting this arm while other
+      // train failures still have proposable tokens. Record a real (non-skip)
+      // failure observation so eligibleTrials() counts the attempt, then
+      // persist it like an evaluated step.
+      if (
+        selectorUsesKlUcb(selector)
+        && !injectedThisStep
+        && arms.some(arm => arm.id === selectedArmId)
+      ) {
+        recordObservation(arms, selectedArmId, {
+          id: stableJsonDigest({
+            experimentId: experiment.experimentId,
+            opportunity: experiment.totalOpportunities,
+            candidateId: noProposalCandidateId,
+          }),
+          reward: 0,
+        })
+        persistExperimentCounters(input.home, { klArms: serializeArms(arms) })
+      }
       candidates.push({
-        candidateId: `cand_none_${round}_${step}`,
+        candidateId: noProposalCandidateId,
         parentId,
         directionKey: 'none',
         lineageHash: candidateLineageHash(parentId, 'none'),

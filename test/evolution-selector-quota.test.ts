@@ -6,6 +6,8 @@ import { selectArmId, NEW_DIRECTION_QUOTA_PER_RUN } from '../src/evolution/searc
 import { emptyCarrier } from '../src/evolution/policy-memory.ts'
 import { writeSynthDataset } from '../src/evolution/synth-fixture.ts'
 import { runEvolution } from '../src/evolution/evolve.ts'
+import { sha256File } from '../src/evolution/digest.ts'
+import { loadExperiment } from '../src/evolution/experiment.ts'
 
 const temps: string[] = []
 
@@ -76,6 +78,102 @@ describe('per-run novel direction quota', () => {
     })
     expect(pick.failureCaseId).toBe('none')
     expect(pick.selectionReason).toContain('no viable')
+  })
+})
+
+function writeNoProposalDataset(targetDir: string, seed: number): void {
+  fs.mkdirSync(targetDir, { recursive: true })
+  const train = {
+    cases: [
+      // Too short for TrainFailureProposer.missingTokens -> always returns null.
+      { id: 'tr-silent', speculative: true, report: { kind: 'ready', text: 'ok.' }, expected: 'deliver' },
+      { id: 'tr-orbit', speculative: true, report: { kind: 'ready', text: 'orbit linkage complete for deploy.' }, expected: 'deliver' },
+      { id: 'tr-glimmer', speculative: true, report: { kind: 'ready', text: 'glimmer linkage complete for deploy.' }, expected: 'deliver' },
+    ],
+  }
+  const validation = {
+    cases: [
+      { id: 'va-keep', speculative: true, report: { kind: 'ready', text: 'fixed and ready to ship.' }, expected: 'deliver' },
+    ],
+  }
+  const finaltest = {
+    cases: [
+      { id: 'ft-a', speculative: true, report: { kind: 'ready', text: 'orbit fix validated.' }, expected: 'deliver' },
+    ],
+  }
+  const files = { train: 'train.json', validation: 'validation.json', finaltest: 'finaltest.json' } as const
+  for (const [split, data] of [['train', train], ['validation', validation], ['finaltest', finaltest]] as const) {
+    fs.writeFileSync(path.join(targetDir, files[split]), JSON.stringify(data, null, 2))
+  }
+  const manifest = {
+    schemaVersion: 2,
+    domain: 'deliver-gate-v1',
+    splits: files,
+    splitDigests: {
+      train: sha256File(path.join(targetDir, files.train)),
+      validation: sha256File(path.join(targetDir, files.validation)),
+      finaltest: sha256File(path.join(targetDir, files.finaltest)),
+    },
+    seed,
+  }
+  fs.writeFileSync(path.join(targetDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+}
+
+describe('kl-ucb no-proposal cold arms', () => {
+  it('seed-0 silent-first run still reaches a proposable failure arm', async () => {
+    const datasetRoot = tempDir('evo-kl-noproposal-ds-')
+    writeNoProposalDataset(datasetRoot, 0)
+    const home = tempDir('evo-kl-noproposal-home-')
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      selector: 'kl-ucb',
+      stopOnFirstSuccess: false,
+      budget: {
+        maxCandidates: 6,
+        maxEvals: 24,
+        evalTimeoutMs: 20_000,
+        reserveEvals: 2,
+        maxCandidatesThisRun: 6,
+      },
+    })
+    // The silent arm can never propose, so its rows stay skipped_invalid.
+    const silentRows = report.candidates.filter(candidate => candidate.failureCaseId === 'tr-silent')
+    expect(silentRows.length).toBeGreaterThan(0)
+    expect(silentRows.every(candidate => candidate.status === 'skipped_invalid')).toBe(true)
+    // The loop must not spend every step on it: a proposable arm is reached.
+    const reached = report.candidates.filter(
+      candidate =>
+        (candidate.failureCaseId === 'tr-orbit' || candidate.failureCaseId === 'tr-glimmer')
+        && candidate.status === 'evaluated',
+    )
+    expect(reached.length).toBeGreaterThan(0)
+  })
+
+  it('records a non-skip failure observation for an arm that yields no proposal', async () => {
+    const datasetRoot = tempDir('evo-kl-noproposal-ds-')
+    writeNoProposalDataset(datasetRoot, 0)
+    const home = tempDir('evo-kl-noproposal-home-')
+    await runEvolution({
+      home,
+      datasetRoot,
+      selector: 'kl-ucb',
+      stopOnFirstSuccess: false,
+      budget: {
+        maxCandidates: 6,
+        maxEvals: 24,
+        evalTimeoutMs: 20_000,
+        reserveEvals: 2,
+        maxCandidatesThisRun: 6,
+      },
+    })
+    const experiment = loadExperiment(home)
+    expect(experiment).not.toBeNull()
+    const silentArm = experiment!.klArms.find(arm => arm.id === 'fail_tr-silent')
+    expect(silentArm).toBeDefined()
+    const attempted = silentArm!.observations.filter(observation => !observation.skip)
+    expect(attempted.length).toBeGreaterThan(0)
+    expect(attempted.every(observation => observation.reward === 0)).toBe(true)
   })
 })
 
