@@ -1,5 +1,8 @@
-export { Collaborations, ensureCollaboration } from './collab.ts'
+export { APPROVAL_ANSWERS, formatApprovalCard } from './approval-card.ts'
+export type { ApprovalAnswer } from './approval-card.ts'
+export { Collaborations, approvalActionId, ensureCollaboration } from './collab.ts'
 export type {
+  ApprovalDecision,
   CollaborationView,
   InterveneInput,
   InterveneOutcome,

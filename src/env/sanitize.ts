@@ -63,9 +63,18 @@ export function redactCredentialPatterns(text: string): string {
   return out
 }
 
-export function redactSecrets(text: string, secrets: readonly string[]): string {
+/**
+ * Replace exact values with `[redacted]`. The default floor avoids mangling
+ * ordinary text for incidental short env values; a fill vault passes `1` so a
+ * short card CVC cannot be read back, accepting that broader replacement.
+ */
+export function redactSecrets(
+  text: string,
+  secrets: readonly string[],
+  minLength = MIN_SECRET_LENGTH,
+): string {
   const ordered = [...new Set(secrets)]
-    .filter(secret => secret.length >= MIN_SECRET_LENGTH)
+    .filter(secret => secret.length >= Math.max(1, minLength))
     .sort((a, b) => b.length - a.length)
   let out = text
   for (const secret of ordered) {

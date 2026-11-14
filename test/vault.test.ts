@@ -52,6 +52,18 @@ describe('T51 vault + Store/Env boundary', () => {
     expect(() => assertStoreEnvSeparation(env)).not.toThrow()
   })
 
+  it('preserves the fill section when rewriting env-injection entries', () => {
+    const file = path.join(tempHome(), 'vault.json')
+    fs.writeFileSync(file, JSON.stringify({
+      fill: { login: { kind: 'password', password: 'fill-only-value' } },
+    }), { mode: 0o600 })
+    const vault = new FileVault(file)
+    vault.set('TOKEN', 'env-token-value')
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+    expect(raw.TOKEN).toBe('env-token-value')
+    expect(raw.fill).toEqual({ login: { kind: 'password', password: 'fill-only-value' } })
+  })
+
   it('describes presence without serializing secret values', () => {
     const file = path.join(tempHome(), 'vault.json')
     const vault = new FileVault(file)

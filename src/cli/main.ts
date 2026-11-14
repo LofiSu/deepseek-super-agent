@@ -1,6 +1,8 @@
 import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
+import { formatApprovalCard } from '../core/approval-card.ts'
+import { approvalActionId } from '../core/collab.ts'
 import { Engine } from '../core/engine.ts'
 import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
@@ -160,7 +162,12 @@ Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent intervene <ticketId> "use the staging db" [--no-pause]
   pnpm ds-agent resume <ticketId> [--reason "human verified"]
   pnpm ds-agent collab <ticketId>          # pause state + guidance audit
+  pnpm ds-agent approvals [--json]         # pending three-answer approval cards
+  pnpm ds-agent approve|deny|dismiss <ticketId> <approvalId>
+                            [--note "..."] [--action-id <id>]
   <ticketId> accepts an exact id, a unique prefix, or "latest".
+  A card is bound to its exact action text; rewriting the action needs a new
+  approval. The model can request a card, never answer it.
 
 Worker-internal teams (persisted in SQLite, offline reads):
   pnpm ds-agent team <teamId|ticketId>     # topology, aggregate, member status
@@ -171,8 +178,8 @@ pause freezes Router/Worker turns, reports, and outbound replies.
 stop ends a ticket for good (an operator veto); pause is for a resumable hold.
 intervene records guidance and pauses by default, so the note lands before more work.
 resume clears the pause and continues with the unseen guidance in the next turn.
-demo/retry/resume need a live model; chat may use MockModel.
-pause/intervene/collab/team/teams are offline.
+demo/retry/resume/approve/deny/dismiss need a live model; chat may use MockModel.
+pause/intervene/collab/team/teams/approvals are offline.
 
 imessage refuses to start (default-deny) without --handle/DS_AGENT_IMESSAGE_HANDLE
 or a non-empty DS_AGENT_ACTOR_ALLOWLIST. --allow-any is an explicit opt-out that
@@ -600,6 +607,7 @@ async function main(): Promise<void> {
       ticketId: string
       title: string
       approvalId: string
+      actionId: string
       action: string
       reason?: string
       requestedBy: string
@@ -614,6 +622,7 @@ async function main(): Promise<void> {
             ticketId: ticket.id,
             title: ticket.title,
             approvalId: approval.id,
+            actionId: approval.actionId || approvalActionId(approval.action),
             action: approval.action,
             requestedBy: approval.requestedBy,
             at: approval.at,
@@ -635,18 +644,21 @@ async function main(): Promise<void> {
     for (const item of pending) {
       console.log(`${item.ticketId}  ${item.approvalId}  ${item.action}`)
       console.log(`  ${item.title}${item.reason ? ` — ${item.reason}` : ''}`)
+      console.log(`  action-id: ${item.actionId}`)
       console.log(`  requested by ${item.requestedBy} at ${item.at}`)
+      console.log('  answers: approve | deny | dismiss')
     }
     return
   }
-  if (cmd === 'approve' || cmd === 'deny') {
-    const rest = bare(3, ['note'])
+  if (cmd === 'approve' || cmd === 'deny' || cmd === 'dismiss') {
+    const rest = bare(3, ['note', 'action-id'])
     const ticketRef = rest[0]
     const approvalId = rest[1]
     if (!ticketRef || !approvalId) {
-      throw new Error(`usage: ds-agent ${cmd} <ticketId> <approvalId> [--note "..."]`)
+      throw new Error(`usage: ds-agent ${cmd} <ticketId> <approvalId> [--note "..."] [--action-id <id>]`)
     }
     const note = option('note')
+    const expectedActionId = option('action-id')
     const resolved = (() => {
       const store = new Store(home)
       try {
@@ -656,13 +668,16 @@ async function main(): Promise<void> {
       }
     })()
     await withRuntime(async runtime => {
+      const decision = cmd === 'approve' ? 'approved' : cmd === 'deny' ? 'denied' : 'dismissed'
       const outcome = await runtime.decideApproval(
         resolved.id,
         approvalId,
-        cmd === 'approve' ? 'approved' : 'denied',
+        decision,
         note,
+        expectedActionId,
       )
-      console.log(`${cmd === 'approve' ? 'approved' : 'denied'} ${approvalId} on ${resolved.id} "${resolved.title}"`)
+      console.log(`${decision} ${approvalId} on ${resolved.id} "${resolved.title}"`)
+      console.log(formatApprovalCard(outcome.approval, '  '))
       if (note) console.log(`  note: ${note}`)
       console.log(`  stage: ${ticketStage(outcome.ticket)}`)
     }, requireLiveModelFromEnv())
@@ -747,12 +762,7 @@ async function main(): Promise<void> {
         console.log('approvals: none')
       } else {
         console.log('approvals:')
-        for (const approval of approvals) {
-          console.log(
-            `  ${approval.status.padEnd(8)} ${approval.id}  ${approval.action}`
-            + `${approval.note ? ` — ${approval.note}` : ''}`,
-          )
-        }
+        for (const approval of approvals) console.log(formatApprovalCard(approval, '  '))
       }
       if (collaboration.guidance.length === 0) {
         console.log('guidance: none')

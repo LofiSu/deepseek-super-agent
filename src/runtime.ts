@@ -1,5 +1,6 @@
 import path from 'node:path'
 import type {
+  ApprovalDecision,
   CollaborationView,
   DecideApprovalOutcome,
   InterveneInput,
@@ -14,6 +15,13 @@ import { arbitrateSubscribers } from './core/intake.ts'
 import { withSessionRole } from './core/session-role.ts'
 import { bindRolePorts } from './core/role-ports.ts'
 import type { Host } from './core/host.ts'
+import {
+  FillVault,
+  fillTargetFromEnv,
+  fillVaultPath,
+  loadFillVault,
+  type FillTarget,
+} from './env/fill-vault.ts'
 import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
@@ -75,6 +83,18 @@ export interface RuntimeOptions {
   now?: () => string
   /** Environment for the LocalEnv allowlist, secret redaction, model ids, and instance settings. */
   env?: NodeJS.ProcessEnv
+  /**
+   * Fill-only credential/payment vault. Defaults to `vault.json` in `home`
+   * (or `DS_AGENT_VAULT_FILE`). Absent, malformed, or non-private means fill is
+   * unavailable. `false` disables it explicitly.
+   */
+  fillVault?: FillVault | false
+  /**
+   * Form adapter the vault types into. Defaults to a local helper configured
+   * by `DS_AGENT_FILL_COMMAND`; no browser adapter is built in. `false`
+   * disables fill even when a vault exists.
+   */
+  fillTarget?: FillTarget | false
   /**
    * External MCP servers (array or JSON array string). Overrides
    * `DS_AGENT_MCP_SERVERS`. Their tools are exposed to Workers only.
@@ -339,6 +359,11 @@ export function admissionRulesFromEnv(
   }
 }
 
+/** One-line label for a log line; adapter-supplied labels are not trusted. */
+function sanitizeLogLabel(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
 class RedactingLogger extends Logger {
   constructor(private readonly clean: (line: string) => string) {
     super()
@@ -450,11 +475,35 @@ export class Runtime {
   static create(opts: RuntimeOptions): Runtime {
     const baseEnv = opts.env ?? process.env
     const mcpConfig = mcpServersFromConfig(opts.mcpServers, baseEnv)
+    // Fill-vault values never enter the environment or the Store. They join
+    // the redaction list so an accidental tool output or log line cannot
+    // replay one; LocalEnv also scrubs them from bash/read_file results at any
+    // length.
+    const fillLoad: { vault?: FillVault; reason?: string } = opts.fillVault === false
+      ? { reason: 'disabled' }
+      : opts.fillVault
+        ? { vault: opts.fillVault }
+        : loadFillVault(fillVaultPath(opts.home, baseEnv))
+    const fillVault = fillLoad.vault
+    let fillTarget: FillTarget | undefined
+    let fillTargetReason: string | undefined
+    if (opts.fillTarget === false) {
+      fillTargetReason = 'disabled'
+    } else if (opts.fillTarget) {
+      fillTarget = opts.fillTarget
+    } else {
+      try {
+        fillTarget = fillTargetFromEnv(baseEnv)
+      } catch {
+        fillTargetReason = 'invalid-config'
+      }
+    }
     // A server's own env is where its credentials live, so its secret-named
     // values join the redaction list before anything logs or persists.
     const secrets = [...new Set([
       ...secretValues(baseEnv),
       ...mcpConfig.configs.flatMap(config => secretValues(config.env)),
+      ...(fillVault?.redactionValues() ?? []),
     ])].sort((a, b) => b.length - a.length)
     const redact = (text: string) => redactSecrets(text, secrets)
     const log = new RedactingLogger(redact)
@@ -463,7 +512,10 @@ export class Runtime {
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
-    const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
+    const env = new LocalEnv(path.join(opts.home, 'workspaces'), {
+      env: baseEnv,
+      ...(fillVault ? { redactValues: fillVault.redactionValues() } : {}),
+    })
     const now = opts.now ?? (() => new Date().toISOString())
     const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv)
     const localAgentSpecs = opts.localAgents ?? loadLocalAgents(opts.home, baseEnv)
@@ -593,6 +645,10 @@ export class Runtime {
     const slowPath = resolveSlowPath(baseEnv, opts.slowPath, model, log)
     log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} meshQueue=${meshQueue} shards=${routerShards.list().length}`)
     log.info(`[runtime] model=${model.name}`)
+    log.info(
+      `[fill] vault=${fillVault ? `entries=${fillVault.summary().length}` : fillLoad.reason ?? 'absent'}`
+      + ` target=${fillTarget ? sanitizeLogLabel(fillTarget.label) : fillTargetReason ?? 'none'}`,
+    )
     log.info(
       `[ingress] slow-path mode=${slowPath.mode} timeoutMs=${slowPath.timeoutMs}`
       + (slowPath.classifier ? ` policy=${slowPath.classifier.name}` : ''),
@@ -753,6 +809,9 @@ export class Runtime {
         if (!late.harness) throw new Error('harness is not ready')
         return late.harness.routerTurn(prompt)
       },
+      ...(fillVault
+        ? { fill: { vault: fillVault, ...(fillTarget ? { target: fillTarget } : {}) } }
+        : {}),
       nudge: (sessionId, ticketId) => {
         journal.append(sessionId, {
           role: 'user',
@@ -1360,11 +1419,13 @@ export class Runtime {
   async decideApproval(
     ticketId: string,
     approvalId: string,
-    decision: 'approved' | 'denied',
+    decision: ApprovalDecision,
     note?: string,
+    expectedActionId?: string,
   ): Promise<DecideApprovalOutcome> {
     const outcome = this.engine.decideApproval(ticketId, approvalId, decision, {
       ...(note ? { note } : {}),
+      ...(expectedActionId ? { expectedActionId } : {}),
     })
     if (!outcome.ticket.ended) await this.harness.resume(outcome.ticket)
     return {

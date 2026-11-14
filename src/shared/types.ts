@@ -223,19 +223,28 @@ export interface ResumeRecord {
 /**
  * One action a Worker paused to ask the owner about. The owner decides through
  * the CLI; the model can request, never decide.
+ *
+ * `actionId` is derived from the exact `action` text and is the stable handle
+ * for the card the owner sees. A decision recomputes it, so rewriting the
+ * action after the request makes the old card undecidable; the Worker must ask
+ * again. The id is not a capability and cannot be minted by chat text.
  */
 export interface ApprovalRequest {
   id: string
   at: string
   /** The exact action the Worker will perform if approved. One line. */
   action: string
+  /** Deterministic id over the exact action text shown to the owner. */
+  actionId: string
   reason?: string
   /** Session id that asked. */
   requestedBy: string
-  status: 'pending' | 'approved' | 'denied'
+  status: 'pending' | 'approved' | 'denied' | 'dismissed'
   decidedAt?: string
   decidedBy?: string
   note?: string
+  /** Set after a vault fill consumes this approval; an approved card is one fill. */
+  usedAt?: string
 }
 
 /**

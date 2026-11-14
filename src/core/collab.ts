@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { UserError } from '../shared/errors.ts'
 import type { ApprovalRequest, Collaboration, Guidance, Ticket } from '../shared/types.ts'
 import type { Host } from './host.ts'
@@ -54,6 +55,11 @@ export interface RequestApprovalOutcome {
 export interface DecideApprovalInput {
   by?: string
   note?: string
+  /**
+   * Exact id the owner saw on the card. When supplied it must equal the
+   * stored `actionId`; a mismatch means the text changed and is refused.
+   */
+  expectedActionId?: string
 }
 
 export interface DecideApprovalOutcome {
@@ -62,12 +68,26 @@ export interface DecideApprovalOutcome {
   guidance: Guidance
 }
 
+/** The three answers a card accepts. None of them is available to a model. */
+export type ApprovalDecision = 'approved' | 'denied' | 'dismissed'
+
 /** Longest action description a Worker may put in front of the owner. */
 export const MAX_APPROVAL_ACTION_CHARS = 300
 /** Longest reason shown with the request. */
 export const MAX_APPROVAL_REASON_CHARS = 300
 /** Longest owner note stored with a decision. */
 export const MAX_APPROVAL_NOTE_CHARS = 300
+
+/**
+ * Stable id for the exact action text on a card. The hash covers the sanitized
+ * one-line action byte-for-byte, so any rewrite produces a different card and
+ * the old decision stops applying. This is an integrity handle, not a secret
+ * and not an approval token.
+ */
+export function approvalActionId(action: string): string {
+  const digest = createHash('sha256').update(action, 'utf8').digest('hex')
+  return `act_${digest.slice(0, 16)}`
+}
 
 /**
  * C0/C1 controls (including NUL and ESC), DEL, and bidirectional formatting
@@ -213,6 +233,7 @@ export class Collaborations {
       id: this.host.repo.nextId('appr'),
       at: this.host.now(),
       action,
+      actionId: approvalActionId(action),
       ...(reason ? { reason } : {}),
       requestedBy: input.requestedBy
         || ticket.assignments.at(-1)?.workerSessionId
@@ -224,11 +245,12 @@ export class Collaborations {
     this.host.repo.addEvent('approval.requested', {
       ticketId: ticket.id,
       approvalId: approval.id,
+      actionId: approval.actionId,
       action: approval.action,
       requestedBy: approval.requestedBy,
     })
     this.host.log(
-      `[approval] requested ticketId=${ticket.id} approvalId=${approval.id} action=${approval.action}`,
+      `[approval] requested ticketId=${ticket.id} approvalId=${approval.id} actionId=${approval.actionId} action=${approval.action}`,
     )
     return { ticket, approval }
   }
@@ -241,7 +263,7 @@ export class Collaborations {
   decideApproval(
     ticketId: string,
     approvalId: string,
-    decision: 'approved' | 'denied',
+    decision: ApprovalDecision,
     input: DecideApprovalInput = {},
   ): DecideApprovalOutcome {
     const ticket = this.mustLive(ticketId, 'decide approval on')
@@ -258,6 +280,23 @@ export class Collaborations {
     if (approval.status !== 'pending') {
       throw new UserError(`approval ${approvalId} already decided (${approval.status})`)
     }
+    // The decision is bound to the bytes the owner saw. Recomputing catches a
+    // post-request rewrite; an explicit card id from the CLI catches a stale
+    // terminal. Either way the old card cannot authorize the new text.
+    const actionId = approvalActionId(approval.action)
+    if (approval.actionId && approval.actionId !== actionId) {
+      throw new UserError(
+        `approval ${approvalId} text changed since the card was shown; request a new approval`,
+      )
+    }
+    if (input.expectedActionId && input.expectedActionId !== actionId) {
+      throw new UserError(
+        `approval ${approvalId} action id does not match the card (${actionId}); request a new approval`,
+      )
+    }
+    // A pending card persisted before ids existed gets the derived id now. A
+    // rewrite is still caught on every later decision.
+    if (!approval.actionId) approval.actionId = actionId
     const at = this.host.now()
     const by = input.by ?? 'human'
     const note = sanitizeApprovalText(input.note ?? '').slice(0, MAX_APPROVAL_NOTE_CHARS)
@@ -267,7 +306,9 @@ export class Collaborations {
     if (note) approval.note = note
     const text = decision === 'approved'
       ? `Approval ${approval.id} approved: ${approval.action}.${note ? ` Note: ${note}.` : ''} Proceed with exactly that action.`
-      : `Approval ${approval.id} denied: ${approval.action}. Do not perform it; report what you did instead and what you need.`
+      : decision === 'denied'
+        ? `Approval ${approval.id} denied: ${approval.action}. Do not perform it; report what you did instead and what you need.`
+        : `Approval ${approval.id} dismissed: ${approval.action}. Do not perform it; report where you stopped and what you need.`
     const guidance: Guidance = {
       id: this.host.repo.nextId('guide'),
       at,
@@ -285,6 +326,7 @@ export class Collaborations {
     this.host.repo.addEvent('approval.decided', {
       ticketId: ticket.id,
       approvalId: approval.id,
+      actionId: approval.actionId,
       decision,
       by,
       note,

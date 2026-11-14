@@ -4,8 +4,16 @@ An approval is a Worker asking the owner, mid-task, whether it may perform one
 exact action that leaves the workspace or is hard to undo: send a message,
 publish, delete, spend, or change something outside the sandbox.
 
-The model can request approval. It cannot approve, deny, or edit a request. The
-owner decides.
+The model can request approval. It cannot approve, deny, dismiss, or edit a
+request. The owner decides. A card has three answers: **approve**, **deny**, and
+**dismiss**. Deny records a refusal; dismiss closes the card without authorizing
+the action. Neither performs it.
+
+Every request also gets a deterministic `actionId` (`act_<16 hex>`) over the
+exact one-line action text. The decision recomputes that id, so rewriting the
+action after the owner saw the card makes the old card undecidable; the Worker
+must request a new approval. The id is an integrity handle, not a token a model
+can present to unlock anything.
 
 ## Flow
 
@@ -17,8 +25,8 @@ owner decides.
    ask the question.
 3. The tool asks the Router to tell the owner what needs approval. The Router
    gets the action, the reason, and the approval id.
-4. The owner runs `ds-agent approvals`, then `ds-agent approve` or
-   `ds-agent deny`.
+4. The owner runs `ds-agent approvals`, then `ds-agent approve`, `deny`, or
+   `dismiss` with the ticket id and approval id. The card shows the action id.
 5. The decision is stored with the note and timestamp, guidance is written for
    the Worker, and the Harness starts the normal RESUME turns. The Worker sees
    the decision as guidance before it acts again.
@@ -32,10 +40,11 @@ Worker ── request_approval ──▶ pending on Ticket ──▶ Router asks
 ## CLI
 
 ```bash
-ds-agent approvals                     # pending requests across live tickets
+ds-agent approvals                     # pending cards across live tickets
 ds-agent approvals --json
-ds-agent approve <ticketId> <approvalId> [--note "ship it"]
+ds-agent approve <ticketId> <approvalId> [--note "ship it"] [--action-id act_...]
 ds-agent deny <ticketId> <approvalId> [--note "use the staging bucket"]
+ds-agent dismiss <ticketId> <approvalId> [--note "not now"]
 ds-agent collab <ticketId>             # pending and decided requests on one ticket
 ```
 
@@ -48,13 +57,18 @@ ds-agent collab <ticketId>             # pending and decided requests on one tic
 - **Requests and pauses are separate.** A human pause (`ds-agent pause`) still
   blocks replies. An approval hold does not, because the question has to reach
   the owner. A paused ticket cannot request approval.
-- **The decision is checked, not inferred.** Approving requires the exact
+- **The decision is checked, not inferred.** Deciding requires the exact
   approval id and only works while it is pending. A second decision is refused.
   Chat text such as "yes, go ahead" does **not** approve anything; the owner
   must run the command. This is deliberate: the model cannot manufacture
   consent from a message it read.
+- **The card is bound to its exact text.** The stored `actionId` is derived from
+  the action text. A decision recomputes it and refuses a rewritten pending
+  action, and `--action-id` lets the owner confirm the id printed on the card.
+  A dismissed or denied card cannot be reused; the Worker requests a new one.
 - **Guidance is injected once.** Approved: "Proceed with exactly that action."
   Denied: "Do not perform it; report what you did instead and what you need."
+  Dismissed: "Do not perform it; report where you stopped and what you need."
 - **The Watchdog treats an approval wait as intentional idle.** A Worker waiting
   on the owner is not a stuck worker and is not failed or nudged as stale.
 - **Follow-ups are preserved.** The approval wait is recorded as a resume point,
@@ -70,14 +84,20 @@ ds-agent collab <ticketId>             # pending and decided requests on one tic
   channel reply to the command requires an authenticated owner identity and a
   signed approval, which is a later change.
 - Approving resumes the ticket, which starts model turns. Like `ds-agent resume`,
-  `approve` and `deny` require a configured live model; without one the command
-  fails before deciding, so guidance is not consumed by a mock. There is no
-  "approve but keep paused" mode: while the ticket is paused, `approve` and
-  `deny` refuse and leave the request pending; run `ds-agent resume` first.
+  `approve`, `deny`, and `dismiss` require a configured live model; without one
+  the command fails before deciding, so guidance is not consumed by a mock.
+  There is no "approve but keep paused" mode: while the ticket is paused, all
+  three commands refuse and leave the request pending; run `ds-agent resume`
+  first.
 - `ds-agent approvals` lists live tickets only. A pending request on an ended
   ticket is stale and is not shown; `collab` still shows the history.
-- The action is a description, not a structured action id. The Worker is trusted
-  to describe the action it will perform, and the rules layer still governs what
-  tools can do.
+- The structured `actionId` binds the card to its text; it is not a machine
+  description of the operation. The Worker is still trusted to describe the
+  action it will perform, and the rules layer still governs what tools can do.
+- A fill from the credential/payment vault requires an approved card whose exact
+  action matches the planned fill. One approved card authorizes one fill, then
+  records `usedAt`; a replay needs a new approval. See `src/env/fill-vault.ts`;
+  the vault has no read-back tool and is unavailable when its config is missing
+  or readable by group/world.
 - A routine, local specialist agent, or team does not get its own approval
   channel; if the Work needs one, it goes through the same Worker path.

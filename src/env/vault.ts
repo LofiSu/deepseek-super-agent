@@ -44,6 +44,11 @@ export class MemoryVault implements Vault {
 
 export class FileVault implements Vault {
   readonly #mem = new MemoryVault()
+  /**
+   * The fill-vault section shares `vault.json` but is owned by `fill-vault.ts`.
+   * Keep it verbatim when this class rewrites the env-injection entries.
+   */
+  #fillSection: unknown
 
   constructor(private readonly filePath: string) {
     this.load()
@@ -51,9 +56,12 @@ export class FileVault implements Vault {
 
   private load(): void {
     try {
-      const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf8')) as Record<string, string>
-      for (const [k, v] of Object.entries(raw)) {
-        if (typeof v === 'string') this.#mem.set(k, v)
+      const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf8')) as Record<string, unknown>
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        this.#fillSection = raw.fill
+        for (const [k, v] of Object.entries(raw)) {
+          if (typeof v === 'string') this.#mem.set(k, v)
+        }
       }
     } catch {
       // empty vault
@@ -62,11 +70,12 @@ export class FileVault implements Vault {
 
   private persist(): void {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
-    const obj: Record<string, string> = {}
+    const obj: Record<string, unknown> = {}
     for (const name of this.#mem.names()) {
       const child = this.#mem.resolveForChild([name])
       if (child[name] !== undefined) obj[name] = child[name]!
     }
+    if (this.#fillSection !== undefined) obj.fill = this.#fillSection
     fs.writeFileSync(this.filePath, `${JSON.stringify(obj)}\n`, { mode: 0o600 })
     fs.chmodSync(this.filePath, 0o600)
   }

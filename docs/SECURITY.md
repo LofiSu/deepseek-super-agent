@@ -228,10 +228,18 @@ The UI is not a substitute for OS file permissions or full-disk encryption.
   (`test/credential-sentinel.test.ts:97-152`). This is best-effort: an unknown
   secret shape, a value shorter than 8 characters, or a secret never present in
   the environment can still leak (`sanitize.ts:4,38-56`).
-- **Vault boundary.** The vault exposes names only; values are injected into a
-  child environment only and are never returned to context-building callers
+- **Vault boundary.** The env vault exposes names only; values are injected into
+  a child environment only and are never returned to context-building callers
   (`src/env/vault.ts:4-12,91-93`; `local-env.ts:69-74,200-213`). `FileVault`
   writes mode `0600` (`vault.ts:63-72`).
+- **Fill-only vault.** `src/env/fill-vault.ts` reads a separate `fill` section
+  and requires group/world permission bits to be clear (typically `0600`); it
+  exposes names, kinds, field names, and a receipt,
+  never a value. `fill()` calls a trusted `FillTarget`; missing or unsafe config
+  means fill is unavailable. The Runtime adds fill values to the redaction list
+  at any length, and `LocalEnv` scrubs them from `bash`/`read_file` output, so a
+  Worker that reads the config file still sees `[redacted]`. A fill also needs
+  an owner-approved card whose exact action text matches.
 - **Worker tool scope.** Executor tools exclude `reply_user`, `decide`, and
   `receive`; only the Router can speak or terminate (`src/harness/tools.ts:299`).
 

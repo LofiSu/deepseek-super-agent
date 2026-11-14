@@ -18,6 +18,11 @@ export interface LocalEnvOptions {
   vault?: Vault
   /** Secret names from the vault to inject into child processes. */
   vaultNames?: readonly string[]
+  /**
+   * Extra values to scrub from bash/read output. The fill vault uses this so a
+   * Worker that cats the config file still cannot read a value back. Never log.
+   */
+  redactValues?: readonly string[]
   sandbox?: SandboxPolicy
   /**
    * Opt-in strict read confinement. Overrides `DS_AGENT_SANDBOX_READ_ISOLATION`
@@ -42,6 +47,8 @@ export class LocalEnv implements EnvPort {
   private readonly maxOutputBytes: number
   private readonly childEnv: NodeJS.ProcessEnv
   private readonly secrets: readonly string[]
+  /** Fill-vault values: redacted at any length, unlike incidental env values. */
+  private readonly strictSecrets: readonly string[]
   private readonly vault?: Vault
   private readonly vaultNames: readonly string[]
   private readonly sandbox: SandboxPolicy
@@ -71,6 +78,8 @@ export class LocalEnv implements EnvPort {
         (v): v is string => typeof v === 'string' && v.length > 0,
       )
       : []
+    this.strictSecrets = [...new Set((options.redactValues ?? []).filter(value => value.length > 0))]
+      .sort((left, right) => right.length - left.length)
     this.secrets = [...secretValues(env), ...vaultSecrets]
   }
 
@@ -180,9 +189,13 @@ export class LocalEnv implements EnvPort {
     })
     return {
       code: result.code,
-      stdout: redactSecrets(result.stdout, this.secrets),
-      stderr: redactSecrets(result.stderr, this.secrets),
+      stdout: this.redact(result.stdout),
+      stderr: this.redact(result.stderr),
     }
+  }
+
+  private redact(text: string): string {
+    return redactSecrets(redactSecrets(text, this.secrets), this.strictSecrets, 1)
   }
 
   async writeFile(workerId: string, relativePath: string, body: string, opts?: EnvRunOptions): Promise<string> {
@@ -221,7 +234,7 @@ export class LocalEnv implements EnvPort {
     }
     try {
       this.assertFdContained(fd, cwd, full)
-      return redactSecrets(fs.readFileSync(fd, 'utf8'), this.secrets)
+      return this.redact(fs.readFileSync(fd, 'utf8'))
     } finally {
       fs.closeSync(fd)
     }

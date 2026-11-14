@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { approvalActionId } from '../src/core/collab.ts'
 import {
   OUTBOX_RETRY_BASE_KEY,
   Outbox,
@@ -352,6 +353,7 @@ describe('idle self-wake policy', () => {
           id: 'ap_1',
           at: new Date(T0 - 30 * MIN).toISOString(),
           action: '向客户发送最终报价邮件',
+          actionId: approvalActionId('向客户发送最终报价邮件'),
           reason: '不可撤销的外部发送',
           requestedBy: 'worker_ticket_seed',
           status: 'pending',
