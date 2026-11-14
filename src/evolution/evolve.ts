@@ -508,5 +508,17 @@ async function runEvolutionLocked(
     selector,
   }
   writeRunReport(runsDir, report)
+  // Record the digest of the in-memory report, not a re-read of the file: a
+  // swap between write and re-read must not become the recorded digest. Freeze
+  // later requires the persisted report to match this search-time binding.
+  const reportDigest = stableJsonDigest(report)
+  mutateExperiment(input.home, state => {
+    const receipts = state.searchRunReceipts ?? []
+    if (receipts.some(entry => entry.runId === report.runId)) {
+      throw new Error(`search run receipt already recorded for ${report.runId}`)
+    }
+    receipts.push({ runId: report.runId, digest: reportDigest })
+    state.searchRunReceipts = receipts
+  })
   return report
 }

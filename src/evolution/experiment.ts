@@ -52,7 +52,11 @@ export function loadExperiment(home: string): ExperimentState | null {
   const file = experimentPath(home)
   if (!fs.existsSync(file)) return null
   const root = resolveTrustedEvolutionRoot(home)
-  return readJsonFile<ExperimentState>(file, root)
+  const state = readJsonFile<ExperimentState>(file, root)
+  // State written before search-run receipt binding existed has no list. Treat
+  // it as empty: never invent digests from files on disk.
+  if (!Array.isArray(state.searchRunReceipts)) state.searchRunReceipts = []
+  return state
 }
 
 export function saveExperiment(home: string, state: ExperimentState): void {
@@ -112,6 +116,7 @@ export function createExperiment(input: {
     totalCandidatesGenerated: 0,
     totalOpportunities: 0,
     klArms: [],
+    searchRunReceipts: [],
     frozenRunReceipt: null,
   }
   // Create-only: never replace a live experiment (and its reserved budget).
@@ -182,6 +187,17 @@ export function freezeCandidate(input: {
   }
   if (input.runReport && stableJsonDigest(input.runReport) !== stableJsonDigest(runReport)) {
     throw new Error('run report forgery vs persisted runs artifact')
+  }
+
+  // Bind the persisted report to the digest the search run recorded in
+  // experiment state. A report swapped on disk after search has no matching
+  // recorded digest, so freeze refuses it even though experiment.json is honest.
+  const searchReceipt = state.searchRunReceipts.find(entry => entry.runId === runId)
+  if (!searchReceipt) {
+    throw new Error('run report was not recorded by search; freeze refused')
+  }
+  if (stableJsonDigest(runReport) !== searchReceipt.digest) {
+    throw new Error('run report content digest mismatch vs recorded search receipt; freeze refused')
   }
 
   const candidate = runReport.candidates.find(item => item.candidateId === input.candidateId)

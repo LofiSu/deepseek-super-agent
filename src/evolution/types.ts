@@ -140,6 +140,16 @@ export interface FrozenSelection {
   frozenAt: string
 }
 
+/**
+ * Search-time binding of a persisted run report. `digest` is the content
+ * digest of the in-memory report produced by the search run, so freeze can
+ * refuse an on-disk report that was swapped after search.
+ */
+export interface SearchRunReceipt {
+  runId: string
+  digest: string
+}
+
 export type FinalTestClaimState = 'CLAIMED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN'
 
 export interface FinalTestClaim {
@@ -180,6 +190,8 @@ export interface ExperimentState {
   totalCandidatesGenerated: number
   totalOpportunities: number
   klArms: KlArmSnapshot[]
+  /** Honest content digests of search run reports, recorded under the search lock. */
+  searchRunReceipts: SearchRunReceipt[]
   frozenRunReceipt: EvolutionRunReport | null
 }
 

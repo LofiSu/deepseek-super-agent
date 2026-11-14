@@ -20,9 +20,9 @@ import { evolutionRunsDir } from '../src/evolution/archive.ts'
 import { parseDeliverGateStrategy } from '../src/evolution/strategy-gate.ts'
 import { compileBoundedPattern, tokensToBoundedPattern } from '../src/evolution/safe-pattern.ts'
 import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
-import { sha256File } from '../src/evolution/digest.ts'
+import { sha256File, stableJsonDigest } from '../src/evolution/digest.ts'
 import { resolveDeliverGate } from '../src/speculate/resolve-gate.ts'
-import type { DeliverGateStrategyV1 } from '../src/evolution/types.ts'
+import type { DeliverGateStrategyV1, EvolutionRunReport } from '../src/evolution/types.ts'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -339,6 +339,112 @@ describe('promotion binds to the experiment-sealed frozen receipt', () => {
     })
     expect(record.candidateId).toBe(winner.candidateId)
     expect(record.experimentId).toBe(loadExperiment(home)!.experimentId)
+    expect(loadPromotedStrategy(home)).not.toBeNull()
+  })
+})
+
+describe('freeze binds to the search-recorded run report digest', () => {
+  async function searchValidationMiss(home: string, dataset: string) {
+    const report = await runEvolution({
+      home,
+      datasetRoot: dataset,
+      injectCandidates: [orbitStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const winner = report.candidates.find(item => item.status === 'evaluated')
+    expect(winner).toBeDefined()
+    expect(winner!.reward).toBe('success')
+    const validation = winner!.scores.find(score => score.split === 'validation')
+    expect(validation).toBeDefined()
+    expect(validation!.accuracy).toBeLessThan(1)
+    return { report, winner: winner!, honestValidation: validation!.accuracy }
+  }
+
+  function validationAccuracy(report: EvolutionRunReport, candidateId: string): number | undefined {
+    return report.candidates
+      .find(item => item.candidateId === candidateId)
+      ?.scores.find(score => score.split === 'validation')?.accuracy
+  }
+
+  it('refuses to freeze a report swapped on disk after search', async () => {
+    const dataset = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-evo-freeze-bind-ds-'))
+    datasets.push(dataset)
+    writeValidationMissDataset(dataset)
+    const home = tempHome()
+    const { report, winner, honestValidation } = await searchValidationMiss(home, dataset)
+
+    // Search recorded the honest in-memory report digest, not a disk re-read.
+    const before = loadExperiment(home)!
+    expect(before.phase).toBe('search')
+    expect(before.frozenRunReceipt).toBeNull()
+    expect(before.searchRunReceipts).toEqual([
+      { runId: report.runId, digest: stableJsonDigest(report) },
+    ])
+
+    // Swap only runs/<runId>.json so validation reads as 1. experiment.json is
+    // untouched: still in search phase with no sealed receipt.
+    const runFile = path.join(evolutionRunsDir(home), `${report.runId}.json`)
+    const tampered = JSON.parse(fs.readFileSync(runFile, 'utf8'))
+    const candidate = tampered.candidates.find(
+      (item: { candidateId: string }) => item.candidateId === winner.candidateId,
+    )
+    const validation = candidate.scores.find(
+      (score: { split: string }) => score.split === 'validation',
+    )
+    validation.correct = validation.total
+    validation.accuracy = 1
+    fs.writeFileSync(runFile, JSON.stringify(tampered, null, 2))
+
+    const diskReport = loadPersistedRunReport(home, report.runId)
+    expect(validationAccuracy(diskReport, winner.candidateId)).toBe(1)
+
+    expect(() => freezeCandidate({
+      home,
+      candidateId: winner.candidateId,
+      runId: report.runId,
+      runReport: diskReport,
+    })).toThrow(/recorded search receipt|not recorded by search/)
+
+    const after = loadExperiment(home)!
+    expect(after.phase).toBe('search')
+    expect(after.frozenRunReceipt).toBeNull()
+    expect(after.selectedCandidateId).toBeNull()
+    expect(after.searchRunReceipts).toEqual(before.searchRunReceipts)
+    expect(validationAccuracy(report, winner.candidateId)).toBe(honestValidation)
+    expect(fs.existsSync(path.join(home, 'evolution', 'frozen-run-receipt.json'))).toBe(false)
+  })
+
+  it('freezes the untampered search report and seals the real validation score', async () => {
+    const dataset = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-evo-freeze-bind-ds-'))
+    datasets.push(dataset)
+    writeValidationMissDataset(dataset)
+    const home = tempHome()
+    const { report, winner, honestValidation } = await searchValidationMiss(home, dataset)
+
+    const state = freezeCandidate({
+      home,
+      candidateId: winner.candidateId,
+      runId: report.runId,
+    })
+    expect(state.phase).toBe('frozen')
+    expect(state.frozenRunReceipt).not.toBeNull()
+    expect(validationAccuracy(state.frozenRunReceipt!, winner.candidateId))
+      .toBe(honestValidation)
+  })
+
+  it('still freezes, finalizes, and approves an honest fully qualified candidate', async () => {
+    const home = tempHome()
+    const { report, winner } = await winningPipeline(home)
+    const state = loadExperiment(home)!
+    expect(state.phase).toBe('finalized')
+    expect(validationAccuracy(state.frozenRunReceipt!, winner.candidateId)).toBe(1)
+    const record = approvePromotion({
+      home,
+      runReport: report,
+      candidateId: winner.candidateId,
+      artifactPath: path.join(report.archiveDir, winner.candidateId, 'candidate.json'),
+    })
+    expect(record.candidateId).toBe(winner.candidateId)
     expect(loadPromotedStrategy(home)).not.toBeNull()
   })
 })
