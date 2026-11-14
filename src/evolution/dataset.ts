@@ -38,9 +38,30 @@ function readManifest(datasetRoot: string): EvolutionSplitManifest {
   return manifest
 }
 
+/**
+ * Each row of a split is scored, but failure arms are keyed by case id. A split
+ * that repeats an id would therefore score more rows than it can propose arms
+ * for, and could carry contradictory labels for the same id. Reject the split
+ * before it reaches the objective. This also makes the finaltest split
+ * self-consistent when finalize reads it; search never parses finaltest.
+ */
+function assertUniqueCaseIds(cases: EvolutionEvalCase[], rel: string): void {
+  const seen = new Set<string>()
+  for (const testCase of cases) {
+    if (typeof testCase?.id !== 'string') {
+      throw new Error(`split has invalid case id: ${rel}`)
+    }
+    if (seen.has(testCase.id)) {
+      throw new Error(`split has duplicate case ids: ${rel}`)
+    }
+    seen.add(testCase.id)
+  }
+}
+
 function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
+  assertUniqueCaseIds(parsed.cases, rel)
   return parsed.cases
 }
 

@@ -18,17 +18,18 @@ const OUTSIDE_CANARY = 'SECRET_OUTSIDE_TOKEN'
 interface WrittenCase {
   id: string
   text: string
+  expected?: 'deliver' | 'discard'
 }
 
 function writeSplitCases(file: string, cases: WrittenCase[]): void {
   fs.writeFileSync(
     file,
     JSON.stringify({
-      cases: cases.map(({ id, text }) => ({
+      cases: cases.map(({ id, text, expected }) => ({
         id,
         speculative: true,
         report: { kind: 'ready', text },
-        expected: 'deliver',
+        expected: expected ?? 'deliver',
       })),
     }),
   )
@@ -863,6 +864,186 @@ describe('regression: train and validation case ids are disjoint during search (
     expect(search.validation.some(c => trainIds.has(c.id))).toBe(false)
     expect(searchText(search)).not.toContain('ho-001')
 
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+  })
+})
+
+describe('regression: a split cannot repeat a case id (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  const TRAIN_DUPLICATE = /^split has duplicate case ids: train\.json$/
+  const VALIDATION_DUPLICATE = /^split has duplicate case ids: validation\.json$/
+  const FINALTEST_DUPLICATE = /^split has duplicate case ids: finaltest\.json$/
+
+  function dataset(
+    train: WrittenCase[],
+    validation: WrittenCase[],
+    finaltest?: WrittenCase[],
+  ): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    writeSplitCases(path.join(temp.root, 'train.json'), train)
+    writeSplitCases(path.join(temp.root, 'validation.json'), validation)
+    if (finaltest) writeSplitCases(path.join(temp.root, 'finaltest.json'), finaltest)
+    return temp
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('rejects a train split that repeats an id on two rows with different bytes', () => {
+    const { root } = dataset(
+      [
+        { id: 'dup', text: 'first train row' },
+        { id: 'dup', text: 'second train row with different bytes' },
+        { id: 't-unique', text: 'unique train row' },
+      ],
+      [{ id: 'v1', text: 'validation one' }],
+    )
+    // Distinct rows within one file: only the id-uniqueness gate can catch it.
+    expect(fs.readFileSync(path.join(root, 'train.json'), 'utf8')).toContain(
+      'second train row with different bytes',
+    )
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(TRAIN_DUPLICATE)
+    }
+    // No train, validation, or finaltest cases were returned at search.
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_DUPLICATE)
+  })
+
+  it('rejects a validation split that repeats an id', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one' }],
+      [
+        { id: 'vdup', text: 'first validation row' },
+        { id: 'vdup', text: 'second validation row with same id' },
+        { id: 'v-unique', text: 'unique validation row' },
+      ],
+    )
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(VALIDATION_DUPLICATE)
+    }
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(VALIDATION_DUPLICATE)
+  })
+
+  it('rejects a train id repeated with contradictory expected labels', () => {
+    const { root } = dataset(
+      [
+        { id: 'conflict', text: 'same id expects deliver', expected: 'deliver' },
+        { id: 'conflict', text: 'same id expects discard', expected: 'discard' },
+      ],
+      [{ id: 'v1', text: 'validation one' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(TRAIN_DUPLICATE)
+    expect(() => loadEvolutionDataset(root)).toThrow(TRAIN_DUPLICATE)
+  })
+
+  it('rejects a non-string case id in a search split', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one' }],
+      [{ id: 'v1', text: 'validation one' }],
+    )
+    fs.writeFileSync(
+      path.join(root, 'train.json'),
+      JSON.stringify({
+        cases: [
+          {
+            id: 7,
+            speculative: true,
+            report: { kind: 'ready', text: 'numeric id' },
+            expected: 'deliver',
+          },
+        ],
+      }),
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(/^split has invalid case id: /)
+    expect(() => loadEvolutionDataset(root)).toThrow(/^split has invalid case id: /)
+  })
+
+  it('loads search but rejects a finaltest split that repeats an id at finalize', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one' }],
+      [{ id: 'v1', text: 'validation one' }],
+      [
+        { id: 'f-dup', text: 'first holdout' },
+        { id: 'f-dup', text: 'second holdout with same id' },
+      ],
+    )
+    // Honest commitment so finalize reaches the split instead of a digest error.
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain('first holdout')
+
+    expect(() => loadFinaltestSplit(root)).toThrow(FINALTEST_DUPLICATE)
+    expect(() => loadEvolutionDataset(root)).toThrow(FINALTEST_DUPLICATE)
+  })
+
+  it('still loads honest distinct case ids at search and finalize', () => {
+    const { root } = dataset(
+      [
+        { id: 't1', text: 'train one' },
+        { id: 't2', text: 'train two' },
+      ],
+      [
+        { id: 'v1', text: 'validation one' },
+        { id: 'v2', text: 'validation two' },
+      ],
+    )
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1', 't2'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1', 'v2'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads the committed fixture with unique ids at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train).toHaveLength(7)
+    expect(search.validation).toHaveLength(4)
+    expect(new Set(search.train.map(c => c.id)).size).toBe(search.train.length)
+    expect(new Set(search.validation.map(c => c.id)).size).toBe(search.validation.length)
+    expect(searchText(search)).not.toContain('ho-001')
+
+    expect(loadFinaltestSplit(FIXTURE_DATASET_ROOT).map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
     expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
       'ho-001',
       'ho-002',
