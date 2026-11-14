@@ -47,6 +47,17 @@ export function approvePromotion(input: {
   if (experiment.finalTest.candidateId !== input.candidateId) {
     throw new Error('final test candidate mismatch')
   }
+  if (experiment.selectedCandidateId !== input.candidateId
+    || experiment.frozenSelection?.candidateId !== input.candidateId) {
+    throw new Error('candidate is not the frozen selection')
+  }
+  // The experiment state sealed at freeze time is the sole source of truth for
+  // the run report. Everything else below is checked against this document.
+  const sealedReport = experiment.frozenRunReceipt
+  if (!sealedReport) {
+    throw new Error('experiment is missing the sealed frozen run receipt')
+  }
+
   const runReport = loadPersistedRunReport(input.home, input.runReport.runId)
   const evaluatorDigest = computeEvaluatorDigest()
   if (evaluatorDigest !== experiment.evaluatorDigest
@@ -56,6 +67,9 @@ export function approvePromotion(input: {
   if (stableJsonDigest(runReport) !== stableJsonDigest(input.runReport)) {
     throw new Error('run report does not match persisted artifact')
   }
+  if (runReport.experimentId !== experiment.experimentId) {
+    throw new Error('run report experiment mismatch')
+  }
   if (runReport.datasetDigest !== experiment.datasetDigest) {
     throw new Error('dataset digest mismatch')
   }
@@ -63,8 +77,18 @@ export function approvePromotion(input: {
   if (!frozenReceipt || frozenReceipt.runId !== runReport.runId) {
     throw new Error('frozen run receipt missing or mismatched')
   }
+  // Bind the on-disk receipt and persisted run report to the experiment-sealed
+  // receipt by content, not merely by runId. A swapped file cannot feed the
+  // admission gates below.
+  const sealedDigest = stableJsonDigest(sealedReport)
+  if (stableJsonDigest(frozenReceipt) !== sealedDigest) {
+    throw new Error('frozen run receipt does not match the experiment-sealed receipt')
+  }
+  if (stableJsonDigest(runReport) !== sealedDigest) {
+    throw new Error('run report does not match the experiment-sealed frozen receipt')
+  }
 
-  const candidate = runReport.candidates.find(item => item.candidateId === input.candidateId)
+  const candidate = sealedReport.candidates.find(item => item.candidateId === input.candidateId)
   if (!candidate) throw new Error(`unknown candidate ${input.candidateId}`)
   if (candidate.status !== 'evaluated') {
     throw new Error(`candidate ${input.candidateId} status=${candidate.status}; cannot promote`)

@@ -3,22 +3,39 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { runEvolution } from '../src/evolution/evolve.ts'
-import { freezeCandidate, loadExperiment } from '../src/evolution/experiment.ts'
+import {
+  freezeCandidate,
+  loadExperiment,
+  loadPersistedRunReport,
+} from '../src/evolution/experiment.ts'
 import { runFinalTestOnce } from '../src/evolution/finalize.ts'
-import { approvePromotion, rollbackPromotion } from '../src/evolution/promotion.ts'
+import {
+  approvePromotion,
+  loadPromotedStrategy,
+  promotedStrategyPath,
+  promotionRecordPath,
+  rollbackPromotion,
+} from '../src/evolution/promotion.ts'
+import { evolutionRunsDir } from '../src/evolution/archive.ts'
 import { parseDeliverGateStrategy } from '../src/evolution/strategy-gate.ts'
 import { compileBoundedPattern, tokensToBoundedPattern } from '../src/evolution/safe-pattern.ts'
 import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
+import { sha256File } from '../src/evolution/digest.ts'
 import { resolveDeliverGate } from '../src/speculate/resolve-gate.ts'
+import type { DeliverGateStrategyV1 } from '../src/evolution/types.ts'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const datasetRoot = path.join(repoRoot, 'test/fixtures/evolution')
 const homes: string[] = []
+const datasets: string[] = []
 
 afterEach(() => {
   for (const home of homes.splice(0)) {
     fs.rmSync(home, { recursive: true, force: true })
+  }
+  for (const dataset of datasets.splice(0)) {
+    fs.rmSync(dataset, { recursive: true, force: true })
   }
 })
 
@@ -40,6 +57,91 @@ async function winningPipeline(home: string) {
   freezeCandidate({ home, candidateId: winner!.candidateId, runId: report.runId, runReport: report })
   await runFinalTestOnce({ home, datasetRoot, candidateId: winner!.candidateId })
   return { report, winner: winner! }
+}
+
+/**
+ * Train is solved by the injected `orbit` strategy, held-out validation keeps a
+ * `glimmer` miss that no candidate token closes, and the finaltest is solved by
+ * the same `orbit` token so only the validation gate is at stake.
+ */
+function writeValidationMissDataset(targetDir: string): void {
+  fs.mkdirSync(targetDir, { recursive: true })
+  const train = {
+    cases: [
+      {
+        id: 'tr-orbit',
+        speculative: true,
+        report: { kind: 'ready', text: 'orbit queue drained.' },
+        expected: 'deliver',
+      },
+      {
+        id: 'tr-keep',
+        speculative: true,
+        report: { kind: 'ready', text: 'cannot ship this change.' },
+        expected: 'discard',
+      },
+    ],
+  }
+  const validation = {
+    cases: [
+      {
+        id: 'va-glimmer',
+        speculative: true,
+        report: { kind: 'ready', text: 'glimmer queue drained.' },
+        expected: 'deliver',
+      },
+      {
+        id: 'va-keep',
+        speculative: true,
+        report: { kind: 'ready', text: 'cannot ship this change.' },
+        expected: 'discard',
+      },
+    ],
+  }
+  const finaltest = {
+    cases: [
+      {
+        id: 'ft-orbit',
+        speculative: true,
+        report: { kind: 'ready', text: 'orbit queue drained.' },
+        expected: 'deliver',
+      },
+      {
+        id: 'ft-keep',
+        speculative: true,
+        report: { kind: 'ready', text: 'cannot ship this change.' },
+        expected: 'discard',
+      },
+    ],
+  }
+  const trainFile = path.join(targetDir, 'train.json')
+  const validationFile = path.join(targetDir, 'validation.json')
+  const finaltestFile = path.join(targetDir, 'finaltest.json')
+  const manifestFile = path.join(targetDir, 'manifest.json')
+  fs.writeFileSync(trainFile, JSON.stringify(train, null, 2))
+  fs.writeFileSync(validationFile, JSON.stringify(validation, null, 2))
+  fs.writeFileSync(finaltestFile, JSON.stringify(finaltest, null, 2))
+  fs.writeFileSync(manifestFile, JSON.stringify({
+    schemaVersion: 2,
+    domain: 'deliver-gate-v1',
+    splits: { train: 'train.json', validation: 'validation.json', finaltest: 'finaltest.json' },
+    splitDigests: {
+      train: sha256File(trainFile),
+      validation: sha256File(validationFile),
+      finaltest: sha256File(finaltestFile),
+    },
+    seed: 20261115,
+  }, null, 2))
+}
+
+function orbitStrategy(): DeliverGateStrategyV1 {
+  return {
+    schemaVersion: 2,
+    domain: 'deliver-gate-v1',
+    positiveTokens: ['orbit'],
+    negativeTokens: ['cannot'],
+    clauseLocalPositive: true,
+  }
 }
 
 describe('evolution security and ABC final test', () => {
@@ -153,5 +255,90 @@ describe('evolution security and ABC final test', () => {
     const baseline = defaultBaselineStrategy()
     expect(r1.candidates.length + r2.candidates.length).toBeGreaterThan(0)
     expect(baseline.positiveTokens?.length).toBeGreaterThan(0)
+  })
+})
+
+describe('promotion binds to the experiment-sealed frozen receipt', () => {
+  it('refuses a swapped run report and receipt that bypass the validation gate', async () => {
+    const dataset = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-evo-bind-ds-'))
+    datasets.push(dataset)
+    writeValidationMissDataset(dataset)
+    const home = tempHome()
+
+    const report = await runEvolution({
+      home,
+      datasetRoot: dataset,
+      injectCandidates: [orbitStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const winner = report.candidates.find(item => item.status === 'evaluated')
+    expect(winner).toBeDefined()
+    expect(winner!.reward).toBe('success')
+    expect(winner!.scores.find(score => score.split === 'validation')?.accuracy).toBeLessThan(1)
+
+    freezeCandidate({ home, candidateId: winner!.candidateId, runId: report.runId, runReport: report })
+    const finalTest = await runFinalTestOnce({
+      home,
+      datasetRoot: dataset,
+      candidateId: winner!.candidateId,
+    })
+    expect(finalTest.scores[0]?.accuracy).toBe(1)
+
+    const artifactPath = path.join(report.archiveDir, winner!.candidateId, 'candidate.json')
+
+    // Honest approval refuses on the validation gate and writes nothing.
+    expect(() => approvePromotion({
+      home,
+      runReport: report,
+      candidateId: winner!.candidateId,
+      artifactPath,
+    })).toThrow(/validation gate/)
+    expect(fs.existsSync(promotedStrategyPath(home))).toBe(false)
+    expect(fs.existsSync(promotionRecordPath(home))).toBe(false)
+
+    // Swap only the replaceable files so validation reads as 1; experiment.json
+    // (and its sealed frozenRunReceipt) stays honest.
+    for (const file of [
+      path.join(evolutionRunsDir(home), `${report.runId}.json`),
+      path.join(home, 'evolution', 'frozen-run-receipt.json'),
+    ]) {
+      const tampered = JSON.parse(fs.readFileSync(file, 'utf8'))
+      const candidate = tampered.candidates.find(
+        (item: { candidateId: string }) => item.candidateId === winner!.candidateId,
+      )
+      const validation = candidate.scores.find(
+        (score: { split: string }) => score.split === 'validation',
+      )
+      validation.correct = validation.total
+      validation.accuracy = 1
+      fs.writeFileSync(file, JSON.stringify(tampered, null, 2))
+    }
+    const sealedValidation = loadExperiment(home)!.frozenRunReceipt!
+      .candidates.find(item => item.candidateId === winner!.candidateId)!
+      .scores.find(score => score.split === 'validation')!
+    expect(sealedValidation.accuracy).toBeLessThan(1)
+
+    expect(() => approvePromotion({
+      home,
+      runReport: loadPersistedRunReport(home, report.runId),
+      candidateId: winner!.candidateId,
+      artifactPath,
+    })).toThrow(/sealed frozen receipt|experiment-sealed/i)
+    expect(fs.existsSync(promotedStrategyPath(home))).toBe(false)
+    expect(fs.existsSync(promotionRecordPath(home))).toBe(false)
+  })
+
+  it('still approves an honest fully qualified candidate', async () => {
+    const home = tempHome()
+    const { report, winner } = await winningPipeline(home)
+    const record = approvePromotion({
+      home,
+      runReport: report,
+      candidateId: winner.candidateId,
+      artifactPath: path.join(report.archiveDir, winner.candidateId, 'candidate.json'),
+    })
+    expect(record.candidateId).toBe(winner.candidateId)
+    expect(record.experimentId).toBe(loadExperiment(home)!.experimentId)
+    expect(loadPromotedStrategy(home)).not.toBeNull()
   })
 })
