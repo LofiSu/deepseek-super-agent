@@ -464,6 +464,126 @@ describe('regression: finaltest digest hex normalization (PR168)', () => {
   })
 })
 
+describe('regression: train and validation are independent search splits (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  function dataset(
+    splits: { train: string; validation: string } = {
+      train: 'train.json',
+      validation: 'validation.json',
+    },
+  ): TempDataset {
+    const temp = makeDataset(splits)
+    cleanups.push(temp.cleanup)
+    return temp
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('rejects validation declared as the same file as train', () => {
+    const { root } = dataset({ train: 'train.json', validation: 'train.json' })
+    // Rejection happens before any split is parsed, so no search cases return.
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+  })
+
+  it('rejects a dot-slash alias between train and validation', () => {
+    const { root } = dataset({ train: 'train.json', validation: './train.json' })
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+  })
+
+  it('rejects validation as a symlink to train', () => {
+    const { root } = dataset()
+    fs.rmSync(path.join(root, 'validation.json'))
+    fs.symlinkSync(path.join(root, 'train.json'), path.join(root, 'validation.json'))
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+  })
+
+  it('rejects validation as a hard link to train', () => {
+    const { root } = dataset()
+    fs.rmSync(path.join(root, 'validation.json'))
+    fs.linkSync(path.join(root, 'train.json'), path.join(root, 'validation.json'))
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /^search splits alias each other: train and validation$/,
+    )
+  })
+
+  it('rejects validation as a byte-identical copy of train with a distinct inode', () => {
+    const { root } = dataset()
+    const train = path.join(root, 'train.json')
+    const validation = path.join(root, 'validation.json')
+    fs.copyFileSync(train, validation)
+    const trainStat = fs.statSync(train)
+    const validationStat = fs.statSync(validation)
+    expect(
+      validationStat.dev === trainStat.dev && validationStat.ino === trainStat.ino,
+    ).toBe(false)
+    expect(fs.readFileSync(validation, 'utf8')).toBe(fs.readFileSync(train, 'utf8'))
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /^search splits alias each other: train and validation \(byte-identical contents\)$/,
+    )
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /^search splits alias each other: train and validation \(byte-identical contents\)$/,
+    )
+  })
+
+  it('still loads honest distinct train and validation at search and finalize', () => {
+    const { root } = dataset()
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads the committed fixture at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train).toHaveLength(7)
+    expect(search.validation).toHaveLength(4)
+    expect(searchText(search)).not.toContain('ho-001')
+
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+  })
+})
+
 describe('regression: declared train/validation digests are verified during search (PR168)', () => {
   const cleanups: Array<() => void> = []
   afterEach(() => {

@@ -213,6 +213,31 @@ function assertSearchSplitsDoNotAliasFinaltest(
   assertSearchSplitsDoNotCopyFinaltestContent(datasetRoot, manifest)
 }
 
+/**
+ * Search-phase isolation: train and validation must be independent splits, so
+ * an identity between them would score the validation gate on train cases.
+ * Reject the same confined file (same path, `./` alias, symlink target, or hard
+ * link) before either split is read, then reject a byte-identical copy that
+ * keeps a distinct path and inode. Hashing is a checksum read, not a parse.
+ */
+function assertSearchSplitsAreIndependent(splits: ConfinedSplits): void {
+  if (
+    splits.train === splits.validation ||
+    isSameExistingFile(splits.train, splits.validation)
+  ) {
+    throw new Error('search splits alias each other: train and validation')
+  }
+  if (
+    isExistingRegularFile(splits.train) &&
+    isExistingRegularFile(splits.validation) &&
+    sha256File(splits.train) === sha256File(splits.validation)
+  ) {
+    throw new Error(
+      'search splits alias each other: train and validation (byte-identical contents)',
+    )
+  }
+}
+
 function datasetDigestFromManifest(
   root: string,
   manifest: EvolutionSplitManifest,
@@ -237,6 +262,7 @@ export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset 
   const manifest = readManifest(root)
   const splits = confineSplits(root, manifest)
   assertSearchSplitsDoNotAliasFinaltest(root, manifest)
+  assertSearchSplitsAreIndependent(splits)
   assertDeclaredSearchSplitDigests(manifest, splits)
   const train = readSplit(splits.train, manifest.splits.train)
   const validation = readSplit(splits.validation, manifest.splits.validation)
