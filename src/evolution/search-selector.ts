@@ -1,5 +1,6 @@
 import type { EvolutionEvalCase, PolicyMemoryCarrier } from './types.ts'
 import { klUcbSelect, type KlUcbArm, stableTieBreak } from './kl-ucb.ts'
+import { isPolicyMemoryTargetId } from './policy-memory.ts'
 
 export type EvolutionSelectorMode = 'kl-ucb' | 'policy-memory' | 'simplified-greedy'
 
@@ -43,9 +44,9 @@ export function selectFailureCasePolicyMemory(input: {
   )
   for (const lesson of input.memory.lessons) {
     if (lesson.status !== 'active' || !lesson.preferredToken) continue
-    const match = ordered.find(f =>
-      lesson.targets.length === 0 || lesson.targets.includes(f.id),
-    )
+    // Empty targets are unbound, not a wildcard: only the lesson's source arm
+    // may claim the preferred token.
+    const match = ordered.find(f => lesson.targets.includes(f.id))
     if (match) return match.id
   }
   return ordered[0]!.id
@@ -140,7 +141,7 @@ export function collectRetiredFailureIds(memory: PolicyMemoryCarrier): Set<strin
   for (const lesson of memory.lessons) {
     if (lesson.status === 'retired' || lesson.failurePattern) {
       for (const target of lesson.targets) {
-        if (/^(tr|va)-/.test(target)) out.add(target)
+        if (isPolicyMemoryTargetId(target)) out.add(target)
       }
     }
   }

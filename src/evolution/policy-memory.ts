@@ -14,6 +14,23 @@ import { readJsonFile } from './io.ts'
 
 export const POLICY_MEMORY_MAX_CHARS = 8192
 
+/**
+ * A memory target is the search case the lesson is bound to. Any case id the
+ * dataset reader accepts is legal, not only the `tr-`/`va-` naming convention:
+ * `none-task`, `glimmer-case`, and `t-unique` are real arm ids and a lesson from
+ * one of them must not become a wildcard. Keep rejecting the things the reader
+ * rejects or reserves: exact `'none'` (the no-target sentinel), blank ids, and
+ * final-test prefixes. Compare exactly — no trimming or case-folding — so
+ * `' none'` stays a distinct legal target.
+ */
+export function isPolicyMemoryTargetId(id: string): boolean {
+  if (typeof id !== 'string') return false
+  if (id === 'none') return false
+  if (id.length === 0 || /^\s*$/.test(id)) return false
+  if (/^(ho|ft)-/i.test(id)) return false
+  return true
+}
+
 export function policyMemoryPath(home: string): string {
   return path.join(resolveTrustedEvolutionRoot(home), 'policy-memory.json')
 }
@@ -28,8 +45,8 @@ export function validatePolicyMemoryCarrier(carrier: PolicyMemoryCarrier): void 
   }
   for (const lesson of carrier.lessons) {
     for (const target of lesson.targets) {
-      if (!/^(tr|va)-/.test(target)) {
-        throw new Error('memory target must be train/validation id only')
+      if (!isPolicyMemoryTargetId(target)) {
+        throw new Error('memory target must be a search case id')
       }
     }
     for (const source of lesson.sources) {
@@ -98,7 +115,10 @@ export function applyMemoryLessons(
 ): { token: string; side: 'positive' | 'negative' } | null {
   for (const lesson of memory.lessons) {
     if (lesson.status !== 'active') continue
-    if (lesson.targets.length > 0 && !lesson.targets.includes(failureId)) continue
+    // Targets bind a lesson to the arm it was learned from. An empty target list
+    // means "unbound", not "every arm": treating it as a wildcard leaks the
+    // source arm's token onto unrelated failures.
+    if (!lesson.targets.includes(failureId)) continue
     if (lesson.preferredToken) {
       if (lesson.recommendedChange.includes('negative') || lesson.failurePattern) {
         if (!negativeTokens.includes(lesson.preferredToken)) {
@@ -150,11 +170,10 @@ export function updatePolicyMemoryFromRound(input: {
       }
     }
 
-    const targets = failureId && /^(tr|va)-/.test(failureId)
+    // Bind to the actual search case id, not the `tr-`/`va-` prefix convention.
+    const targets = failureId && isPolicyMemoryTargetId(failureId)
       ? [failureId]
-      : record.reward === 'failure' && record.failureCaseId && /^(tr|va)-/.test(record.failureCaseId)
-        ? [record.failureCaseId]
-        : []
+      : []
 
     const lesson: PolicyLesson = {
       id: existingIdx >= 0 ? lessons[existingIdx]!.id : `lesson_${record.candidateId}`,
