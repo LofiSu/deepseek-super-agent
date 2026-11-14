@@ -78,6 +78,16 @@ describe('ds-agent prompt', () => {
     expect(result.stdout).toMatch(/soul\s+\d+ chars\s+env:DS_AGENT_SOUL/)
   })
 
+  it('separates the longest section ids from their length', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'INSTRUCTIONS.md'), 'Reply in Chinese.\n')
+    fs.writeFileSync(path.join(home, 'PROACTIVE_PREFERENCES.md'), 'Failed deploys.\n')
+    const result = runCli(home, ['prompt', '--layers'])
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toMatch(/standing-instructions\s+\d+ chars\s+/)
+    expect(result.stdout).toMatch(/proactive-preferences\s+\d+ chars\s+/)
+  })
+
   it('redacts a secret from a prompt file', () => {
     const home = tempHome()
     fs.writeFileSync(path.join(home, 'USER.md'), 'api key: supersecret123\n')

@@ -910,8 +910,9 @@ async function main(): Promise<void> {
       return
     }
     if (process.argv.includes('--layers')) {
+      const width = Math.max(20, ...sections.map(section => section.id.length + 2))
       for (const section of sections) {
-        console.log(`${section.id.padEnd(20)}${section.text.length} chars  ${section.source}`)
+        console.log(`${section.id.padEnd(width)}${section.text.length} chars  ${section.source}`)
       }
       return
     }

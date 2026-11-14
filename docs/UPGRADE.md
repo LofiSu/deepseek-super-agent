@@ -133,7 +133,7 @@ After upgrading:
   `AGENTS.md` still load, but their roles changed.
 - `DS_AGENT_PERSONA` still seeds the soul; prefer `DS_AGENT_SOUL`.
   `DS_AGENT_INSTRUCTIONS` now seeds `INSTRUCTIONS.md`.
-- Optional files (`MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`,
+- Optional files (`IDENTITY.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`,
   `PROACTIVE_PREFERENCES.md`) are new and can stay absent.
 - Prompt files are read once at startup. Restart the agent after editing them.
   `ds-agent prompt --layers` shows which file supplied each section.

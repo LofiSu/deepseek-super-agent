@@ -18,10 +18,10 @@ not the text.
 
 | | Muse | Instinct / Open Instinct | Grok Bot |
 |---|---|---|---|
-| Unit | One long system prompt + injected workspace files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`, `INSTRUCTIONS.md`) | A prompt rebuilt every run from about nine layers | Persistent Bot instructions, plus skills, routines, integrations, and memory |
+| Unit | One long system prompt + injected workspace files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, `PROACTIVE_PREFERENCES.md`) | A prompt rebuilt every run from about nine layers | Persistent Bot instructions, plus skills, routines, integrations, and memory |
 | Order | Identity and values → owner → work style → personalization and memory → context → writing style → environment and tools → subagents → scheduling → proactivity → security and safety | identity → instructions → owner → principal → channel → reach → setup → rules → memory → skills → approvals → long tasks → now | role → scope → decision rules → output format → safety boundaries |
 | Owner voice | `SOUL.md` and `IDENTITY.md` | `PERSONA.md`, about thirty lines, owned by the owner | Bot instructions |
-| Standing rules | `INSTRUCTIONS.md` | `AGENTS.md` (house rules, every conversation) | Persistent instructions |
+| Standing rules | `AGENTS.md` (operating lessons) | `AGENTS.md` (house rules, every conversation) | Persistent instructions |
 | Memory | `MEMORY.md` injected; memory tools search and explain; strict rules on what is stored | `MEMORY.md` + daily journal; a bounded digest is injected every turn | Bot memory |
 | Who is talking | The owner is the only principal; other people are not | A `principal` layer with tiers (owner, staff, partner, family, friend, contact, stranger) | The bot's owner |
 | Channel | Surface-specific guidance (WhatsApp, app, etc.) | A `channel` layer with texting, email, A2A, chat, scheduled etiquette | Routine-specific |
@@ -68,8 +68,8 @@ so the prefix is byte-identical across turns and across calls.
 | 15 | `proactive-preferences` | `PROACTIVE_PREFERENCES.md` | What the owner wants surfaced, and how. |
 | 16 | `personalization` | built-in | Adapting to the owner's habits without losing judgment. |
 | 17 | `memory` | `MEMORY.md` | Curated durable facts. Recall entries still carry provenance. |
-| 18 | `contextual-awareness` | built-in | Time, place, and continuity. |
-| 19 | `conversation-context` | built-in | Reading the thread rather than the last message alone. |
+| 18 | `contextual-awareness` | built-in | No clock is supplied; do not assert the time or a weekday. |
+| 19 | `conversation-context` | built-in | Bounded journal replay; older turns stay on disk. |
 | 20 | `writing-style` | built-in | Answer first, plain prose, match the owner's language, no em dashes. |
 | 21 | `environment` | built-in | The install, `DS_AGENT_HOME`, and where work happens. |
 | 22 | `tools` | built-in | How to choose and trust tools. |
@@ -86,7 +86,9 @@ so the prefix is byte-identical across turns and across calls.
 | 33 | `role` | built-in | The Router, Worker, or Watchdog contract. Last because it must win. |
 
 Sections are joined with blank lines. A section is included whole or omitted
-whole; no section is truncated.
+Built-in sections are included whole. An owner file body is capped at 4,000
+characters; an optional owner section that does not fit the budget is omitted
+whole, never truncated.
 
 The `team` section names configured specialists by id and description only. The
 specialist's command, argv, environment, and limits never enter the prompt;
@@ -114,9 +116,11 @@ Nine owner-editable files live in the agent home. They are read once at
 | `HEARTBEAT.md` | `heartbeat` | A recurring checklist to keep in view | Owner |
 | `PROACTIVE_PREFERENCES.md` | `proactive-preferences` | What to surface, what never, and how | Owner |
 
-The agent has no write path to these files. Router has no write tool, and
-Worker `write_file`/`bash` are confined to its workspace by `LocalEnv`. An edit
-is a deliberate human act, not a side effect of a turn.
+Neither the Router nor the Worker prompt gives the model a write path to these
+files: the Router has no write tool, and Worker `write_file`/`bash` are confined
+to its workspace by `LocalEnv`. A configured local specialist is a separate
+process under its own policy. An edit to a runtime file is a human act, not a
+side effect of a turn.
 
 `SOUL.md` always produces a `soul` section: when the file and seed are absent,
 the built-in default voice is used. The other eight sections exist only when
@@ -158,11 +162,12 @@ Programmatic callers may still pass `persona` and `owner` keys to
 - One file is capped at 4,000 characters after CRLF normalization, NUL
   stripping, and trimming.
 - Core file sections (`soul`, `identity`, `user`, `standing-instructions`)
-  always render.
+  always render, even when they alone exceed the 20,000-character budget.
 - Optional file sections are considered in priority order: `memory`,
   `agents-manual`, `tools-notes`, `heartbeat`, `proactive-preferences`. Each is
   included only if the rendered file total stays within 20,000 characters;
-  otherwise it is omitted whole.
+  otherwise it is omitted whole. The budget trims optional sections; it never
+  drops a core section or the role contract.
 - Headings inside an owner file are demoted one level so they do not look like
   prompt sections. Lines inside fenced code keep their text.
 - Every `<file ...>` / `</file>` wrapper tag is stripped from a file body, not
@@ -188,18 +193,22 @@ The first 32 sections are shared. The `role` section changes:
 This mirrors the subagent prompt modes in OpenClaw/Open Instinct: a subagent
 gets the shared frame and its role, not the whole personality.
 
-## Turn layers
+## Per-turn context
 
-Stable sections are the system message. The following are turn data and arrive
-in the user/task message, so they never disturb the cacheable prefix:
+Stable sections are the system message. The runtime adds the following turn
+data to the user/task message so it never disturbs the cacheable prefix:
 
-| Layer | Source | Why it is not in the system prompt |
+| Data | Source | Notes |
 |---|---|---|
-| `principal` | trigger source and trust | Who is speaking, and whether they have authority |
-| `channel` | thread key | Texting, chat, email, GitHub, or A2A etiquette |
-| `memory recall` | long-term memory | The actual `memory=` lines, spill ids, and refs |
-| `now` | runtime clock | Current time and timezone; the prefix stays byte-stable |
-| `task` | Engine/Harness | `TASK`, `FOLLOWUP`, `REPORT`, `RESUME`, or `WATCHDOG`, with ids and the brief |
+| Ticket context | Engine/Harness | `TICKET_CREATED` or `SPECULATIVE`, ticket id, trigger id, title, mode, and the direct-chat flag |
+| Task kind | Engine/Harness | `TASK`, `FOLLOWUP`, `REPORT`, `RESUME`, or `WATCHDOG`, with ids and the brief |
+| Memory recall | long-term memory | `memory=` lines, spill ids, and refs on Worker tasks |
+| Journal replay | session journal | The last 200 entries; older turns stay on disk but are not replayed |
+
+No clock or calendar is injected, and there is no date tool, so the prompt
+tells the model to say it does not know rather than invent a time. A
+`principal` layer is not wired yet: ingress trust decides who may open work,
+and the prompt treats everyone but the owner as a non-principal.
 
 ## Inspecting the prompt
 
@@ -234,7 +243,8 @@ parsing one large string. `describePromptLayers` remains as a deprecated alias.
   runtime file.
 - **Bounded owner input.** Each file is capped, optional sections are omitted
   under pressure, and the core sections always fit.
-- **No agent write path.** The agent cannot edit its own runtime files.
+- **No prompt-side write path.** The Router and Worker cannot edit the runtime
+  files; a configured specialist is a separate process under its own policy.
 - **One owner.** ds-agent currently has a single owner. Group participants and
   other actors are not principals yet; when a `principal` layer is wired into
   the turn, it must follow the same tier discipline as Instinct rather than
@@ -250,4 +260,5 @@ parsing one large string. `describePromptLayers` remains as a deprecated alias.
   Engine enforces it.
 - Per-user tiers. The owner/group distinction currently lives in ingress trust,
   not in the prompt. The turn `principal` layer is the place to add it.
-- A clock in the system prompt. `now` is turn data.
+- A clock in the prompt. The runtime injects neither a clock nor a date tool,
+  so the model is told to say it does not know rather than assert a time.

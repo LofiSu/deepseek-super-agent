@@ -13,6 +13,7 @@ import {
   loadPrompts,
   systemPrompt,
 } from '../src/harness/prompts.ts'
+import { loadPrompts as loadPromptsFromIndex } from '../src/harness/index.ts'
 
 const homes: string[] = []
 
@@ -309,5 +310,34 @@ describe('programmatic compatibility', () => {
 
   it('keeps the describePromptLayers alias', () => {
     expect(describePromptLayers({ role: 'router' })).toEqual(describePromptSections({ role: 'router' }))
+  })
+})
+
+describe('prompt honesty', () => {
+  it('does not claim a clock, a time tag, or a date tool', () => {
+    const prompt = buildSystemPrompt({ role: 'router' })
+    expect(prompt).toContain('No clock')
+    expect(prompt).not.toMatch(/time tag/i)
+    expect(prompt).not.toMatch(/date tool/i)
+  })
+
+  it('describes a bounded journal replay without claiming compaction', () => {
+    const prompt = buildSystemPrompt({ role: 'router' })
+    expect(prompt).toContain('journal')
+    expect(prompt).not.toMatch(/compaction|summariz/i)
+  })
+
+  it('states subordination in every file-backed section', () => {
+    const sections = describePromptSections({ role: 'router', ...ALL_FILES })
+    for (const id of FILE_SECTION_IDS) {
+      const text = sections.find(section => section.id === id)?.text ?? ''
+      expect(text, id).toMatch(/role contract/i)
+      expect(text, id).toMatch(/security/i)
+      expect(text, id).toMatch(/safety/i)
+    }
+  })
+
+  it('exports loadPrompts from the harness barrel', () => {
+    expect(loadPromptsFromIndex(tempHome())).toHaveProperty('files')
   })
 })
