@@ -1,11 +1,28 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   DEFAULT_PERSONA,
   MAX_PROMPT_FILE_CHARS,
   MAX_PROMPT_TOTAL_CHARS,
   buildSystemPrompt,
   describePromptSections,
+  loadPromptFiles,
+  loadPrompts,
 } from '../src/harness/prompts.ts'
+
+const homes: string[] = []
+
+function tempHome(): string {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-prompts-'))
+  homes.push(home)
+  return home
+}
+
+afterEach(() => {
+  for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true })
+})
 
 const ALL_FILES = {
   soul: 'Dry wit. Short sentences.',
@@ -175,5 +192,96 @@ describe('runtime file sections', () => {
       .filter(section => FILE_SECTION_IDS.has(section.id))
       .reduce((total, section) => total + section.text.length, 0)
     expect(fileChars).toBeLessThanOrEqual(MAX_PROMPT_TOTAL_CHARS)
+  })
+})
+
+describe('prompt file loading', () => {
+  it('reads all nine files and returns canonical keys', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'SOUL.md'), 'Warm and blunt.\n')
+    fs.writeFileSync(path.join(home, 'IDENTITY.md'), 'Name: Ada.\n')
+    fs.writeFileSync(path.join(home, 'USER.md'), 'Name: Lin.\n')
+    fs.writeFileSync(path.join(home, 'INSTRUCTIONS.md'), 'Reply in Chinese.\n')
+    fs.writeFileSync(path.join(home, 'AGENTS.md'), 'Exports live in workspace/exports.\n')
+    fs.writeFileSync(path.join(home, 'MEMORY.md'), 'Prefers metric units.\n')
+    fs.writeFileSync(path.join(home, 'TOOLS.md'), 'Stage host is stage-1.\n')
+    fs.writeFileSync(path.join(home, 'HEARTBEAT.md'), 'Check the deploy.\n')
+    fs.writeFileSync(path.join(home, 'PROACTIVE_PREFERENCES.md'), 'Failed deploys.\n')
+
+    const files = loadPromptFiles(home)
+    expect(files.soul).toBe('Warm and blunt.')
+    expect(files.identity).toBe('Name: Ada.')
+    expect(files.user).toBe('Name: Lin.')
+    expect(files.instructions).toBe('Reply in Chinese.')
+    expect(files.agents).toBe('Exports live in workspace/exports.')
+    expect(files.memory).toBe('Prefers metric units.')
+    expect(files.tools).toBe('Stage host is stage-1.')
+    expect(files.heartbeat).toBe('Check the deploy.')
+    expect(files.proactivePreferences).toBe('Failed deploys.')
+    expect(Object.keys(files).sort()).toEqual([
+      'agents', 'heartbeat', 'identity', 'instructions', 'memory',
+      'proactivePreferences', 'soul', 'tools', 'user',
+    ])
+  })
+
+  it('reports a file source or an env seed source', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'SOUL.md'), 'From the file.\n')
+    const loaded = loadPrompts(home, { DS_AGENT_IDENTITY: 'From the seed.' })
+    expect(loaded.sources.soul).toBe('<home>/SOUL.md')
+    expect(loaded.sources.identity).toBe('env:DS_AGENT_IDENTITY')
+  })
+
+  it('falls back from PERSONA.md and warns', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'PERSONA.md'), 'Legacy voice.\n')
+    const warnings: string[] = []
+    const loaded = loadPrompts(home, {}, line => warnings.push(line))
+    expect(loaded.files.soul).toBe('Legacy voice.')
+    expect(loaded.sources.soul).toBe('<home>/PERSONA.md (deprecated fallback)')
+    expect(warnings.join('\n')).toContain('PERSONA.md is deprecated')
+  })
+
+  it('prefers SOUL.md over PERSONA.md', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'SOUL.md'), 'New voice.\n')
+    fs.writeFileSync(path.join(home, 'PERSONA.md'), 'Legacy voice.\n')
+    const warnings: string[] = []
+    expect(loadPrompts(home, {}, line => warnings.push(line)).files.soul).toBe('New voice.')
+    expect(warnings).toEqual([])
+  })
+
+  it('falls back from DS_AGENT_PERSONA and warns', () => {
+    const warnings: string[] = []
+    const loaded = loadPrompts(tempHome(), { DS_AGENT_PERSONA: 'Legacy seed.' }, line => warnings.push(line))
+    expect(loaded.files.soul).toBe('Legacy seed.')
+    expect(loaded.sources.soul).toBe('env:DS_AGENT_PERSONA (deprecated fallback)')
+    expect(warnings.join('\n')).toContain('DS_AGENT_PERSONA is deprecated')
+  })
+
+  it('lets a file win over an environment seed', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'SOUL.md'), 'From the file.\n')
+    expect(loadPromptFiles(home, { DS_AGENT_SOUL: 'From the seed.' }).soul).toBe('From the file.')
+  })
+
+  it('ignores blank files and seeds', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'SOUL.md'), '   \n')
+    const files = loadPromptFiles(home, { DS_AGENT_INSTRUCTIONS: '  ' })
+    expect(files.soul).toBeUndefined()
+    expect(files.instructions).toBeUndefined()
+  })
+
+  it('ignores a directory named SOUL.md', () => {
+    const home = tempHome()
+    fs.mkdirSync(path.join(home, 'SOUL.md'))
+    expect(loadPromptFiles(home).soul).toBeUndefined()
+  })
+
+  it('caps a long file instead of growing the prompt without bound', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'SOUL.md'), 'x'.repeat(MAX_PROMPT_FILE_CHARS + 500))
+    expect(loadPromptFiles(home).soul).toHaveLength(MAX_PROMPT_FILE_CHARS)
   })
 })

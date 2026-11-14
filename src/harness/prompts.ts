@@ -386,41 +386,127 @@ function promptText(value: string | undefined): string | undefined {
   return text.slice(0, MAX_PROMPT_FILE_CHARS)
 }
 
+/** Owner-editable runtime file for each section. */
+export const PROMPT_FILES: Record<PromptFileKey, string> = {
+  soul: 'SOUL.md',
+  identity: 'IDENTITY.md',
+  user: 'USER.md',
+  instructions: 'INSTRUCTIONS.md',
+  agents: 'AGENTS.md',
+  memory: 'MEMORY.md',
+  tools: 'TOOLS.md',
+  heartbeat: 'HEARTBEAT.md',
+  proactivePreferences: 'PROACTIVE_PREFERENCES.md',
+}
+
+/**
+ * Deployer seeds for a fresh home. Most runtime files are owner-only; these
+ * four have a useful default that a container can set without a writable home.
+ */
+export const PROMPT_ENV: Partial<Record<PromptFileKey, string>> = {
+  soul: 'DS_AGENT_SOUL',
+  identity: 'DS_AGENT_IDENTITY',
+  user: 'DS_AGENT_OWNER',
+  instructions: 'DS_AGENT_INSTRUCTIONS',
+}
+
+/** @deprecated old name for the soul file. */
+export const LEGACY_PROMPT_FILE = { soul: 'PERSONA.md' } as const
+/** @deprecated old seed for the soul file. */
+export const LEGACY_PROMPT_ENV = { soul: 'DS_AGENT_PERSONA' } as const
+
+const CANONICAL_KEYS: readonly PromptFileKey[] = [
+  'soul',
+  'identity',
+  'user',
+  'instructions',
+  'agents',
+  'memory',
+  'tools',
+  'heartbeat',
+  'proactivePreferences',
+]
+
+export interface LoadedPrompts {
+  files: PromptFiles
+  /** Where each present value came from, for `prompt --layers`. */
+  sources: Partial<Record<PromptFileKey, string>>
+}
+
+/**
+ * Only a regular file counts. A directory, device, or symlink named like a
+ * prompt file is absent: the runtime must not follow a link out of home.
+ */
 function readPromptFile(home: string, name: string): string | undefined {
   try {
-    return promptText(fs.readFileSync(path.join(home, name), 'utf8'))
+    const full = path.join(home, name)
+    if (!fs.lstatSync(full).isFile()) return undefined
+    return promptText(fs.readFileSync(full, 'utf8'))
   } catch {
     return undefined
   }
 }
 
-// Task 3 replaces this three-file loader with the nine-file loader. It is kept
-// here temporarily so the file compiles between tasks.
-export const PROMPT_FILES = {
-  persona: 'PERSONA.md',
-  instructions: 'AGENTS.md',
-  owner: 'USER.md',
-} as const
-
-export const PROMPT_ENV = {
-  persona: 'DS_AGENT_PERSONA',
-  instructions: 'DS_AGENT_INSTRUCTIONS',
-  owner: 'DS_AGENT_OWNER',
-} as const
-
 /**
- * Read the owner-editable prompt files, falling back to deployer seeds in the
- * environment. A file always wins over the matching seed. Missing, blank, or
- * unreadable files are ignored rather than failing the runtime.
+ * Read the owner-editable files, falling back to deployer seeds in the
+ * environment. A file always wins over the matching seed. Missing, blank,
+ * unreadable, or non-regular files are ignored rather than failing the runtime.
+ * `PERSONA.md` and `DS_AGENT_PERSONA` still supply the soul, with a warning.
  */
+export function loadPrompts(
+  home: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  warn: (line: string) => void = () => {},
+): LoadedPrompts {
+  const files: Record<PromptFileKey, string | undefined> = {
+    soul: undefined,
+    identity: undefined,
+    user: undefined,
+    instructions: undefined,
+    agents: undefined,
+    memory: undefined,
+    tools: undefined,
+    heartbeat: undefined,
+    proactivePreferences: undefined,
+  }
+  const sources: Partial<Record<PromptFileKey, string>> = {}
+  for (const key of CANONICAL_KEYS) {
+    const file = readPromptFile(home, PROMPT_FILES[key])
+    if (file !== undefined) {
+      files[key] = file
+      sources[key] = `<home>/${PROMPT_FILES[key]}`
+      continue
+    }
+    const envName = PROMPT_ENV[key]
+    if (!envName) continue
+    const seed = promptText(env[envName])
+    if (seed !== undefined) {
+      files[key] = seed
+      sources[key] = `env:${envName}`
+    }
+  }
+  if (files.soul === undefined) {
+    const legacyFile = readPromptFile(home, LEGACY_PROMPT_FILE.soul)
+    if (legacyFile !== undefined) {
+      files.soul = legacyFile
+      sources.soul = `<home>/${LEGACY_PROMPT_FILE.soul} (deprecated fallback)`
+      warn(`[prompt] ${LEGACY_PROMPT_FILE.soul} is deprecated; rename it to ${PROMPT_FILES.soul}`)
+    } else {
+      const legacySeed = promptText(env[LEGACY_PROMPT_ENV.soul])
+      if (legacySeed !== undefined) {
+        files.soul = legacySeed
+        sources.soul = `env:${LEGACY_PROMPT_ENV.soul} (deprecated fallback)`
+        warn(`[prompt] ${LEGACY_PROMPT_ENV.soul} is deprecated; use ${PROMPT_ENV.soul}`)
+      }
+    }
+  }
+  return { files, sources }
+}
+
 export function loadPromptFiles(
   home: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
+  warn: (line: string) => void = () => {},
 ): PromptFiles {
-  return {
-    persona: readPromptFile(home, PROMPT_FILES.persona) ?? promptText(env[PROMPT_ENV.persona]),
-    instructions:
-      readPromptFile(home, PROMPT_FILES.instructions) ?? promptText(env[PROMPT_ENV.instructions]),
-    owner: readPromptFile(home, PROMPT_FILES.owner) ?? promptText(env[PROMPT_ENV.owner]),
-  }
+  return loadPrompts(home, env, warn).files
 }
