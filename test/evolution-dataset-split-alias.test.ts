@@ -1076,6 +1076,123 @@ describe('regression: a split cannot repeat a case id (PR168)', () => {
   })
 })
 
+describe('regression: a split cannot use the reserved case id "none" (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  const INVALID_ID = /^split has invalid case id: /
+
+  function dataset(
+    train: WrittenCase[],
+    validation: WrittenCase[],
+    finaltest?: WrittenCase[],
+  ): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    writeSplitCases(path.join(temp.root, 'train.json'), train)
+    writeSplitCases(path.join(temp.root, 'validation.json'), validation)
+    if (finaltest) writeSplitCases(path.join(temp.root, 'finaltest.json'), finaltest)
+    return temp
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('rejects a train row whose id is exactly "none" at search and dataset load', () => {
+    const { root } = dataset(
+      [
+        { id: 'none', text: 'widget relay stabilized after deploy.' },
+        { id: 't-unique', text: 'honest unique train row' },
+      ],
+      [{ id: 'v1', text: 'validation one' }],
+    )
+    // A real row would otherwise be mistaken for the exhausted-selection sentinel.
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(INVALID_ID)
+    }
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(INVALID_ID)
+  })
+
+  it('rejects a validation row whose id is exactly "none" at search and dataset load', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one' }],
+      [{ id: 'none', text: 'validation row named none' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(INVALID_ID)
+    expect(() => loadEvolutionDataset(root)).toThrow(INVALID_ID)
+  })
+
+  it('loads search but rejects a finaltest row whose id is exactly "none" at finalize', () => {
+    const { root } = dataset(
+      [{ id: 't1', text: 'train one' }],
+      [{ id: 'v1', text: 'validation one' }],
+      [{ id: 'none', text: 'holdout row named none' }],
+    )
+    // Honest commitment so finalize reaches the split instead of a digest error.
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    // Search does not parse finaltest, so the reserved holdout id is not seen yet.
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain('holdout row named none')
+
+    expect(() => loadFinaltestSplit(root)).toThrow(INVALID_ID)
+    expect(() => loadEvolutionDataset(root)).toThrow(INVALID_ID)
+  })
+
+  it('still loads near-miss ids at search and finalize', () => {
+    // Exact comparison only: no trimming, case-folding, or prefix matching.
+    const { root } = dataset(
+      [
+        { id: 'none-task', text: 'train near miss' },
+        { id: 't-unique', text: 'honest unique train row' },
+      ],
+      [
+        { id: 'None', text: 'validation capitalized near miss' },
+        { id: 'v-unique', text: 'honest unique validation row' },
+      ],
+    )
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['none-task', 't-unique'])
+    expect(search.validation.map(c => c.id)).toEqual(['None', 'v-unique'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads the committed fixture with unique non-reserved ids', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train).toHaveLength(7)
+    expect(search.validation).toHaveLength(4)
+    expect([...search.train, ...search.validation].some(c => c.id === 'none')).toBe(false)
+
+    expect(loadFinaltestSplit(FIXTURE_DATASET_ROOT).map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+  })
+})
+
 describe('regression: a split must carry a valid expected label (PR168)', () => {
   const cleanups: Array<() => void> = []
   afterEach(() => {

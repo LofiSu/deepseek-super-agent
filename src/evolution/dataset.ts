@@ -59,6 +59,24 @@ function assertUniqueCaseIds(cases: EvolutionEvalCase[], rel: string): void {
 }
 
 /**
+ * `'none'` is the no-target sentinel: `selectArmId` returns
+ * `{ armId: 'fail_none', failureCaseId: 'none' }` when policy-memory has no
+ * viable failure arm, and `TrainFailureProposer` treats `failureCaseId: 'none'`
+ * as "no candidate" by exact id lookup. A row literally named `'none'` would
+ * therefore be mistaken for an exhausted selection and silently spend search
+ * budget on it. Reject the id when the split is read. Compare exactly: near-miss
+ * ids such as `'None'`, `' none'`, or `'none-task'` remain valid (no trimming or
+ * case-folding).
+ */
+function assertNoReservedCaseIds(cases: EvolutionEvalCase[], rel: string): void {
+  for (const testCase of cases) {
+    if (testCase.id === 'none') {
+      throw new Error(`split has invalid case id: ${rel}`)
+    }
+  }
+}
+
+/**
  * `expected` is the scored label, and every strategy prediction is exactly
  * `'deliver'` or `'discard'`. A typo, wrong case, missing, empty, or non-string
  * label still produces a row that scores as incorrect and cannot be repaired by
@@ -126,6 +144,7 @@ function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
   assertUniqueCaseIds(parsed.cases, rel)
+  assertNoReservedCaseIds(parsed.cases, rel)
   assertValidExpectedLabels(parsed.cases, rel)
   assertValidSpeculativeFlags(parsed.cases, rel)
   assertValidReports(parsed.cases, rel)
