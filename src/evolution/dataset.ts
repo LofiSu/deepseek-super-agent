@@ -166,6 +166,29 @@ function assertSearchSplitsDoNotCopyFinaltestContent(
 }
 
 /**
+ * Search-phase isolation: a declared train/validation SHA-256 is a commitment
+ * for the search split actually read. Only a 64-hex value is a commitment;
+ * dummy/empty values keep the pre-existing behavior and are not compared here.
+ * A declared 64-hex digest makes the corresponding split mandatory, so a
+ * missing file cannot silently skip the check and load unverified bytes.
+ */
+function assertDeclaredSearchSplitDigests(
+  manifest: EvolutionSplitManifest,
+  splits: ConfinedSplits,
+): void {
+  for (const split of ['train', 'validation'] as const) {
+    const declaredHex = declaredSha256Hex(manifest.splitDigests[split] ?? '')
+    if (declaredHex === null) continue
+    if (!isExistingRegularFile(splits[split])) {
+      throw new Error(`${split} file missing during search`)
+    }
+    if (sha256File(splits[split]) !== declaredHex) {
+      throw new Error(`${split} file digest mismatch vs manifest`)
+    }
+  }
+}
+
+/**
  * Search-phase isolation: train and validation must not identify the same file
  * as finaltest (same name, `./` alias, symlink target, or hard link). Runs
  * before any search split is read so an aliased finaltest is never opened
@@ -214,6 +237,7 @@ export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset 
   const manifest = readManifest(root)
   const splits = confineSplits(root, manifest)
   assertSearchSplitsDoNotAliasFinaltest(root, manifest)
+  assertDeclaredSearchSplitDigests(manifest, splits)
   const train = readSplit(splits.train, manifest.splits.train)
   const validation = readSplit(splits.validation, manifest.splits.validation)
   const datasetDigest = datasetDigestFromManifest(root, manifest, splits)

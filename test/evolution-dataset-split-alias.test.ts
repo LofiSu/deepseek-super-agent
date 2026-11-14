@@ -64,6 +64,32 @@ function setDeclaredFinaltestDigest(root: string, digest: string): void {
   fs.writeFileSync(manifestPath, JSON.stringify(manifest))
 }
 
+/** Rewrite only the declared train or validation digest, simulating a lying manifest. */
+function setDeclaredSearchDigest(
+  root: string,
+  split: 'train' | 'validation',
+  digest: string,
+): void {
+  const manifestPath = path.join(root, 'manifest.json')
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+    splitDigests: { train?: string; validation?: string }
+  }
+  manifest.splitDigests[split] = digest
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest))
+}
+
+function setDeclaredSearchDigests(root: string, train: string, validation: string): void {
+  setDeclaredSearchDigest(root, 'train', train)
+  setDeclaredSearchDigest(root, 'validation', validation)
+}
+
+function toMixedCase(hex: string): string {
+  return hex
+    .split('')
+    .map((ch, index) => (index % 2 === 0 ? ch.toUpperCase() : ch))
+    .join('')
+}
+
 /**
  * A valid-looking SHA-256 that belongs to a different file of the same dataset,
  * while `finaltest.json` still holds the real canary holdout.
@@ -435,5 +461,157 @@ describe('regression: finaltest digest hex normalization (PR168)', () => {
     setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'validation.json').toUpperCase())
     expect(() => loadSearchDatasetOnly(root)).toThrow(/finaltest file digest mismatch/)
     expect(() => loadEvolutionDataset(root)).toThrow(/finaltest file digest mismatch/)
+  })
+})
+
+describe('regression: declared train/validation digests are verified during search (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  function dataset(): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    return temp
+  }
+
+  /** Honest finaltest commitment so finalize paths stay realistic. */
+  function setHonestFinaltestDigest(root: string): void {
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+  }
+
+  function searchText(data: { train: Array<{ report: { text: string } }>; validation: Array<{ report: { text: string } }> }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('loads honest lowercase train and validation digests at search and finalize', () => {
+    const { root } = dataset()
+    setDeclaredSearchDigests(
+      root,
+      digestOfSiblingFile(root, 'train.json'),
+      digestOfSiblingFile(root, 'validation.json'),
+    )
+    setHonestFinaltestDigest(root)
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('loads uppercase honest train and validation digests at search and finalize', () => {
+    const { root } = dataset()
+    setDeclaredSearchDigests(
+      root,
+      digestOfSiblingFile(root, 'train.json').toUpperCase(),
+      digestOfSiblingFile(root, 'validation.json').toUpperCase(),
+    )
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json').toUpperCase())
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('loads mixed-case honest train and validation digests', () => {
+    const { root } = dataset()
+    const trainMixed = toMixedCase(digestOfSiblingFile(root, 'train.json'))
+    const validationMixed = toMixedCase(digestOfSiblingFile(root, 'validation.json'))
+    expect(trainMixed).not.toBe(trainMixed.toLowerCase())
+    setDeclaredSearchDigests(root, trainMixed, validationMixed)
+    setHonestFinaltestDigest(root)
+
+    expect(loadSearchDatasetOnly(root).train.map(c => c.id)).toEqual(['t1'])
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('rejects a lying valid 64-hex train digest at search and dataset load', () => {
+    const { root } = dataset()
+    // Valid SHA-256, but of a sibling file: the manifest lies about train.
+    setDeclaredSearchDigests(
+      root,
+      digestOfSiblingFile(root, 'validation.json'),
+      digestOfSiblingFile(root, 'validation.json'),
+    )
+    setHonestFinaltestDigest(root)
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toMatch(/train file digest mismatch vs manifest/)
+    }
+    // The finaltest holdout is never returned as search cases.
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(/train file digest mismatch vs manifest/)
+  })
+
+  it('rejects a lying valid 64-hex validation digest at search and dataset load', () => {
+    const { root } = dataset()
+    setDeclaredSearchDigests(
+      root,
+      digestOfSiblingFile(root, 'train.json'),
+      digestOfSiblingFile(root, 'train.json'),
+    )
+    setHonestFinaltestDigest(root)
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(
+      /validation file digest mismatch vs manifest/,
+    )
+    expect(() => loadEvolutionDataset(root)).toThrow(
+      /validation file digest mismatch vs manifest/,
+    )
+  })
+
+  it('rejects a declared 64-hex train digest when the train file is missing', () => {
+    const { root } = dataset()
+    setDeclaredSearchDigests(root, digestOfSiblingFile(root, 'train.json'), '')
+    setHonestFinaltestDigest(root)
+    fs.rmSync(path.join(root, 'train.json'))
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(/train file missing during search/)
+  })
+
+  it('still loads empty-string train and validation declarations', () => {
+    const { root } = dataset()
+    setHonestFinaltestDigest(root)
+    const search = loadSearchDatasetOnly(root)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads non-hex dummy train and validation declarations', () => {
+    const { root } = dataset()
+    setDeclaredSearchDigests(root, 'dummy-train', 'dummy-validation')
+    setHonestFinaltestDigest(root)
+
+    const search = loadSearchDatasetOnly(root)
+    expect(search.train.map(c => c.id)).toEqual(['t1'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1'])
+  })
+
+  it('still loads the committed fixture with empty train/validation digests', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.length).toBeGreaterThan(0)
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
   })
 })
