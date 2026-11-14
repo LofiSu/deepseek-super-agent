@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { SkillRegistry, loadSkills, MAX_SKILL_BODY_CHARS } from '../src/env/skills.ts'
+import { SkillRegistry, loadSkills, MAX_SKILL_BODY_CHARS, MAX_SKILL_INDEX_CHARS } from '../src/env/skills.ts'
 import { buildSystemPrompt, describePromptLayers } from '../src/harness/prompts.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import { Runtime } from '../src/runtime.ts'
@@ -129,14 +129,14 @@ describe('skill reading', () => {
 })
 
 describe('skill prompt layer', () => {
-  it('lists skill ids and descriptions after the team and before reach', () => {
+  it('lists skill ids and descriptions after the team and before scheduled work', () => {
     const layers = describePromptLayers({
       role: 'worker',
       skills: [{ id: 'deploy', description: 'Check the deploy.' }],
     })
     const ids = layers.map(layer => layer.id)
     expect(ids.indexOf('skills')).toBeGreaterThan(ids.indexOf('team'))
-    expect(ids.indexOf('skills')).toBeLessThan(ids.indexOf('reach'))
+    expect(ids.indexOf('skills')).toBeLessThan(ids.indexOf('scheduled-work'))
     const text = layers.find(layer => layer.id === 'skills')?.text ?? ''
     expect(text).toContain('deploy')
     expect(text).toContain('Check the deploy.')
@@ -154,7 +154,9 @@ describe('skill prompt layer', () => {
       description: 'd'.repeat(200),
     }))
     const prompt = buildSystemPrompt({ role: 'worker', skills })
-    expect(prompt.length).toBeLessThan(10_000)
+    const skillsText = describePromptLayers({ role: 'worker', skills })
+      .find(layer => layer.id === 'skills')?.text ?? ''
+    expect(skillsText.length).toBeLessThan(MAX_SKILL_INDEX_CHARS + 500)
     expect(prompt).toContain('skill-0')
   })
 })
