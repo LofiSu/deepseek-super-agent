@@ -15,13 +15,27 @@ const FIXTURE_DATASET_ROOT = path.join(
 const CANARY = 'SECRET_HOLDOUT_TOKEN'
 const OUTSIDE_CANARY = 'SECRET_OUTSIDE_TOKEN'
 
-function writeSplit(file: string, id: string, text: string): void {
+interface WrittenCase {
+  id: string
+  text: string
+}
+
+function writeSplitCases(file: string, cases: WrittenCase[]): void {
   fs.writeFileSync(
     file,
     JSON.stringify({
-      cases: [{ id, speculative: true, report: { kind: 'ready', text }, expected: 'deliver' }],
+      cases: cases.map(({ id, text }) => ({
+        id,
+        speculative: true,
+        report: { kind: 'ready', text },
+        expected: 'deliver',
+      })),
     }),
   )
+}
+
+function writeSplit(file: string, id: string, text: string): void {
+  writeSplitCases(file, [{ id, text }])
 }
 
 interface TempDataset {
@@ -727,6 +741,128 @@ describe('regression: declared train/validation digests are verified during sear
     const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
     expect('finaltest' in search).toBe(false)
     expect(search.train.length).toBeGreaterThan(0)
+    expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
+      'ho-001',
+      'ho-002',
+      'ho-003',
+      'ho-004',
+    ])
+  })
+})
+
+describe('regression: train and validation case ids are disjoint during search (PR168)', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+
+  const OVERLAP_ERROR = /^search splits share case ids: train and validation$/
+
+  /**
+   * Dataset whose train/validation files are distinct with different bytes but
+   * caller-chosen cases, so shared ids can be exercised independently of the
+   * file-identity and byte-identity checks.
+   */
+  function casesDataset(
+    train: WrittenCase[],
+    validation: WrittenCase[],
+  ): TempDataset {
+    const temp = makeDataset({ train: 'train.json', validation: 'validation.json' })
+    cleanups.push(temp.cleanup)
+    writeSplitCases(path.join(temp.root, 'train.json'), train)
+    writeSplitCases(path.join(temp.root, 'validation.json'), validation)
+    return temp
+  }
+
+  function searchText(data: {
+    train: Array<{ report: { text: string } }>
+    validation: Array<{ report: { text: string } }>
+  }): string {
+    return [...data.train, ...data.validation].map(c => c.report.text).join('\n')
+  }
+
+  it('rejects train and validation with the same single id and different bytes', () => {
+    const { root } = casesDataset(
+      [{ id: 'shared', text: 'train copy of the shared case' }],
+      [{ id: 'shared', text: 'validation copy with different bytes' }],
+    )
+    // Distinct files, distinct bytes: only the case-id check can catch this.
+    expect(fs.readFileSync(path.join(root, 'train.json'), 'utf8')).not.toBe(
+      fs.readFileSync(path.join(root, 'validation.json'), 'utf8'),
+    )
+
+    let searchResult: unknown = null
+    try {
+      searchResult = loadSearchDatasetOnly(root)
+    } catch (error) {
+      expect((error as Error).message).toMatch(OVERLAP_ERROR)
+    }
+    // No train, validation, or finaltest cases were returned at search.
+    expect(searchResult).toBeNull()
+    expect(() => loadEvolutionDataset(root)).toThrow(OVERLAP_ERROR)
+  })
+
+  it('rejects a partial case-id overlap where each split also has a unique id', () => {
+    const { root } = casesDataset(
+      [
+        { id: 't1', text: 'train unique' },
+        { id: 'overlap', text: 'shared case in train' },
+      ],
+      [
+        { id: 'overlap', text: 'shared case in validation' },
+        { id: 'v1', text: 'validation unique' },
+      ],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(OVERLAP_ERROR)
+    expect(() => loadEvolutionDataset(root)).toThrow(OVERLAP_ERROR)
+  })
+
+  it('rejects validation ids that are a subset of train ids', () => {
+    const { root } = casesDataset(
+      [
+        { id: 'a', text: 'train a' },
+        { id: 'b', text: 'train b' },
+      ],
+      [{ id: 'b', text: 'validation is a one-case subset of the train ids' }],
+    )
+
+    expect(() => loadSearchDatasetOnly(root)).toThrow(OVERLAP_ERROR)
+    expect(() => loadEvolutionDataset(root)).toThrow(OVERLAP_ERROR)
+  })
+
+  it('still loads honest distinct case ids at search and finalize', () => {
+    const { root } = casesDataset(
+      [
+        { id: 't1', text: 'train one' },
+        { id: 't2', text: 'train two' },
+      ],
+      [
+        { id: 'v1', text: 'validation one' },
+        { id: 'v2', text: 'validation two' },
+      ],
+    )
+    setDeclaredFinaltestDigest(root, digestOfSiblingFile(root, 'finaltest.json'))
+
+    const search = loadSearchDatasetOnly(root)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train.map(c => c.id)).toEqual(['t1', 't2'])
+    expect(search.validation.map(c => c.id)).toEqual(['v1', 'v2'])
+    expect(searchText(search)).not.toContain(CANARY)
+
+    expect(loadFinaltestSplit(root).map(c => c.id)).toEqual(['f1'])
+    expect(loadEvolutionDataset(root).finaltest.map(c => c.id)).toEqual(['f1'])
+  })
+
+  it('still loads the committed fixture with disjoint ids at search and finalize', () => {
+    const search = loadSearchDatasetOnly(FIXTURE_DATASET_ROOT)
+    expect('finaltest' in search).toBe(false)
+    expect(search.train).toHaveLength(7)
+    expect(search.validation).toHaveLength(4)
+    const trainIds = new Set(search.train.map(c => c.id))
+    expect(search.validation.some(c => trainIds.has(c.id))).toBe(false)
+    expect(searchText(search)).not.toContain('ho-001')
+
     expect(loadEvolutionDataset(FIXTURE_DATASET_ROOT).finaltest.map(c => c.id)).toEqual([
       'ho-001',
       'ho-002',

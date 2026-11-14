@@ -238,6 +238,22 @@ function assertSearchSplitsAreIndependent(splits: ConfinedSplits): void {
   }
 }
 
+/**
+ * Search-phase isolation: train and validation must be independent at the case
+ * level too. Distinct files holding different bytes can still share case ids,
+ * and a shared id is scored on both the train objective and the validation
+ * gate, so the gate would not be an independent split for those cases.
+ */
+function assertSearchSplitsHaveDisjointCaseIds(
+  train: EvolutionEvalCase[],
+  validation: EvolutionEvalCase[],
+): void {
+  const trainIds = new Set(train.map(testCase => testCase.id))
+  if (validation.some(testCase => trainIds.has(testCase.id))) {
+    throw new Error('search splits share case ids: train and validation')
+  }
+}
+
 function datasetDigestFromManifest(
   root: string,
   manifest: EvolutionSplitManifest,
@@ -266,6 +282,7 @@ export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset 
   assertDeclaredSearchSplitDigests(manifest, splits)
   const train = readSplit(splits.train, manifest.splits.train)
   const validation = readSplit(splits.validation, manifest.splits.validation)
+  assertSearchSplitsHaveDisjointCaseIds(train, validation)
   const datasetDigest = datasetDigestFromManifest(root, manifest, splits)
   return {
     root,
