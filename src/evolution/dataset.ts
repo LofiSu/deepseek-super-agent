@@ -59,6 +59,23 @@ function assertUniqueCaseIds(cases: EvolutionEvalCase[], rel: string): void {
 }
 
 /**
+ * `selectFailureCasePolicyMemory` picks a failure by id and `selectArmId` uses a
+ * falsy id to mean "no viable failure arm", rewriting it to the `'none'`
+ * sentinel. An empty or whitespace-only id is therefore indistinguishable from
+ * exhaustion: the row's own tokens are never proposed and the search loop spends
+ * its budget on the sentinel. Reject the id when the split is read. Do not trim
+ * or case-fold: near-miss ids such as `' none'`, `'None'`, or `'none-task'` stay
+ * valid.
+ */
+function assertNonBlankCaseIds(cases: EvolutionEvalCase[], rel: string): void {
+  for (const testCase of cases) {
+    if (testCase.id.length === 0 || /^\s*$/.test(testCase.id)) {
+      throw new Error(`split has invalid case id: ${rel}`)
+    }
+  }
+}
+
+/**
  * `'none'` is the no-target sentinel: `selectArmId` returns
  * `{ armId: 'fail_none', failureCaseId: 'none' }` when policy-memory has no
  * viable failure arm, and `TrainFailureProposer` treats `failureCaseId: 'none'`
@@ -144,6 +161,7 @@ function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
   assertUniqueCaseIds(parsed.cases, rel)
+  assertNonBlankCaseIds(parsed.cases, rel)
   assertNoReservedCaseIds(parsed.cases, rel)
   assertValidExpectedLabels(parsed.cases, rel)
   assertValidSpeculativeFlags(parsed.cases, rel)

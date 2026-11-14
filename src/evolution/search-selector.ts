@@ -83,7 +83,10 @@ export function selectArmId(input: {
       opportunity: input.totalOpportunities,
       seed: input.seed,
     })
-    if (!fid) {
+    // Nullish, not falsy: an empty-string id is a real (if invalid) case id and
+    // must not be rewritten to the exhausted sentinel. Read-time validation
+    // rejects such ids; this keeps the in-memory path from masking them.
+    if (fid === null) {
       return {
         armId: 'fail_none',
         failureCaseId: 'none',
