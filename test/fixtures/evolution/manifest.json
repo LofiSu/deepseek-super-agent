@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "domain": "deliver-gate-v1",
+  "splits": {
+    "train": "train.json",
+    "validation": "validation.json",
+    "finaltest": "finaltest.json"
+  },
+  "splitDigests": {
+    "train": "",
+    "validation": "",
+    "finaltest": "2e814671d4f963fbcc635965f7416b1395d1c9b93878032df018367da3e9b114"
+  },
+  "seed": 20260308
+}

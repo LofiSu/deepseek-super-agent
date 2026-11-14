@@ -1,0 +1,6 @@
+export { runEvolution } from './evolve.ts'
+export { loadEvolutionDataset, defaultBaselineStrategy } from './dataset.ts'
+export { evaluateDeliverGateStrategy, parseDeliverGateStrategy } from './strategy-gate.ts'
+export { approvePromotion, rollbackPromotion, loadPromotedStrategy, PROMOTED_STRATEGY_FILE } from './promotion.ts'
+export { computeEvaluatorDigestForExport } from './evolve.ts'
+export type { EvolutionRunReport, DeliverGateStrategyV1, EvolutionCandidateRecord } from './types.ts'

@@ -1,4 +1,6 @@
-import { HeuristicDeliverGate, type DeliverGate } from '../speculate/gate.ts'
+import path from 'node:path'
+import type { DeliverGate } from '../speculate/gate.ts'
+import { resolveDeliverGate } from '../speculate/resolve-gate.ts'
 import type { SurfaceVerdict } from '../speculate/silent.ts'
 import { UserError } from '../shared/errors.ts'
 import type { WorkerReport } from '../shared/ports.ts'
@@ -37,7 +39,8 @@ export class Assignments {
   private readonly gate: DeliverGate
 
   constructor(private readonly host: Host, gate?: DeliverGate) {
-    this.gate = gate ?? new HeuristicDeliverGate()
+    const stateHome = path.dirname(this.host.repo.path)
+    this.gate = gate ?? resolveDeliverGate(stateHome)
   }
 
   start(ticketId: string, assignmentId: string, sessionId: string): void {

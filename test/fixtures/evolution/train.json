@@ -1,0 +1,46 @@
+{
+  "cases": [
+    {
+      "id": "tr-001",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Fixed the login timeout; patch passes CI." },
+      "expected": "deliver"
+    },
+    {
+      "id": "tr-002",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Could not reproduce on main." },
+      "expected": "discard"
+    },
+    {
+      "id": "tr-003",
+      "speculative": true,
+      "report": { "kind": "failed", "text": "worker crashed" },
+      "expected": "discard"
+    },
+    {
+      "id": "tr-004",
+      "speculative": false,
+      "report": { "kind": "ready", "text": "nothing found worth changing" },
+      "expected": "deliver"
+    },
+    {
+      "id": "tr-005",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Reproduced the flake and resolved with a bounded retry." },
+      "expected": "deliver"
+    },
+    {
+      "id": "tr-006",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Unable to find a valuable change." },
+      "expected": "discard"
+    },
+    {
+      "id": "tr-007",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "checkout session restored after deploy." },
+      "expected": "deliver"
+    }
+  ]
+}
