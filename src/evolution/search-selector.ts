@@ -88,7 +88,13 @@ export function selectArmId(input: {
   }
 
   if (input.mode === 'simplified-greedy') {
-    const armId = input.arms[input.totalOpportunities % Math.max(1, input.arms.length)]?.id
+    // runEvolution pre-increments totalOpportunities, so the first call sees 1.
+    // Map 1 to the first arm (0-based), and guard non-positive counters so they
+    // cannot index arms[-1].
+    const index = input.totalOpportunities >= 1 && input.arms.length > 0
+      ? (input.totalOpportunities - 1) % input.arms.length
+      : null
+    const armId = (index === null ? undefined : input.arms[index]?.id)
       ?? `fail_${input.trainFailures[0]?.id ?? 'none'}`
     const failureCaseId = armId.replace(/^fail_/, '')
     return { armId, failureCaseId, selectionReason: 'greedy:round_robin' }

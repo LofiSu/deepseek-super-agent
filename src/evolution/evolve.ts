@@ -245,7 +245,10 @@ async function runEvolutionLocked(
   const maxTrialsThisRun = budget.maxCandidatesThisRun ?? budget.maxCandidates
 
   let arms: KlUcbArm[] = deserializeArms(experiment.klArms)
-  if (selectorUsesKlUcb(selector)) {
+  // KL-UCB records observations against these arms. Simplified-greedy only needs
+  // the id list so it can round-robin across the current train failures; it must
+  // not accrue KL observations.
+  if (selectorUsesKlUcb(selector) || selector === 'simplified-greedy') {
     for (const failure of trainFailures) {
       const id = `fail_${failure.id}`
       if (!arms.find(arm => arm.id === id)) arms.push({ id, observations: [] })
