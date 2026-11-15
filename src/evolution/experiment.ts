@@ -20,6 +20,7 @@ import {
   releaseFinalTestClaimLock,
 } from './final-test-claim-lock.ts'
 import { acquireSearchRunLock, releaseSearchRunLock } from './search-run-lock.ts'
+import { assertValidEvolutionBudget } from './budget-validate.ts'
 
 export const BASELINE_PARENT_ID = 'baseline_immutable'
 
@@ -99,6 +100,9 @@ export function createExperiment(input: {
   seed: number
   budget?: Partial<BudgetLedger>
 }): ExperimentState {
+  // Never persist a budget search/freeze could accept but the final test could
+  // not fund: that state would burn the one-shot holdout without opening it.
+  assertValidEvolutionBudget(input.budget ?? {})
   const state: ExperimentState = {
     experimentId: randomUUID(),
     phase: 'search',
