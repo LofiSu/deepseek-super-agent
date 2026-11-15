@@ -3,6 +3,11 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { Engine } from '../src/core/engine.ts'
+import {
+  EXTERNAL_OP_KIND,
+  finalizeUncertainExternalEffects,
+  type ExternalOperationRecord,
+} from '../src/core/external-effects.ts'
 import type { Host } from '../src/core/host.ts'
 import { ticketStage } from '../src/core/stage.ts'
 import { bindRolePorts } from '../src/core/role-ports.ts'
@@ -78,6 +83,40 @@ afterEach(async () => {
 })
 
 describe('approval domain', () => {
+  it('releases only the recovery effect ids captured before owner approval', () => {
+    const { engine, store } = openEngine()
+    const now = '2026-01-01T00:00:00.000Z'
+    store.putDoc('ticket', 'ticket_1', fabricate())
+    store.putDoc(EXTERNAL_OP_KIND, 'extop_before', {
+      schemaVersion: 1,
+      id: 'extop_before',
+      kind: 'delegate_agent',
+      ticketId: 'ticket_1',
+      idempotencyKey: 'before',
+      phase: 'started',
+      startedAt: now,
+      updatedAt: now,
+    } satisfies ExternalOperationRecord)
+    finalizeUncertainExternalEffects(store, now)
+    store.putDoc(EXTERNAL_OP_KIND, 'extop_after', {
+      schemaVersion: 1,
+      id: 'extop_after',
+      kind: 'delegate_agent',
+      ticketId: 'ticket_1',
+      idempotencyKey: 'after',
+      phase: 'unknown_outcome',
+      startedAt: now,
+      updatedAt: now,
+    } satisfies ExternalOperationRecord)
+
+    const approval = store.getDoc<Ticket>('ticket', 'ticket_1')!.collab!.approvals![0]!
+    expect(approval.recovery?.effectIds).toEqual(['extop_before'])
+    engine.decideApproval('ticket_1', approval.id, 'approved')
+
+    expect(store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_before')?.phase).toBe('operator_released')
+    expect(store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_after')?.phase).toBe('unknown_outcome')
+  })
+
   it('records a pending approval without pausing the ticket', () => {
     const { engine, store } = openEngine()
     store.putDoc('ticket', 'ticket_1', fabricate())

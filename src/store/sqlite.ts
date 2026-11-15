@@ -272,6 +272,30 @@ export class Store {
     return Number(result.changes ?? 0)
   }
 
+  /** Release only the named uncertain rows after an effect-scoped decision. */
+  requeueUnknownOutcomeOutboxIds(ticketId: string, ids: readonly string[]): number {
+    if (ids.length === 0) return 0
+    const placeholders = ids.map(() => '?').join(', ')
+    const result = this.db.prepare(
+      `UPDATE outbox
+       SET status = 'pending', next_attempt_at = NULL
+       WHERE status = 'unknown_outcome' AND ticket_id = ? AND id IN (${placeholders})`,
+    ).run(ticketId, ...ids)
+    return Number(result.changes ?? 0)
+  }
+
+  /** Record an operator's decision that an uncertain delivery already happened. */
+  acknowledgeUnknownOutcomeOutboxIds(ticketId: string, ids: readonly string[]): number {
+    if (ids.length === 0) return 0
+    const placeholders = ids.map(() => '?').join(', ')
+    const result = this.db.prepare(
+      `UPDATE outbox
+       SET status = 'failed', error = 'operator acknowledged unknown outcome', next_attempt_at = NULL
+       WHERE status = 'unknown_outcome' AND ticket_id = ? AND id IN (${placeholders})`,
+    ).run(ticketId, ...ids)
+    return Number(result.changes ?? 0)
+  }
+
   /**
    * @deprecated Uncertain sends use `unknown_outcome`; operator must approve before requeue.
    */

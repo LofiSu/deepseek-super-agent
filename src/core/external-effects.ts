@@ -15,6 +15,7 @@ export type ExternalOperationPhase =
   | 'failed'
   | 'unknown_outcome'
   | 'operator_released'
+  | 'operator_acknowledged'
 
 /** Persisted delegation / outbound lifecycle for crash-boundary honesty. */
 export interface ExternalOperationRecord {
@@ -48,8 +49,7 @@ export function activeAssignmentId(ticket: Ticket): string | undefined {
 }
 
 function unknownApprovalForTicket(approvals: readonly ApprovalRequest[] | undefined): ApprovalRequest | undefined {
-  return approvals?.find(item =>
-    item.status === 'pending' && item.action.startsWith(UNKNOWN_OUTCOME_PREFIX))
+  return approvals?.find(isUnknownOutcomeApproval)
 }
 
 /** True when restart recovery must not auto-replay uncertain external effects. */
@@ -180,14 +180,15 @@ function queueUnknownOutcomeApproval(store: Store, ticketId: string, now: string
   if (!ticket || ticket.ended) return false
   const collab = ensureCollaboration(ticket)
   if (unknownApprovalForTicket(collab.approvals)) return false
-  const effects = describeUnknownEffects(ticketId, store)
-  if (!effects) return false
+  const effectIds = unknownEffectIds(ticketId, store)
+  if (effectIds.length === 0) return false
   const approval: ApprovalRequest = {
     id: store.nextId('appr'),
     at: now,
-    action: `${UNKNOWN_OUTCOME_PREFIX} ${effects}`,
+    action: `${UNKNOWN_OUTCOME_PREFIX} ${describeUnknownEffects(ticketId, store)}`,
     reason: 'Process stopped before an external effect finished; approve only after verifying remote state.',
     requestedBy: 'recovery',
+    recovery: { source: 'crash-boundary', effectIds },
     status: 'pending',
   }
   collab.approvals!.push(approval)
@@ -217,17 +218,68 @@ function describeUnknownEffects(ticketId: string, store: Store): string | undefi
 }
 
 /** Owner approved continuation: release rows for idempotent retry / recovery. */
-export function releaseUnknownOutcomeEffects(store: Store, ticketId: string, now: string): number {
+export type UnknownOutcomeResolution = 'retry' | 'acknowledge'
+
+/**
+ * Resolve exact effect ids selected by a recovery approval or an operator.
+ * This is intentionally usable for an ended Ticket, where a normal approval
+ * cannot be decided because no Worker may resume.
+ */
+export function resolveUnknownOutcomeEffects(
+  store: Store,
+  ticketId: string,
+  effectIds: readonly string[],
+  resolution: UnknownOutcomeResolution,
+  now: string,
+): number {
+  const selected = [...new Set(effectIds)]
+  if (selected.length !== effectIds.length || selected.length === 0) return 0
+  const available = new Set(unknownEffectIds(ticketId, store))
+  if (selected.some(id => !available.has(id))) return 0
   let released = 0
   for (const op of store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)) {
-    if (op.ticketId !== ticketId || op.phase !== 'unknown_outcome') continue
-    putExternalOp(store, { ...op, phase: 'operator_released', updatedAt: now })
+    if (op.ticketId !== ticketId || op.phase !== 'unknown_outcome' || !selected.includes(op.id)) continue
+    putExternalOp(store, {
+      ...op,
+      phase: resolution === 'retry' ? 'operator_released' : 'operator_acknowledged',
+      updatedAt: now,
+    })
     released += 1
   }
-  released += store.requeueUnknownOutcomeOutbox(ticketId)
+  const outboxIds = selected
+    .filter(id => id.startsWith('outbox_'))
+    .map(id => id.slice('outbox_'.length))
+  released += resolution === 'retry'
+    ? store.requeueUnknownOutcomeOutboxIds(ticketId, outboxIds)
+    : store.acknowledgeUnknownOutcomeOutboxIds(ticketId, outboxIds)
   return released
 }
 
+/** Owner approved the exact recovery approval effect set for idempotent retry. */
+export function releaseUnknownOutcomeEffects(
+  store: Store,
+  ticketId: string,
+  effectIds: readonly string[],
+  now: string,
+): number {
+  return resolveUnknownOutcomeEffects(store, ticketId, effectIds, 'retry', now)
+}
+
+export function unknownEffectIds(ticketId: string, store: Store): string[] {
+  const ids = new Set(
+    store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)
+      .filter(op => op.ticketId === ticketId && op.phase === 'unknown_outcome')
+      .map(op => op.id),
+  )
+  for (const row of store.listOutbox('unknown_outcome')) {
+    if (row.ticketId === ticketId) ids.add(`outbox_${row.id}`)
+  }
+  return [...ids].sort()
+}
+
 export function isUnknownOutcomeApproval(approval: ApprovalRequest): boolean {
-  return approval.action.startsWith(UNKNOWN_OUTCOME_PREFIX)
+  return approval.status === 'pending'
+    && approval.requestedBy === 'recovery'
+    && approval.recovery?.source === 'crash-boundary'
+    && approval.recovery.effectIds.length > 0
 }

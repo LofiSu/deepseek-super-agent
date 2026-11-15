@@ -166,10 +166,12 @@ export class Engine {
     return this.host.repo.atomic(() => {
       const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
       const pending = ticket?.collab?.approvals?.find(item => item.id === approvalId)
-      const wasUnknown = pending ? isUnknownOutcomeApproval(pending) : false
+      const recoveryEffectIds = pending && isUnknownOutcomeApproval(pending)
+        ? pending.recovery!.effectIds
+        : undefined
       const outcome = this.collaborations.decideApproval(ticketId, approvalId, decision, input)
-      if (wasUnknown && decision === 'approved') {
-        const released = releaseUnknownOutcomeEffects(this.host.repo, ticketId, this.host.now())
+      if (recoveryEffectIds && decision === 'approved') {
+        const released = releaseUnknownOutcomeEffects(this.host.repo, ticketId, recoveryEffectIds, this.host.now())
         this.host.log(`[recovery] unknown-outcome released ticketId=${ticketId} count=${released}`)
       }
       return outcome

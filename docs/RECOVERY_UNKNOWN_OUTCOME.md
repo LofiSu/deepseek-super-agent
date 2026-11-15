@@ -11,15 +11,17 @@ Exactly-once side effects to local specialists (`delegate_agent`) or remote chan
 ## On `Runtime.start()`
 
 1. `finalizeUncertainExternalEffects` marks every `started` op and every `sending` outbox row as uncertain.
-2. Affected tickets receive a pending approval whose action begins with `UNKNOWN-OUTCOME:`.
+2. Live affected tickets receive a pending approval with `requestedBy: recovery` and immutable `recovery.source: crash-boundary` plus the exact persisted effect IDs. `UNKNOWN-OUTCOME:` remains display text only.
 3. ADR-004 ticket recovery (`RECOVERED` prompt + replacement assignment) is **skipped** while that approval is pending.
 
 ## Operator recovery (no credentials)
 
 1. Inspect SQLite under `DS_AGENT_HOME`: ticket `collab.approvals`, `external_op` docs, outbox `unknown_outcome` rows.
 2. Verify remote/local state out of band (Feishu message, specialist workspace, etc.).
-3. Approve the `UNKNOWN-OUTCOME` request only if safe to retry; approval runs `releaseUnknownOutcomeEffects`, which moves eligible outbox rows back to `pending` and ops to `operator_released` for an **explicit** operator-approved retry — not a silent duplicate on restart.
+3. Approve the recovery request only if safe to retry. It releases only the effect IDs embedded in that approval, moving eligible outbox rows back to `pending` and ops to `operator_released` for an **explicit** operator-approved retry.
 4. Deny if the effect already happened or must not repeat; then resume or close the ticket manually.
+
+Ended tickets have no resumable approval. An operator uses `resolveUnknownOutcomeEffects(store, ticketId, effectIds, 'retry' | 'acknowledge', now)` from the recovery boundary: `retry` requeues only named outbox rows, while `acknowledge` marks them terminal and records `operator_acknowledged` on their external-operation records.
 
 ## Boundaries
 
