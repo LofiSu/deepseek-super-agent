@@ -161,6 +161,59 @@ describe('Feishu message mapping', () => {
     )).toMatchObject({ action: 'drop', layer: 'fast', reason: 'group-not-allowlisted' })
   })
 
+  it('maps p2p direct mode without address.group and addressed=direct', () => {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const trigger = feishuTriggerFromMessage(message({
+        body: { content: JSON.stringify({ text: '你好' }) },
+      }), config)
+      expect(trigger.addressed).toBe('direct')
+      expect(trigger.channel?.address?.group).toBeUndefined()
+      expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({ action: 'pass' })
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
+  })
+
+  it('honors DS_AGENT_FEISHU_P2P_DIRECT for short p2p utterances through filterTrigger', () => {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    const utterances = ['你现在可以改了', '在干嘛怎么回我那么慢'] as const
+    try {
+      for (const text of utterances) {
+        const trigger = feishuTriggerFromMessage(message({
+          body: { content: JSON.stringify({ text }) },
+        }), config)
+        expect(trigger.addressed).toBeUndefined()
+        expect(trigger.channel?.address?.group).toBe('oc_chat')
+        expect(filterTrigger(trigger, ruleSemantic))
+          .toMatchObject({ action: 'drop', layer: 'fast', reason: 'noise' })
+      }
+
+      process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+      for (const text of utterances) {
+        const trigger = feishuTriggerFromMessage(message({
+          body: { content: JSON.stringify({ text }) },
+        }), config)
+        expect(trigger.addressed).toBe('direct')
+        expect(trigger.channel?.address?.group).toBeUndefined()
+        expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({ action: 'pass' })
+      }
+
+      process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+      const mentioned = feishuTriggerFromMessage(message({
+        body: { content: JSON.stringify({ text: '@ds-agent 你现在可以改了' }) },
+        mentions: [{ id: { open_id: 'ou_bot' }, name: 'ds-agent' }],
+      }), config)
+      expect(mentioned.addressed).toBe('mention')
+      expect(mentioned.channel?.address?.group).toBeUndefined()
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
+  })
+
   it('treats an app sender as non-human and detects bot mention ids', () => {
     const trigger = feishuTriggerFromMessage(message({
       sender: { id: 'ou_bot', sender_type: 'app' },

@@ -264,7 +264,10 @@ function mentionsBot(message: FeishuMessage, config?: FeishuConfig): boolean {
 export function feishuTriggerFromMessage(message: FeishuMessage, config?: FeishuConfig): Trigger {
   const text = flattenFeishuMessage(message)
   const thread = feishuThread(message.chat_id, message.thread_id)
-  const addressed = mentionsBot(message, config) ? 'mention' as const : undefined
+  // Local ops flag for a verified p2p bind: treat as direct chat like CLI/iMessage 1:1.
+  // Keeps group allowlist usable when unset; when set, serve should rely on actor allowlist + single chat poll.
+  const p2pDirect = process.env.DS_AGENT_FEISHU_P2P_DIRECT?.trim() === '1'
+  const addressed = mentionsBot(message, config) ? 'mention' as const : (p2pDirect ? 'direct' as const : undefined)
   const senderType = message.sender?.sender_type
   return {
     id: `feishu_${message.message_id}`,
@@ -282,7 +285,8 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
         provider: 'feishu',
         chat_id: message.chat_id,
         // Group admission reads only `address.group`; a Feishu chat is the group.
-        group: message.chat_id,
+        // For verified p2p direct mode, omit group so short chatter is not noise-dropped.
+        ...(p2pDirect ? {} : { group: message.chat_id }),
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
       },
