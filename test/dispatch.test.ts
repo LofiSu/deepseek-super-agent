@@ -1,0 +1,467 @@
+import { execSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
+import type { GithubComment, GithubIssue } from '../src/channels/github-source.ts'
+import {
+  admitDispatchComment,
+  admitDispatchIssueBody,
+  parseDispatchCommand,
+  stripNonCommandRegions,
+} from '../src/dispatch/admission.ts'
+import {
+  loadDispatchOwnerConfigSync,
+  MIN_POLL_INTERVAL_MS,
+  UNOWNED_PUBLIC_HANDLE,
+} from '../src/dispatch/config.ts'
+import { processGithubPoll } from '../src/dispatch/github-poll.ts'
+import { createJobRunner, IMPLEMENTER_NOT_CONFIGURED } from '../src/dispatch/job-runner.ts'
+import { drainDispatchQueue } from '../src/dispatch/queue.ts'
+import { classifyGapRisk, ingestGap, runRsiSchedulerTick, RSI_RESEARCH_CACHE_KIND } from '../src/dispatch/rsi.ts'
+import {
+  recoverInterruptedJobs,
+  seedDispatchCursorNow,
+  wasCommentHandled,
+  type DispatchJobDoc,
+} from '../src/dispatch/store.ts'
+import { trustedFetch } from '../src/dispatch/trusted-fetch.ts'
+import { formatDispatchStatus, runDispatchCancel } from '../src/dispatch/cli.ts'
+import { verifyGithubWebhookSignature256 } from '../src/dispatch/webhook-verify.ts'
+import { FeaturePrPublisher } from '../src/env/git-publish.ts'
+import { parseRepo } from '../src/channels/github-source.ts'
+import { Store } from '../src/store/sqlite.ts'
+import { tempHome } from './fixtures.ts'
+
+const REPO = 'LofiSu/deepseek-super-agent'
+
+function issue(n: number, extra: Partial<GithubIssue> = {}): GithubIssue & { pull_request?: unknown } {
+  return {
+    id: 9000 + n,
+    number: n,
+    title: 'bug',
+    body: 'details',
+    created_at: '2026-11-20T12:00:00Z',
+    html_url: `https://github.com/${REPO}/issues/${n}`,
+    user: { login: 'LofiSu', type: 'User' },
+    ...extra,
+  }
+}
+
+function comment(
+  id: number,
+  body: string,
+  login = 'LofiSu',
+  created = '2026-11-20T12:01:00Z',
+): GithubComment {
+  return {
+    id,
+    body,
+    created_at: created,
+    user: { login, type: login.endsWith('[bot]') ? 'Bot' : 'User' },
+  }
+}
+
+function dispatchConfig(home: string, extra: Record<string, unknown> = {}): void {
+  fs.writeFileSync(path.join(home, 'github-dispatch.json'), JSON.stringify({
+    github: { enabled: true, repo: REPO, authorizedActors: ['LofiSu'] },
+    rsi: { enabled: true, intervalMs: 0 },
+    ...extra,
+  }))
+}
+
+describe('dispatch admission', () => {
+  it('accepts /ds-agent fix from LofiSu on a normal issue', () => {
+    const r = admitDispatchComment({
+      configuredRepo: REPO,
+      authorizedActors: ['LofiSu'],
+      repoFullFromPayload: REPO,
+      issue: issue(1),
+      comment: comment(101, '/ds-agent fix'),
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.command).toBe('fix')
+  })
+
+  it('accepts @LofiSu fix when mentionHandles configured', () => {
+    const r = admitDispatchComment({
+      configuredRepo: REPO,
+      authorizedActors: ['LofiSu'],
+      mentionHandles: ['LofiSu'],
+      repoFullFromPayload: REPO,
+      issue: issue(1),
+      comment: comment(102, '@LofiSu fix'),
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.command).toBe('fix')
+    expect(parseDispatchCommand('@LofiSu /ds-agent status', ['LofiSu'])).toBe('status')
+    expect(parseDispatchCommand('@ds-agent fix', ['LofiSu'])).toBeUndefined()
+    expect(parseDispatchCommand('@ds-agent fix')).toBeUndefined()
+  })
+
+  it('admits fix command in new issue body after cursor seed', () => {
+    const store = new Store(tempHome())
+    const cursor = seedDispatchCursorNow(store)
+    const iss = issue(88, {
+      body: '/ds-agent fix\nmore context',
+      created_at: new Date().toISOString(),
+    })
+    const r = admitDispatchIssueBody({
+      configuredRepo: REPO,
+      authorizedActors: ['LofiSu'],
+      repoFullFromPayload: REPO,
+      issue: iss,
+      seededAt: cursor.seededAt,
+    })
+    expect(r.ok).toBe(true)
+    store.close()
+  })
+
+  it('rejects outsider, wrong repo, PR, fence, bot, historical replay fields', () => {
+    const base = {
+      configuredRepo: REPO,
+      authorizedActors: ['LofiSu'],
+      repoFullFromPayload: REPO,
+      issue: issue(2),
+    }
+    expect(admitDispatchComment({ ...base, comment: comment(1, '/ds-agent fix', 'evil') }).ok).toBe(false)
+    expect(admitDispatchComment({
+      ...base,
+      repoFullFromPayload: 'other/repo',
+      comment: comment(2, '/ds-agent fix'),
+    }).ok).toBe(false)
+    expect(admitDispatchComment({
+      ...base,
+      issue: { ...issue(3), pull_request: {} },
+      comment: comment(3, '/ds-agent fix'),
+    }).ok).toBe(false)
+    expect(admitDispatchComment({
+      ...base,
+      comment: comment(4, '```\n/ds-agent fix\n```'),
+    }).ok).toBe(false)
+    expect(admitDispatchComment({
+      ...base,
+      comment: comment(5, '> /ds-agent fix'),
+    }).ok).toBe(false)
+    expect(admitDispatchComment({
+      ...base,
+      comment: comment(6, '/ds-agent fix', 'dependabot[bot]'),
+    }).ok).toBe(false)
+    expect(parseDispatchCommand('` /ds-agent fix`')).toBeUndefined()
+    expect(parseDispatchCommand(stripNonCommandRegions('```\n/ds-agent fix\n```'))).toBeUndefined()
+  })
+})
+
+describe('dispatch config', () => {
+  it('refuses unverifiable ds-agent mention handle', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'github-dispatch.json'), JSON.stringify({
+      github: { enabled: true, mentionHandles: [UNOWNED_PUBLIC_HANDLE] },
+    }))
+    expect(() => loadDispatchOwnerConfigSync(home)).toThrow(/unverifiable|unrelated/i)
+  })
+
+  it('enforces minimum pollIntervalMs', () => {
+    const home = tempHome()
+    fs.writeFileSync(path.join(home, 'github-dispatch.json'), JSON.stringify({
+      github: { enabled: true, pollIntervalMs: 1000 },
+    }))
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    expect(cfg.github.pollIntervalMs).toBe(MIN_POLL_INTERVAL_MS)
+  })
+})
+
+describe('dispatch job runner', () => {
+  it('default runner refuses publish without implementer', async () => {
+    const runner = createJobRunner()
+    const pub = { publish: vi.fn() }
+    await expect(runner.runGithubFix({
+      job: { id: '1', type: 'github_fix', status: 'queued', createdAt: '', commentId: 'c' },
+      issueTitle: 't',
+      issueBody: 'b',
+    })).rejects.toThrow(IMPLEMENTER_NOT_CONFIGURED)
+    await expect(runner.runRsiImplement({
+      job: { id: '2', type: 'rsi_implement', status: 'queued', createdAt: '', commentId: 'c' },
+      gap: {
+        id: 'g',
+        title: 'x',
+        description: 'd',
+        acceptance: 'a',
+        risk: 'low',
+        priority: 1,
+        sourceUrl: 'u',
+        fetchedAt: 't',
+        manusCue: 'unknown',
+        status: 'open',
+        dedupeKey: 'k',
+      },
+    })).rejects.toThrow(IMPLEMENTER_NOT_CONFIGURED)
+    expect(pub.publish).not.toHaveBeenCalled()
+  })
+})
+
+describe('dispatch poll cursor and dedup', () => {
+  it('seeds cursor to now and does not enqueue pre-cursor comments; replays dedupe', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    seedDispatchCursorNow(store)
+    const cursor = store.getDoc<{ seededAt: string }>('github_dispatch_cursor', 'cursor')!
+
+    const old = comment(200, '/ds-agent fix', 'LofiSu', '2020-01-01T00:00:00Z')
+    const evOld = { repoFull: REPO, issue: issue(10), comment: old }
+    const { jobs: j0 } = processGithubPoll(store, cfg, [evOld], p => store.nextId(p))
+    expect(j0).toHaveLength(0)
+
+    const fresh = comment(201, '/ds-agent fix', 'LofiSu', new Date().toISOString())
+    const { jobs: j1 } = processGithubPoll(store, cfg, [
+      { repoFull: REPO, issue: issue(11), comment: fresh },
+    ], p => store.nextId(p))
+    expect(j1).toHaveLength(1)
+
+    const { jobs: j2 } = processGithubPoll(store, cfg, [
+      { repoFull: REPO, issue: issue(11), comment: fresh },
+    ], p => store.nextId(p))
+    expect(j2).toHaveLength(0)
+    expect(wasCommentHandled(store, '201')).toBe(true)
+    expect(cursor.seededAt <= fresh.created_at || fresh.created_at >= cursor.seededAt).toBe(true)
+    store.close()
+  })
+
+  it('enqueues github_fix from issue body dedupe issue-body:id', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    const cursor = seedDispatchCursorNow(store)
+    const iss = issue(42, {
+      id: 4242,
+      body: '/ds-agent fix',
+      created_at: new Date().toISOString(),
+    })
+    const { jobs } = processGithubPoll(
+      store,
+      cfg,
+      [],
+      p => store.nextId(p),
+      [{ repoFull: REPO, issue: iss }],
+    )
+    expect(jobs).toHaveLength(1)
+    expect(jobs[0]!.commentId).toBe('issue-body:4242')
+    expect(wasCommentHandled(store, 'issue-body:4242')).toBe(true)
+    expect(cursor).toBeTruthy()
+    store.close()
+  })
+})
+
+describe('dispatch local status and cancel', () => {
+  it('updates local job state only', () => {
+    const home = tempHome()
+    const store = new Store(home)
+    const job: DispatchJobDoc = {
+      id: 'dispatch_1',
+      type: 'github_fix',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: '999',
+      issueNumber: 5,
+    }
+    store.putDoc('dispatch_job' as const, job.id, job)
+    expect(formatDispatchStatus(store)).toContain('dispatch_1')
+    expect(runDispatchCancel(store, 'dispatch_1')).toContain('cancelled')
+    expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'dispatch_1')?.status).toBe('cancelled')
+    store.close()
+  })
+})
+
+describe('dispatch queue', () => {
+  it('runs one job at a time and recovers interrupted without duplicating completed', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    const calls: string[] = []
+    const runner = createJobRunner({
+      githubFix: async () => {
+        calls.push('run')
+        return { prUrl: 'https://example/pr/1', prNumber: 1 }
+      },
+    })
+    store.putDoc('dispatch_job', 'a', {
+      id: 'a',
+      type: 'github_fix',
+      status: 'queued',
+      createdAt: '2026-11-01T00:00:00Z',
+      commentId: '1',
+    } satisfies DispatchJobDoc)
+    store.putDoc('dispatch_job', 'b', {
+      id: 'b',
+      type: 'github_fix',
+      status: 'queued',
+      createdAt: '2026-11-01T00:00:01Z',
+      commentId: '2',
+    } satisfies DispatchJobDoc)
+    await drainDispatchQueue({ store, runner })
+    expect(calls).toEqual(['run', 'run'])
+    expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'a')?.status).toBe('completed')
+
+    store.putDoc('dispatch_job', 'dead', {
+      id: 'dead',
+      type: 'github_fix',
+      status: 'running',
+      createdAt: '2026-11-01T00:00:02Z',
+      commentId: '3',
+    } satisfies DispatchJobDoc)
+    store.putDoc('dispatch_queue', 'main', { runningJobId: 'dead' })
+    recoverInterruptedJobs(store)
+    expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'dead')?.status).toBe('queued')
+    store.close()
+  })
+})
+
+describe('dispatch fix job with FeaturePrPublisher', () => {
+  it('publishes peanut branch via fixture gh without merging main', async () => {
+    const root = tempHome()
+    const bare = path.join(root, 'remote.git')
+    execSync(`git init --bare -b main ${JSON.stringify(bare)}`, { stdio: 'ignore' })
+    const runner = createJobRunner({
+      githubFix: async () => {
+        const ws = path.join(root, 'ws')
+        fs.mkdirSync(ws)
+        execSync('git init -b main', { cwd: ws, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+        execSync('git config user.email t@t.com && git config user.name t', { cwd: ws })
+        fs.writeFileSync(path.join(ws, 'f'), 'x\n')
+        execSync('git add f && git commit -m seed', { cwd: ws })
+        execSync(`git checkout -b peanut/dispatch-issue-7`, { cwd: ws })
+        const gh = vi.fn(async (args: string[]) => {
+          if (args[1] === 'list') return '[]'
+          if (args[1] === 'create') return 'https://github.com/o/r/pull/7\n'
+          if (args[1] === 'view') return JSON.stringify({ number: 7, url: 'https://github.com/o/r/pull/7' })
+          return ''
+        })
+        const gitReal = await import('../src/env/git-publish.ts')
+        const pub = new FeaturePrPublisher({
+          repo: parseRepo(REPO),
+          workspace: () => ws,
+          pushRemote: bare,
+          git: gitReal.runGit,
+          gh,
+        })
+        const result = await pub.publish({
+          workerId: 'w',
+          title: 'fix: issue #7',
+          body: `Issue: https://github.com/${REPO}/issues/7`,
+          branch: 'peanut/dispatch-issue-7',
+        })
+        expect(result.branch).toMatch(/^peanut\//)
+        expect(result.number).toBe(7)
+        return { prUrl: result.url, prNumber: result.number }
+      },
+    })
+    const home = tempHome()
+    const store = new Store(home)
+    const job: DispatchJobDoc = {
+      id: 'dispatch_7',
+      type: 'github_fix',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: '77',
+      issueNumber: 7,
+      issueUrl: `https://github.com/${REPO}/issues/7`,
+    }
+    store.putDoc('dispatch_job' as const, job.id, job)
+    await drainDispatchQueue({ store, runner })
+    const done = store.getDoc<DispatchJobDoc>('dispatch_job', job.id)
+    expect(done?.status).toBe('completed')
+    expect(done?.prNumber).toBe(7)
+    expect(done?.prUrl).toContain('/pull/7')
+    store.close()
+  })
+})
+
+describe('webhook verify', () => {
+  it('returns false when secret is empty', () => {
+    expect(verifyGithubWebhookSignature256('body', 'sha256=abc', '')).toBe(false)
+    expect(verifyGithubWebhookSignature256('body', 'sha256=abc', '   ')).toBe(false)
+  })
+})
+
+describe('trusted-fetch SSRF', () => {
+  const allow = ['example.com']
+  const urls = [
+    'http://127.0.0.1/',
+    'https://127.0.0.1/',
+    'https://127.0.0.2/',
+    'https://0.0.0.0/',
+    'https://localhost/',
+    'https://10.0.0.1/',
+    'https://169.254.169.254/',
+    'file:///etc/passwd',
+  ]
+  for (const u of urls) {
+    it(`refuses ${u}`, async () => {
+      await expect(trustedFetch(u, { allowHosts: allow })).rejects.toThrow()
+    })
+  }
+
+  it('refuses IPv4-mapped loopback host when allowlisted', async () => {
+    await expect(trustedFetch('https://::ffff:127.0.0.1/', { allowHosts: ['::ffff:127.0.0.1'] })).rejects.toThrow()
+  })
+})
+
+describe('RSI gap pool', () => {
+  it('ingests with URL+fetched_at; high-risk stays proposal; low implements; idle on duplicate PR', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    const gap = ingestGap(store, {
+      title: 'Docs tweak',
+      description: 'Add note',
+      acceptance: 'Test passes',
+      sourceUrl: 'https://docs.github.com/en',
+      fetchedAt: '2026-11-15T00:00:00Z',
+    }, p => store.nextId(p))!
+    expect(gap.sourceUrl).toContain('docs.github.com')
+    expect(gap.manusCue).toBe('unknown')
+
+    const high = ingestGap(store, {
+      title: 'Change sandbox network policy',
+      description: 'widen network',
+      acceptance: 'n/a',
+      sourceUrl: 'https://docs.github.com/policy',
+      fetchedAt: '2026-11-15T00:00:00Z',
+      dedupeKey: 'high-1',
+    }, p => store.nextId(p))!
+    expect(classifyGapRisk(high.title, high.description)).toBe('high')
+    expect(high.status).toBe('proposal')
+    const proposalJob = store.listDocs<DispatchJobDoc>('dispatch_job').find(j => j.type === 'rsi_proposal')
+    expect(proposalJob).toBeTruthy()
+
+    cfg.rsi.intervalMs = 0
+    const tick = await runRsiSchedulerTick(store, cfg, p => store.nextId(p), {
+      fetchPage: async () => ({ body: 'ok', fetchedAt: '2026-11-15T12:00:00Z' }),
+      hasOpenPeanutPr: async () => true,
+      repoRoot: home,
+    })
+    expect(tick.idle).toBe(true)
+    store.close()
+  })
+
+  it('homepage snapshot fetch does not enqueue rsi_implement', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    cfg.rsi.intervalMs = 0
+    const tick = await runRsiSchedulerTick(store, cfg, p => store.nextId(p), {
+      fetchPage: async () => ({ body: '<html>homepage</html>', fetchedAt: '2026-11-15T12:00:00Z' }),
+      repoRoot: home,
+    })
+    expect(tick.idle).toBe(true)
+    const impl = store.listDocs<DispatchJobDoc>('dispatch_job').filter(j => j.type === 'rsi_implement')
+    expect(impl).toHaveLength(0)
+    const cache = store.getDoc(RSI_RESEARCH_CACHE_KIND, 'host:docs.github.com')
+    expect(cache).toBeTruthy()
+    store.close()
+  })
+})
+
