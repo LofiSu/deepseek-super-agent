@@ -48,7 +48,7 @@ export {
   PROTOCOL_QUERIES,
   SYNTHETIC_MONTHS,
 } from '../src/measurement/t48-fixture.ts'
-export type { ProtocolQuery } from '../src/measurement/t48-fixture.ts'
+export type { FixtureEntry, ProtocolQuery } from '../src/measurement/t48-fixture.ts'
 
 export interface QueryResult {
   id: string
