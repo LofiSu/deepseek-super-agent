@@ -4,14 +4,13 @@ Production ingress for owner-triggered fixes and evidence-based improvements. Th
 
 ## Identity
 
-- Authenticated `gh` user for this deployment is **LofiSu** (default authorized actor).
-- Public user [`ds-agent`](https://github.com/ds-agent) is **unrelated** and not owned here. Config **must not** list `ds-agent` as a `mentionHandle` unless a verification probe proves the authenticated login matches (it does not today).
-- **`/ds-agent` is a slash command**, not a GitHub account mention. Syntax at the start of a line (outside fences, inline code, blockquotes):
+- **Authorized actors** (who may issue commands): **LofiSu** by default, plus any configured `authorizedActors`. **Poll/publish authentication** is the owner’s **`gh`** CLI when `github.auth` is omitted; with `github.auth.mode` `github-app`, the installed GitHub App mints short-lived installation tokens (see **`github.auth`** below).
+- Public user [`ds-agent`](https://github.com/ds-agent) is **unrelated** to this harness and **must not** be used as a `mentionHandle` (verification does not match today).
+- **`/ds-agent` slash commands** are the **reliable** dispatch interface (not a GitHub account mention). Syntax at the start of a line (outside fences, inline code, blockquotes):
   - `/ds-agent fix` — enqueue a fix job for this issue
   - `/ds-agent status` — local state only
   - `/ds-agent cancel` — cancel queued jobs for this issue (local only)
-- **Optional @handle lines** apply only when `mentionHandles` is configured **and** each handle was verified against `gh api user` at config load. Examples (case-insensitive handle): `@LofiSu fix`, `@LofiSu /ds-agent fix`. Still requires an explicit `fix|status|cancel`. An unconfigured `@ds-agent` mention is **not** a command.
-- **A dedicated @bot identity is not connected**. Polling is not the same as a GitHub App bot.
+- **Optional @handle lines** are **local text triggers** parsed by the poller only — not a guarantee of native GitHub @notification or autocomplete for a generic App. In **owner-gh** mode, configured handles must verify against `gh api user` at load (e.g. `@LofiSu fix`). In **github-app** mode, only the verified `GET /app` **slug** and `{slug}[bot]` are allowed (e.g. `@lofisu-peanut-agent fix`, `@lofisu-peanut-agent[bot] fix`). Each line still requires an explicit `fix|status|cancel`. An unconfigured `@ds-agent` mention is **not** a command. **Do not claim** a generic GitHub App is natively notified by @mention; **webhook ingress is not deployed**.
 
 ## Ingress
 
@@ -67,6 +66,35 @@ File: `<DS_AGENT_HOME>/github-dispatch.json` (outside worker writable roots).
 ```
 
 `pollIntervalMs` defaults to **60_000** with a minimum floor of **15_000**.
+
+### `github.auth` (host-only)
+
+When omitted, dispatch uses the owner’s authenticated **`gh`** CLI (`mode: owner-gh`). Optional GitHub App mode avoids putting installation tokens in `~/.config/gh` and mints short-lived tokens in process memory only.
+
+| Key | Notes |
+|-----|--------|
+| `mode` | `"github-app"` or omit / `"owner-gh"` |
+| `appId` | GitHub App numeric id (JSON string or number) |
+| `clientId` | OAuth Client ID (JWT `iss`; string) |
+| `installationId` | Installation id for the configured repo (string or number) |
+| `privateKeyFile` | **Absolute** path to the App private key PEM (string) |
+| `expectedSlug` | Verified slug from `GET /app` (string) |
+
+JWT signing follows GitHub’s [App authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app) (RS256, `iat` up to 60s in the past, `exp` ≤ 10 minutes, `iss` = Client ID). Installation tokens use [Create an installation access token](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app).
+
+**Fail-closed:** invalid, incomplete, or unverifiable `github-app` auth **throws at load** — there is **no** fallback to owner `gh`. Only omission of `github.auth` keeps owner `gh`.
+
+**Key material:** PEM lives **outside** the git repo and outside `/workspace` checkouts; file mode **0600** or **0400** only. Do not store PEM, client secret, or tokens in JSON, git, or worker sandboxes. Tokens stay in memory; each `gh`/`git` host call refreshes the installation token as needed (in-memory cache with refresh skew).
+
+**Example identifiers (this deployment):** App “LofiSu Peanut Agent”, slug `lofisu-peanut-agent`, App ID **5772121**, installation **182274751**, PEM path `/home/box/ds-agent-credentials/github-app/lofisu-peanut-agent.pem` (no PEM body or client secret in repo).
+
+### @mentions vs slash commands
+
+GitHub’s writing docs describe @mentions as notifying **people** and org teams; autocomplete is documented for collaborators and thread participants. There is **no official guarantee** that a generic GitHub App is notified by `@slug` or `@slug[bot]`, or that it appears in `@` autocomplete. Copilot agent apps are a different product. **Webhook ingress is not deployed**, so GitHub will not deliver comment webhooks to this App. The poller may treat a **verified** App slug and `{slug}[bot]` in `mentionHandles` as a **local text trigger** only (after `GET /app` slug match). The reliable interface remains `/ds-agent fix`, `/ds-agent status`, and `/ds-agent cancel` — do not claim native App notification.
+
+### Permissions warning
+
+GitHub’s permission model treats **Pull requests: write as including merge**. The installation token is not “PR-only”; **`main` branch protection** and review requirements remain the merge barrier. `FeaturePrPublisher` opens PRs only; it does not merge.
 
 `serve` loads dispatch when the file enables `github` and/or `rsi`, or when `--github-dispatch` / `DS_AGENT_GITHUB_DISPATCH=1` is set (config must still validate).
 
