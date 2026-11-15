@@ -1,11 +1,10 @@
 import type { BudgetLedger, ExperimentState } from './types.ts'
 import { assertSearchAllowed, loadExperiment, mutateExperiment } from './experiment.ts'
-import { EVAL_CALLS_FINALTEST } from './budget-constants.ts'
+import { EVAL_CALLS_BASELINE_SEARCH, EVAL_CALLS_FINALTEST } from './budget-constants.ts'
 
-export { EVAL_CALLS_FINALTEST }
+export { EVAL_CALLS_BASELINE_SEARCH, EVAL_CALLS_FINALTEST }
 
 export const EVAL_CALLS_PER_SEARCH_CANDIDATE = 2
-export const EVAL_CALLS_BASELINE_SEARCH = 2
 
 function searchUnitsUsed(state: ExperimentState): number {
   return (state.budget.reservations ?? [])

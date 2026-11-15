@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { fileURLToPath } from 'node:url'
 import { assertValidEvolutionBudget } from '../src/evolution/budget-validate.ts'
 import { EVAL_CALLS_FINALTEST, reserveFinalTestUnits } from '../src/evolution/budget-ledger.ts'
+import { runEvolution } from '../src/evolution/evolve.ts'
 import { createExperiment, experimentPath, mutateExperiment } from '../src/evolution/experiment.ts'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+
+const datasetRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/evolution')
 
 const homes: string[] = []
 afterEach(() => {
@@ -29,12 +33,55 @@ describe('budget validation fail-closed', () => {
     expect(() => assertValidEvolutionBudget({ reserveEvals: EVAL_CALLS_FINALTEST - 1 })).toThrow(
       /reserveEvals must be >= 2/,
     )
-    // The minimum and the default-sized reserve still pass.
+    // The minimum and the default-sized reserve still pass when the baseline
+    // search reservation also fits in the search pool.
     expect(() => assertValidEvolutionBudget({ reserveEvals: EVAL_CALLS_FINALTEST, maxEvals: 10 })).not.toThrow()
     expect(() => assertValidEvolutionBudget({ reserveEvals: 8, maxEvals: 10 })).not.toThrow()
-    // An omitted reserveEvals keeps its later default; it is not treated as 0.
+    expect(() => assertValidEvolutionBudget({ reserveEvals: 2, maxEvals: 10 })).not.toThrow()
+    // Omitted values use the same defaults as experiment creation.
     expect(() => assertValidEvolutionBudget({ maxEvals: 10 })).not.toThrow()
     expect(() => assertValidEvolutionBudget({})).not.toThrow()
+  })
+
+  it('rejects budgets whose search pool cannot fund baseline search', () => {
+    expect(() => assertValidEvolutionBudget({ maxEvals: 8, reserveEvals: 8 })).toThrow(/search pool/)
+    expect(() => assertValidEvolutionBudget({ maxEvals: 9, reserveEvals: 8 })).toThrow(/search pool/)
+    expect(() => assertValidEvolutionBudget({ maxEvals: 8 })).toThrow(/search pool/)
+    expect(() => assertValidEvolutionBudget({ maxEvals: 4 })).toThrow(/reserveEvals exceeds maxEvals/)
+  })
+
+  it('createExperiment refuses budgets that cannot fund baseline search without persisting them', () => {
+    for (const budget of [
+      { maxEvals: 8, reserveEvals: 8 },
+      { maxEvals: 9, reserveEvals: 8 },
+      { maxEvals: 4 },
+    ]) {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-baseline-budget-'))
+      homes.push(home)
+      expect(() =>
+        createExperiment({ home, datasetDigest: 'd', evaluatorDigest: 'e', seed: 1, budget }),
+      ).toThrow()
+      expect(fs.existsSync(experimentPath(home))).toBe(false)
+    }
+  })
+
+  it('rejects a doomed run before creation and allows a valid retry on the same home', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-baseline-budget-'))
+    homes.push(home)
+    await expect(runEvolution({
+      home,
+      datasetRoot,
+      budget: { maxCandidates: 8, maxEvals: 8, evalTimeoutMs: 20_000, reserveEvals: 8 },
+    })).rejects.toThrow(/search pool/)
+    expect(fs.existsSync(experimentPath(home))).toBe(false)
+
+    await expect(runEvolution({
+      home,
+      datasetRoot,
+      budget: { maxCandidates: 1, maxEvals: 64, evalTimeoutMs: 20_000, reserveEvals: 8 },
+      stopOnFirstSuccess: true,
+    })).resolves.toBeDefined()
+    expect(fs.existsSync(experimentPath(home))).toBe(true)
   })
 
   it('createExperiment refuses a budget that cannot fund the final test', () => {

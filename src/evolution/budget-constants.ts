@@ -6,3 +6,4 @@
  * imports budget validation).
  */
 export const EVAL_CALLS_FINALTEST = 2
+export const EVAL_CALLS_BASELINE_SEARCH = 2
