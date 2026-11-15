@@ -126,10 +126,79 @@ describe('T48 wall-clock observation (persistent corpus, not month-scale accepta
     const journal = path.join(home, 'locked.jsonl')
     const lock = path.join(home, '.ds-agent/measurement/t48-wall-clock.lock')
     fs.mkdirSync(path.dirname(lock), { recursive: true })
-    fs.writeFileSync(lock, 'running\n', 'utf8')
+    fs.writeFileSync(lock, JSON.stringify({
+      owner: 'active-observer',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }), 'utf8')
     expect(() => runT48WallClockObservation({ home, journalPath: journal, force: true }))
       .toThrow('T48 wall-clock observation already running')
     expect(fs.existsSync(journal)).toBe(false)
     expect(readWallClockState(home)).toBeUndefined()
+  })
+
+  it('reclaims an expired observation lease after a crashed process', () => {
+    const home = tempHome()
+    const journal = path.join(home, 'expired-lock.jsonl')
+    const lock = path.join(home, '.ds-agent/measurement/t48-wall-clock.lock')
+    fs.mkdirSync(path.dirname(lock), { recursive: true })
+    fs.writeFileSync(lock, JSON.stringify({
+      owner: 'crashed-observer',
+      expiresAt: '2026-01-01T00:00:00.000Z',
+    }), 'utf8')
+
+    const result = runT48WallClockObservation({
+      home,
+      journalPath: journal,
+      force: true,
+      now: () => new Date('2026-01-01T00:01:00.000Z'),
+    })
+    expect(result.action).toBe('appended')
+    expect(fs.existsSync(lock)).toBe(false)
+  })
+
+  it('reconciles a crash after fixture persistence without inserting another sample', () => {
+    const home = tempHome()
+    const journal = path.join(home, 'after-fixture.jsonl')
+    expect(() => runT48WallClockObservation({
+      home,
+      journalPath: journal,
+      force: true,
+      testFaultAfter: 'fixture',
+    })).toThrow('injected T48 fault after fixture')
+
+    const pending = readWallClockState(home)?.pending
+    expect(pending).toBeDefined()
+    const fixture = readCorpusState(resolveT48MeasurementHome(home))
+    expect(fixture?.completedRun?.runId).toBe(pending?.runId)
+    expect(fixture?.insertedSampleIndices).toEqual([0])
+    expect(readT48Journal(journal)).toEqual([])
+
+    const resumed = runT48WallClockObservation({ home, journalPath: journal, force: true })
+    expect(resumed.action).toBe('appended')
+    expect(resumed.state.samples).toBe(1)
+    expect(resumed.state.pending).toBeUndefined()
+    expect(readCorpusState(resolveT48MeasurementHome(home))?.insertedSampleIndices).toEqual([0])
+    expect(readT48Journal(journal).map(entry => entry.runId)).toEqual([pending?.runId])
+  })
+
+  it('reconciles a crash after journal append without duplicating the journal row', () => {
+    const home = tempHome()
+    const journal = path.join(home, 'after-journal.jsonl')
+    expect(() => runT48WallClockObservation({
+      home,
+      journalPath: journal,
+      force: true,
+      testFaultAfter: 'journal',
+    })).toThrow('injected T48 fault after journal')
+
+    const pending = readWallClockState(home)?.pending
+    expect(pending).toBeDefined()
+    expect(readT48Journal(journal).map(entry => entry.runId)).toEqual([pending?.runId])
+
+    const resumed = runT48WallClockObservation({ home, journalPath: journal, force: true })
+    expect(resumed.action).toBe('appended')
+    expect(resumed.state.samples).toBe(1)
+    expect(resumed.state.pending).toBeUndefined()
+    expect(readT48Journal(journal).map(entry => entry.runId)).toEqual([pending?.runId])
   })
 })

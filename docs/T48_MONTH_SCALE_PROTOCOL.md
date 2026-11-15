@@ -155,6 +155,9 @@ inserts + held-out queries). Journal rows use `syntheticClock: false` (real rete
 and **`syntheticWorkload: true`** (fixture data only — never implied non-synthetic workload).
 Uses real `recordedAt` timestamps and writes JSONL rows plus
 `$DS_AGENT_HOME/.ds-agent/measurement/t48-wall-clock-state.json` for restartable sampling.
+Each observation has a durable run id. A lease protects concurrent observers; after a crash,
+the next observer reuses the persisted fixture report, appends a missing journal row once, and
+then clears the pending state without creating another corpus sample.
 Default cadence is 24h (`minIntervalMs`); force with `DS_AGENT_T48_OBSERVE_FORCE=1` for tests.
 This accumulates **longitudinal observation data** for future month-spanning analysis; it does
 **not** satisfy operator month-scale acceptance (§3) and must not flip T48 to `[x]`.

@@ -42,6 +42,8 @@ export interface T48CorpusState {
   insertedSampleIndices: number[]
   firstInsertAt?: string
   lastInsertAt?: string
+  /** Last fully measured sample, retained only to reconcile a crashed observer run. */
+  completedRun?: { runId: string, report: T48IncrementalReport }
 }
 
 export function corpusStatePath(home: string): string {
@@ -146,6 +148,8 @@ export interface T48IncrementalStepResult {
 export function runT48PersistentIncrementalStep(options: {
   home: string
   wallClockMeasurement: boolean
+  /** Stable observer id allows restart reconciliation without another insert. */
+  runId?: string
   /** Injectable clock for synthetic measurement mode only. */
   now?: () => Date
   env?: NodeJS.ProcessEnv
@@ -155,6 +159,14 @@ export function runT48PersistentIncrementalStep(options: {
   const wallClock = options.wallClockMeasurement
   const knownThreads = new Set(T48_INCREMENTAL_SAMPLES.map(e => e.thread))
   const prior = readCorpusState(options.home)
+  if (options.runId && prior?.completedRun?.runId === options.runId) {
+    return {
+      runId: options.runId,
+      state: prior,
+      report: prior.completedRun.report,
+      home: options.home,
+    }
+  }
   const inserted = new Set(prior?.insertedSampleIndices ?? [])
   const nextIndex = T48_INCREMENTAL_SAMPLES.findIndex((_, i) => !inserted.has(i))
 
@@ -163,7 +175,7 @@ export function runT48PersistentIncrementalStep(options: {
 
   const retention = retentionForMode(env)
   const store = new Store(options.home)
-  const runId = randomUUID()
+  const runId = options.runId ?? randomUUID()
   try {
     const embedding = new HashedEmbedding()
     const memory = new SpillBackedLongTermMemory(store, {
@@ -330,7 +342,12 @@ export function runT48PersistentIncrementalStep(options: {
           deterministicAfterReopen,
         },
       }
-      return { runId, state, report, home: options.home }
+      const completedState: T48CorpusState = {
+        ...state,
+        completedRun: { runId, report },
+      }
+      writeCorpusState(completedState)
+      return { runId, state: completedState, report, home: options.home }
     } finally {
       reopened.close()
     }
