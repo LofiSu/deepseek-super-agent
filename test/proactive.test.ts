@@ -364,6 +364,36 @@ describe('idle self-wake policy', () => {
     expect(fired[1]!.id).not.toBe(firstId)
   })
 
+  it('prunes stale or ended receipts without recontacting an unchanged active signal', () => {
+    const store = tempStore()
+    const ticket = openTicket()
+    seed(store, { ticket })
+    const { scheduler: runner, fired } = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    runner.tick(T0)
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('contact')
+    const current = runner.state().signalReceipts[0]!
+    const ended = openTicket({
+      id: 'ticket_ended',
+      ended: { at: new Date(T0).toISOString(), outcome: 'done', by: 'executor' },
+    })
+    store.putDoc('ticket', ended.id, ended)
+    store.putDoc('proactive', 'state', {
+      ...runner.state(),
+      signalReceipts: [
+        current,
+        { ticketId: ended.id, signalId: 'ended', at: T0 },
+        { ticketId: 'ticket_missing', signalId: 'stale', at: T0 - 31 * 86_400_000 },
+      ],
+    })
+
+    expect(runner.tick(T0 + 5 * 60 * MIN).action).toBe('silent')
+    expect(fired).toHaveLength(1)
+    expect(runner.state().signalReceipts).toEqual([current])
+  })
+
   it('does not consume contact quota when ingress did not commit', () => {
     const store = tempStore()
     seed(store, { ticket: openTicket() })

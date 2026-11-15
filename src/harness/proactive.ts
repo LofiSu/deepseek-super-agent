@@ -31,8 +31,10 @@ export const DEFAULT_PROACTIVE_ACTIVE_THREAD_MINUTES = 30
 export const DEFAULT_PROACTIVE_QUIET_START = '23:00'
 export const DEFAULT_PROACTIVE_QUIET_END = '08:00'
 export const MAX_PROACTIVE_CONTACT_ROWS = 64
+export const MAX_PROACTIVE_SIGNAL_RECEIPTS = 256
 const CONTACT_RETENTION_MS = 7 * 86_400_000
 export const MAX_PROACTIVE_SIGNAL_AGE_MS = 24 * 60 * 60_000
+const SIGNAL_RECEIPT_RETENTION_MS = 30 * 86_400_000
 const MIN_INTERVAL_MINUTES = 15
 const MAX_INTERVAL_MINUTES = 1_440
 const MAX_ACTIVE_THREAD_MINUTES = 1_440
@@ -96,6 +98,7 @@ export interface ProactiveContact {
 export interface ProactiveSignalReceipt {
   ticketId: string
   signalId: string
+  at: number
 }
 
 export interface ProactiveState {
@@ -293,7 +296,7 @@ export class ProactiveScheduler {
   tick(at = this.opts.now()): ProactiveTickResult {
     const config = this.opts.config
     if (!config.enabled) return { action: 'disabled' }
-    const state = this.loadState()
+    const state = this.pruneSignalReceipts(this.loadState(), at)
 
     if (state.lastCheckAt === undefined) {
       this.saveState({ ...state, lastCheckAt: at })
@@ -360,6 +363,11 @@ export class ProactiveScheduler {
       this.log('[proactive] silent reason=no-useful-signal')
       return { action: 'silent' }
     }
+    if (state.signalReceipts.length >= MAX_PROACTIVE_SIGNAL_RECEIPTS) {
+      this.saveState(checked)
+      this.log(`[proactive] silent reason=signal-receipt-cap max=${MAX_PROACTIVE_SIGNAL_RECEIPTS}`)
+      return { action: 'silent', plan }
+    }
 
     const trigger = proactiveTrigger(plan, at)
     let ingress: ReceiveResult
@@ -385,7 +393,7 @@ export class ProactiveScheduler {
       .slice(-MAX_PROACTIVE_CONTACT_ROWS)
     const signalReceipts = [
       ...state.signalReceipts.filter(receipt => receipt.ticketId !== plan.ticket.id),
-      { ticketId: plan.ticket.id, signalId: plan.signalId },
+      { ticketId: plan.ticket.id, signalId: plan.signalId, at },
     ]
     // Ingress is durable before quota accounting. The trigger id is based on
     // the signal revision, so a crash before this write becomes an ingress
@@ -426,7 +434,9 @@ export class ProactiveScheduler {
         receipt != null
         && typeof receipt === 'object'
         && typeof (receipt as ProactiveSignalReceipt).ticketId === 'string'
-        && typeof (receipt as ProactiveSignalReceipt).signalId === 'string')
+        && typeof (receipt as ProactiveSignalReceipt).signalId === 'string'
+        && typeof (receipt as ProactiveSignalReceipt).at === 'number'
+        && Number.isFinite((receipt as ProactiveSignalReceipt).at))
       : []
     return {
       ...(typeof raw.lastCheckAt === 'number' && Number.isFinite(raw.lastCheckAt)
@@ -442,6 +452,24 @@ export class ProactiveScheduler {
 
   private saveState(state: ProactiveState): void {
     this.opts.store.putDoc(PROACTIVE_STATE_KIND, PROACTIVE_STATE_ID, state)
+  }
+
+  /** Keep only current signals on unfinished Tickets. Never evict an active receipt for a newer signal. */
+  private pruneSignalReceipts(state: ProactiveState, at: number): ProactiveState {
+    const currentSignals = new Map<string, string>()
+    for (const ticket of this.opts.store.listDocs<Ticket>('ticket')) {
+      if (ticket.ended != null) continue
+      const signal = signalOf(ticket)
+      if (signal) currentSignals.set(ticket.id, signal.id)
+    }
+    const signalReceipts = state.signalReceipts.filter(receipt =>
+      at - receipt.at <= SIGNAL_RECEIPT_RETENTION_MS
+      && currentSignals.get(receipt.ticketId) === receipt.signalId)
+    const changed = signalReceipts.length !== state.signalReceipts.length
+    if (!changed) return state
+    const pruned = { ...state, signalReceipts }
+    this.saveState(pruned)
+    return pruned
   }
 }
 
