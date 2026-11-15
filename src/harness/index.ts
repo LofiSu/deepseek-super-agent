@@ -4,13 +4,21 @@ export { HttpOpenAI, MockModel, createModelFromEnv, requireLiveModelFromEnv } fr
 export {
   DEFAULT_PERSONA,
   MAX_PROMPT_FILE_CHARS,
+  MAX_PROMPT_TOTAL_CHARS,
   buildSystemPrompt,
   describePromptLayers,
+  describePromptSections,
   loadPromptFiles,
+  loadPrompts,
   systemPrompt,
+  type LoadedPrompts,
+  type PromptFileKey,
   type PromptFiles,
+  type PromptInput,
   type PromptLayer,
   type PromptLayerId,
+  type PromptSection,
+  type PromptSectionId,
 } from './prompts.ts'
 export { PROVIDER_PRESETS, resolveLiveApi, type LiveApi, type ProviderPreset } from './providers.ts'
 export { SessionJournal } from './session.ts'

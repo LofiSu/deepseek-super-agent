@@ -8,6 +8,7 @@ import {
   runT48MonthScaleProtocol,
   SYNTHETIC_MONTHS,
 } from '../scripts/t48-month-scale-protocol.ts'
+import type { FixtureEntry } from '../scripts/t48-month-scale-protocol.ts'
 import type { LongTermMemoryEntry } from '../src/memory/long-term.ts'
 import { Store } from '../src/store/sqlite.ts'
 import { tempHome } from './fixtures.ts'
@@ -20,6 +21,15 @@ import { tempHome } from './fixtures.ts'
  * determinism. It is not wall-clock evidence and does not unblock T48.
  */
 describe('T48 month-scale LTM protocol (offline fixture smoke)', () => {
+  it('keeps the fixture entry type available from the protocol script', () => {
+    const entry: FixtureEntry = {
+      thread: 'compatibility',
+      text: 'fixture type export remains stable',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }
+    expect(entry.thread).toBe('compatibility')
+  })
+
   it('measures cold recall@3, digest survival, ACL, semantic arm, and determinism', () => {
     const report = runT48MonthScaleProtocol()
 

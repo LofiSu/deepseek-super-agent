@@ -50,6 +50,16 @@ bounds inbound nodes and addresses, and rejects peer-registered loopback
 endpoints unless the operator opts in; its assignment callback is synchronous.
 The module starts no listener and makes no remote-execution claim; mounting it
 in Runtime/CLI remains owner-gated.
+`WorkerPlacement` (`mesh-runtime.ts`) merges the in-process node with optional
+`DS_AGENT_REMOTE_MESH` peers for `pick`/`release`/`dispatch`. Remote nodes may
+advertise `capabilities`; `DS_AGENT_MESH_REQUIRED_CAPABILITIES` (comma-separated)
+restricts which remote peer may receive a ticket when the local slot is full.
+Inbound `assignment_result` is handled via `Runtime.applyRemoteAssignmentResult`
+when operators mount `createRemoteMeshHandler` (idempotent on `deliveryKey`;
+late results after ticket end are ignored). `releaseMesh` clears remote result
+wait timers on ticket end/cancel. Physical multi-machine placement is still
+operator-gated; loopback integration tests cover the HTTP path only.
+
 Capacity is enforced in-process with a bounded FIFO queue owned by the Harness
 (the registry stays pure accounting):
 
@@ -102,19 +112,28 @@ Restart replay remains a boundary: an in-flight turn is not reconstructed after 
 restart, and unfinished jobs/sessions are not replayed. This is deliberate and
 documented, not hidden behavior.
 
-`prompts.ts` assembles the stable system-prompt stack in dependency order:
-identity, owner persona, standing instructions, owner context, team, skills,
-reach, rules, memory guidance, style, long tasks, then the role contract. The team layer names
+`prompts.ts` assembles the stable system prompt from 33 ordered sections:
+identity and values, the soul and identity files, who built the agent and who it
+works for, the owner, standing instructions, discretion, external parties, work
+style, evolution, operating notes, proactivity and its preferences,
+personalization, memory, context, expression, environment, tools and their
+notes, team, skills, scheduled work, heartbeat, channels, runtime files,
+filesystem, security, safety, then the role contract. Nine owner files in the
+agent home feed named sections: `SOUL.md`, `IDENTITY.md`, `USER.md`,
+`INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, and
+`PROACTIVE_PREFERENCES.md`. `soul` always renders, using the built-in default
+voice when the file and seed are absent. Core file sections always fit; optional
+ones are omitted whole when the 20,000-character rendered budget is exceeded,
+and each file is capped at 4,000 characters. `PERSONA.md` and
+`DS_AGENT_PERSONA` remain deprecated soul fallbacks. The team layer names
 configured local specialist agents by id and description only; their command,
 environment, and limits stay in `local-agents.json`. The skills layer lists
 owner-authored playbooks by id and description only; `read_skill` loads one
-body on demand and cannot grant a tool or widen a role. `PERSONA.md`,
-`AGENTS.md`, and `USER.md` in the agent home refine the owner-editable layers;
-`DS_AGENT_PERSONA` / `DS_AGENT_INSTRUCTIONS` / `DS_AGENT_OWNER` seed them when a
-file is absent. Files are capped and never override the rules or the role.
-Turn facts (principal, channel, recalled memory, clock, task) stay in the turn
-prompt so the system prefix remains cacheable. `ds-agent prompt --layers` shows
-the stack and each layer's source; see `docs/PROMPTS.md`.
+body on demand and cannot grant a tool or widen a role. Files never override
+the security, safety, or role sections, and the agent has no write path to
+them. Turn facts (principal, channel, recalled memory, clock, task) stay in the
+turn prompt so the system prefix remains cacheable. `ds-agent prompt --layers`
+shows the sections and each one's source; see `docs/PROMPTS.md`.
 
 ## M2 — store
 
@@ -124,7 +143,9 @@ the stack and each layer's source; see `docs/PROMPTS.md`.
 
 ## M3 — engine
 
-`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. `collab.ts`
+`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. Persisted
+`recovery/latest` documents the last startup recovery boundary (outcome, per-ticket
+transitions). `collab.ts`
 owns pause/intervene/resume plus the approval hold: a Worker records a pending
 action, Worker turns stop while it is pending, the Router may still speak, and
 the owner's decision writes guidance before the RESUME turns. `lifecycle.ts`
