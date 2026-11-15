@@ -300,6 +300,60 @@ describe('RemoteMeshRegistry placement', () => {
     expect(mesh.pick('t2', NOW + 60_001)).toBeUndefined()
   })
 
+  it('notifies the listener when a node becomes eligible on register or heartbeat', () => {
+    let now = NOW
+    const mesh = new RemoteMeshRegistry({
+      localPeerId: LOCAL,
+      now: () => now,
+      staleAfterMs: 1_000,
+    })
+    const woken: string[] = []
+    mesh.setOnBecameEligible(id => woken.push(id))
+    const registration = {
+      id: 'a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: PEER,
+      secret: SECRET,
+    }
+    mesh.register(registration)
+
+    // A successful register inserts a brand-new eligible node, so it is the
+    // production late-bind "a placeable node just appeared" wake event.
+    expect(woken).toEqual(['a'])
+
+    // A duplicate id throws before insertion and must not wake anyone.
+    expect(() => mesh.register(registration)).toThrow('already registered')
+    expect(woken).toEqual(['a'])
+
+    // An invalid registration throws before insertion and must not wake anyone.
+    expect(() => mesh.register({ ...registration, id: '' })).toThrow('non-empty id')
+    expect(woken).toEqual(['a'])
+
+    // Registration leaves the node eligible, so this heartbeat is not a transition.
+    expect(mesh.heartbeat('a')).toBe(true)
+    expect(woken).toEqual(['a'])
+
+    // Offline → heartbeat is an ineligible → eligible transition.
+    expect(mesh.markOffline('a')).toBe(true)
+    expect(mesh.heartbeat('a')).toBe(true)
+    expect(woken).toEqual(['a', 'a'])
+
+    // An already-eligible heartbeat does not wake anyone again.
+    expect(mesh.heartbeat('a')).toBe(true)
+    expect(woken).toEqual(['a', 'a'])
+
+    // Stale → heartbeat is the other ineligible → eligible transition.
+    now = NOW + 1_001
+    expect(mesh.pick('t1')?.id).toBeUndefined()
+    expect(mesh.heartbeat('a')).toBe(true)
+    expect(woken).toEqual(['a', 'a', 'a'])
+
+    // A heartbeat older than the stale window still leaves the node stale.
+    now = NOW + 5_000
+    expect(mesh.heartbeat('a', NOW)).toBe(true)
+    expect(woken).toEqual(['a', 'a', 'a'])
+  })
+
   it('releases a stale/offline assignment so capacity frees and a node can be repicked', async () => {
     let now = NOW
     const mesh = new RemoteMeshRegistry({
@@ -311,12 +365,10 @@ describe('RemoteMeshRegistry placement', () => {
     mesh.register({ id: 'a', url, peerId: 'peer-a', secret: SECRET, capacity: 2 })
     mesh.register({ id: 'b', url, peerId: 'peer-b', secret: SECRET, capacity: 2 })
 
-    // pick() drops an offline assignment instead of leaking its slot.
+    // pick() drops an offline assignment and re-picks in the same call.
     expect(mesh.pick('t1', now)?.id).toBe('a')
     expect(mesh.inFlight('a')).toBe(1)
     mesh.markOffline('a')
-    expect(mesh.pick('t1', now)).toBeUndefined()
-    expect(mesh.inFlight('a')).toBe(0)
     expect(mesh.pick('t1', now)?.id).toBe('b')
     expect(mesh.inFlight('a')).toBe(0)
     expect(mesh.inFlight('b')).toBe(1)
@@ -328,6 +380,53 @@ describe('RemoteMeshRegistry placement', () => {
     mesh.heartbeat('b', now)
     expect(mesh.pick('t1', now)?.id).toBe('b')
     expect(mesh.inFlight('b')).toBe(1)
+  })
+
+  it('re-picks a capability-eligible node in the same call when the sticky node mismatches', () => {
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => NOW })
+    mesh.register({
+      id: 'generic',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'peer-g',
+      secret: SECRET,
+    })
+    mesh.register({
+      id: 'linux',
+      url: 'http://127.0.0.1:8/a2a',
+      peerId: 'peer-l',
+      secret: SECRET,
+      capabilities: ['linux'],
+    })
+
+    expect(mesh.pick('t1', NOW)?.id).toBe('generic')
+    // The pinned node fails the requirement; the same call releases it and
+    // assigns the eligible peer instead of requiring a second pick.
+    expect(mesh.pick('t1', NOW, ['linux'])?.id).toBe('linux')
+    expect(mesh.inFlight('generic')).toBe(0)
+    expect(mesh.inFlight('linux')).toBe(1)
+  })
+
+  it('keeps the sticky node while it remains eligible', () => {
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => NOW })
+    mesh.register({
+      id: 'a',
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: 'peer-a',
+      secret: SECRET,
+      capacity: 2,
+    })
+    mesh.register({
+      id: 'b',
+      url: 'http://127.0.0.1:8/a2a',
+      peerId: 'peer-b',
+      secret: SECRET,
+      capacity: 2,
+    })
+
+    expect(mesh.pick('t1', NOW)?.id).toBe('a')
+    expect(mesh.pick('t1', NOW)?.id).toBe('a')
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.inFlight('b')).toBe(0)
   })
 })
 
@@ -426,7 +525,7 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(mesh.pick('t2')?.id).toBe('node-1')
   })
 
-  it('releases capacity on unroutable/failed/throwing transports without leaking peer text', async () => {
+  it('keeps the sticky reservation on unroutable/failed/throwing transports without leaking peer text', async () => {
     let mode: 'unroutable' | 'failed' | 'throw' = 'unroutable'
     const factory = (_options: A2AHttpTransportOptions): A2ATransport => ({
       send: async (envelope: A2AEnvelope): Promise<A2ADelivery> => {
@@ -453,7 +552,12 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(mesh.pick('t1', NOW)?.id).toBe('a')
     const unroutable = await mesh.dispatch('t1', { instruction: 'x' })
     expect(unroutable?.status).toBe('unroutable')
-    expect(mesh.inFlight('a')).toBe(0)
+    // A send that settled non-delivered keeps the sticky reservation: the
+    // caller owns the release decision so a late failure cannot steal a live
+    // replacement's slot.
+    expect(mesh.hasTicketAssignment('t1')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.release('t1')).toBe(true)
     expect(mesh.pick('t2', NOW)?.id).toBe('a')
 
     mode = 'failed'
@@ -461,7 +565,9 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(failed?.status).toBe('failed')
     expect(JSON.stringify(failed)).not.toContain('peer text')
     expect(JSON.stringify(failed)).not.toContain(SECRET)
-    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.hasTicketAssignment('t2')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.release('t2')).toBe(true)
     expect(mesh.pick('t3', NOW)?.id).toBe('a')
 
     mode = 'throw'
@@ -469,8 +575,97 @@ describe('RemoteMeshRegistry dispatch', () => {
     expect(thrown?.status).toBe('failed')
     expect(thrown?.error).toBe('remote delivery failed')
     expect(JSON.stringify(thrown)).not.toContain(SECRET)
-    expect(mesh.inFlight('a')).toBe(0)
+    expect(mesh.hasTicketAssignment('t3')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    expect(mesh.release('t3')).toBe(true)
     expect(mesh.pick('t4', NOW)?.id).toBe('a')
+  })
+  it('keeps the sticky reservation on unroutable/failed/throwing/invalid cancel deliveries without leaking peer text', async () => {
+    let mode: 'unroutable' | 'failed' | 'throw' | 'invalid' = 'unroutable'
+    const factory = (_options: A2AHttpTransportOptions): A2ATransport => ({
+      send: async (envelope: A2AEnvelope): Promise<A2ADelivery> => {
+        if (mode === 'throw') throw new Error(`peer text ${SECRET}`)
+        if (mode === 'invalid') return null as unknown as A2ADelivery
+        if (mode === 'unroutable') {
+          return { envelope, status: 'unroutable', delivered: 0, persisted: false }
+        }
+        return {
+          envelope,
+          status: 'failed',
+          delivered: 0,
+          persisted: false,
+          error: `peer text ${SECRET}`,
+        }
+      },
+    })
+    let now = NOW
+    const mesh = new RemoteMeshRegistry({
+      localPeerId: LOCAL,
+      now: () => now,
+      transportFactory: factory,
+    })
+    mesh.register({ id: 'a', url: 'http://127.0.0.1:9/a2a', peerId: PEER, secret: SECRET, capacity: 1 })
+
+    const modes = ['unroutable', 'failed', 'throw', 'invalid'] as const
+    for (const [index, next] of modes.entries()) {
+      mode = next
+      const ticketId = `t${index + 1}`
+      expect(mesh.pick(ticketId, now)?.id).toBe('a')
+      const result = await mesh.dispatchCancel(ticketId, `asg_${index + 1}`)
+      expect(result?.status).toBe(next === 'unroutable' ? 'unroutable' : 'failed')
+      expect(JSON.stringify(result)).not.toContain('peer text')
+      expect(JSON.stringify(result)).not.toContain(SECRET)
+      // A send that settled keeps the sticky reservation: the caller owns the
+      // release decision so a late cancel cannot steal a live replacement's
+      // slot. Compare with the dispatch contract above.
+      expect(mesh.hasTicketAssignment(ticketId)).toBe(true)
+      expect(mesh.inFlight('a')).toBe(1)
+      expect(mesh.release(ticketId)).toBe(true)
+    }
+
+    // A stale target still drops the reservation before any send.
+    mode = 'unroutable'
+    expect(mesh.pick('stale', now)?.id).toBe('a')
+    now += DEFAULT_REMOTE_STALE_MS + 1
+    expect(await mesh.dispatchCancel('stale', 'asg_stale')).toBeUndefined()
+    expect(mesh.hasTicketAssignment('stale')).toBe(false)
+    expect(mesh.inFlight('a')).toBe(0)
+  })
+  it('keeps the sticky reservation when dispatchCancel opts out of release on an ineligible target', async () => {
+    let now = NOW
+    const mesh = new RemoteMeshRegistry({ localPeerId: LOCAL, now: () => now })
+    mesh.register({ id: 'a', url: 'http://127.0.0.1:9/a2a', peerId: PEER, secret: SECRET, capacity: 2 })
+
+    // Offline target: the keep-assignment cancel must not steal the slot that a
+    // live replacement already owns.
+    expect(mesh.pick('offline', now)?.id).toBe('a')
+    mesh.markOffline('a')
+    expect(await mesh.dispatchCancel('offline', 'asg_offline', { release: false })).toBeUndefined()
+    expect(mesh.hasTicketAssignment('offline')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(1)
+    mesh.heartbeat('a', now)
+
+    // Stale target behaves the same when the caller opts out of release.
+    expect(mesh.pick('stale-keep', now)?.id).toBe('a')
+    now += DEFAULT_REMOTE_STALE_MS + 1
+    expect(await mesh.dispatchCancel('stale-keep', 'asg_stale', { release: false })).toBeUndefined()
+    expect(mesh.hasTicketAssignment('stale-keep')).toBe(true)
+    expect(mesh.inFlight('a')).toBe(2)
+
+    // A transport factory failure before the send also keeps the reservation.
+    const factoryMesh = new RemoteMeshRegistry({
+      localPeerId: LOCAL,
+      transportFactory: () => {
+        throw new Error(`factory ${SECRET}`)
+      },
+    })
+    factoryMesh.register({ id: 'a', url: 'http://127.0.0.1:9/a2a', peerId: PEER, secret: SECRET, capacity: 1 })
+    expect(factoryMesh.pick('factory-fail', now)?.id).toBe('a')
+    const failed = await factoryMesh.dispatchCancel('factory-fail', 'asg_factory', { release: false })
+    expect(failed?.status).toBe('failed')
+    expect(JSON.stringify(failed)).not.toContain(SECRET)
+    expect(factoryMesh.hasTicketAssignment('factory-fail')).toBe(true)
+    expect(factoryMesh.inFlight('a')).toBe(1)
   })
 })
 

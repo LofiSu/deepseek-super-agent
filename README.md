@@ -172,7 +172,7 @@ For mid-task collaboration, the CLI exposes `pause`, `intervene`, `resume`, and 
 - **Approvals.** A Worker can call `request_approval` with an exact outward action instead of performing it. The ticket holds; the Router asks; `ds-agent approve` / `ds-agent deny` records the decision and resumes through the normal path. The model may request, never decide, and chat text is not consent. See [docs/APPROVALS.md](docs/APPROVALS.md).
 - **Routines.** `routines.json` schedules a prompt every N minutes, or once per UTC day at a chosen time and weekdays, on a chosen channel and thread. The daemon fires a missed slot once after a gap, not per missed interval. Routines pass through normal ingress and rules; the model cannot create or edit one. See [docs/ROUTINES.md](docs/ROUTINES.md).
 - **Skills.** An owner-authored `skills/<id>/SKILL.md` adds a playbook without a code change. The prompt carries only an id and description index (capped at 2000 characters); `read_skill` loads the body on demand. A skill cannot grant a tool or widen a role. See [docs/SKILLS.md](docs/SKILLS.md).
-- **Prompt stack.** Identity, owner voice, standing instructions, owner context, team, skills, reach, rules, memory guidance, style, and the role contract are assembled in dependency order. `PERSONA.md`, `AGENTS.md`, and `USER.md` in the agent home refine the editable layers. `ds-agent prompt --layers` shows every layer and its source. See [docs/PROMPTS.md](docs/PROMPTS.md).
+- **Prompt architecture.** One stable system prompt composed from 33 ordered sections, plus nine owner-written runtime files: `SOUL.md`, `IDENTITY.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, and `PROACTIVE_PREFERENCES.md`. `SOUL.md` is optional: a built-in default voice always renders. Core file sections always fit; optional ones are omitted whole under the 20,000-character budget, and each file is capped at 4,000 characters. `PERSONA.md` still loads as a deprecated soul fallback. `ds-agent prompt --layers` shows every section and its source. See [docs/PROMPTS.md](docs/PROMPTS.md).
 
 ### Channels
 
@@ -357,17 +357,21 @@ export DS_AGENT_MCP_SERVERS='[
   to `[]`, `env` to `{}`, and `timeoutMs` to `120000`.
 - Tools appear to Workers as `mcp__<server>__<tool>`. Text stays text;
   image/resource payloads are written to `<DS_AGENT_HOME>/mcp/<server>/` and
-  referenced by path; a result over 64 KB goes to spill and returns
-  `{ spillId, bytes, preview }`.
+  referenced by path. A result whose JSON text exceeds 65,536 characters
+  (UTF-16 code units) goes to spill and returns `{ spillId, bytes, preview }`;
+  `bytes` is the UTF-8 byte length of the spilled body.
 - The child process inherits only `PATH`, `HOME`, `LANG`, `TZ`, `HTTP_PROXY`,
-  `HTTPS_PROXY`, and `NO_PROXY`, plus the server's own `env`; the MCP SDK also
-  adds its own safe defaults (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`,
-  `USER`) from the host when it starts the transport. Put credentials in
-  `env`, not in your shell. Secret-named `env` values (for example
-  `KRENE_TOKEN`) join the redaction list like any other credential.
+  `HTTPS_PROXY`, and `NO_PROXY`, plus the server's own `env`. On non-Windows
+  hosts the MCP SDK also adds its own safe defaults (`HOME`, `LOGNAME`, `PATH`,
+  `SHELL`, `TERM`, `USER`); on Windows it additionally inherits variables such
+  as `APPDATA`, `USERPROFILE`, and `PROGRAMFILES`. Put credentials in `env`,
+  not in your shell. Secret-named `env` values of at least 8 characters (for
+  example `KRENE_TOKEN`) join the redaction list; shorter values are left as-is.
 - Unreadable configuration is logged as
-  `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` and ignored. A server that fails or
-  hangs while connecting increments `mcp.connect_error` and is omitted; the
+  `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` and ignored. A server whose
+  connection attempt rejects increments `mcp.connect_error` and is omitted. A
+  server still not connected when the shared listing deadline expires is
+  skipped with `reason=not-connected` and does not increment the counter. The
   runtime and the other servers keep working.
 
 `RuntimeOptions.mcpServers` accepts the same array when embedding the runtime.
@@ -458,7 +462,7 @@ Partial and owner-gated areas, stated plainly:
 | [docs/SKILLS.md](docs/SKILLS.md) | Owner-authored skills. |
 | [docs/ROUTINES.md](docs/ROUTINES.md) | Scheduled routines. |
 | [docs/APPROVALS.md](docs/APPROVALS.md) | Approval holds for outward actions. |
-| [docs/PROMPTS.md](docs/PROMPTS.md) | The layered system-prompt stack. |
+| [docs/PROMPTS.md](docs/PROMPTS.md) | The composed system prompt and runtime files. |
 | [docs/UI.md](docs/UI.md) | The read-only dashboard. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Roadmap and current gaps. |
 

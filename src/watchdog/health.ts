@@ -1,6 +1,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { readIsolationFromEnv, sandboxEnabledFromEnv } from '../env/seccomp.ts'
+import {
+  probeSandboxAvailability,
+  readIsolationFromEnv,
+  sandboxEnabledFromEnv,
+  type SandboxAvailabilityDiagnostic,
+} from '../env/seccomp.ts'
 import type { MachineRegistry } from '../harness/machines.ts'
 import type { Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
@@ -31,6 +36,11 @@ export interface HealthCapabilities {
   a2aTransport: 'in-process'
   /** Worker mesh placement is in-process; no network transport is wired. */
   meshTransport: 'in-process'
+  /**
+   * Host wrapper on PATH and strict-read policy flag — diagnostic only;
+   * never substitutes for `enforced`.
+   */
+  sandboxAvailability: SandboxAvailabilityDiagnostic
 }
 
 export interface HealthSnapshot {
@@ -81,6 +91,7 @@ function capabilityView(store: Store): HealthCapabilities {
     workerSandbox: { requested: requestedWorkerSandbox(), enforced: 'unknown' },
     a2aTransport: 'in-process',
     meshTransport: 'in-process',
+    sandboxAvailability: probeSandboxAvailability(process.env),
   }
 }
 
