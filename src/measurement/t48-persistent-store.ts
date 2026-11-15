@@ -42,6 +42,8 @@ export interface T48CorpusState {
   insertedSampleIndices: number[]
   firstInsertAt?: string
   lastInsertAt?: string
+  /** Receipt recorded with insertion before a report is available after a crash. */
+  inProgressRun?: { runId: string, insertedSampleIndex: number | null }
   /** Last fully measured sample, retained only to reconcile a crashed observer run. */
   completedRun?: { runId: string, report: T48IncrementalReport }
 }
@@ -154,6 +156,8 @@ export function runT48PersistentIncrementalStep(options: {
   now?: () => Date
   env?: NodeJS.ProcessEnv
   forceInsert?: boolean
+  /** Test-only fault point after durable insertion receipt, before report persistence. */
+  testFaultAfterInsertionReceipt?: boolean
 }): T48IncrementalStepResult {
   const env = options.env ?? process.env
   const wallClock = options.wallClockMeasurement
@@ -167,8 +171,11 @@ export function runT48PersistentIncrementalStep(options: {
       home: options.home,
     }
   }
+  const resumingRun = options.runId != null && prior?.inProgressRun?.runId === options.runId
   const inserted = new Set(prior?.insertedSampleIndices ?? [])
-  const nextIndex = T48_INCREMENTAL_SAMPLES.findIndex((_, i) => !inserted.has(i))
+  const nextIndex = resumingRun
+    ? -1
+    : T48_INCREMENTAL_SAMPLES.findIndex((_, i) => !inserted.has(i))
 
   let currentTime = wallClock ? new Date() : (options.now?.() ?? new Date())
   const clock = (): Date => currentTime
@@ -185,7 +192,9 @@ export function runT48PersistentIncrementalStep(options: {
       embeddingFloor: DEFAULT_EMBEDDING_FLOOR,
     })
 
-    let insertedThread: string | null = null
+    let insertedThread: string | null = resumingRun && prior?.inProgressRun?.insertedSampleIndex != null
+      ? T48_INCREMENTAL_SAMPLES[prior.inProgressRun.insertedSampleIndex]?.thread ?? null
+      : null
     if (nextIndex >= 0 && (options.forceInsert !== false)) {
       const doc = T48_INCREMENTAL_SAMPLES[nextIndex]!
       if (!wallClock) {
@@ -204,8 +213,12 @@ export function runT48PersistentIncrementalStep(options: {
         insertedSampleIndices: [...inserted].sort((a, b) => a - b),
         firstInsertAt: prior?.firstInsertAt ?? at.toISOString(),
         lastInsertAt: at.toISOString(),
+        inProgressRun: { runId, insertedSampleIndex: nextIndex },
       }
       writeCorpusState(state)
+      if (options.testFaultAfterInsertionReceipt) {
+        throw new Error('injected T48 fault after insertion receipt')
+      }
     }
 
     // Drive hot prune once entire corpus is present (wall-clock or synthetic path).
@@ -344,6 +357,7 @@ export function runT48PersistentIncrementalStep(options: {
       }
       const completedState: T48CorpusState = {
         ...state,
+        inProgressRun: undefined,
         completedRun: { runId, report },
       }
       writeCorpusState(completedState)

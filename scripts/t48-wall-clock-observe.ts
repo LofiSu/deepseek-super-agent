@@ -141,7 +141,7 @@ export function runT48WallClockObservation(options: {
   force?: boolean
   env?: NodeJS.ProcessEnv
   /** Test-only deterministic fault point for restart reconciliation coverage. */
-  testFaultAfter?: 'fixture' | 'journal'
+  testFaultAfter?: 'fixture' | 'fixture-receipt' | 'journal'
   now?: () => Date
   lockLeaseMs?: number
 }): { action: 'appended' | 'skipped', reason?: string, state: WallClockObservationState } {
@@ -187,6 +187,7 @@ export function runT48WallClockObservation(options: {
       wallClockMeasurement: true,
       env: options.env,
       runId,
+      testFaultAfterInsertionReceipt: options.testFaultAfter === 'fixture-receipt',
     })
     if (stepRunId !== runId) throw new Error('T48 fixture run id changed during observation')
     if (options.testFaultAfter === 'fixture') throw new Error('injected T48 fault after fixture')

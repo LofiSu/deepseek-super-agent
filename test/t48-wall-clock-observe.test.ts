@@ -181,6 +181,29 @@ describe('T48 wall-clock observation (persistent corpus, not month-scale accepta
     expect(readT48Journal(journal).map(entry => entry.runId)).toEqual([pending?.runId])
   })
 
+  it('reconciles an insertion-receipt crash without advancing to the next corpus sample', () => {
+    const home = tempHome()
+    const journal = path.join(home, 'after-insertion-receipt.jsonl')
+    expect(() => runT48WallClockObservation({
+      home,
+      journalPath: journal,
+      force: true,
+      testFaultAfter: 'fixture-receipt',
+    })).toThrow('injected T48 fault after insertion receipt')
+
+    const pending = readWallClockState(home)?.pending
+    const fixture = readCorpusState(resolveT48MeasurementHome(home))
+    expect(fixture?.inProgressRun?.runId).toBe(pending?.runId)
+    expect(fixture?.inProgressRun?.insertedSampleIndex).toBe(0)
+    expect(fixture?.completedRun).toBeUndefined()
+    expect(fixture?.insertedSampleIndices).toEqual([0])
+
+    const resumed = runT48WallClockObservation({ home, journalPath: journal, force: true })
+    expect(resumed.state.samples).toBe(1)
+    expect(readCorpusState(resolveT48MeasurementHome(home))?.insertedSampleIndices).toEqual([0])
+    expect(readT48Journal(journal).map(entry => entry.runId)).toEqual([pending?.runId])
+  })
+
   it('reconciles a crash after journal append without duplicating the journal row', () => {
     const home = tempHome()
     const journal = path.join(home, 'after-journal.jsonl')
