@@ -77,8 +77,8 @@ export class Engine {
   }
 
   /** Persist the Harness's logical mesh placement; the Engine owns the write. */
-  assignmentPlaced(ticketId: string, assignmentId: string, node: string): void {
-    this.host.repo.atomic(() => this.assignments.placed(ticketId, assignmentId, node))
+  assignmentPlaced(ticketId: string, assignmentId: string, node: string, remotePeerId?: string): void {
+    this.host.repo.atomic(() => this.assignments.placed(ticketId, assignmentId, node, remotePeerId))
   }
 
   report(ticketId: string, report: WorkerReport): ReportResult {

@@ -194,3 +194,55 @@ export function wrapBashCommand(
 export function sandboxEnabledFromEnv(_env: NodeJS.ProcessEnv = process.env): boolean {
   return true
 }
+
+/** Worker bash sandbox wrapper on PATH — not proof of kernel confinement. */
+export type SandboxWrapperAvailability = 'available' | 'unavailable' | 'unsupported'
+
+/**
+ * Secret-free host diagnostic for ops. Separate from `capabilities.*.enforced`,
+ * which stays `unknown` because health never runs worker bash.
+ */
+export interface SandboxAvailabilityDiagnostic {
+  /** `bwrap` on Linux or `sandbox-exec` on Darwin; missing wrapper is unavailable, not "isolation off". */
+  workerSandboxWrapper: SandboxWrapperAvailability
+  /**
+   * Env/policy signal: strict read argv or profile would be selected when wrapping.
+   * `unknown` when `DS_AGENT_SANDBOX_READ_ISOLATION` is invalid.
+   */
+  strictReadIsolationPolicy: 'on' | 'off' | 'unknown'
+}
+
+function sandboxWrapperPresent(system: SandboxSystem): boolean {
+  if (system.platform === 'darwin') return system.available('sandbox-exec')
+  if (system.platform === 'linux') return system.available('bwrap')
+  return false
+}
+
+/**
+ * Wrapper availability + policy flags for health/ops. Does not execute worker bash
+ * or read vault secrets; presence of bwrap must not be reported as enforcement.
+ */
+export function probeSandboxAvailability(
+  env: NodeJS.ProcessEnv = process.env,
+  system: SandboxSystem = {
+    platform: platform(),
+    available: bin => spawnSync('which', [bin], { stdio: 'ignore' }).status === 0,
+  },
+): SandboxAvailabilityDiagnostic {
+  let strictReadIsolationPolicy: 'on' | 'off' | 'unknown'
+  try {
+    strictReadIsolationPolicy = readIsolationFromEnv(env) ? 'on' : 'off'
+  } catch {
+    strictReadIsolationPolicy = 'unknown'
+  }
+
+  if (system.platform !== 'darwin' && system.platform !== 'linux') {
+    return { workerSandboxWrapper: 'unsupported', strictReadIsolationPolicy }
+  }
+
+  if (!sandboxWrapperPresent(system)) {
+    return { workerSandboxWrapper: 'unavailable', strictReadIsolationPolicy }
+  }
+
+  return { workerSandboxWrapper: 'available', strictReadIsolationPolicy }
+}

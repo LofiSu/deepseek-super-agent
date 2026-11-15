@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MachineRegistry } from '../src/harness/machines.ts'
+import { probeSandboxAvailability } from '../src/env/seccomp.ts'
 import { healthProbe, type CapabilityState } from '../src/watchdog/health.ts'
 import { LATEST_SCHEMA_VERSION } from '../src/store/schema.ts'
 import { Store } from '../src/store/sqlite.ts'
@@ -42,6 +43,7 @@ describe('health probe', () => {
       expect(LATEST_SCHEMA_VERSION).toBe(4)
       expect(result.capabilities.readIsolation).toEqual({ requested: 'off', enforced: 'unknown' })
       expect(result.capabilities.workerSandbox).toEqual({ requested: 'on', enforced: 'unknown' })
+      expect(result.capabilities.sandboxAvailability).toEqual(probeSandboxAvailability(process.env))
       expect(result.capabilities.a2aTransport).toBe('in-process')
       expect(result.capabilities.meshTransport).toBe('in-process')
       expect(JSON.stringify(result)).not.toContain('hidden-value')
@@ -88,6 +90,7 @@ describe('health probe', () => {
       }).not.toThrow()
       expect(result!.capabilities.readIsolation.requested).toBe(expected)
       expect(result!.capabilities.readIsolation.enforced).toBe('unknown')
+      expect(result!.capabilities.workerSandbox.enforced).toBe('unknown')
     } finally {
       store.close()
     }
@@ -124,6 +127,7 @@ describe('health probe', () => {
         'workerSandbox',
         'a2aTransport',
         'meshTransport',
+        'sandboxAvailability',
       ])
       expect(JSON.stringify(result)).not.toContain('"http"')
     } finally {
