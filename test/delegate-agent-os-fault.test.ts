@@ -60,6 +60,27 @@ async function waitForExit(child: ChildProcess): Promise<void> {
   await once(child, 'exit')
 }
 
+async function waitForStartedDelegateOperation(
+  home: string,
+  timeoutMs = 5_000,
+): Promise<ExternalOperationRecord> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const store = new Store(home)
+    try {
+      const operation = store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND).find(item =>
+        item.ticketId === 'ticket_delegate_os'
+        && item.kind === 'delegate_agent'
+        && item.phase === 'started')
+      if (operation) return operation
+    } finally {
+      store.close()
+    }
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error('timed out waiting for durable started delegate operation')
+}
+
 afterEach(() => {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
@@ -77,13 +98,16 @@ describe('delegate_agent OS fault boundary', () => {
           {
             id: 'ipc-hold',
             command: process.execPath,
-            args: ['test/fixtures/delegate-ipc-hold.mjs', '{task}'],
+            // Local specialists run in their Worker workspace, not the
+            // repository root. Keep this fixture path valid across that
+            // boundary so the effect remains in-flight until SIGKILL.
+            args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
             timeoutMs: 60_000,
           },
           {
             id: 'ipc-echo',
             command: process.execPath,
-            args: ['--import', 'tsx', 'test/helpers/delegate-agent-os-child.ts', '{task}'],
+            args: ['--import', 'tsx', path.resolve(process.cwd(), 'test/helpers/delegate-agent-os-child.ts'), '{task}'],
             timeoutMs: 30_000,
           },
         ],
@@ -95,22 +119,13 @@ describe('delegate_agent OS fault boundary', () => {
     expect(during.phase).toBe('delegating')
     expect(during.delegateActive).toBe(1)
 
-    // `activeCount` confirms the child specialist is live, but recovery only
-    // has an uncertain effect to preserve once the durable operation record
-    // exists. Assert that crash boundary explicitly before taking the process
-    // down, rather than relying on a timing delay after SIGKILL.
-    const beforeKillStore = new Store(home)
-    try {
-      const operations = beforeKillStore.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)
-      expect(operations).toHaveLength(1)
-      expect(operations[0]).toMatchObject({
-        ticketId: 'ticket_delegate_os',
-        kind: 'delegate_agent',
-        phase: 'started',
-      })
-    } finally {
-      beforeKillStore.close()
-    }
+    // The durable operation (rather than child activity alone) defines the
+    // crash boundary. Poll it with a bounded timeout before SIGKILL.
+    await expect(waitForStartedDelegateOperation(home)).resolves.toMatchObject({
+      ticketId: 'ticket_delegate_os',
+      kind: 'delegate_agent',
+      phase: 'started',
+    })
 
     first.kill('SIGKILL')
     await waitForExit(first)
