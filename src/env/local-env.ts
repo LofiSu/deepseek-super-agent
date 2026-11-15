@@ -5,6 +5,7 @@ import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import { UserError } from '../shared/errors.ts'
 import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
 import type { Vault } from './vault.ts'
+import { assertDevShellCommandAllowed } from './bash-policy.ts'
 import { readIsolationFromEnv, sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
 
 export interface LocalEnvOptions {
@@ -111,6 +112,7 @@ export class LocalEnv implements EnvPort {
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     const isolated = opts?.isolated === true
     if (!command.trim()) throw new UserError('empty command')
+    if (!isolated) assertDevShellCommandAllowed(command)
     if (isolated && leavesWorkdir(command)) {
       throw new UserError('speculative command leaves the isolated workdir')
     }
@@ -227,7 +229,7 @@ export class LocalEnv implements EnvPort {
     }
   }
 
-  private shellEnv(cwd: string, isolated: boolean): NodeJS.ProcessEnv {
+  private shellEnv(cwd: string, _isolated: boolean): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...this.childEnv }
     // Startup files can leak host state into a sandboxed shell and pollute stderr.
     delete env.BASH_ENV
@@ -235,9 +237,18 @@ export class LocalEnv implements EnvPort {
     if (this.vault && this.vaultNames.length > 0) {
       Object.assign(env, this.vault.resolveForChild(this.vaultNames))
     }
-    if (isolated) {
+    {
+      const tmp = path.join(cwd, 'tmp')
+      fs.mkdirSync(tmp, { recursive: true, mode: 0o700 })
       env.HOME = cwd
-      env.TMPDIR = cwd
+      env.TMPDIR = tmp
+      env.TMP = tmp
+      env.TEMP = tmp
+      env.XDG_CONFIG_HOME = path.join(cwd, '.config')
+      env.GH_CONFIG_DIR = path.join(cwd, '.config', 'gh')
+      fs.mkdirSync(env.XDG_CONFIG_HOME, { recursive: true, mode: 0o700 })
+      const sshConfig = path.join(cwd, '.ssh', 'config')
+      env.GIT_SSH_COMMAND = `ssh -o IdentitiesOnly=yes -o AddKeysToAgent=no -F ${JSON.stringify(sshConfig)}`
     }
     return env
   }
