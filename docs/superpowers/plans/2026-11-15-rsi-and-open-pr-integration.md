@@ -154,8 +154,8 @@
 - Produces: resumable pagination state and wake ledger entries committed after ingress.
 
 - [ ] Add a backlog-over-limit test and an ingress failure/retry test.
-- [ ] Persist a continuation token or high-water cursor only after fully enumerating the eligible range.
-- [ ] Persist wake state after idempotent ingress success and retry failures.
+- [ ] Persist the continuation token or high-water cursor after each page only when every event on that page has committed through idempotent ingress, so a bounded wake resumes at the first uncommitted page.
+- [ ] Persist wake state after idempotent ingress success, retaining the previous page cursor for retryable failures.
 - [ ] Rebase and repair `#174` after `#170` merges, then request re-review.
 
 ### Task 10: Review and Integrate PR #175
