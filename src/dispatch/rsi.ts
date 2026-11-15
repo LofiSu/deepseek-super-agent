@@ -181,6 +181,26 @@ function recordResearchCache(
   store.putDoc(RSI_RESEARCH_CACHE_KIND, id, { host, ...payload })
 }
 
+function normalizeUrlForResearchCache(url: string): string {
+  try {
+    const u = new URL(url)
+    u.hash = ''
+    return u.toString()
+  } catch {
+    return url.trim()
+  }
+}
+
+function recordSourceUrlResearchCache(
+  store: Store,
+  url: string,
+  payload: { ok: true; body: string; fetchedAt: string; url: string } | { ok: false; error: string; at: string; url: string },
+): void {
+  const normalized = normalizeUrlForResearchCache(url)
+  const id = `url:${normalized}`
+  store.putDoc(RSI_RESEARCH_CACHE_KIND, id, { ...payload, url: normalized })
+}
+
 /**
  * Parse docs/INSTINCT_CAPABILITIES.md rows with status `missing`.
  */
@@ -349,13 +369,23 @@ export async function runRsiSchedulerTick(
   for (const src of config.rsi.sourceUrls) {
     if (src.startsWith('file://')) continue
     try {
-      if (deps.fetchPage) {
-        await deps.fetchPage(src)
-      } else {
-        await trustedFetch(src, { allowHosts: config.rsi.fetchAllowlist })
-      }
+      const fetched = deps.fetchPage
+        ? { ...(await deps.fetchPage(src)), url: src }
+        : await trustedFetch(src, { allowHosts: config.rsi.fetchAllowlist })
+      recordSourceUrlResearchCache(store, src, {
+        ok: true,
+        body: fetched.body.slice(0, 32_000),
+        fetchedAt: fetched.fetchedAt,
+        url: fetched.url,
+      })
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
+      recordSourceUrlResearchCache(store, src, {
+        ok: false,
+        error: msg,
+        at: new Date().toISOString(),
+        url: normalizeUrlForResearchCache(src),
+      })
       log(`[rsi] sourceUrl fetch recorded failure ${src}: ${msg}`)
     }
   }

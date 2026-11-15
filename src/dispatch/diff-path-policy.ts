@@ -22,6 +22,13 @@ const FORBIDDEN_PATH_RULES: readonly { re: RegExp; reason: string }[] = [
   { re: /^\.github\//, reason: 'github workflows' },
   { re: /memory-recall-eval\.test\.ts$/, reason: 'eval thresholds' },
   { re: /^src\/dispatch\/(implementer|job-runner|diff-path-policy|holdout)\.ts$/, reason: 'dispatch publish path' },
+  { re: /^src\/dispatch\/rsi\.ts$/, reason: 'RSI scheduler' },
+  { re: /^src\/dispatch\/trusted-fetch\.ts$/, reason: 'trusted fetch' },
+  { re: /^src\/dispatch\/queue\.ts$/, reason: 'dispatch queue' },
+  { re: /^src\/dispatch\/serve-loop\.ts$/, reason: 'serve loop' },
+  { re: /^src\/dispatch\/github-poll\.ts$/, reason: 'github poll' },
+  { re: /^src\/dispatch\/github-peanut\.ts$/, reason: 'github peanut' },
+  { re: /^src\/cli\/dispatch-integration\.ts$/, reason: 'dispatch integration' },
 ]
 
 const RSI_EXTRA_FORBIDDEN: readonly { re: RegExp; reason: string }[] = [
@@ -29,8 +36,8 @@ const RSI_EXTRA_FORBIDDEN: readonly { re: RegExp; reason: string }[] = [
   { re: /^pnpm-lock\.yaml$/, reason: 'lockfile' },
 ]
 
-export function changedPathsSinceRef(workspace: string, baseHead: string): string[] {
-  const r = spawnSync('git', ['diff', '--name-only', baseHead], {
+function gitNameOnlyLines(workspace: string, args: readonly string[]): string[] {
+  const r = spawnSync('git', [...args], {
     cwd: workspace,
     encoding: 'utf8',
     env: GIT_LOCAL_ENV,
@@ -42,6 +49,18 @@ export function changedPathsSinceRef(workspace: string, baseHead: string): strin
     .split(/\r?\n/)
     .map(s => s.trim())
     .filter(Boolean)
+}
+
+/** Paths that differ from baseline (commits, staged, and working tree). */
+export function changedPathsSinceRef(workspace: string, baseHead: string): string[] {
+  const names = new Set<string>()
+  for (const rel of gitNameOnlyLines(workspace, ['diff', '--name-only', baseHead])) {
+    names.add(rel)
+  }
+  for (const rel of gitNameOnlyLines(workspace, ['diff', '--cached', '--name-only', baseHead])) {
+    names.add(rel)
+  }
+  return [...names]
 }
 
 function matchForbidden(rel: string, rules: readonly { re: RegExp; reason: string }[]): string | undefined {

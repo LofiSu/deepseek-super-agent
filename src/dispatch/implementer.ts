@@ -261,6 +261,7 @@ async function runIsolatedImplementPublish(
     await input.runImplement(workspace)
 
     holdout(workspace, 'publish', baseHead)
+    spawnSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore', env: GIT_LOCAL_ENV })
     assertImplementerDiffPolicy(workspace, baseHead, input.mode)
 
     const dirty = await workspaceHasPublishableChanges(workspace, baseHead)

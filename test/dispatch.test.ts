@@ -554,6 +554,38 @@ describe('implementer diff path policy', () => {
     execSync('git add package.json && git commit -m dep', { cwd: ws })
     expect(() => assertImplementerDiffPolicy(ws, base, 'rsi_implement')).toThrow(/dependency|lockfile/i)
   })
+
+  it('refuses untracked forbidden workflow after git add (staged new path)', async () => {
+    const { assertImplementerDiffPolicy } = await import('../src/dispatch/diff-path-policy.ts')
+    const root = tempHome()
+    const ws = path.join(root, 'ws')
+    fs.mkdirSync(ws)
+    execSync('git init -b main', { cwd: ws, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: ws })
+    fs.writeFileSync(path.join(ws, 'x.txt'), '1\n')
+    execSync('git add x.txt && git commit -m seed', { cwd: ws })
+    const base = execSync('git rev-parse HEAD', { cwd: ws, encoding: 'utf8' }).trim()
+    fs.mkdirSync(path.join(ws, '.github/workflows'), { recursive: true })
+    fs.writeFileSync(path.join(ws, '.github/workflows/x.yml'), 'name: evil\n')
+    execSync('git add -A', { cwd: ws, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    expect(() => assertImplementerDiffPolicy(ws, base, 'github_fix')).toThrow(/github workflows|forbidden/i)
+  })
+
+  it('refuses RSI edits to scheduler modules', async () => {
+    const { assertImplementerDiffPolicy } = await import('../src/dispatch/diff-path-policy.ts')
+    const root = tempHome()
+    const ws = path.join(root, 'ws')
+    fs.mkdirSync(ws)
+    execSync('git init -b main', { cwd: ws, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: ws })
+    fs.mkdirSync(path.join(ws, 'src/dispatch'), { recursive: true })
+    fs.writeFileSync(path.join(ws, 'src/dispatch/queue.ts'), 'export const q = 1\n')
+    execSync('git add -A && git commit -m seed', { cwd: ws })
+    const base = execSync('git rev-parse HEAD', { cwd: ws, encoding: 'utf8' }).trim()
+    fs.writeFileSync(path.join(ws, 'src/dispatch/queue.ts'), 'export const q = 2\n')
+    execSync('git add -A', { cwd: ws, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    expect(() => assertImplementerDiffPolicy(ws, base, 'rsi_implement')).toThrow(/dispatch queue|forbidden/i)
+  })
 })
 
 describe('trusted-fetch redirects', () => {
@@ -759,6 +791,42 @@ describe('RSI gap pool', () => {
     expect(impl).toHaveLength(0)
     const cache = store.getDoc(RSI_RESEARCH_CACHE_KIND, 'host:docs.github.com')
     expect(cache).toBeTruthy()
+    store.close()
+  })
+
+  it('records rsi.sourceUrls fetch success and failure in research cache', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    const src = 'https://docs.github.com/en/actions'
+    dispatchConfig(home, {
+      rsi: {
+        enabled: true,
+        intervalMs: 0,
+        sourceUrls: [src, 'https://docs.github.com/bad-path'],
+      },
+    })
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    cfg.rsi.intervalMs = 0
+    let call = 0
+    const tick = await runRsiSchedulerTick(store, cfg, p => store.nextId(p), {
+      fetchPage: async url => {
+        call += 1
+        if (url === src) {
+          return { body: 'actions-doc', fetchedAt: '2026-11-15T13:00:00Z' }
+        }
+        throw new Error('simulated 404')
+      },
+      repoRoot: home,
+    })
+    expect(tick.idle).toBe(true)
+    expect(call).toBeGreaterThanOrEqual(2)
+    const okCache = store.getDoc(RSI_RESEARCH_CACHE_KIND, `url:${src}`)
+    expect(okCache).toMatchObject({ ok: true, body: 'actions-doc', url: src })
+    const failCache = store.getDoc(
+      RSI_RESEARCH_CACHE_KIND,
+      'url:https://docs.github.com/bad-path',
+    )
+    expect(failCache).toMatchObject({ ok: false, error: 'simulated 404' })
     store.close()
   })
 })
