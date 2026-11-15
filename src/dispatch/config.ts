@@ -32,6 +32,8 @@ export interface RsiConfig {
   enabled: boolean
   intervalMs: number
   fetchAllowlist: string[]
+  /** Explicit structured source URLs (HTTPS allowlisted or file:// under repo). */
+  sourceUrls: string[]
   /** Product label whose meaning is unknown — recorded as unknown, not invented. */
   manusCueLabel: 'unknown'
 }
@@ -47,6 +49,10 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000
 export const MIN_POLL_INTERVAL_MS = 15_000
 export const DEFAULT_RSI_INTERVAL_MS = 6 * 60 * 60 * 1000
 export const MIN_RSI_INTERVAL_MS = 30 * 60 * 1000
+
+export const DEFAULT_RSI_SOURCE_URLS = [
+  'https://docs.github.com/en',
+] as const
 
 const DEFAULT_FETCH_ALLOWLIST = [
   'instinct.com',
@@ -75,6 +81,14 @@ function normalizeAllowlist(raw: unknown): string[] {
   return raw
     .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
     .map(v => v.trim().toLowerCase())
+}
+
+function normalizeSourceUrls(raw: unknown): string[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [...DEFAULT_RSI_SOURCE_URLS]
+  const out = raw
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    .map(v => v.trim())
+  return out.length > 0 ? out : [...DEFAULT_RSI_SOURCE_URLS]
 }
 
 async function authenticatedGhLogin(gh: GhRun): Promise<string> {
@@ -193,6 +207,7 @@ export async function loadDispatchOwnerConfig(
       enabled: rsiEnabled,
       intervalMs: rsiIntervalMs,
       fetchAllowlist: normalizeAllowlist(rsiBlock.fetchAllowlist ?? root.fetchAllowlist),
+      sourceUrls: normalizeSourceUrls(rsiBlock.sourceUrls ?? root.rsiSourceUrls),
       manusCueLabel: 'unknown',
     },
   }
@@ -245,6 +260,7 @@ export function loadDispatchOwnerConfigSync(home: string): DispatchOwnerConfig |
       enabled: rsiEnabled,
       intervalMs: Math.max(MIN_RSI_INTERVAL_MS, Number(rsiBlock.intervalMs) || DEFAULT_RSI_INTERVAL_MS),
       fetchAllowlist: normalizeAllowlist(rsiBlock.fetchAllowlist),
+      sourceUrls: normalizeSourceUrls(rsiBlock.sourceUrls),
       manusCueLabel: 'unknown',
     },
   }

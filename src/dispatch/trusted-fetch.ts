@@ -6,7 +6,10 @@ export interface TrustedFetchOptions {
   allowHosts: readonly string[]
   fetchImpl?: typeof fetch
   maxBytes?: number
+  maxRedirects?: number
 }
+
+const DEFAULT_MAX_REDIRECTS = 3
 
 function ipv4ToNum(ip: string): number | undefined {
   const parts = ip.split('.')
@@ -86,6 +89,15 @@ async function assertResolvesPublic(hostname: string): Promise<void> {
   }
 }
 
+async function validateRequestUrl(url: URL, allowHosts: readonly string[]): Promise<void> {
+  if (url.protocol !== 'https:') throw new UserError('trusted-fetch: only https:// allowed')
+  const host = normalizeHostname(url.hostname)
+  if (!hostAllowed(host, allowHosts)) {
+    throw new UserError(`trusted-fetch: host ${url.hostname} not in allowlist`)
+  }
+  await assertResolvesPublic(host)
+}
+
 /**
  * Host-side HTTPS fetch with SSRF protections. Not exposed to sandboxed bash.
  */
@@ -100,26 +112,38 @@ export async function trustedFetch(
     throw new UserError('trusted-fetch: invalid URL')
   }
   if (url.protocol === 'file:') throw new UserError('trusted-fetch: file:// refused')
-  if (url.protocol !== 'https:') throw new UserError('trusted-fetch: only https:// allowed')
-  const host = normalizeHostname(url.hostname)
-  if (!hostAllowed(host, options.allowHosts)) {
-    throw new UserError(`trusted-fetch: host ${url.hostname} not in allowlist`)
-  }
-  await assertResolvesPublic(host)
 
   const fetchImpl = options.fetchImpl ?? fetch
-  const res = await fetchImpl(url.toString(), {
-    method: 'GET',
-    redirect: 'manual',
-    signal: AbortSignal.timeout(30_000),
-  })
-  if (res.status >= 300 && res.status < 400) {
-    throw new UserError('trusted-fetch: redirects refused')
+  const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS
+  let current = url.toString()
+  let hops = 0
+
+  while (true) {
+    const parsed = new URL(current)
+    await validateRequestUrl(parsed, options.allowHosts)
+
+    const res = await fetchImpl(parsed.toString(), {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
+    })
+
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location')
+      if (!loc) throw new UserError('trusted-fetch: redirect without Location')
+      if (hops >= maxRedirects) throw new UserError('trusted-fetch: too many redirects')
+      hops += 1
+      const next = new URL(loc, parsed)
+      if (next.protocol !== 'https:') throw new UserError('trusted-fetch: redirect must stay on https')
+      current = next.toString()
+      continue
+    }
+
+    if (!res.ok) throw new UserError(`trusted-fetch: HTTP ${res.status}`)
+    const buf = Buffer.from(await res.arrayBuffer())
+    const max = options.maxBytes ?? 512_000
+    const body = buf.slice(0, max).toString('utf8')
+    return { url: parsed.toString(), body, fetchedAt: new Date().toISOString() }
   }
-  if (!res.ok) throw new UserError(`trusted-fetch: HTTP ${res.status}`)
-  const buf = Buffer.from(await res.arrayBuffer())
-  const max = options.maxBytes ?? 512_000
-  const body = buf.slice(0, max).toString('utf8')
-  return { url: url.toString(), body, fetchedAt: new Date().toISOString() }
 }
 

@@ -484,7 +484,7 @@ describe('claude implementer fixture', () => {
       },
       gh,
       pushRemote: bare,
-      baselineTests: () => undefined,
+      holdout: () => undefined,
       runCoder: async ({ workspace }) => {
         fs.writeFileSync(path.join(workspace, 'fix.txt'), 'applied\n')
       },
@@ -517,6 +517,82 @@ describe('webhook verify', () => {
   it('returns false when secret is empty', () => {
     expect(verifyGithubWebhookSignature256('body', 'sha256=abc', '')).toBe(false)
     expect(verifyGithubWebhookSignature256('body', 'sha256=abc', '   ')).toBe(false)
+  })
+})
+
+describe('implementer diff path policy', () => {
+  it('refuses forbidden admission path on publish', async () => {
+    const { assertImplementerDiffPolicy } = await import('../src/dispatch/diff-path-policy.ts')
+    const root = tempHome()
+    const ws = path.join(root, 'ws')
+    fs.mkdirSync(ws)
+    execSync('git init -b main', { cwd: ws, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: ws })
+    fs.writeFileSync(path.join(ws, 'x.txt'), '1\n')
+    execSync('git add x.txt && git commit -m seed', { cwd: ws })
+    const base = execSync('git rev-parse HEAD', { cwd: ws, encoding: 'utf8' }).trim()
+    fs.mkdirSync(path.join(ws, 'src/dispatch'), { recursive: true })
+    fs.writeFileSync(path.join(ws, 'src/dispatch/admission.ts'), 'export const x = 1\n')
+    execSync('git add -A && git commit -m bad', { cwd: ws })
+    expect(() => assertImplementerDiffPolicy(ws, base, 'github_fix')).toThrow(/forbidden/i)
+  })
+
+  it('refuses RSI lockfile and docs-only diffs', async () => {
+    const { assertImplementerDiffPolicy } = await import('../src/dispatch/diff-path-policy.ts')
+    const root = tempHome()
+    const ws = path.join(root, 'ws')
+    fs.mkdirSync(ws)
+    execSync('git init -b main', { cwd: ws, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: ws })
+    fs.writeFileSync(path.join(ws, 'note.md'), '1\n')
+    execSync('git add note.md && git commit -m seed', { cwd: ws })
+    const base = execSync('git rev-parse HEAD', { cwd: ws, encoding: 'utf8' }).trim()
+    fs.writeFileSync(path.join(ws, 'note.md'), '2\n')
+    expect(() => assertImplementerDiffPolicy(ws, base, 'rsi_implement')).toThrow(/docs\/prompts/i)
+    execSync('git checkout -- note.md', { cwd: ws })
+    fs.writeFileSync(path.join(ws, 'package.json'), '{}\n')
+    execSync('git add package.json && git commit -m dep', { cwd: ws })
+    expect(() => assertImplementerDiffPolicy(ws, base, 'rsi_implement')).toThrow(/dependency|lockfile/i)
+  })
+})
+
+describe('trusted-fetch redirects', () => {
+  it('follows allowlisted https redirect and returns body', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        new Response('', { status: 302, headers: { Location: 'https://example.com/final' } }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }))
+    const out = await trustedFetch('https://example.com/start', {
+      allowHosts: ['example.com'],
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+    expect(out.body).toBe('ok')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses redirect to private host', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(
+      new Response('', { status: 302, headers: { Location: 'https://127.0.0.1/x' } }),
+    )
+    await expect(
+      trustedFetch('https://example.com/', {
+        allowHosts: ['example.com', '127.0.0.1'],
+        fetchImpl: fetchImpl as typeof fetch,
+      }),
+    ).rejects.toThrow(/private|allowlist/i)
+  })
+
+  it('refuses redirect to host outside allowlist', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(
+      new Response('', { status: 302, headers: { Location: 'https://evil.example/xx' } }),
+    )
+    await expect(
+      trustedFetch('https://example.com/', {
+        allowHosts: ['example.com'],
+        fetchImpl: fetchImpl as typeof fetch,
+      }),
+    ).rejects.toThrow(/allowlist/i)
   })
 })
 
@@ -621,6 +697,53 @@ describe('RSI gap pool', () => {
     store.close()
   })
 
+  it('rsi_proposal job does not invoke implementer hooks', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    const rsiImpl = vi.fn()
+    const runner = createJobRunner({
+      rsiImplement: rsiImpl as never,
+    })
+    store.putDoc('dispatch_job', 'prop', {
+      id: 'prop',
+      type: 'rsi_proposal',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: 'gap-x',
+      gapId: 'gap-x',
+    } satisfies DispatchJobDoc)
+    await drainDispatchQueue({ store, runner })
+    expect(rsiImpl).not.toHaveBeenCalled()
+    expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'prop')?.status).toBe('completed')
+    store.close()
+  })
+
+  it('low-risk gap with acceptance enqueues rsi_implement once', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    cfg.rsi.intervalMs = 0
+    const gap = ingestGap(store, {
+      title: 'Small helper export',
+      description: 'Add typed export',
+      acceptance: 'test/foo.test.ts passes in offline holdout.',
+      sourceUrl: 'file://docs/x.md',
+      fetchedAt: '2026-11-15T00:00:00Z',
+      dedupeKey: 'low-1',
+    }, p => store.nextId(p))!
+    expect(gap.risk).toBe('low')
+    const tick = await runRsiSchedulerTick(store, cfg, p => store.nextId(p), {
+      fetchPage: async () => ({ body: 'ok', fetchedAt: '2026-11-15T12:00:00Z' }),
+      hasOpenPeanutPr: async () => false,
+      repoRoot: home,
+    })
+    expect(tick.idle).toBe(false)
+    const impl = store.listDocs<DispatchJobDoc>('dispatch_job').filter(j => j.type === 'rsi_implement')
+    expect(impl).toHaveLength(1)
+    store.close()
+  })
+
   it('homepage snapshot fetch does not enqueue rsi_implement', async () => {
     const home = tempHome()
     const store = new Store(home)
@@ -636,6 +759,197 @@ describe('RSI gap pool', () => {
     expect(impl).toHaveLength(0)
     const cache = store.getDoc(RSI_RESEARCH_CACHE_KIND, 'host:docs.github.com')
     expect(cache).toBeTruthy()
+    store.close()
+  })
+})
+
+describe('rsi implementer fixture', () => {
+  it('isolated implement publishes peanut PR with source and acceptance', async () => {
+    const root = tempHome()
+    const bare = path.join(root, 'remote.git')
+    execSync(`git init --bare -b main ${JSON.stringify(bare)}`, { stdio: 'ignore' })
+    const origin = path.join(root, 'origin')
+    fs.mkdirSync(origin)
+    execSync('git init -b main', { cwd: origin, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: origin })
+    fs.writeFileSync(path.join(origin, 'package.json'), JSON.stringify({
+      name: 't',
+      scripts: { typecheck: 'exit 0', test: 'exit 0' },
+    }) + '\n')
+    execSync('git add -A && git commit -m seed', { cwd: origin })
+    execSync(`git remote add origin ${JSON.stringify(bare)}`, { cwd: origin })
+    execSync('git push -u origin main', { cwd: origin, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+
+    let prBody = ''
+    const gh = vi.fn(async (args: string[]) => {
+      if (args[1] === 'create') {
+        const i = args.indexOf('--body')
+        if (i >= 0) prBody = args[i + 1] ?? ''
+      }
+      if (args[1] === 'list') return '[]'
+      if (args[1] === 'create') return 'https://github.com/o/r/pull/11\n'
+      if (args[1] === 'view') return JSON.stringify({ number: 11, url: 'https://github.com/o/r/pull/11' })
+      return ''
+    })
+
+    const runner = createClaudeDispatchJobRunner({
+      github: {
+        enabled: true,
+        repo: REPO,
+        authorizedActors: ['LofiSu'],
+        pollIntervalMs: 60_000,
+        sourceRepo: origin,
+        implementer: 'claude',
+      },
+      gh,
+      pushRemote: bare,
+      holdout: () => undefined,
+      runRsiCoder: async ({ workspace }) => {
+        fs.writeFileSync(path.join(workspace, 'rsi-fix.txt'), 'gap\n')
+      },
+    })
+
+    const home = tempHome()
+    const store = new Store(home)
+    const gap: DispatchGapDoc = {
+      id: 'gap_low',
+      title: 'Helper tweak',
+      description: 'd',
+      acceptance: 'Unit tests pass.',
+      risk: 'low',
+      priority: 10,
+      sourceUrl: 'file://docs/INSTINCT_CAPABILITIES.md',
+      fetchedAt: '2026-11-16T00:00:00Z',
+      manusCue: 'unknown',
+      status: 'open',
+      dedupeKey: 'k-low',
+    }
+    store.putDoc('dispatch_gap', gap.id, gap)
+    store.putDoc('dispatch_job', 'rsi-1', {
+      id: 'rsi-1',
+      type: 'rsi_implement',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: 'gap-impl-gap_low',
+      gapId: gap.id,
+    } satisfies DispatchJobDoc)
+    await drainDispatchQueue({ store, runner })
+    expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'rsi-1')?.status).toBe('completed')
+    expect(prBody).toContain('sourceUrl')
+    expect(prBody).toContain(gap.acceptance)
+    expect(prBody).toMatch(/manusCue.*unknown/i)
+    store.close()
+  })
+
+  it('holdout failure leaves job failed without publish', async () => {
+    const root = tempHome()
+    const origin = path.join(root, 'origin')
+    fs.mkdirSync(origin)
+    execSync('git init -b main', { cwd: origin, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: origin })
+    fs.writeFileSync(path.join(origin, 'package.json'), '{"name":"t"}\n')
+    execSync('git add -A && git commit -m seed', { cwd: origin })
+
+    const gh = vi.fn()
+    const runner = createClaudeDispatchJobRunner({
+      github: {
+        enabled: true,
+        repo: REPO,
+        authorizedActors: ['LofiSu'],
+        pollIntervalMs: 60_000,
+        sourceRepo: origin,
+      },
+      gh,
+      holdout: (_w, label) => {
+        if (label === 'publish') throw new Error('holdout failed')
+      },
+      runRsiCoder: async ({ workspace }) => {
+        fs.writeFileSync(path.join(workspace, 'x'), 'y\n')
+      },
+    })
+
+    const home = tempHome()
+    const store = new Store(home)
+    store.putDoc('dispatch_gap', 'gap_fail', {
+      id: 'gap_fail',
+      title: 't',
+      description: 'd',
+      acceptance: 'tests pass',
+      risk: 'low',
+      priority: 10,
+      sourceUrl: 'file://x',
+      fetchedAt: '2026-11-16T00:00:00Z',
+      manusCue: 'unknown',
+      status: 'open',
+      dedupeKey: 'kf',
+    } satisfies DispatchGapDoc)
+    store.putDoc('dispatch_job', 'j-fail', {
+      id: 'j-fail',
+      type: 'rsi_implement',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: 'c',
+      gapId: 'gap_fail',
+    } satisfies DispatchJobDoc)
+    await drainDispatchQueue({ store, runner })
+    expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'j-fail')?.status).toBe('failed')
+    expect(gh).not.toHaveBeenCalled()
+    store.close()
+  })
+
+  it('forbidden path edit refuses publish', async () => {
+    const root = tempHome()
+    const origin = path.join(root, 'origin')
+    fs.mkdirSync(origin)
+    execSync('git init -b main', { cwd: origin, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: origin })
+    fs.mkdirSync(path.join(origin, 'src/dispatch'), { recursive: true })
+    fs.writeFileSync(path.join(origin, 'src/dispatch/admission.ts'), 'export const ok = true\n')
+    fs.writeFileSync(path.join(origin, 'package.json'), '{"name":"t"}\n')
+    execSync('git add -A && git commit -m seed', { cwd: origin })
+
+    const gh = vi.fn()
+    const runner = createClaudeDispatchJobRunner({
+      github: {
+        enabled: true,
+        repo: REPO,
+        authorizedActors: ['LofiSu'],
+        pollIntervalMs: 60_000,
+        sourceRepo: origin,
+      },
+      gh,
+      holdout: () => undefined,
+      runRsiCoder: async ({ workspace }) => {
+        fs.writeFileSync(path.join(workspace, 'src/dispatch/admission.ts'), 'export const ok = false\n')
+      },
+    })
+
+    const home = tempHome()
+    const store = new Store(home)
+    store.putDoc('dispatch_gap', 'g2', {
+      id: 'g2',
+      title: 't',
+      description: 'd',
+      acceptance: 'a',
+      risk: 'low',
+      priority: 10,
+      sourceUrl: 'file://x',
+      fetchedAt: '2026-11-16T00:00:00Z',
+      manusCue: 'unknown',
+      status: 'open',
+      dedupeKey: 'k2',
+    } satisfies DispatchGapDoc)
+    store.putDoc('dispatch_job', 'j2', {
+      id: 'j2',
+      type: 'rsi_implement',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: 'c2',
+      gapId: 'g2',
+    } satisfies DispatchJobDoc)
+    await drainDispatchQueue({ store, runner })
+    expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'j2')?.status).toBe('failed')
+    expect(gh).not.toHaveBeenCalled()
     store.close()
   })
 })

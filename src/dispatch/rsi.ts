@@ -18,23 +18,27 @@ import {
 export const RSI_RESEARCH_CACHE_KIND = 'rsi_research_cache'
 
 const HIGH_RISK_PATTERNS = [
-  /publish\s+policy/i,
-  /branch\s+protection/i,
-  /vault|seccomp|bwrap/i,
-  /admission|trust\s+policy/i,
-  /sandbox|network\s+policy/i,
+  /environment-blocked/i,
+  /WhatsApp|SMS\b|email\s+inbound|PSTN|\bphone\b|SIP\b/i,
+  /credential|vault|payment|merchant/i,
+  /publish\s+policy|branch\s+protection/i,
+  /admission|trust\s+policy|authorizedActors|authorized\s+actors|mentionHandles/i,
+  /sandbox|network\s+policy|seccomp|bwrap/i,
   /force\s+push|merge\s+to\s+main/i,
-  /eval\s+threshold/i,
-  /authorizedActors|authorized\s+actors/i,
-  /credential|secret/i,
+  /eval\s+threshold|memory-recall-eval/i,
   /webhook\s+signature/i,
-  /FeaturePrPublisher|publish\s+intermediary/i,
+  /FeaturePrPublisher|publish\s+intermediary|GithubOutbox/i,
+  /Google\s+Workspace|\bOAuth\b|Gmail\s+connector/i,
+  /cloud\s+browser|\bE2B\b/i,
+  /unverified\s+third[- ]party\s+identity/i,
+  /public\s+mesh|A2A\s+listener|mesh\s+peer/i,
 ] as const
 
 const BUSYWORK_TITLE = /^research snapshot:/i
+const AUTO_STUB_ACCEPTANCE = /add\s+(a\s+)?stub\s+test|auto-generated/i
 
-export function classifyGapRisk(title: string, description: string): 'low' | 'high' {
-  const blob = `${title}\n${description}`
+export function classifyGapRisk(title: string, description: string, notes = ''): 'low' | 'high' {
+  const blob = `${title}\n${description}\n${notes}`
   return HIGH_RISK_PATTERNS.some(re => re.test(blob)) ? 'high' : 'low'
 }
 
@@ -42,6 +46,7 @@ export function isImplementableLowRiskGap(gap: DispatchGapDoc): boolean {
   if (gap.risk !== 'low' || gap.status !== 'open') return false
   if (BUSYWORK_TITLE.test(gap.title)) return false
   if (!gap.acceptance?.trim()) return false
+  if (AUTO_STUB_ACCEPTANCE.test(gap.acceptance)) return false
   return true
 }
 
@@ -65,7 +70,7 @@ export function ingestGap(
 
   if (!input.acceptance?.trim()) return undefined
 
-  const risk = classifyGapRisk(input.title, input.description)
+  const risk = classifyGapRisk(input.title, input.description, input.acceptance)
   const gap: DispatchGapDoc = {
     id: nextId('gap'),
     title: input.title,
@@ -94,6 +99,79 @@ export function ingestGap(
   return gap
 }
 
+function upsertStructuredGap(
+  store: Store,
+  draft: Omit<DispatchGapDoc, 'id'> & { dedupeKey: string },
+  nextId: (prefix: string) => string,
+): DispatchGapDoc | undefined {
+  const existing = findGapByDedupe(store, draft.dedupeKey)
+  if (existing) {
+    if (existing.status === 'implemented' || existing.status === 'dismissed') return existing
+    const merged: DispatchGapDoc = {
+      ...existing,
+      title: draft.title,
+      description: draft.description,
+      acceptance: draft.acceptance,
+      risk: draft.risk,
+      priority: draft.priority,
+      sourceUrl: draft.sourceUrl,
+      fetchedAt: draft.fetchedAt,
+      status: draft.status,
+    }
+    putGap(store, merged)
+    return merged
+  }
+
+  const gap: DispatchGapDoc = { ...draft, id: nextId('gap') }
+  putGap(store, gap)
+  if (gap.risk === 'high' && gap.status === 'proposal') {
+    const hasProposalJob = store.listDocs<DispatchJobDoc>(DISPATCH_JOB_KIND)
+      .some(j => j.type === 'rsi_proposal' && j.gapId === gap.id)
+    if (!hasProposalJob) {
+      putDispatchJob(store, {
+        id: nextId('dispatch'),
+        type: 'rsi_proposal',
+        status: 'queued',
+        createdAt: new Date().toISOString(),
+        commentId: `gap-${gap.id}`,
+        gapId: gap.id,
+      })
+    }
+  }
+  return gap
+}
+
+function stripMd(cell: string): string {
+  return cell.replace(/`/g, '').trim()
+}
+
+function isMissingStatusCell(cell: string | undefined): boolean {
+  const v = stripMd(cell ?? '').toLowerCase()
+  return v === 'missing' || v.startsWith('missing')
+}
+
+function isEnvironmentBlockedCell(cell: string | undefined): boolean {
+  const v = stripMd(cell ?? '').toLowerCase()
+  return v.includes('environment-blocked') || v === 'environment-blocked'
+}
+
+/** Extract testable acceptance from 验收/依据 column — not stub filler. */
+function acceptanceFromInstinctEvidenceColumn(evidenceCell: string): string {
+  const raw = stripMd(evidenceCell)
+  if (!raw) return ''
+  if (/^无|^n\/a$/i.test(raw)) return ''
+  const testFile = raw.match(/`([^`]+\.test\.ts)`/)?.[1]
+  if (testFile) return `Offline test file ${testFile} passes in CI holdout.`
+  if (/test\//.test(raw) && /\.test\.ts/.test(raw)) {
+    const m = raw.match(/(test\/[\w./-]+\.test\.ts)/)
+    if (m) return `Offline test ${m[1]} passes.`
+  }
+  if (raw.length >= 24 && /验收|依据|test\//i.test(raw) && !AUTO_STUB_ACCEPTANCE.test(raw)) {
+    return raw.slice(0, 500)
+  }
+  return ''
+}
+
 function recordResearchCache(
   store: Store,
   host: string,
@@ -104,7 +182,7 @@ function recordResearchCache(
 }
 
 /**
- * Parse docs/INSTINCT_CAPABILITIES.md rows with status `missing` and non-empty acceptance.
+ * Parse docs/INSTINCT_CAPABILITIES.md rows with status `missing`.
  */
 export function ingestInstinctCapabilitiesFromFile(
   store: Store,
@@ -116,10 +194,7 @@ export function ingestInstinctCapabilitiesFromFile(
   const text = fs.readFileSync(file, 'utf8')
   const lines = text.split(/\r?\n/)
   const created: DispatchGapDoc[] = []
-  const isMissingStatusCell = (cell: string | undefined): boolean => {
-    const v = (cell ?? '').replace(/`/g, '').trim().toLowerCase()
-    return v === 'missing' || v.startsWith('missing')
-  }
+  const fetchedAt = new Date().toISOString()
 
   for (const line of lines) {
     const trimmed = line.trim()
@@ -129,30 +204,94 @@ export function ingestInstinctCapabilitiesFromFile(
     if (cells.length < 6) continue
     const title = cells[1]
     if (!title || /^(#|能力项)$/.test(title)) continue
-    if (!cells.some(isMissingStatusCell)) continue
+    const statusCell = cells[4] ?? ''
+    if (!isMissingStatusCell(statusCell) && !isEnvironmentBlockedCell(statusCell)) continue
+
+    const evidence = cells[5] ?? ''
+    const description = `${cells[2] ?? title}\nStatus: ${stripMd(statusCell)}`
+    const notes = `${description}\n${evidence}`
+    const risk = classifyGapRisk(title, description, notes)
+    const acceptance = risk === 'high' ? '' : acceptanceFromInstinctEvidenceColumn(evidence)
     const dedupeKey = `instinct-cap:${title.slice(0, 120)}`
-    const existing = findGapByDedupe(store, dedupeKey)
-    if (existing) {
-      created.push(existing)
-      continue
-    }
-    const gap: DispatchGapDoc = {
-      id: nextId('gap'),
+
+    let status: DispatchGapDoc['status'] = 'proposal'
+    if (risk === 'low' && acceptance.trim()) status = 'open'
+
+    const draft = {
       title,
-      description: cells[2] ?? title,
-      acceptance: '',
-      risk: 'high',
+      description,
+      acceptance,
+      risk,
+      priority: risk === 'high' ? 0 : 10,
+      sourceUrl: `file://${file}`,
+      fetchedAt,
+      manusCue: 'unknown' as const,
+      status,
+      dedupeKey,
+    }
+    const gap = upsertStructuredGap(store, draft, nextId)
+    if (gap) created.push(gap)
+  }
+  return created
+}
+
+/**
+ * Ingest docs/COMPETITIVE_GAP.md scorecard rows with Verdict Missing or Partial.
+ */
+export function ingestCompetitiveGapFromFile(
+  store: Store,
+  repoRoot: string,
+  nextId: (prefix: string) => string,
+): DispatchGapDoc[] {
+  const file = path.join(repoRoot, 'docs', 'COMPETITIVE_GAP.md')
+  if (!fs.existsSync(file)) return []
+  const text = fs.readFileSync(file, 'utf8')
+  const created: DispatchGapDoc[] = []
+  const fetchedAt = new Date().toISOString()
+
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('|') || trimmed.startsWith('|---')) continue
+    const parts = trimmed.split('|').map(c => c.trim())
+    const cells = parts.filter((_, i) => i > 0 && i < parts.length - 1)
+    if (cells.length < 6) continue
+    const dimension = cells[0]?.replace(/\*\*/g, '').trim() ?? ''
+    if (!dimension || /^dimension$/i.test(dimension)) continue
+    const dsAgent = cells[4] ?? ''
+    const verdict = cells[5] ?? ''
+    const missing = /\*\*Missing\*\*|\bMissing\b/i.test(verdict)
+    const partial = /\*\*Partial\*\*|\bPartial\b/i.test(verdict)
+    if (!missing && !partial) continue
+
+    const title = `Competitive gap: ${dimension}`
+    const description = `Verdict: ${stripMd(verdict)}. ds-agent: ${dsAgent.slice(0, 400)}`
+    const risk = classifyGapRisk(title, description, dsAgent)
+    const acceptance = ''
+    const dedupeKey = `competitive-gap:${dimension.slice(0, 80)}`
+
+    const gap = upsertStructuredGap(store, {
+      title,
+      description,
+      acceptance,
+      risk,
       priority: 0,
       sourceUrl: `file://${file}`,
-      fetchedAt: new Date().toISOString(),
+      fetchedAt,
       manusCue: 'unknown',
       status: 'proposal',
       dedupeKey,
-    }
-    putGap(store, gap)
-    created.push(gap)
+    }, nextId)
+    if (gap) created.push(gap)
   }
   return created
+}
+
+function gapHasActiveImplement(store: Store, gapId: string): boolean {
+  return store.listDocs<DispatchJobDoc>(DISPATCH_JOB_KIND).some(j =>
+    j.type === 'rsi_implement'
+    && j.gapId === gapId
+    && (j.status === 'queued' || j.status === 'running' || j.status === 'completed'),
+  )
 }
 
 export interface RsiTickResult {
@@ -163,7 +302,7 @@ export interface RsiTickResult {
 
 /**
  * Bounded scheduler tick: allowlisted fetch updates research cache only;
- * structured gaps from docs/INSTINCT_CAPABILITIES.md; at most one low-risk implement.
+ * structured gaps from local docs; at most one low-risk implement.
  */
 export async function runRsiSchedulerTick(
   store: Store,
@@ -207,11 +346,27 @@ export async function runRsiSchedulerTick(
     }
   }
 
+  for (const src of config.rsi.sourceUrls) {
+    if (src.startsWith('file://')) continue
+    try {
+      if (deps.fetchPage) {
+        await deps.fetchPage(src)
+      } else {
+        await trustedFetch(src, { allowHosts: config.rsi.fetchAllowlist })
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      log(`[rsi] sourceUrl fetch recorded failure ${src}: ${msg}`)
+    }
+  }
+
   const repoRoot = deps.repoRoot ?? process.cwd()
   ingestInstinctCapabilitiesFromFile(store, repoRoot, nextId)
+  ingestCompetitiveGapFromFile(store, repoRoot, nextId)
 
   const openGaps = store.listDocs<DispatchGapDoc>(DISPATCH_GAP_KIND)
     .filter(isImplementableLowRiskGap)
+    .filter(g => !gapHasActiveImplement(store, g.id))
     .sort((a, b) => b.priority - a.priority)
 
   if (openGaps.length === 0) {
