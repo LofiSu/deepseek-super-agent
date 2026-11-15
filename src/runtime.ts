@@ -484,7 +484,7 @@ export class Runtime {
     // The scheduler is built before the Runtime exists; the closure forwards
     // into Runtime.ingest once construction finishes, so routines take the
     // normal filter, spill, dedupe, and Engine path.
-    let fireRoutine: (trigger: Trigger) => void = () => {}
+    let fireRoutine: (trigger: Trigger) => ReceiveResult = () => 'filtered'
     // Programmatic specs follow the same bounds as file/env specs; skipping
     // normalization lets everyMinutes=0 create a fire-on-every-tick loop.
     const routineSpecs = opts.routines === undefined

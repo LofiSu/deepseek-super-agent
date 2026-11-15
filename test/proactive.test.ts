@@ -139,6 +139,7 @@ function scheduler(
     now?: number
     env?: NodeJS.ProcessEnv
     memoryFor?: (ticket: Ticket) => string[]
+    fire?: (trigger: Trigger) => 'stored' | 'duplicate' | 'filtered'
   } = {},
 ): { scheduler: ProactiveScheduler; fired: Trigger[]; lines: string[] } {
   const fired: Trigger[] = []
@@ -149,7 +150,10 @@ function scheduler(
     config: options.config ?? config(),
     env: options.env ?? {},
     ...(options.memoryFor ? { memoryFor: options.memoryFor } : {}),
-    fire: trigger => { fired.push(trigger) },
+    fire: options.fire ?? (trigger => {
+      fired.push(trigger)
+      return 'stored'
+    }),
     log: line => { lines.push(line) },
   })
   return { scheduler, fired, lines }
@@ -328,6 +332,57 @@ describe('idle self-wake policy', () => {
     const second = scheduler(store)
     expect(second.scheduler.tick(T0 + 5 * 60 * MIN).action).toBe('not-due')
     expect(second.fired).toHaveLength(0)
+  })
+
+  it('contacts a signal revision once across days and wakes again after it changes', () => {
+    const store = tempStore()
+    const ticket = openTicket()
+    seed(store, { ticket })
+    const { scheduler: runner, fired } = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    runner.tick(T0)
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('contact')
+    const firstId = fired[0]!.id
+
+    // The same report remains visible after midnight, but is no longer new.
+    expect(runner.tick(T0 + 15 * 60 * MIN).action).toBe('silent')
+    expect(fired).toHaveLength(1)
+
+    const revised = store.getDoc<Ticket>('ticket', ticket.id)!
+    const assignment = revised.assignments[0]!
+    assignment.report = {
+      ...assignment.report!,
+      at: new Date(T0 + 15 * 60 * MIN + MIN).toISOString(),
+      question: '附件版本改了，按哪一版继续？',
+    }
+    store.putDoc('ticket', revised.id, revised)
+
+    expect(runner.tick(T0 + 16 * 60 * MIN).action).toBe('contact')
+    expect(fired).toHaveLength(2)
+    expect(fired[1]!.id).not.toBe(firstId)
+  })
+
+  it('does not consume contact quota when ingress did not commit', () => {
+    const store = tempStore()
+    seed(store, { ticket: openTicket() })
+    const attempts: Trigger[] = []
+    const { scheduler: runner } = scheduler(store, {
+      fire: trigger => {
+        attempts.push(trigger)
+        return 'filtered'
+      },
+    })
+
+    runner.tick(T0)
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('silent')
+    expect(runner.state().contacts).toHaveLength(0)
+    expect(runner.state().lastContactAt).toBeUndefined()
+
+    expect(runner.tick(T0 + 62 * MIN).action).toBe('silent')
+    expect(attempts).toHaveLength(2)
+    expect(runner.state().contacts).toHaveLength(0)
   })
 
   it('never auto-approves an irreversible pending action', () => {

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
-import type { ChannelRef, Disposition, Ticket, Trigger } from '../shared/types.ts'
+import type { ChannelRef, Disposition, ReceiveResult, Ticket, Trigger } from '../shared/types.ts'
 import { UserError } from '../shared/errors.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -31,6 +32,7 @@ export const DEFAULT_PROACTIVE_QUIET_START = '23:00'
 export const DEFAULT_PROACTIVE_QUIET_END = '08:00'
 export const MAX_PROACTIVE_CONTACT_ROWS = 64
 const CONTACT_RETENTION_MS = 7 * 86_400_000
+export const MAX_PROACTIVE_SIGNAL_AGE_MS = 24 * 60 * 60_000
 const MIN_INTERVAL_MINUTES = 15
 const MAX_INTERVAL_MINUTES = 1_440
 const MAX_ACTIVE_THREAD_MINUTES = 1_440
@@ -90,10 +92,17 @@ export interface ProactiveContact {
   thread: string
 }
 
+/** The newest signal considered for each Ticket. It survives contact retention. */
+export interface ProactiveSignalReceipt {
+  ticketId: string
+  signalId: string
+}
+
 export interface ProactiveState {
   lastCheckAt?: number
   lastContactAt?: number
   contacts: ProactiveContact[]
+  signalReceipts: ProactiveSignalReceipt[]
 }
 
 export interface ProactivePlan {
@@ -103,6 +112,7 @@ export interface ProactivePlan {
   thread: string
   channel: ChannelRef
   actor: string
+  signalId: string
   memory?: string
 }
 
@@ -131,7 +141,7 @@ export interface ProactiveSchedulerOptions {
   /** Related memory, already scoped to the candidate ticket by the caller. */
   memoryFor?: (ticket: Ticket) => string[]
   /** Must be the Runtime ingress path, not a direct channel send. */
-  fire: (trigger: Trigger) => void
+  fire: (trigger: Trigger) => ReceiveResult
   log?: (line: string) => void
 }
 
@@ -148,6 +158,7 @@ interface Signal {
   reason: ProactivePlan['reason']
   fact: string
   at: number
+  id: string
 }
 
 /**
@@ -336,6 +347,7 @@ export class ProactiveScheduler {
         config,
         env: this.opts.env ?? process.env,
         memoryFor: this.memoryFor,
+        seenSignals: new Set(state.signalReceipts.map(receipt => `${receipt.ticketId}:${receipt.signalId}`)),
       })
     } catch (error) {
       // A malformed ticket or memory row must not kill the serving daemon.
@@ -349,7 +361,20 @@ export class ProactiveScheduler {
       return { action: 'silent' }
     }
 
-    const trigger = proactiveTrigger(plan, at, config.timezone)
+    const trigger = proactiveTrigger(plan, at)
+    let ingress: ReceiveResult
+    try {
+      ingress = this.opts.fire(trigger)
+    } catch (error) {
+      this.saveState(checked)
+      this.log(`[proactive] fire failed ticketId=${plan.ticket.id}: ${messageOf(error)}`)
+      return { action: 'silent', plan, trigger }
+    }
+    if (ingress !== 'stored' && ingress !== 'duplicate') {
+      this.saveState(checked)
+      this.log(`[proactive] ingress not committed ticketId=${plan.ticket.id} result=${ingress}`)
+      return { action: 'silent', plan, trigger }
+    }
     const contacts = [...state.contacts, {
       at,
       triggerId: trigger.id,
@@ -358,16 +383,14 @@ export class ProactiveScheduler {
     }]
       .filter(contact => at - contact.at <= CONTACT_RETENTION_MS)
       .slice(-MAX_PROACTIVE_CONTACT_ROWS)
-    // Record before fire: a failed/partly failed wake must consume the quota,
-    // not leave a window for an immediate retry burst. The stable trigger id
-    // also deduplicates a crash between this write and persistence.
-    this.saveState({ ...checked, lastContactAt: at, contacts })
-    try {
-      this.opts.fire(trigger)
-    } catch (error) {
-      this.log(`[proactive] fire failed ticketId=${plan.ticket.id}: ${messageOf(error)}`)
-      return { action: 'contact', plan, trigger }
-    }
+    const signalReceipts = [
+      ...state.signalReceipts.filter(receipt => receipt.ticketId !== plan.ticket.id),
+      { ticketId: plan.ticket.id, signalId: plan.signalId },
+    ]
+    // Ingress is durable before quota accounting. The trigger id is based on
+    // the signal revision, so a crash before this write becomes an ingress
+    // duplicate even after midnight and subsequently records this receipt.
+    this.saveState({ ...checked, lastContactAt: at, contacts, signalReceipts })
     this.log(
       `[proactive] fired ticketId=${plan.ticket.id} reason=${plan.reason} thread=${plan.thread} triggerId=${trigger.id}`,
     )
@@ -387,7 +410,7 @@ export class ProactiveScheduler {
 
   private loadState(): ProactiveState {
     const raw = this.opts.store.getDoc<Partial<ProactiveState>>(PROACTIVE_STATE_KIND, PROACTIVE_STATE_ID)
-    if (!raw || typeof raw !== 'object') return { contacts: [] }
+    if (!raw || typeof raw !== 'object') return { contacts: [], signalReceipts: [] }
     const contacts = Array.isArray(raw.contacts)
       ? raw.contacts.filter((contact): contact is ProactiveContact =>
         contact != null
@@ -398,6 +421,13 @@ export class ProactiveScheduler {
         && typeof (contact as ProactiveContact).ticketId === 'string'
         && typeof (contact as ProactiveContact).thread === 'string')
       : []
+    const signalReceipts = Array.isArray(raw.signalReceipts)
+      ? raw.signalReceipts.filter((receipt): receipt is ProactiveSignalReceipt =>
+        receipt != null
+        && typeof receipt === 'object'
+        && typeof (receipt as ProactiveSignalReceipt).ticketId === 'string'
+        && typeof (receipt as ProactiveSignalReceipt).signalId === 'string')
+      : []
     return {
       ...(typeof raw.lastCheckAt === 'number' && Number.isFinite(raw.lastCheckAt)
         ? { lastCheckAt: raw.lastCheckAt }
@@ -406,6 +436,7 @@ export class ProactiveScheduler {
         ? { lastContactAt: raw.lastContactAt }
         : {}),
       contacts,
+      signalReceipts,
     }
   }
 
@@ -426,6 +457,8 @@ export function planProactiveContact(input: {
   config: ProactiveConfig
   env: NodeJS.ProcessEnv
   memoryFor?: (ticket: Ticket) => string[]
+  /** Signals already committed through normal ingress for this Ticket revision. */
+  seenSignals?: ReadonlySet<string>
 }): ProactivePlan | undefined {
   const recent = recentRealTriggers(input.store)
   if (!recent.length) return undefined
@@ -433,7 +466,9 @@ export function planProactiveContact(input: {
   for (const ticket of input.store.listDocs<Ticket>('ticket')) {
     if (ticket.ended != null) continue
     const signal = signalOf(ticket)
-    if (signal) candidates.push({ ticket, signal })
+    if (!signal || input.now - signal.at > MAX_PROACTIVE_SIGNAL_AGE_MS) continue
+    if (input.seenSignals?.has(`${ticket.id}:${signal.id}`)) continue
+    candidates.push({ ticket, signal })
   }
   candidates.sort((left, right) =>
     right.signal.at - left.signal.at
@@ -472,6 +507,7 @@ export function planProactiveContact(input: {
       thread,
       channel,
       actor: owner.actor,
+      signalId: signal.id,
       ...(memory ? { memory } : {}),
     }
   }
@@ -489,6 +525,7 @@ function signalOf(ticket: Ticket): Signal | undefined {
       reason: 'report-question',
       fact: `「${shortTitle(ticket.title)}」那边有个问题：${truncate(question, 180)}`,
       at: base,
+      id: fingerprint(ticket.id, 'report-question', assignment?.id, report?.at, report?.kind, question),
     }
   }
   const approval = [...(ticket.collab?.approvals ?? [])]
@@ -500,6 +537,7 @@ function signalOf(ticket: Ticket): Signal | undefined {
       reason: 'pending-approval',
       fact: `「${shortTitle(ticket.title)}」有一个操作等你确认：${truncate(oneLineText(approval.action), 160)}`,
       at: Number.isFinite(approvedAt) ? approvedAt : base,
+      id: fingerprint(ticket.id, 'pending-approval', approval.id, approval.at, approval.action),
     }
   }
   if (
@@ -512,6 +550,7 @@ function signalOf(ticket: Ticket): Signal | undefined {
       reason: 'report-blocked',
       fact: `「${shortTitle(ticket.title)}」现在卡在：${truncate(oneLineText(report.text), 180)}`,
       at: base,
+      id: fingerprint(ticket.id, 'report-blocked', assignment?.id, report?.at, report?.kind, report?.text),
     }
   }
   return undefined
@@ -580,8 +619,8 @@ function isPrivate(channel: ChannelRef, config: ProactiveConfig, env: NodeJS.Pro
   return false
 }
 
-/** The owner-authored trigger one due round produces. Stable id, one thread. */
-export function proactiveTrigger(plan: ProactivePlan, at: number, timezone = 'Asia/Shanghai'): Trigger {
+/** The owner-authored trigger for one signal revision. Stable id, one thread. */
+export function proactiveTrigger(plan: ProactivePlan, at: number): Trigger {
   const address: Record<string, string> = {}
   for (const [key, value] of Object.entries(plan.channel.address ?? {})) {
     // A stale message id would make the Outbox reply to an old message. Send
@@ -602,7 +641,7 @@ export function proactiveTrigger(plan: ProactivePlan, at: number, timezone = 'As
     'If the fact is not genuinely useful, stay silent and stop this ticket.',
   ].join('\n')
   return {
-    id: `${PROACTIVE_TRIGGER_PREFIX}${safeId(plan.ticket.id)}_${dayKey(at, timezone)}_${plan.reason}`,
+    id: `${PROACTIVE_TRIGGER_PREFIX}${safeId(plan.ticket.id)}_${plan.signalId}`,
     source: plan.channel.source,
     threads: [{ source: plan.channel.source, id: plan.thread }],
     actor: { source: plan.channel.source, id: plan.actor },
@@ -648,6 +687,13 @@ function parseMinutes(value: string): number {
 
 function safeId(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64)
+}
+
+function fingerprint(...parts: unknown[]): string {
+  return createHash('sha256')
+    .update(parts.map(part => String(part ?? '')).join('\u0000'))
+    .digest('hex')
+    .slice(0, 16)
 }
 
 function shortTitle(value: string): string {
