@@ -7,7 +7,7 @@ import { runEvolution } from '../src/evolution/evolve.ts'
 import { freezeCandidate, loadExperiment } from '../src/evolution/experiment.ts'
 import { runFinalTestOnce } from '../src/evolution/finalize.ts'
 import { approvePromotion, promotedStrategyPath } from '../src/evolution/promotion.ts'
-import { claimConsumedPath } from '../src/evolution/final-test-claim-lock.ts'
+import { claimConsumedPath, claimLockPath } from '../src/evolution/final-test-claim-lock.ts'
 import { sha256File, stableJsonDigest } from '../src/evolution/digest.ts'
 import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
 import type { DeliverGateStrategyV1 } from '../src/evolution/types.ts'
@@ -167,6 +167,98 @@ describe('promotion final-test gate', () => {
       artifactPath,
     })).toThrow(/final test gate/i)
     expect(fs.existsSync(promotedStrategyPath(home))).toBe(false)
+  })
+})
+
+describe('final-test request preconditions do not spend the one-shot claim', () => {
+  it('leaves the experiment claimable after a dataset digest mismatch', async () => {
+    const datasetRoot = tempDir('evo-finaltest-digest-ds-')
+    datasets.push(datasetRoot)
+    writeFinalTestRegressionDataset(datasetRoot)
+    // Same train/validation bytes, different holdout bytes: only the dataset
+    // digest differs, and loadSearchDatasetOnly still succeeds.
+    const otherDatasetRoot = tempDir('evo-finaltest-digest-other-ds-')
+    datasets.push(otherDatasetRoot)
+    writeFinalTestRegressionDataset(otherDatasetRoot, 'ft-other-alpha')
+    const home = tempDir('evo-finaltest-digest-home-')
+    homes.push(home)
+
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      injectCandidates: [regressionStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const candidate = report.candidates.find(item => item.status === 'evaluated')
+    expect(candidate).toBeDefined()
+    expect(candidate!.reward).toBe('success')
+    freezeCandidate({ home, candidateId: candidate!.candidateId, runId: report.runId })
+    expect(loadExperiment(home)!.phase).toBe('frozen')
+
+    // A wrong --dataset is a request precondition, not a holdout failure: it
+    // must not claim, finalize, or write the consumed marker.
+    await expect(runFinalTestOnce({
+      home,
+      datasetRoot: otherDatasetRoot,
+      candidateId: candidate!.candidateId,
+    })).rejects.toThrow(/dataset digest mismatch vs preregistered experiment/)
+
+    const afterMismatch = loadExperiment(home)!
+    expect(afterMismatch.phase).toBe('frozen')
+    expect(afterMismatch.finalTestClaim).toBeNull()
+    expect(afterMismatch.finalTest).toBeNull()
+    expect(fs.existsSync(claimConsumedPath(home))).toBe(false)
+    expect(fs.existsSync(claimLockPath(home))).toBe(false)
+
+    // The honest finalize against the preregistered dataset still claims and runs.
+    const finalTest = await runFinalTestOnce({
+      home,
+      datasetRoot,
+      candidateId: candidate!.candidateId,
+    })
+    expect(finalTest.scores).toHaveLength(1)
+    const after = loadExperiment(home)!
+    expect(after.phase).toBe('finalized')
+    expect(after.finalTestClaim?.state).toBe('SUCCEEDED')
+    expect(after.finalTest).not.toBeNull()
+  })
+
+  it('leaves the experiment claimable after a tampered artifact', async () => {
+    const datasetRoot = tempDir('evo-finaltest-artifact-ds-')
+    datasets.push(datasetRoot)
+    writeFinalTestRegressionDataset(datasetRoot)
+    const home = tempDir('evo-finaltest-artifact-home-')
+    homes.push(home)
+
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      injectCandidates: [regressionStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const candidate = report.candidates.find(item => item.status === 'evaluated')
+    expect(candidate).toBeDefined()
+    freezeCandidate({ home, candidateId: candidate!.candidateId, runId: report.runId })
+
+    const artifactPath = path.join(report.archiveDir, candidate!.candidateId, 'candidate.json')
+    const tampered = JSON.parse(fs.readFileSync(artifactPath, 'utf8'))
+    tampered.strategy.positiveTokens.push('totallynewtoken')
+    fs.writeFileSync(artifactPath, JSON.stringify(tampered, null, 2))
+
+    // Artifact loading binds the frozen selection before the claim, so a
+    // tampered artifact is rejected without spending the one-shot.
+    await expect(runFinalTestOnce({
+      home,
+      datasetRoot,
+      candidateId: candidate!.candidateId,
+    })).rejects.toThrow(/artifact full seal mismatch/)
+
+    const after = loadExperiment(home)!
+    expect(after.phase).toBe('frozen')
+    expect(after.finalTestClaim).toBeNull()
+    expect(after.finalTest).toBeNull()
+    expect(fs.existsSync(claimConsumedPath(home))).toBe(false)
+    expect(fs.existsSync(claimLockPath(home))).toBe(false)
   })
 })
 

@@ -41,59 +41,51 @@ export async function runFinalTestOnce(input: {
   datasetRoot: string
   candidateId: string
 }): Promise<{ scores: SplitScore[]; ledgerId: string }> {
-  const experimentBefore = loadExperiment(input.home)
-  if (!experimentBefore) throw new Error('missing experiment')
-  if (experimentBefore.phase === 'finalized' && experimentBefore.finalTest !== null) {
+  const experiment = loadExperiment(input.home)
+  if (!experiment) throw new Error('missing experiment')
+  if (experiment.phase === 'finalized' && experiment.finalTest !== null) {
     throw new Error('final test already finalized')
   }
-  if (experimentBefore.finalTest !== null) throw new Error('duplicate final test open rejected')
-  if (experimentBefore.selectedCandidateId !== input.candidateId) {
+  if (experiment.finalTest !== null) throw new Error('duplicate final test open rejected')
+  if (experiment.selectedCandidateId !== input.candidateId) {
     throw new Error('candidate not frozen selection')
   }
 
+  // Request preconditions below never parse or return finaltest cases, so they
+  // run before the one-shot claim. A rejection here (a wrong or omitted
+  // --dataset, a tampered artifact, evaluator drift) must leave the experiment
+  // frozen and claimable, not burn the claim that seals the holdout read.
+  const searchDataset = loadSearchDatasetOnly(input.datasetRoot)
+  if (searchDataset.datasetDigest !== experiment.datasetDigest) {
+    throw new Error('dataset digest mismatch vs preregistered experiment')
+  }
+
+  const artifact = loadCandidateArtifact(input.home, input.candidateId)
+  if (artifact.artifactDigest !== experiment.frozenSelection?.artifactDigest) {
+    throw new Error('frozen artifact digest mismatch')
+  }
+
+  const strategy = parseDeliverGateStrategy(artifact.strategy)
+  const strategyDigest = stableJsonDigest(strategy)
+  if (strategyDigest !== artifact.strategyDigest
+    || strategyDigest !== experiment.frozenSelection?.strategyDigest) {
+    throw new Error('artifact strategy digest mismatch')
+  }
+
+  const evaluatorDigest = computeEvaluatorDigest()
+  if (evaluatorDigest !== experiment.evaluatorDigest) {
+    throw new Error('evaluator digest drift; refuse final test')
+  }
+
+  // Every precondition is satisfied; only now open the one-shot claim. Failures
+  // from here on happen while opening or scoring the sealed holdout and must
+  // still abort and consume the claim.
   const { lockToken } = claimFinalTest(input.home, input.candidateId)
 
   try {
-    const searchDataset = loadSearchDatasetOnly(input.datasetRoot)
-    const experiment = loadExperiment(input.home)!
-    if (searchDataset.datasetDigest !== experiment.datasetDigest) {
-      abortFinalTestClaim(input.home, lockToken, 'dataset digest mismatch vs preregistered experiment')
-    }
-
     reserveFinalTestUnits(input.home)
     assertEvolutionTestFault(input.home, 'hang_after_claim')
-
-    let artifact: EvolutionCandidateRecord
-    try {
-      artifact = loadCandidateArtifact(input.home, input.candidateId)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      abortFinalTestClaim(input.home, lockToken, message)
-    }
-
-    if (artifact.artifactDigest !== experiment.frozenSelection?.artifactDigest) {
-      abortFinalTestClaim(input.home, lockToken, 'frozen artifact digest mismatch')
-    }
-
     markFinalTestRunning(input.home)
-
-    const evaluatorDigest = computeEvaluatorDigest()
-    if (evaluatorDigest !== experiment.evaluatorDigest) {
-      abortFinalTestClaim(input.home, lockToken, 'evaluator digest drift; refuse final test')
-    }
-
-    let strategy
-    try {
-      strategy = parseDeliverGateStrategy(artifact.strategy)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      abortFinalTestClaim(input.home, lockToken, message)
-    }
-    const strategyDigest = stableJsonDigest(strategy)
-    if (strategyDigest !== artifact.strategyDigest
-      || strategyDigest !== experiment.frozenSelection?.strategyDigest) {
-      abortFinalTestClaim(input.home, lockToken, 'artifact strategy digest mismatch')
-    }
 
     let finaltest: ReturnType<typeof loadFinaltestSplit>
     try {
@@ -137,7 +129,7 @@ export async function runFinalTestOnce(input: {
     return { scores: [score], ledgerId: ledger.ledgerId }
   } catch (error) {
     // Any post-claim throw that did not take an explicit abort path above (for
-    // example loadSearchDatasetOnly or reserveFinalTestUnits) must not leave the
+    // example reserveFinalTestUnits or markFinalTestRunning) must not leave the
     // one-shot claim open with an unconsumed OS lock. A throw that already went
     // through abortFinalTestClaim has marked the claim FAILED and consumed the
     // lock, so rethrow it untouched instead of aborting a second time.
