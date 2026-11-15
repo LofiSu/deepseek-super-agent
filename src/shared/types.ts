@@ -169,6 +169,8 @@ export interface Assignment {
   workerSessionId?: string
   /** Worker mesh node that owns this assignment. Logical placement only. */
   node?: string
+  /** Authenticated remote peer selected when this assignment was dispatched. */
+  remotePeerId?: string
   startedAt?: string
   endedAt?: string
   report?: {
