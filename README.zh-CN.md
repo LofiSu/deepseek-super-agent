@@ -42,6 +42,7 @@
 - [配置](#配置)
   - [模型](#模型)
   - [运行时设置](#运行时设置)
+  - [MCP 服务器](#mcp-服务器)
 - [Demo（真实信道）](#demo真实信道)
 - [安全与部署](#安全与部署)
 - [当前状态](#当前状态)
@@ -171,7 +172,7 @@ Router 是全局序点：它负责对话、批处理 Trigger 和分派。Worker 
 - **审批**：Worker 可以调用 `request_approval`，提交一个精确的外发动作并暂停执行，而不是直接做。Ticket 挂起，Router 询问主人，`ds-agent approve` / `ds-agent deny` 记录决定并走正常路径恢复。模型只能申请、不能决定；聊天里说“可以”不构成批准。详见 [docs/APPROVALS.md](docs/APPROVALS.md)。
 - **Routines**：`routines.json` 按每 N 分钟，或在指定 UTC 时间和星期几每天一次，在指定信道和 Thread 投递一条 prompt。长时间停机后只补一次，不回放每个错过的时段。Routine 走正常 ingress 与规则；模型不能创建或修改。详见 [docs/ROUTINES.md](docs/ROUTINES.md)。
 - **技能**：主人在 `skills/<id>/SKILL.md` 写一份操作手册，无需改代码。Prompt 只带 id 与描述索引（上限 2000 字符），`read_skill` 按需加载正文。技能不能授予工具或扩大角色权限。详见 [docs/SKILLS.md](docs/SKILLS.md)。
-- **Prompt Stack**：身份、主人声音、常驻指令、主人资料、团队、技能、渠道、规则、记忆指引、表达风格、角色契约按依赖顺序装配。agent home 里的 `PERSONA.md`、`AGENTS.md`、`USER.md` 用于微调可编辑层。`ds-agent prompt --layers` 显示每一层及其来源。详见 [docs/PROMPTS.md](docs/PROMPTS.md)。
+- **Prompt 架构**：一条稳定的系统 prompt，由 33 个有序 section 组成，外加九个由主人编写的运行时文件：`SOUL.md`、`IDENTITY.md`、`USER.md`、`INSTRUCTIONS.md`、`AGENTS.md`、`MEMORY.md`、`TOOLS.md`、`HEARTBEAT.md` 和 `PROACTIVE_PREFERENCES.md`。`SOUL.md` 可省略：内置默认声音始终会渲染。核心文件 section 始终保留；在 20,000 字符预算下，可选 section 整体省略；每个文件上限为 4,000 字符。`PERSONA.md` 仍作为已弃用的 soul 回退加载。`ds-agent prompt --layers` 显示每个 section 及其来源。详见 [docs/PROMPTS.md](docs/PROMPTS.md)。
 
 ### 信道
 
@@ -338,6 +339,23 @@ Router 和 Watchdog 适合用轻量模型，Worker 适合用更强的模型。�
 | `DS_AGENT_SANDBOX_READ_ISOLATION` | 关闭 | `1` / `true` / `strict` 启用严格读隔离。 |
 | `DS_AGENT_UI_TOKEN` | 未设置 | `ds-agent ui` 的 Bearer token，至少 16 个字符。 |
 
+### MCP 服务器
+
+Worker 可以调用以数据形式配置的外部 Model Context Protocol 服务器提供的工具。Router 与 Watchdog 看不到这些工具。
+
+```bash
+export DS_AGENT_MCP_SERVERS='[
+  {"name":"krene","command":"/absolute/path/to/krene-mcp","args":["serve"],"timeoutMs":120000}
+]'
+```
+
+- `name` 需匹配 `[A-Za-z0-9_-]`，以字母或数字开头，最长 32 个字符，必须唯一，且不能包含 `__`（命名空间分隔符）。`command` 是非空可执行文件（使用 `/absolute/path` 最稳妥，因为子进程会继承当前工作目录）。`args` 默认 `[]`，`env` 默认 `{}`，`timeoutMs` 默认 `120000`。
+- Worker 看到的工具名是 `mcp__<server>__<tool>`。文本仍是文本；image/resource payload 写入 `<DS_AGENT_HOME>/mcp/<server>/` 并以路径引用。JSON 文本超过 65,536 个字符（UTF-16 code unit）的结果进入 spill，返回 `{ spillId, bytes, preview }`；其中 `bytes` 是写入 spill 的正文 UTF-8 字节数。
+- 子进程只继承 `PATH`、`HOME`、`LANG`、`TZ`、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`，以及该服务器自己的 `env`。在非 Windows 宿主上，MCP SDK 启动 transport 时还会从宿主补上它自己的安全默认值（`HOME`、`LOGNAME`、`PATH`、`SHELL`、`TERM`、`USER`）；在 Windows 上还会继承 `APPDATA`、`USERPROFILE`、`PROGRAMFILES` 等变量。凭据放进 `env`，不要放在 shell 里。名字像密钥且至少 8 个字符的 `env` 值（例如 `KRENE_TOKEN`）会进入脱敏列表；更短的值会原样保留。
+- 无法读取的配置会记录 `[mcp] DS_AGENT_MCP_SERVERS ignored: ...` 后忽略。连接尝试被拒绝的服务器会累加 `mcp.connect_error` 并被跳过；在共享的列表截止时间到达时仍未连接的服务器会以 `reason=not-connected` 跳过，且不累加该计数。Runtime 和其他服务器继续工作。
+
+嵌入 Runtime 时，`RuntimeOptions.mcpServers` 接受同一个数组。
+
 ## Demo（真实信道）
 
 `pnpm demo` 是验收路径，只走真实信道：
@@ -405,7 +423,7 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 故意保留真实 issue
 - **长期记忆**：hot/cold 分层与混合召回可用；自然月尺度的行为有边界，尚未按真实月份测量。测量协议见 [docs/T48_MONTH_SCALE_PROTOCOL.md](docs/T48_MONTH_SCALE_PROTOCOL.md)。
 - **A2A**：HMAC-SHA256 HTTP transport 已实现；跨主机暴露与远端 dispatch 仍需运维者开启。
 - **Watchdog 漂移检查**：nudge/fail、规则与只读 `ds-agent health` 可用；更深的自然语言目标漂移检查仍较薄。
-- **延迟对照**：批处理压测 harness 会记录曲线；完整双层 vs 单 Session 对照仍未完成。
+- **延迟对照**：一次有日期记录的本机双层 vs 单 Session 运行见 [docs/BAKEOFF.md](docs/BAKEOFF.md)；这只是单个样本，不是基准测试。
 
 ## 文档
 

@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  beginDelegateOperation,
+  EXTERNAL_OP_KIND,
+  recordOutboxSendStart,
+  UNKNOWN_OUTCOME_PREFIX,
+  type ExternalOperationRecord,
+} from '../src/core/external-effects.ts'
 import type { SemanticHit } from '../src/ingress/filter.ts'
 import { MockModel, type Completion, type CompletionRequest, type Model } from '../src/harness/model.ts'
 import { Runtime, type RuntimeOptions } from '../src/runtime.ts'
-import type { Ticket } from '../src/shared/types.ts'
+import type { OutboxRow, Ticket } from '../src/shared/types.ts'
 import { shutdown, tempHome } from './fixtures.ts'
 
 /**
@@ -93,6 +100,11 @@ function createRuntime(home: string, opts: Partial<RuntimeOptions> = {}): Runtim
 
 function recoveredInputs(ticket: Ticket) {
   return ticket.inputs.filter(input => input.kind === 'context' && input.text?.startsWith('RECOVERED:'))
+}
+
+function unknownApprovals(ticket: Ticket) {
+  return (ticket.collab?.approvals ?? []).filter(approval =>
+    approval.status === 'pending' && approval.action.startsWith(UNKNOWN_OUTCOME_PREFIX))
 }
 
 function recoveredEvents(runtime: Runtime) {
@@ -194,6 +206,74 @@ describe('restart recovery', () => {
     expect(runtime.log.text()).toContain('[recovery] deferred reason=mock-model')
   })
 
+  it('defers under MockModel without finalizing a started delegate operation', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home, { model: new MockModel() })
+    runtime.store.putDoc('ticket', 'ticket_mock_delegate', runningTicket('ticket_mock_delegate'))
+    const started = beginDelegateOperation({
+      store: runtime.store,
+      ticketId: 'ticket_mock_delegate',
+      assignmentId: 'asg_ticket_mock_delegate_1',
+      sessionId: 'worker_ticket_mock_delegate',
+      agent: 'a',
+      task: 'do the work',
+      now: new Date().toISOString(),
+    })
+    const launch = vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.resolve())
+
+    runtime.start({ assessPending: false })
+
+    const ticket = runtime.store.getDoc<Ticket>('ticket', 'ticket_mock_delegate')!
+    expect(ticket.assignments).toHaveLength(1)
+    expect(ticket.assignments[0]?.state).toBe('running')
+    expect(ticket.inputs).toHaveLength(0)
+    expect(ticket.collab?.approvals ?? []).toHaveLength(0)
+    expect(unknownApprovals(ticket)).toHaveLength(0)
+    const ops = runtime.store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)
+    expect(ops).toHaveLength(1)
+    expect(ops[0]?.id).toBe(started.id)
+    expect(ops[0]?.phase).toBe('started')
+    expect(launch).not.toHaveBeenCalled()
+    expect(runtime.log.text()).toContain('[recovery] deferred reason=mock-model')
+    expect(runtime.log.text()).not.toContain('[recovery] uncertain external effects')
+  })
+
+  it('defers under MockModel without flipping a started outbox send to unknown', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home, { model: new MockModel() })
+    runtime.store.putDoc('ticket', 'ticket_mock_outbox', runningTicket('ticket_mock_outbox'))
+    const at = new Date().toISOString()
+    const row: OutboxRow = {
+      id: 'obx_mock_inflight',
+      replyId: 'rpl_mock_inflight',
+      ticketId: 'ticket_mock_outbox',
+      channel: 'im',
+      thread: 'im:topic/disk',
+      target: { provider: 'feishu', chat_id: 'topic/disk' },
+      text: 'still sending',
+      status: 'pending',
+      idempotencyKey: 'idem_mock_inflight',
+      createdAt: at,
+    }
+    runtime.store.enqueueOutbox(row)
+    expect(runtime.store.claimOutbox(row.id)).toBe(true)
+    recordOutboxSendStart(runtime.store, row, at)
+    const launch = vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.resolve())
+
+    runtime.start({ assessPending: false })
+
+    const current = runtime.store.listOutbox().find(item => item.id === row.id)!
+    expect(current.status).toBe('sending')
+    const op = runtime.store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, `outbox_${row.id}`)
+    expect(op?.phase).toBe('started')
+    const ticket = runtime.store.getDoc<Ticket>('ticket', 'ticket_mock_outbox')!
+    expect(ticket.assignments[0]?.state).toBe('running')
+    expect(unknownApprovals(ticket)).toHaveLength(0)
+    expect(launch).not.toHaveBeenCalled()
+    expect(runtime.log.text()).toContain('[recovery] deferred reason=mock-model')
+    expect(runtime.log.text()).not.toContain('[recovery] uncertain external effects')
+  })
+
   it('is idempotent across repeated start() calls and a process restart', async () => {
     const home = tempHome()
     const first = createRuntime(home)
@@ -263,6 +343,80 @@ describe('restart recovery', () => {
       expect(ticket.assignments).toHaveLength(2)
       expect(ticket.assignments.at(-1)?.state).toBe('pending')
       expect(recoveredInputs(ticket)).toHaveLength(1)
+    }
+  })
+
+  it('keeps an earlier ticket relaunch_scheduled when a later async launch fails', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_ok', runningTicket('ticket_ok'))
+    runtime.store.putDoc('ticket', 'ticket_rejects', runningTicket('ticket_rejects'))
+    const launched: string[] = []
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(ticket => {
+      launched.push(ticket.id)
+      return launched.length === 2
+        ? Promise.reject(new Error('second launch boom'))
+        : Promise.resolve()
+    })
+
+    runtime.start({ assessPending: false })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(launched).toHaveLength(2)
+    const boundary = runtime.recoveryBoundary()!
+    expect(boundary.tickets.find(t => t.ticketId === launched[0])?.transition).toBe('relaunch_scheduled')
+    expect(boundary.tickets.find(t => t.ticketId === launched[1])?.transition).toBe('launch_failed')
+  })
+
+  it('does not revert a later ticket relaunch_scheduled when an earlier async launch fails', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_early_fail', runningTicket('ticket_early_fail'))
+    runtime.store.putDoc('ticket', 'ticket_later_ok', runningTicket('ticket_later_ok'))
+    const launched: string[] = []
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(ticket => {
+      launched.push(ticket.id)
+      return launched.length === 1
+        ? Promise.reject(new Error('first launch boom'))
+        : Promise.resolve()
+    })
+
+    runtime.start({ assessPending: false })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(launched).toHaveLength(2)
+    const boundary = runtime.recoveryBoundary()!
+    expect(boundary.tickets.find(t => t.ticketId === launched[0])?.transition).toBe('launch_failed')
+    expect(boundary.tickets.find(t => t.ticketId === launched[1])?.transition).toBe('relaunch_scheduled')
+  })
+
+  it('keeps launch_failed persisted after start() when harness.launch throws synchronously', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_sync_only', runningTicket('ticket_sync_only'))
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(() => {
+      throw new Error('sync launch boom')
+    })
+
+    runtime.start({ assessPending: false })
+
+    const boundary = runtime.recoveryBoundary()!
+    expect(boundary.tickets.find(t => t.ticketId === 'ticket_sync_only')?.transition).toBe('launch_failed')
+  })
+
+  it('records every async launch failure instead of the last snapshot winning', async () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_fail_a', runningTicket('ticket_fail_a'))
+    runtime.store.putDoc('ticket', 'ticket_fail_b', runningTicket('ticket_fail_b'))
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.reject(new Error('launch boom')))
+
+    runtime.start({ assessPending: false })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    const boundary = runtime.recoveryBoundary()!
+    for (const id of ['ticket_fail_a', 'ticket_fail_b']) {
+      expect(boundary.tickets.find(t => t.ticketId === id)?.transition).toBe('launch_failed')
     }
   })
 
@@ -338,6 +492,20 @@ describe('restart recovery', () => {
     expect(recoveryPrompt).toContain('asg_ticket_prompt_1')
     expect(normalPrompt).toBeDefined()
     expect(normalPrompt).not.toContain('RECOVERED:')
+  })
+
+  it('persists a recovery boundary record with ticket transitions', () => {
+    const home = tempHome()
+    const runtime = createRuntime(home)
+    runtime.store.putDoc('ticket', 'ticket_boundary', runningTicket('ticket_boundary'))
+    vi.spyOn(runtime.harness, 'launch').mockImplementation(() => Promise.resolve())
+
+    runtime.start({ assessPending: false })
+
+    const boundary = runtime.recoveryBoundary()
+    expect(boundary?.outcome).toBe('completed')
+    expect(boundary?.model).toBe('StubLiveModel')
+    expect(boundary?.tickets.some(t => t.ticketId === 'ticket_boundary')).toBe(true)
   })
 
   it('never writes an environment credential into recovery state, events, or logs', () => {

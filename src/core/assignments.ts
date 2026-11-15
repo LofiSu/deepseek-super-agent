@@ -59,17 +59,19 @@ export class Assignments {
    * Persist logical Worker-mesh placement. The Harness decides the node, but
    * only the Engine writes the Assignment aggregate.
    */
-  placed(ticketId: string, assignmentId: string, node: string): void {
+  placed(ticketId: string, assignmentId: string, node: string, remotePeerId?: string): void {
     const ticket = this.must(ticketId)
     const assignment = ticket.assignments.find(item => item.id === assignmentId) ?? ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
     assignment.node = node
+    assignment.remotePeerId = remotePeerId
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     this.host.log(`[engine] Assignments.placed ticketId=${ticket.id} assignmentId=${assignment.id} node=${node}`)
     this.host.repo.addEvent('assignment.placed', {
       ticketId: ticket.id,
       assignmentId: assignment.id,
       node,
+      ...(remotePeerId ? { remotePeerId } : {}),
     })
   }
 
@@ -242,7 +244,7 @@ export class Assignments {
     ticket.inputs.push({
       id: this.host.repo.nextId('input'),
       kind: 'context',
-      text: `RECOVERED: assignment ${interruptedAssignmentIds.join(',')} was interrupted by a process restart. Continue from persisted state and assume prior side effects may already have occurred (at-least-once).`,
+      text: `RECOVERED: assignment ${interruptedAssignmentIds.join(',')} was interrupted by a process restart (including any in-flight delegate_agent specialist, which does not survive the process). Continue from persisted state and assume prior side effects may already have occurred (at-least-once).`,
       at,
       human: false,
     })
@@ -252,6 +254,17 @@ export class Assignments {
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     const existing = ticket.assignments.find(item => item.state === 'pending')
     const replacement = existing ?? this.retry(ticket.id, 'restart-recovery')
+    // Recovery ends the interrupted Assignment outside the normal report path,
+    // so notify observers here as well: a live Runtime must clear its remote
+    // result wait and release mesh capacity. Startup recovery has no armed
+    // timers and an empty in-memory placement, so this is a no-op there.
+    try {
+      this.host.onAssignmentEnded?.(ticket.id)
+    } catch (error) {
+      this.host.log(
+        `[hook] hook=assignment-ended ticketId=${ticket.id} error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
     this.host.log(
       `[engine] Assignments.recover ticketId=${ticket.id} interrupted=${interruptedAssignmentIds.join(',')} replacementId=${replacement.id}`,
     )

@@ -1,3 +1,8 @@
+import {
+  activeAssignmentId,
+  beginDelegateOperation,
+  finishDelegateOperation,
+} from '../core/external-effects.ts'
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
 import type { LocalAgentRegistry } from '../env/local-agents.ts'
@@ -643,7 +648,31 @@ function localAgentTools(
         if (ticket.speculative) {
           throw new UserError('delegate_agent is unavailable to speculative workers (local agents run unsandboxed)')
         }
-        const result = await registry.run(agent, task, ctx.sessionId)
+        const assignmentId = activeAssignmentId(ticket)
+        if (!assignmentId) throw new UserError('delegate_agent needs a running assignment on the ticket')
+        const now = new Date().toISOString()
+        const op = beginDelegateOperation({
+          store,
+          ticketId: ticket.id,
+          assignmentId,
+          sessionId: ctx.sessionId,
+          agent,
+          task,
+          now,
+        })
+        let result
+        try {
+          result = await registry.run(agent, task, ctx.sessionId)
+        } catch (error) {
+          finishDelegateOperation(store, op.id, 'failed', now, error instanceof Error ? error.message : String(error))
+          throw error
+        }
+        finishDelegateOperation(
+          store,
+          op.id,
+          result.code === 0 ? 'completed' : 'failed',
+          now,
+        )
         log(
           `[local-agent] agent=${agent} session=${ctx.sessionId} code=${result.code}`
           + ` timedOut=${result.timedOut} truncated=${result.truncated}`,
