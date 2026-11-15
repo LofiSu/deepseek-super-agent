@@ -19,7 +19,15 @@ import { hasOpenPeanutPrForRepo } from '../src/dispatch/github-peanut.ts'
 import { createClaudeDispatchJobRunner } from '../src/dispatch/implementer.ts'
 import { createJobRunner, IMPLEMENTER_NOT_CONFIGURED } from '../src/dispatch/job-runner.ts'
 import { drainDispatchQueue } from '../src/dispatch/queue.ts'
-import { classifyGapRisk, ingestGap, runRsiSchedulerTick, RSI_RESEARCH_CACHE_KIND } from '../src/dispatch/rsi.ts'
+import {
+  acceptanceFromInstinctEvidenceColumn,
+  classifyGapRisk,
+  ingestCompetitiveGapFromFile,
+  ingestGap,
+  isImplementableLowRiskGap,
+  runRsiSchedulerTick,
+  RSI_RESEARCH_CACHE_KIND,
+} from '../src/dispatch/rsi.ts'
 import {
   recoverInterruptedJobs,
   seedDispatchCursorNow,
@@ -726,6 +734,70 @@ describe('RSI gap pool', () => {
     expect(impl).toHaveLength(0)
     const gaps = store.listDocs<DispatchGapDoc>('dispatch_gap')
     expect(gaps.some(g => g.status === 'proposal')).toBe(true)
+    store.close()
+  })
+
+  it('instinct C2-style disclaimer evidence is proposal-only and does not enqueue rsi_implement', async () => {
+    const c2Evidence =
+      '名称数量不是验收标准。本仓库 tool surface 是 `src/harness/tools.ts` 的显式 tool list，远小于 Instinct 的 CLI grammar；不要用“577”当能力声明'
+    expect(acceptanceFromInstinctEvidenceColumn(c2Evidence)).toBe('')
+
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    cfg.rsi.intervalMs = 0
+    const docDir = path.join(home, 'docs')
+    fs.mkdirSync(docDir)
+    fs.writeFileSync(path.join(docDir, 'INSTINCT_CAPABILITIES.md'), [
+      '| # | 能力项 | Instinct 公开证据 | 等级 | ds-agent 状态 | 本仓库路径 / 验收依据 |',
+      '|---|---|---|---|---|---|',
+      `| C2 | 工具/动作总量口径 | S4/S5 evidence | teardown | \`missing\`（无可比 surface） | ${c2Evidence} |`,
+    ].join('\n'))
+    const tick = await runRsiSchedulerTick(store, cfg, p => store.nextId(p), {
+      fetchPage: async () => ({ body: 'ok', fetchedAt: '2026-11-15T12:00:00Z' }),
+      hasOpenPeanutPr: async () => false,
+      repoRoot: home,
+    })
+    expect(tick.idle).toBe(true)
+    const gaps = store.listDocs<DispatchGapDoc>('dispatch_gap')
+    const c2 = gaps.find(g => g.title.includes('工具/动作总量口径'))
+    expect(c2).toBeTruthy()
+    expect(c2!.acceptance).toBe('')
+    expect(c2!.status).toBe('proposal')
+    expect(isImplementableLowRiskGap(c2!)).toBe(false)
+    const impl = store.listDocs<DispatchJobDoc>('dispatch_job').filter(j => j.type === 'rsi_implement')
+    expect(impl).toHaveLength(0)
+    store.close()
+  })
+
+  it('competitive gap Behind verdict ingests proposal and does not enqueue rsi_implement', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    cfg.rsi.intervalMs = 0
+    const docDir = path.join(home, 'docs')
+    fs.mkdirSync(docDir)
+    fs.writeFileSync(path.join(docDir, 'COMPETITIVE_GAP.md'), [
+      '| Dimension | Instinct / Open Instinct | Muse | Grok Bot | ds-agent now | Verdict |',
+      '|---|---|---|---|---|---|',
+      '| **Owner model** | tiers | single | one | single owner | **Behind** on tiers; ahead on ingress |',
+    ].join('\n'))
+    const created = ingestCompetitiveGapFromFile(store, home, p => store.nextId(p))
+    expect(created).toHaveLength(1)
+    expect(created[0]!.status).toBe('proposal')
+    expect(created[0]!.acceptance).toBe('')
+    expect(created[0]!.manusCue).toBe('unknown')
+    expect(created[0]!.sourceUrl).toContain('COMPETITIVE_GAP.md')
+    const tick = await runRsiSchedulerTick(store, cfg, p => store.nextId(p), {
+      fetchPage: async () => ({ body: 'ok', fetchedAt: '2026-11-15T12:00:00Z' }),
+      hasOpenPeanutPr: async () => false,
+      repoRoot: home,
+    })
+    expect(tick.idle).toBe(true)
+    const impl = store.listDocs<DispatchJobDoc>('dispatch_job').filter(j => j.type === 'rsi_implement')
+    expect(impl).toHaveLength(0)
     store.close()
   })
 

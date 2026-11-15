@@ -155,20 +155,19 @@ function isEnvironmentBlockedCell(cell: string | undefined): boolean {
   return v.includes('environment-blocked') || v === 'environment-blocked'
 }
 
-/** Extract testable acceptance from 验收/依据 column — not stub filler. */
-function acceptanceFromInstinctEvidenceColumn(evidenceCell: string): string {
+const INSTINCT_ACCEPTANCE_DISCLAIMER =
+  /不是验收标准|不要用|不把[^。；\n]{0,40}当|不当[^。；\n]{0,24}能力|无实现|没有实现|不列入验收|environment-blocked|不等于|不是本仓库当前能力/i
+
+/** Extract testable acceptance from 验收/依据 column — fail-closed; no length heuristics. */
+export function acceptanceFromInstinctEvidenceColumn(evidenceCell: string): string {
   const raw = stripMd(evidenceCell)
   if (!raw) return ''
   if (/^无|^n\/a$/i.test(raw)) return ''
+  if (INSTINCT_ACCEPTANCE_DISCLAIMER.test(raw)) return ''
   const testFile = raw.match(/`([^`]+\.test\.ts)`/)?.[1]
   if (testFile) return `Offline test file ${testFile} passes in CI holdout.`
-  if (/test\//.test(raw) && /\.test\.ts/.test(raw)) {
-    const m = raw.match(/(test\/[\w./-]+\.test\.ts)/)
-    if (m) return `Offline test ${m[1]} passes.`
-  }
-  if (raw.length >= 24 && /验收|依据|test\//i.test(raw) && !AUTO_STUB_ACCEPTANCE.test(raw)) {
-    return raw.slice(0, 500)
-  }
+  const bareTest = raw.match(/(test\/[\w./-]+\.test\.ts)/)
+  if (bareTest) return `Offline test ${bareTest[1]} passes.`
   return ''
 }
 
@@ -255,8 +254,13 @@ export function ingestInstinctCapabilitiesFromFile(
   return created
 }
 
+function competitiveGapVerdictIsActionable(verdict: string): boolean {
+  return /\*\*Behind\*\*|\bBehind\b|\*\*Missing\*\*|\bMissing\b|\*\*Partial\*\*|\bPartial\b/i.test(verdict)
+    || /\bbehind\b/i.test(verdict)
+}
+
 /**
- * Ingest docs/COMPETITIVE_GAP.md scorecard rows with Verdict Missing or Partial.
+ * Ingest docs/COMPETITIVE_GAP.md scorecard rows with Verdict Behind, Missing, or Partial.
  */
 export function ingestCompetitiveGapFromFile(
   store: Store,
@@ -279,9 +283,7 @@ export function ingestCompetitiveGapFromFile(
     if (!dimension || /^dimension$/i.test(dimension)) continue
     const dsAgent = cells[4] ?? ''
     const verdict = cells[5] ?? ''
-    const missing = /\*\*Missing\*\*|\bMissing\b/i.test(verdict)
-    const partial = /\*\*Partial\*\*|\bPartial\b/i.test(verdict)
-    if (!missing && !partial) continue
+    if (!competitiveGapVerdictIsActionable(verdict)) continue
 
     const title = `Competitive gap: ${dimension}`
     const description = `Verdict: ${stripMd(verdict)}. ds-agent: ${dsAgent.slice(0, 400)}`
