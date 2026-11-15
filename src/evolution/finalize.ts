@@ -1,7 +1,11 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { loadSearchDatasetOnly, loadFinaltestSplit } from './dataset.ts'
+import {
+  assertPreregisteredFinaltestCommitment,
+  loadCommittedFinaltestSplit,
+  loadSearchDatasetOnly,
+} from './dataset.ts'
 import {
   abortFinalTestClaim,
   claimFinalTest,
@@ -59,6 +63,7 @@ export async function runFinalTestOnce(input: {
   if (searchDataset.datasetDigest !== experiment.datasetDigest) {
     throw new Error('dataset digest mismatch vs preregistered experiment')
   }
+  assertPreregisteredFinaltestCommitment(searchDataset)
 
   const artifact = loadCandidateArtifact(input.home, input.candidateId)
   if (artifact.artifactDigest !== experiment.frozenSelection?.artifactDigest) {
@@ -87,9 +92,9 @@ export async function runFinalTestOnce(input: {
     assertEvolutionTestFault(input.home, 'hang_after_claim')
     markFinalTestRunning(input.home)
 
-    let finaltest: ReturnType<typeof loadFinaltestSplit>
+    let finaltest: ReturnType<typeof loadCommittedFinaltestSplit>
     try {
-      finaltest = loadFinaltestSplit(input.datasetRoot)
+      finaltest = loadCommittedFinaltestSplit(searchDataset)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       abortFinalTestClaim(input.home, lockToken, message)

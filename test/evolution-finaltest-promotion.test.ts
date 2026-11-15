@@ -9,7 +9,11 @@ import { runFinalTestOnce } from '../src/evolution/finalize.ts'
 import { approvePromotion, promotedStrategyPath } from '../src/evolution/promotion.ts'
 import { claimConsumedPath, claimLockPath } from '../src/evolution/final-test-claim-lock.ts'
 import { sha256File, stableJsonDigest } from '../src/evolution/digest.ts'
-import { defaultBaselineStrategy } from '../src/evolution/dataset.ts'
+import {
+  defaultBaselineStrategy,
+  loadCommittedFinaltestSplit,
+  loadSearchDatasetOnly,
+} from '../src/evolution/dataset.ts'
 import type { DeliverGateStrategyV1 } from '../src/evolution/types.ts'
 
 const homes: string[] = []
@@ -263,6 +267,90 @@ describe('final-test request preconditions do not spend the one-shot claim', () 
 })
 
 describe('finalize loading failure aborts the one-shot claim', () => {
+  it('keeps the pre-claim finaltest commitment when manifest changes later', () => {
+    const datasetRoot = tempDir('evo-finaltest-commitment-ds-')
+    datasets.push(datasetRoot)
+    writeFinalTestRegressionDataset(datasetRoot)
+
+    const search = loadSearchDatasetOnly(datasetRoot)
+    const replacementPath = path.join(datasetRoot, 'replacement-finaltest.json')
+    fs.writeFileSync(replacementPath, JSON.stringify({ cases: [{
+      id: 'replacement',
+      speculative: true,
+      report: { kind: 'ready', text: 'replacement finaltest' },
+      expected: 'deliver',
+    }] }, null, 2))
+    const manifestPath = path.join(datasetRoot, 'manifest.json')
+    const changedManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    changedManifest.splits.finaltest = 'replacement-finaltest.json'
+    changedManifest.splitDigests.finaltest = sha256File(replacementPath)
+    fs.writeFileSync(manifestPath, JSON.stringify(changedManifest, null, 2))
+
+    expect(loadCommittedFinaltestSplit(search).map(testCase => testCase.id))
+      .toEqual(['ft-no-alpha', 'ft-alpha-discard'])
+  })
+
+  it('rejects a malformed finaltest commitment before spending the claim', async () => {
+    const datasetRoot = tempDir('evo-finaltest-bad-commitment-ds-')
+    datasets.push(datasetRoot)
+    writeFinalTestRegressionDataset(datasetRoot)
+    const manifestPath = path.join(datasetRoot, 'manifest.json')
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    manifest.splitDigests.finaltest = 'not-a-sha256-commitment'
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+    const home = tempDir('evo-finaltest-bad-commitment-home-')
+    homes.push(home)
+
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      injectCandidates: [regressionStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const candidate = report.candidates.find(item => item.status === 'evaluated')
+    expect(candidate).toBeDefined()
+    freezeCandidate({ home, candidateId: candidate!.candidateId, runId: report.runId })
+
+    await expect(runFinalTestOnce({ home, datasetRoot, candidateId: candidate!.candidateId }))
+      .rejects.toThrow(/preregistered commitment must be a SHA-256 digest/)
+    const after = loadExperiment(home)!
+    expect(after.phase).toBe('frozen')
+    expect(after.finalTestClaim).toBeNull()
+  })
+
+  it('rejects manifest and finaltest mutation after registration without spending the claim', async () => {
+    const datasetRoot = tempDir('evo-finaltest-mutated-ds-')
+    datasets.push(datasetRoot)
+    writeFinalTestRegressionDataset(datasetRoot)
+    const home = tempDir('evo-finaltest-mutated-home-')
+    homes.push(home)
+
+    const report = await runEvolution({
+      home,
+      datasetRoot,
+      injectCandidates: [regressionStrategy()],
+      budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
+    })
+    const candidate = report.candidates.find(item => item.status === 'evaluated')
+    expect(candidate).toBeDefined()
+    freezeCandidate({ home, candidateId: candidate!.candidateId, runId: report.runId })
+
+    const finaltestPath = path.join(datasetRoot, 'finaltest.json')
+    const finaltest = JSON.parse(fs.readFileSync(finaltestPath, 'utf8'))
+    finaltest.cases[0].expected = 'discard'
+    fs.writeFileSync(finaltestPath, JSON.stringify(finaltest, null, 2))
+    const manifestPath = path.join(datasetRoot, 'manifest.json')
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    manifest.splitDigests.finaltest = sha256File(finaltestPath)
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+
+    await expect(runFinalTestOnce({ home, datasetRoot, candidateId: candidate!.candidateId }))
+      .rejects.toThrow(/dataset digest mismatch vs preregistered experiment/)
+    const after = loadExperiment(home)!
+    expect(after.phase).toBe('frozen')
+    expect(after.finalTestClaim).toBeNull()
+  })
+
   it('closes the claim when the holdout split overlaps a search split', async () => {
     // The holdout reuses the train case id `tr-alpha` with different bytes, so
     // search and freeze still succeed (finaltest is never parsed there). Only

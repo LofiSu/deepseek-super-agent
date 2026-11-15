@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { sha256File, stableJsonDigest } from './digest.ts'
+import { sha256File, sha256Hex, stableJsonDigest } from './digest.ts'
 import type {
   DeliverGateStrategyV1,
   EvolutionEvalCase,
@@ -17,6 +17,10 @@ export interface LoadedSearchDataset {
   datasetDigest: string
   /** Declared in the manifest; the search phase never parses finaltest cases. */
   finaltestDigest: string
+  /** Normalized validated SHA-256 commitment captured before finalization. */
+  finaltestCommitment?: string
+  /** Captured before the one-shot claim, so finalization never re-reads a mutable manifest. */
+  finaltestPath: string
 }
 
 export interface LoadedEvolutionDataset extends LoadedSearchDataset {
@@ -157,8 +161,8 @@ function assertValidReports(cases: EvolutionEvalCase[], rel: string): void {
   }
 }
 
-function readSplit(file: string, rel: string): EvolutionEvalCase[] {
-  const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as EvolutionSplitFile
+function parseSplit(contents: Buffer, rel: string): EvolutionEvalCase[] {
+  const parsed = JSON.parse(contents.toString('utf8')) as EvolutionSplitFile
   if (!Array.isArray(parsed.cases)) throw new Error(`invalid split ${rel}: missing cases[]`)
   assertUniqueCaseIds(parsed.cases, rel)
   assertNonBlankCaseIds(parsed.cases, rel)
@@ -167,6 +171,10 @@ function readSplit(file: string, rel: string): EvolutionEvalCase[] {
   assertValidSpeculativeFlags(parsed.cases, rel)
   assertValidReports(parsed.cases, rel)
   return parsed.cases
+}
+
+function readSplit(file: string, rel: string): EvolutionEvalCase[] {
+  return parseSplit(fs.readFileSync(file), rel)
 }
 
 /** Resolve a split path under the dataset root, following symlinks when it exists. */
@@ -389,17 +397,14 @@ function assertSearchSplitsHaveDisjointCaseIds(
  * still never parses finaltest.
  */
 function assertFinaltestIdsDoNotOverlapSearchSplits(
-  root: string,
-  manifest: EvolutionSplitManifest,
+  train: EvolutionEvalCase[],
+  validation: EvolutionEvalCase[],
   finaltest: EvolutionEvalCase[],
 ): void {
   const finaltestIds = new Set(finaltest.map(testCase => testCase.id))
-  const splits = confineSplits(root, manifest)
-  const train = readSplit(splits.train, manifest.splits.train)
   if (train.some(testCase => finaltestIds.has(testCase.id))) {
     throw new Error('finaltest split shares case ids with train')
   }
-  const validation = readSplit(splits.validation, manifest.splits.validation)
   if (validation.some(testCase => finaltestIds.has(testCase.id))) {
     throw new Error('finaltest split shares case ids with validation')
   }
@@ -442,7 +447,35 @@ export function loadSearchDatasetOnly(datasetRoot: string): LoadedSearchDataset 
     validation,
     datasetDigest,
     finaltestDigest: manifest.splitDigests.finaltest,
+    finaltestCommitment: declaredSha256Hex(manifest.splitDigests.finaltest) ?? undefined,
+    finaltestPath: manifest.splits.finaltest,
   }
+}
+
+/**
+ * Finalization reads one sealed finaltest buffer after the one-shot claim. The
+ * path, digest, and search cases come from the pre-claim search load, so a
+ * manifest replacement cannot change what the claim is authorized to score.
+ */
+export function loadCommittedFinaltestSplit(search: LoadedSearchDataset): EvolutionEvalCase[] {
+  const expectedDigest = assertPreregisteredFinaltestCommitment(search)
+  const file = resolveSplitInsideRoot(search.root, search.finaltestPath, 'finaltest')
+  const contents = fs.readFileSync(file)
+  if (sha256Hex(contents) !== expectedDigest) {
+    throw new Error('finaltest file digest mismatch vs preregistered commitment')
+  }
+  const finaltest = parseSplit(contents, search.finaltestPath)
+  assertFinaltestIdsDoNotOverlapSearchSplits(search.train, search.validation, finaltest)
+  return finaltest
+}
+
+/** Finalization validates this before claiming its one-shot final-test lock. */
+export function assertPreregisteredFinaltestCommitment(search: LoadedSearchDataset): string {
+  const digest = search.finaltestCommitment
+  if (typeof digest !== 'string') {
+    throw new Error('finaltest preregistered commitment must be a SHA-256 digest')
+  }
+  return digest
 }
 
 /** Finalization only: loads sealed split C after claim. */
@@ -458,7 +491,10 @@ export function loadFinaltestSplit(datasetRoot: string): EvolutionEvalCase[] {
     throw new Error('finaltest file digest mismatch vs manifest')
   }
   const finaltest = readSplit(file, manifest.splits.finaltest)
-  assertFinaltestIdsDoNotOverlapSearchSplits(root, manifest, finaltest)
+  const splits = confineSplits(root, manifest)
+  const train = readSplit(splits.train, manifest.splits.train)
+  const validation = readSplit(splits.validation, manifest.splits.validation)
+  assertFinaltestIdsDoNotOverlapSearchSplits(train, validation, finaltest)
   return finaltest
 }
 
