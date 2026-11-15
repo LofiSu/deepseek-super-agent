@@ -6,6 +6,12 @@ import { UserError } from '../shared/errors.ts'
 import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
 import type { Vault } from './vault.ts'
 import { assertDevShellCommandAllowed } from './bash-policy.ts'
+import { parseBashAllowNetwork } from './bash-allow-network.ts'
+import {
+  defaultCredentialHidePaths,
+  hidePathsForWorkspace,
+  seedWorkspaceCheckout,
+} from './git-workspace.ts'
 import { readIsolationFromEnv, sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
 
 export interface LocalEnvOptions {
@@ -27,6 +33,10 @@ export interface LocalEnvOptions {
   readIsolation?: boolean
   /** Extra absolute host paths allowed read-only in strict mode. */
   readRoots?: readonly string[]
+  /** `git clone --no-hardlinks` source when a worker workspace directory is empty. */
+  sourceRepo?: string
+  /** Credential paths to tmpfs-hide in Linux bwrap; defaults to well-known host paths. */
+  credentialHidePaths?: readonly string[]
 }
 
 /**
@@ -46,6 +56,8 @@ export class LocalEnv implements EnvPort {
   private readonly vault?: Vault
   private readonly vaultNames: readonly string[]
   private readonly sandbox: SandboxPolicy
+  private readonly sourceRepo?: string
+  private readonly credentialHidePaths: readonly string[]
 
   constructor(private readonly root: string, timeoutOrOptions: number | LocalEnvOptions = {}) {
     fs.mkdirSync(root, { recursive: true })
@@ -61,7 +73,17 @@ export class LocalEnv implements EnvPort {
     // Parse the env value even when an explicit flag is present so a garbage
     // value fails closed instead of being silently shadowed.
     const envReadIsolation = readIsolationFromEnv(env)
-    const sandbox: SandboxPolicy = options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }
+    const allowNetwork = sandboxEnabledFromEnv(env)
+      ? (options.sandbox?.allowNetwork ?? parseBashAllowNetwork(env))
+      : options.sandbox?.allowNetwork
+    const sandbox: SandboxPolicy = {
+      ...(options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }),
+      allowNetwork,
+    }
+    this.sourceRepo = options.sourceRepo?.trim() || undefined
+    this.credentialHidePaths = options.credentialHidePaths
+      ? [...options.credentialHidePaths]
+      : defaultCredentialHidePaths()
     this.sandbox = {
       ...sandbox,
       readIsolation: options.readIsolation ?? sandbox.readIsolation ?? envReadIsolation,
@@ -84,6 +106,7 @@ export class LocalEnv implements EnvPort {
   workspace(workerId: string): string {
     const dir = path.join(this.root, workerId)
     fs.mkdirSync(dir, { recursive: true })
+    if (this.sourceRepo) seedWorkspaceCheckout(dir, this.sourceRepo)
     return dir
   }
 
@@ -120,10 +143,12 @@ export class LocalEnv implements EnvPort {
     if (isolated && leavesWorkdir(command)) {
       throw new UserError('speculative command leaves the isolated workdir')
     }
+    const hidePaths = hidePathsForWorkspace(this.credentialHidePaths, [cwd])
     const wrapped = wrapBashCommand(command, {
       ...this.sandbox,
       writableRoots: [cwd],
       allowNetwork: isolated ? false : this.sandbox.allowNetwork,
+      hidePaths,
     })
     const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
       const [bin, ...args] = wrapped.argv

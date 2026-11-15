@@ -14,7 +14,10 @@ import { arbitrateSubscribers } from './core/intake.ts'
 import { withSessionRole } from './core/session-role.ts'
 import { bindRolePorts } from './core/role-ports.ts'
 import type { Host } from './core/host.ts'
+import { githubRepoFromEnv } from './channels/github-source.ts'
+import { parseBashAllowNetwork } from './env/bash-allow-network.ts'
 import { parseBashTimeoutMs } from './env/bash-timeout.ts'
+import { FeaturePrPublisher } from './env/git-publish.ts'
 import { LocalEnv } from './env/local-env.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
@@ -451,10 +454,17 @@ export class Runtime {
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
+    const workspaceSource = baseEnv.DS_AGENT_WORKSPACE_SOURCE_REPO?.trim() || process.cwd()
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), {
       env: baseEnv,
       timeoutMs: parseBashTimeoutMs(baseEnv),
-      sandbox: { enabled: true, allowNetwork: true },
+      sourceRepo: workspaceSource,
+      sandbox: { enabled: true, allowNetwork: parseBashAllowNetwork(baseEnv) },
+    })
+    const ghRepo = githubRepoFromEnv(baseEnv)
+    const publishFeaturePr = new FeaturePrPublisher({
+      repo: ghRepo,
+      workspace: workerId => env.workspace(workerId),
     })
     const now = opts.now ?? (() => new Date().toISOString())
     const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv, line => log.info(line))
@@ -734,6 +744,7 @@ export class Runtime {
       ...(mcp ? { mcp } : {}),
       localAgents,
       ...(skills.size ? { skills } : {}),
+      publishFeaturePr,
     })
     const harness = new Harness({
       model,
