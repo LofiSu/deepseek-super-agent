@@ -21,7 +21,7 @@ Exactly-once side effects to local specialists (`delegate_agent`) or remote chan
 3. Approve the recovery request only if safe to retry. It releases only the effect IDs embedded in that approval, moving eligible outbox rows back to `pending` and ops to `operator_released` for an **explicit** operator-approved retry.
 4. Deny if the effect already happened or must not repeat; then resume or close the ticket manually.
 
-Ended tickets have no resumable approval. An operator uses `resolveUnknownOutcomeEffects(store, ticketId, effectIds, 'retry' | 'acknowledge', now)` from the recovery boundary: `retry` requeues only named outbox rows, while `acknowledge` marks them terminal and records `operator_acknowledged` on their external-operation records.
+Ended tickets have no resumable approval. Inspect their durable effect IDs with `pnpm ds-agent recovery-effects <ticketId>`, then resolve exactly one verified ID with `pnpm ds-agent recovery-effects <ticketId> retry <effectId>` or `pnpm ds-agent recovery-effects <ticketId> acknowledge <effectId>`. `retry` requeues only that named outbox row, while `acknowledge` marks it terminal and records `operator_acknowledged` on its external-operation record. The CLI refuses live Tickets, which must use their recovery approval.
 
 ## Boundaries
 

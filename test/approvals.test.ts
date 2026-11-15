@@ -517,6 +517,44 @@ describe('approval CLI', () => {
     expect(result.stdout).toContain('no approvals pending')
   })
 
+  it('lists and resolves one unknown effect on an ended ticket through the CLI', () => {
+    const home = tempHome()
+    dirs.push(home)
+    const store = new Store(home)
+    try {
+      store.putDoc('ticket', 'ticket_ended', fabricate({
+        id: 'ticket_ended',
+        ended: { at: '2026-01-01T00:00:00.000Z', outcome: 'stopped', by: 'human' },
+      }))
+      store.putDoc(EXTERNAL_OP_KIND, 'extop_ended', {
+        schemaVersion: 1,
+        id: 'extop_ended',
+        kind: 'delegate_agent',
+        ticketId: 'ticket_ended',
+        idempotencyKey: 'ended',
+        phase: 'unknown_outcome',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      } satisfies ExternalOperationRecord)
+    } finally {
+      store.close()
+    }
+
+    const listed = runCli(home, ['recovery-effects', 'ticket_ended'])
+    expect(listed.status, listed.stderr).toBe(0)
+    expect(listed.stdout).toContain('extop_ended')
+
+    const acknowledged = runCli(home, ['recovery-effects', 'ticket_ended', 'acknowledge', 'extop_ended'])
+    expect(acknowledged.status, acknowledged.stderr).toBe(0)
+    expect(acknowledged.stdout).toContain('acknowledge extop_ended')
+    const after = new Store(home)
+    try {
+      expect(after.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_ended')?.phase).toBe('operator_acknowledged')
+    } finally {
+      after.close()
+    }
+  })
+
   it('refuses to decide without a live model instead of consuming guidance on a mock', () => {
     const home = tempHome()
     dirs.push(home)
