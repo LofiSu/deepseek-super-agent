@@ -31,7 +31,7 @@ function fakeEnforced(hooks?: Partial<SandboxConfinementProbeHooks>): SandboxCon
         return { status: 0, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
       }
       if (command.includes('fetch(')) {
-        return { status: 1, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
+        return { status: 1, stdout: 'ds-agent-network-probe-started\n', stderr: '', pid: 0, output: [null, 'ds-agent-network-probe-started\n', ''], signal: null, error: undefined }
       }
       if (command.includes('kill -0')) {
         if (command.includes('PPID')) return { status: 1, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
@@ -78,7 +78,8 @@ describe('required sandbox dimensions gate', () => {
           return { status: 0, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
         }
         if (command.includes('fetch(')) {
-          return { status: command.includes('127.0.0.1') ? 0 : 1, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
+          const status = command.includes('127.0.0.1') ? 0 : 1
+          return { status, stdout: 'ds-agent-network-probe-started\n', stderr: '', pid: 0, output: [null, 'ds-agent-network-probe-started\n', ''], signal: null, error: undefined }
         }
         if (command.includes('$PPID')) {
           return { status: 0, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
@@ -147,7 +148,7 @@ describe('required sandbox dimensions gate', () => {
           return { status: 0, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
         }
         if (command.includes('fetch(')) {
-          return { status: 1, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }
+          return { status: 1, stdout: 'ds-agent-network-probe-started\n', stderr: '', pid: 0, output: [null, 'ds-agent-network-probe-started\n', ''], signal: null, error: undefined }
         }
         if (command.includes('kill -0')) {
           if (command.includes('PPID')) return { status: 1, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined }

@@ -216,6 +216,7 @@ const LOOPBACK_FIXTURE = join(import.meta.dirname, 'fixtures', 'sandbox-loopback
 const EXTERNAL_PID_FIXTURE = join(import.meta.dirname, 'fixtures', 'sandbox-external-pid-fixture.mjs')
 
 const FIXTURE_DEADLINE_MS = 8_000
+const NETWORK_PROBE_STARTED = 'ds-agent-network-probe-started'
 /** First liveness check; an immediate module-not-found exit is caught here. */
 const FIXTURE_FIRST_LIVENESS_CHECK_MS = 100
 const FIXTURE_LIVENESS_INTERVAL_MS = 1_000
@@ -340,16 +341,19 @@ function probeNetworkIsolation(
   const runner = hooks.runWrapped ?? ((cmd, pol, sys) => runWrappedDefault(cmd, pol, sys))
   const node = shellQuote(system.execPath ?? process.execPath)
   const fetchCmd = (hostPort: string) =>
-    `${node} -e "fetch('http://${hostPort}/').then(r=>r.ok?process.exit(0):process.exit(2)).catch(()=>process.exit(1))"`
+    `${node} -e "process.stdout.write('${NETWORK_PROBE_STARTED}\\n'); fetch('http://${hostPort}/').then(r=>process.exit(r.ok?0:2)).catch(()=>process.exit(1))"`
+  const started = (result: SpawnSyncReturns<string>): boolean =>
+    (result.stdout ?? '').includes(NETWORK_PROBE_STARTED)
   try {
     return withLoopbackFixture(hooks, system, port => {
       const target = `127.0.0.1:${port}`
       const positive = runner(fetchCmd(target), { ...policy, allowNetwork: true }, system)
-      if (spawnFailed(positive) || positive.status !== 0) return 'probe_failed'
+      if (spawnFailed(positive) || !started(positive) || positive.status !== 0) return 'probe_failed'
       const negative = runner(fetchCmd(target), { ...policy, allowNetwork: false }, system)
-      if (spawnFailed(negative)) return 'probe_failed'
-      if (negative.status === 0) return 'not_enforced'
-      return 'enforced'
+      if (spawnFailed(negative) || !started(negative)) return 'probe_failed'
+      if (negative.status === 1) return 'enforced'
+      if (negative.status === 0 || negative.status === 2) return 'not_enforced'
+      return 'probe_failed'
     })
   } catch {
     return 'probe_failed'

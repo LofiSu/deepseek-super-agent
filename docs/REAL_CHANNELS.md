@@ -193,8 +193,10 @@ become a Ticket.
 both in-flight polls and their drains (jobs, outbox flush), closes the iMessage
 API, and only then runs `Runtime.finish()` to stop the daemon and close SQLite.
 The loops never close the Runtime or the clients; `serve` owns them. A failed
-pull is logged and retried with bounded exponential backoff (cap 30s);
-stream/ingest errors are logged and skipped like the iMessage loop. A TCC/Full
+pull is logged and retried with bounded exponential backoff (cap 30s). An
+ingest error restores the source cursor to the beginning of that pull, so the
+next poll replays the window and durable trigger-id dedupe handles any earlier
+successful items. A TCC/Full
 Disk Access denial is terminal for the iMessage loop (not retried forever), names
 the exact System Settings path, and leaves a combined Feishu loop and the daemon
 running.

@@ -39,7 +39,7 @@ import { existsSync } from 'node:fs'
 import { probeSandboxConfinement, sandboxProbeFixturePaths } from './src/env/sandbox-probe.ts'
 
 const paths = sandboxProbeFixturePaths()
-const fake = (status) => ({ status, stdout: '', stderr: '', pid: 0, output: [null, '', ''], signal: null, error: undefined })
+const fake = (status, stdout = '') => ({ status, stdout, stderr: '', pid: 0, output: [null, stdout, ''], signal: null, error: undefined })
 const started = Date.now()
 const probe = probeSandboxConfinement(
   { platform: 'linux', available: () => true, exists: () => true, execPath: process.execPath },
@@ -49,7 +49,7 @@ const probe = probeSandboxConfinement(
       if (command.includes('echo ok')) return fake(0)
       if (command.includes('ds-agent-sandbox-negative-probe')) return fake(0)
       if (command.includes('test -r')) return fake(1)
-      if (command.includes('fetch(')) return fake(policy.allowNetwork === true ? 0 : 1)
+      if (command.includes('fetch(')) return fake(policy.allowNetwork === true ? 0 : 1, 'ds-agent-network-probe-started\\n')
       if (command === 'kill -0 $$') return fake(0)
       if (command.includes('kill -0')) return fake(1)
       return fake(0)

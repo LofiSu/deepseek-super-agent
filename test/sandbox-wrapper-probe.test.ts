@@ -30,6 +30,11 @@ const fakeResult = (status: number): SpawnSyncReturns<string> => ({
   error: undefined,
 })
 
+const networkResult = (status: number): SpawnSyncReturns<string> => ({
+  ...fakeResult(status),
+  stdout: 'ds-agent-network-probe-started\n',
+})
+
 const realBash = (command: string): SpawnSyncReturns<string> =>
   spawnSync('bash', ['--noprofile', '--norc', '-c', command], { encoding: 'utf8' })
 
@@ -44,7 +49,7 @@ function readIsolationHooks(
       if (command.includes('echo ok')) return fakeResult(0)
       if (command.includes('ds-agent-sandbox-negative-probe')) return fakeResult(0)
       if (command.includes('test -r') && command.includes('probe-write.txt')) return fakeResult(wrappedReadStatus)
-      if (command.includes('fetch(')) return fakeResult(1)
+      if (command.includes('fetch(')) return networkResult(1)
       if (command.includes('kill -0')) return fakeResult(command.includes('PPID') ? 1 : 0)
       return fakeResult(0)
     },
@@ -100,6 +105,38 @@ describe('sandbox wrapper probe (PATH ≠ enforcement)', () => {
     expect(confinement.outcome).toBe('probe_failed')
     expect(confinement.dimensions.write).toBe('probe_failed')
     expect(confinement.negativeWriteBlocked).toBeNull()
+  })
+
+  it('requires an in-wrapper startup marker before crediting network isolation', () => {
+    const probe = probeSandboxConfinement(linuxBwrapSystem(), {
+      runWrapped: command => {
+        if (command === 'true' || command.includes('echo ok') || command.includes('ds-agent-sandbox-negative-probe')) {
+          return fakeResult(0)
+        }
+        if (command.includes('fetch(')) return fakeResult(1)
+        if (command.includes('kill -0')) return fakeResult(1)
+        return fakeResult(0)
+      },
+      runUnsandboxed: realBash,
+      loopbackPort: 19_880,
+    })
+    expect(probe.dimensions.network).toBe('probe_failed')
+  })
+
+  it('does not mistake an HTTP response for denied network access', () => {
+    const probe = probeSandboxConfinement(linuxBwrapSystem(), {
+      runWrapped: (command, policy) => {
+        if (command === 'true' || command.includes('echo ok') || command.includes('ds-agent-sandbox-negative-probe')) {
+          return fakeResult(0)
+        }
+        if (command.includes('fetch(')) return networkResult(policy.allowNetwork === true ? 0 : 2)
+        if (command.includes('kill -0')) return fakeResult(1)
+        return fakeResult(0)
+      },
+      runUnsandboxed: realBash,
+      loopbackPort: 19_881,
+    })
+    expect(probe.dimensions.network).toBe('not_enforced')
   })
 
   it('on-host optional smoke: run wrapped true when wrapper exists', () => {
@@ -222,7 +259,7 @@ describe('sandbox probe requires the forbidden parent to be visible', () => {
           hideForbiddenDir(command)
           return realBash(command)
         }
-        if (command.includes('fetch(')) return fakeResult(policy.allowNetwork === true ? 0 : 1)
+        if (command.includes('fetch(')) return networkResult(policy.allowNetwork === true ? 0 : 1)
         return realBash(command)
       },
       runUnsandboxed: realBash,

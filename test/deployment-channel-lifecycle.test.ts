@@ -320,6 +320,46 @@ describe('deployment resident channel lifecycle', () => {
     }
   })
 
+  it('feishu loop retries the whole window after an ordinary ingress failure', async () => {
+    const rt = runtime()
+    rt.start()
+    const messageMs = 1_761_958_800_000
+    const source = new WindowFeishuSource(
+      [feishuTrigger('retryable', messageMs)],
+      messageMs - 6_000,
+    )
+    const base = rt.ingestAsync.bind(rt)
+    let attempts = 0
+    rt.ingestAsync = async trigger => {
+      attempts += 1
+      if (attempts === 1) throw new Error('simulated store failure')
+      return base(trigger)
+    }
+    const controller = new AbortController()
+    const loop = runFeishuLoop({
+      runtime: rt,
+      chatId: 'oc_test',
+      client: noNetworkFeishu(),
+      createSource: () => source,
+      intervalMs: 5,
+      signal: controller.signal,
+    })
+    const deadline = Date.now() + 3_000
+    while (!rt.store.getDoc<Trigger>('trigger', 'feishu_retryable') && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    controller.abort()
+    await loop
+    expect(attempts).toBeGreaterThanOrEqual(2)
+    expect(source.batches.slice(0, 2)).toEqual([
+      ['feishu_retryable'],
+      ['feishu_retryable'],
+    ])
+    expect(rt.store.getDoc<{ chatId: string; lastCreateTimeMs: number }>('feishu_cursor', 'cursor'))
+      .toEqual({ chatId: 'oc_test', lastCreateTimeMs: messageMs })
+    await rt.finish()
+  })
+
   it('feishu loop logs poll errors and exits cleanly on abort', async () => {
     const rt = runtime()
     rt.start()

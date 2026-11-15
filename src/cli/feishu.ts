@@ -17,8 +17,6 @@ import {
 import { Outbox, type OutboundAdapter } from '../channels/outbox-adapter.ts'
 import {
   ingestResidentTrigger,
-  ResidentIngressAbortedError,
-  ResidentIngressRejectedError,
   residentIngressLimitFromEnv,
 } from './channel-resident-gate.ts'
 import type { Runtime } from '../runtime.ts'
@@ -184,9 +182,10 @@ function storedCursor(runtime: Runtime, chatId: string): number | undefined {
  * catch same-second messages; any overlap is deduped by Trigger id in
  * `Runtime.ingest`, so an already-processed message is never processed twice.
  *
- * Pull failures are logged and retried with bounded exponential backoff. Ingest
- * failures are logged and skipped. The loop never closes the client or finishes
- * the Runtime: the caller owns those resources.
+ * Pull failures are logged and retried with bounded exponential backoff. An
+ * ingest failure restores the source cursor to the start of that pull, so a
+ * retry cannot advance past an uncommitted Trigger. The loop never closes the
+ * client or finishes the Runtime: the caller owns those resources.
  */
 export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuLoopStopReason> {
   const { runtime, chatId, client, createSource } = options
@@ -241,13 +240,8 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
             })
           } catch (error) {
             log(`[feishu] ingest failed ${messageOf(error)}`)
-            if (
-              error instanceof ResidentIngressRejectedError
-              || error instanceof ResidentIngressAbortedError
-            ) {
-              cursorBlockedByIngress = true
-              break
-            }
+            cursorBlockedByIngress = true
+            break
           }
         }
         // Persist only after the pulled triggers were ingested, matching the
