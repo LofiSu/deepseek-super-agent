@@ -51,7 +51,8 @@ force-pushed. Commit **`ffffbf3b`** (PR #166 format fix) and this document use
 
 Protocol: `docs/T48_MONTH_SCALE_PROTOCOL.md`. T48 remains **`[~]`** until a
 real calendar-month corpus exists; wall-clock rows set `syntheticClock: false`
-and **`syntheticWorkload: true`** (fixture corpus persists under `DS_AGENT_HOME`).
+and **`syntheticWorkload: true`** (fixture corpus persists under
+`$DS_AGENT_HOME/.ds-agent/measurement/t48-fixture`, separate from the Runtime store).
 
 **Reproducible operator command** (persistent home; default cadence **24h**;
 `DS_AGENT_T48_OBSERVE_FORCE=1` for an immediate sample without waiting):

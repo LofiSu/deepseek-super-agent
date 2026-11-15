@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { readCorpusState } from '../src/measurement/t48-persistent-store.ts'
+import { readCorpusState, resolveT48MeasurementHome } from '../src/measurement/t48-persistent-store.ts'
 import { runT48PersistentIncrementalStep, T48_INCREMENTAL_SAMPLES } from '../src/measurement/t48-persistent-store.ts'
 import { tempHome } from './fixtures.ts'
 
@@ -51,11 +51,13 @@ describe('T48 persistent corpus across processes', () => {
     const second = await spawnOneSample(home, journal)
     expect(second).toBe(2)
 
-    expect(readCorpusState(home)?.insertedSampleIndices).toEqual([0, 1])
-    expect(fs.existsSync(path.join(home, 'ds-agent.db'))).toBe(true)
+    const measurementHome = resolveT48MeasurementHome(home)
+    expect(readCorpusState(measurementHome)?.insertedSampleIndices).toEqual([0, 1])
+    expect(fs.existsSync(path.join(measurementHome, 'ds-agent.db'))).toBe(true)
+    expect(fs.existsSync(path.join(home, 'ds-agent.db'))).toBe(false)
 
     const { report } = runT48PersistentIncrementalStep({
-      home,
+      home: measurementHome,
       wallClockMeasurement: true,
       env: { ...process.env, DS_AGENT_T48_TEST_HOT_MAX_AGE_DAYS: '0', DS_AGENT_T48_TEST_HOT_MAX_ENTRIES: '1000' },
       forceInsert: false,

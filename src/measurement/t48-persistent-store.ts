@@ -25,6 +25,17 @@ export const T48_HELD_OUT_QUERIES: readonly ProtocolQuery[] = PROTOCOL_QUERIES
 
 export const T48_CORPUS_STATE_REL = '.ds-agent/measurement/t48-corpus-state.json'
 
+/**
+ * A measurement fixture never shares the operator's Runtime SQLite store.
+ * The path lives below the measurement area so it can be retained across
+ * samples without allowing fixture retention to prune production memories.
+ */
+export const T48_MEASUREMENT_HOME_REL = '.ds-agent/measurement/t48-fixture'
+
+export function resolveT48MeasurementHome(home: string): string {
+  return path.join(home, T48_MEASUREMENT_HOME_REL)
+}
+
 export interface T48CorpusState {
   schemaVersion: 1
   home: string

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { readT48Journal } from '../src/measurement/t48-journal.ts'
 import {
   readCorpusState,
+  resolveT48MeasurementHome,
   T48_INCREMENTAL_SAMPLES,
   runT48PersistentIncrementalStep,
 } from '../src/measurement/t48-persistent-store.ts'
@@ -33,10 +34,11 @@ describe('T48 wall-clock observation (persistent corpus, not month-scale accepta
     expect(rows.every(r => r.syntheticWorkload === true)).toBe(true)
     expect(readWallClockState(home)?.samples).toBe(2)
 
-    const corpus = readCorpusState(home)
+    const measurementHome = resolveT48MeasurementHome(home)
+    const corpus = readCorpusState(measurementHome)
     expect(corpus?.insertedSampleIndices).toEqual([0, 1])
 
-    const store = new Store(home)
+    const store = new Store(measurementHome)
     try {
       const docs = store.listDocs<LongTermMemoryEntry>('ltm')
       const hotBilling = docs.filter(
@@ -78,7 +80,7 @@ describe('T48 wall-clock observation (persistent corpus, not month-scale accepta
     }
 
     const { report } = runT48PersistentIncrementalStep({
-      home,
+      home: resolveT48MeasurementHome(home),
       wallClockMeasurement: true,
       env,
       forceInsert: false,
@@ -89,6 +91,45 @@ describe('T48 wall-clock observation (persistent corpus, not month-scale accepta
     expect(report.metrics.topBillingQueryIsBilling).toBe(true)
     expect(report.syntheticWorkload).toBe(true)
     expect(report.wallClockMeasurement).toBe(true)
-    expect(fs.existsSync(path.join(home, 'ds-agent.db'))).toBe(true)
+    expect(fs.existsSync(path.join(resolveT48MeasurementHome(home), 'ds-agent.db'))).toBe(true)
+    expect(fs.existsSync(path.join(home, 'ds-agent.db'))).toBe(false)
+  })
+
+  it('preserves ordinary runtime memory while fixture retention runs in measurement storage', () => {
+    const home = tempHome()
+    const production = new Store(home)
+    try {
+      production.putDoc('ltm', 'production-memory', {
+        id: 'production-memory', text: 'real operator memory', tier: 'hot', createdAt: new Date().toISOString(),
+      })
+    } finally {
+      production.close()
+    }
+
+    runT48WallClockObservation({
+      home,
+      journalPath: path.join(home, 'isolated.jsonl'),
+      force: true,
+      env: { ...process.env, DS_AGENT_T48_TEST_HOT_MAX_AGE_DAYS: '0' },
+    })
+
+    const reopened = new Store(home)
+    try {
+      expect(reopened.getDoc('ltm', 'production-memory')).toMatchObject({ text: 'real operator memory' })
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('refuses a concurrent observation before changing journal or state', () => {
+    const home = tempHome()
+    const journal = path.join(home, 'locked.jsonl')
+    const lock = path.join(home, '.ds-agent/measurement/t48-wall-clock.lock')
+    fs.mkdirSync(path.dirname(lock), { recursive: true })
+    fs.writeFileSync(lock, 'running\n', 'utf8')
+    expect(() => runT48WallClockObservation({ home, journalPath: journal, force: true }))
+      .toThrow('T48 wall-clock observation already running')
+    expect(fs.existsSync(journal)).toBe(false)
+    expect(readWallClockState(home)).toBeUndefined()
   })
 })
