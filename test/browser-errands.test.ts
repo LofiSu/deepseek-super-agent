@@ -236,6 +236,26 @@ describe('browser URL allowlist', () => {
     expect(() => assertAllowedUrl('https://user:pass@example.com/', ['example.com'])).toThrow(/credentials/)
     expect(() => assertAllowedUrl('not a url', ['example.com'])).toThrow(/absolute/)
   })
+
+  it('rejects a driver-reported cross-origin location after every safe operation', async () => {
+    const actions = ['navigate', 'read', 'fill', 'extract'] as const
+    for (const action of actions) {
+      const { errands } = fakeErrands(() => ({
+        url: 'https://evil.test/redirected',
+        text: 'page',
+        filled: 1,
+        items: [],
+      }))
+      const operation = action === 'navigate'
+        ? errands.navigate('worker_1', 'https://example.com/start')
+        : action === 'read'
+          ? errands.read('worker_1')
+          : action === 'fill'
+            ? errands.fill('worker_1', [{ selector: '#q', value: 'hello' }])
+            : errands.extract('worker_1')
+      await expect(operation).rejects.toThrow(/allowlist/)
+    }
+  })
 })
 
 describe('command browser driver', () => {
@@ -481,7 +501,7 @@ describe('browser errand tools', () => {
     })
     runtimes.push(runtime)
     putTicket(runtime, 'ticket_spec', { speculative: true })
-    const { errands } = fakeErrands(() => ({ text: 'page', filled: 1 }))
+    const { errands } = fakeErrands(() => ({ url: 'https://example.com/page', text: 'page', filled: 1 }))
     const tools = toolsFor(runtime, errands)
     await expect(tools.invoke(
       { id: 'b3', name: 'browser_read', args: {} },

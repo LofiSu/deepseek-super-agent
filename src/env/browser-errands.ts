@@ -451,7 +451,7 @@ export class BrowserErrands {
   async navigate(session: string, rawUrl: string): Promise<BrowserErrandResult> {
     const url = assertAllowedUrl(rawUrl, this.config.allowedHosts)
     const result = await this.run({ action: 'navigate', session, url: url.toString() })
-    const finalUrl = optionalString(result, 'url')
+    const finalUrl = this.assertAllowedResultUrl(result)
     const title = optionalString(result, 'title')
     return {
       action: 'navigate',
@@ -463,7 +463,7 @@ export class BrowserErrands {
   async read(session: string): Promise<BrowserErrandResult> {
     const result = await this.run({ action: 'read', session })
     const text = requiredString(result, 'text')
-    const url = optionalString(result, 'url')
+    const url = this.assertAllowedResultUrl(result)
     const title = optionalString(result, 'title')
     const truncated = text.length > this.config.maxReadChars || result.truncated === true
     return {
@@ -479,6 +479,7 @@ export class BrowserErrands {
     // Re-validate here too: a caller outside the tool layer must not weaken this.
     const normalized = normalizeBrowserFields(fields)
     const result = await this.run({ action: 'fill', session, fields: normalized })
+    this.assertAllowedResultUrl(result)
     const filled = requiredInteger(result, 'filled')
     if (filled < 0 || filled > normalized.length) {
       throw new UserError(`browser driver reported ${filled} filled fields for ${normalized.length} fields`)
@@ -500,7 +501,7 @@ export class BrowserErrands {
     if (!Array.isArray(items) || items.some(item => typeof item !== 'string')) {
       throw new UserError('browser driver returned invalid extract items')
     }
-    const url = optionalString(result, 'url')
+    const url = this.assertAllowedResultUrl(result)
     const truncated = items.length > this.config.maxExtractItems || result.truncated === true
     return {
       action: 'extract',
@@ -527,6 +528,16 @@ export class BrowserErrands {
     } finally {
       this.running -= 1
     }
+  }
+
+  /**
+   * The driver reports the post-action page URL for every operation. Treat it
+   * as a trust boundary: navigation and page actions can redirect a session
+   * after the initial owner-allowlisted URL has already been checked.
+   */
+  private assertAllowedResultUrl(result: Record<string, unknown>): string {
+    const url = requiredString(result, 'url')
+    return assertAllowedUrl(url, this.config.allowedHosts).toString()
   }
 }
 
