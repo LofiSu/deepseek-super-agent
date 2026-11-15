@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -53,6 +54,11 @@ async function waitForMarker(home: string, timeoutMs = 45_000): Promise<Record<s
   throw new Error(`timed out waiting for ${file}`)
 }
 
+async function waitForExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  await once(child, 'exit')
+}
+
 afterEach(() => {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
@@ -70,13 +76,16 @@ describe('delegate_agent OS fault boundary', () => {
           {
             id: 'ipc-hold',
             command: process.execPath,
-            args: ['test/fixtures/delegate-ipc-hold.mjs', '{task}'],
+            // Local specialists run in their Worker workspace, not the
+            // repository root. Keep this fixture path valid across that
+            // boundary so the effect remains in-flight until SIGKILL.
+            args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
             timeoutMs: 60_000,
           },
           {
             id: 'ipc-echo',
             command: process.execPath,
-            args: ['--import', 'tsx', 'test/helpers/delegate-agent-os-child.ts', '{task}'],
+            args: ['--import', 'tsx', path.resolve(process.cwd(), 'test/helpers/delegate-agent-os-child.ts'), '{task}'],
             timeoutMs: 30_000,
           },
         ],
@@ -87,9 +96,12 @@ describe('delegate_agent OS fault boundary', () => {
     const during = await waitForMarker(home)
     expect(during.phase).toBe('delegating')
     expect(during.delegateActive).toBe(1)
+    expect(during.delegateOperationPhase).toBe('started')
+    expect(during.delegateOperationId).toMatch(/^extop_/)
+    expect(during.durableStarted).toBe(true)
 
     first.kill('SIGKILL')
-    await new Promise(resolve => setTimeout(resolve, 200))
+    await waitForExit(first)
 
     const store = new Store(home)
     try {
@@ -106,6 +118,8 @@ describe('delegate_agent OS fault boundary', () => {
     const after = await waitForMarker(home)
     expect(after.phase).toBe('post-recovery')
     expect(after.recoveryOutcome).toBe('completed')
+    expect(after.assignmentCount).toBe(1)
+    expect(after.lastAssignmentState).toBe('running')
     expect(after.recoveredInputs).toBe(0)
     expect(after.unknownApprovals).toBeGreaterThanOrEqual(1)
     second.kill('SIGTERM')
