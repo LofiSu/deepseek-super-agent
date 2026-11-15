@@ -75,8 +75,10 @@ export interface RuntimeOptions {
    */
   mcpServers?: unknown
   /**
-   * Owner-editable persona, standing instructions, and owner context. Defaults
-   * to PERSONA.md / AGENTS.md / USER.md in `home`, then DS_AGENT_* seeds.
+   * Owner-editable runtime files. Defaults to SOUL.md, IDENTITY.md, USER.md,
+   * INSTRUCTIONS.md, AGENTS.md, MEMORY.md, TOOLS.md, HEARTBEAT.md, and
+   * PROACTIVE_PREFERENCES.md in `home`, then DS_AGENT_* seeds. PERSONA.md and
+   * DS_AGENT_PERSONA are still read as deprecated soul fallbacks.
    */
   prompts?: PromptFiles
   /**
@@ -450,7 +452,7 @@ export class Runtime {
     const metrics = new Metrics(opts.home)
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const now = opts.now ?? (() => new Date().toISOString())
-    const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv)
+    const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv, line => log.info(line))
     const localAgentSpecs = opts.localAgents ?? loadLocalAgents(opts.home, baseEnv)
     const localAgents = localAgentSpecs.length
       ? new LocalAgentRegistry(localAgentSpecs, {
