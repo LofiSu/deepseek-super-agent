@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -6,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { LocalAgentRegistry, type LocalAgentSpec } from '../src/env/local-agents.ts'
 import { Store } from '../src/store/sqlite.ts'
 import type { Ticket } from '../src/shared/types.ts'
+import { EXTERNAL_OP_KIND, type ExternalOperationRecord } from '../src/core/external-effects.ts'
 
 const children: ChildProcess[] = []
 const homes: string[] = []
@@ -53,6 +55,11 @@ async function waitForMarker(home: string, timeoutMs = 45_000): Promise<Record<s
   throw new Error(`timed out waiting for ${file}`)
 }
 
+async function waitForExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  await once(child, 'exit')
+}
+
 afterEach(() => {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
@@ -88,8 +95,25 @@ describe('delegate_agent OS fault boundary', () => {
     expect(during.phase).toBe('delegating')
     expect(during.delegateActive).toBe(1)
 
+    // `activeCount` confirms the child specialist is live, but recovery only
+    // has an uncertain effect to preserve once the durable operation record
+    // exists. Assert that crash boundary explicitly before taking the process
+    // down, rather than relying on a timing delay after SIGKILL.
+    const beforeKillStore = new Store(home)
+    try {
+      const operations = beforeKillStore.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)
+      expect(operations).toHaveLength(1)
+      expect(operations[0]).toMatchObject({
+        ticketId: 'ticket_delegate_os',
+        kind: 'delegate_agent',
+        phase: 'started',
+      })
+    } finally {
+      beforeKillStore.close()
+    }
+
     first.kill('SIGKILL')
-    await new Promise(resolve => setTimeout(resolve, 200))
+    await waitForExit(first)
 
     const store = new Store(home)
     try {
@@ -106,6 +130,8 @@ describe('delegate_agent OS fault boundary', () => {
     const after = await waitForMarker(home)
     expect(after.phase).toBe('post-recovery')
     expect(after.recoveryOutcome).toBe('completed')
+    expect(after.assignmentCount).toBe(1)
+    expect(after.lastAssignmentState).toBe('running')
     expect(after.recoveredInputs).toBe(0)
     expect(after.unknownApprovals).toBeGreaterThanOrEqual(1)
     second.kill('SIGTERM')
