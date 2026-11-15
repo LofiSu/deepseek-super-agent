@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { LocalAgentRegistry, type LocalAgentSpec } from '../src/env/local-agents.ts'
 import { Store } from '../src/store/sqlite.ts'
 import type { Ticket } from '../src/shared/types.ts'
-import { EXTERNAL_OP_KIND, type ExternalOperationRecord } from '../src/core/external-effects.ts'
 
 const children: ChildProcess[] = []
 const homes: string[] = []
@@ -60,27 +59,6 @@ async function waitForExit(child: ChildProcess): Promise<void> {
   await once(child, 'exit')
 }
 
-async function waitForStartedDelegateOperation(
-  home: string,
-  timeoutMs = 5_000,
-): Promise<ExternalOperationRecord> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const store = new Store(home)
-    try {
-      const operation = store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND).find(item =>
-        item.ticketId === 'ticket_delegate_os'
-        && item.kind === 'delegate_agent'
-        && item.phase === 'started')
-      if (operation) return operation
-    } finally {
-      store.close()
-    }
-    await new Promise(resolve => setTimeout(resolve, 25))
-  }
-  throw new Error('timed out waiting for durable started delegate operation')
-}
-
 afterEach(() => {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
@@ -118,14 +96,9 @@ describe('delegate_agent OS fault boundary', () => {
     const during = await waitForMarker(home)
     expect(during.phase).toBe('delegating')
     expect(during.delegateActive).toBe(1)
-
-    // The durable operation (rather than child activity alone) defines the
-    // crash boundary. Poll it with a bounded timeout before SIGKILL.
-    await expect(waitForStartedDelegateOperation(home)).resolves.toMatchObject({
-      ticketId: 'ticket_delegate_os',
-      kind: 'delegate_agent',
-      phase: 'started',
-    })
+    expect(during.delegateOperationPhase).toBe('started')
+    expect(during.delegateOperationId).toMatch(/^extop_/)
+    expect(during.durableStarted).toBe(true)
 
     first.kill('SIGKILL')
     await waitForExit(first)
