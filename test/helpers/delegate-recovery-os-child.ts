@@ -10,7 +10,11 @@ import { ScriptedModel } from '../scripted-model.ts'
 import { ToolRegistry } from '../../src/harness/tools.ts'
 import { Runtime } from '../../src/runtime.ts'
 import type { Ticket } from '../../src/shared/types.ts'
-import { UNKNOWN_OUTCOME_PREFIX } from '../../src/core/external-effects.ts'
+import {
+  EXTERNAL_OP_KIND,
+  UNKNOWN_OUTCOME_PREFIX,
+  type ExternalOperationRecord,
+} from '../../src/core/external-effects.ts'
 import { RECOVERY_BOUNDARY_DOC_ID, type RecoveryBoundaryRecord } from '../../src/core/recovery-boundary.ts'
 
 const home = process.argv[2]
@@ -52,6 +56,22 @@ function runningTicket(): Ticket {
   }
 }
 
+async function waitForStartedDelegateOperation(
+  runtime: Runtime,
+  timeoutMs = 5_000,
+): Promise<ExternalOperationRecord> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const operation = runtime.store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND).find(item =>
+      item.ticketId === 'ticket_delegate_os'
+      && item.kind === 'delegate_agent'
+      && item.phase === 'started')
+    if (operation) return operation
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error('timed out waiting for durable started delegate operation')
+}
+
 async function main(): Promise<void> {
   const runtime = Runtime.create({
     home,
@@ -84,16 +104,26 @@ async function main(): Promise<void> {
     // running ticket without auto-recover mutating it before delegate_agent.
     runtime.start({ assessPending: false })
     runtime.store.putDoc('ticket', 'ticket_delegate_os', runningTicket())
+    let delegationFailure: unknown
     void tools.invoke(
       { id: 'd1', name: 'delegate_agent', args: { agent: 'ipc-hold', task } },
       { sessionId: 'worker_ticket_delegate_os', role: 'worker', ticketId: 'ticket_delegate_os' },
-    )
+    ).catch(error => { delegationFailure = error })
+    // The parent is only permitted to SIGKILL after this process has observed
+    // the committed crash boundary itself. A parent-side SQLite poll races the
+    // write and can incorrectly test a failed delegation rather than an
+    // in-flight external effect.
+    const operation = await waitForStartedDelegateOperation(runtime)
     for (let i = 0; i < 300 && localAgents.activeCount === 0; i++) {
       await new Promise(resolve => setTimeout(resolve, 10))
     }
+    if (delegationFailure) throw delegationFailure
     fs.writeFileSync(marker, `${JSON.stringify({
       phase: 'delegating',
       delegateActive: localAgents.activeCount,
+      delegateOperationId: operation.id,
+      delegateOperationPhase: operation.phase,
+      durableStarted: true,
     })}\n`)
   } else if (mode === 'restart') {
     runtime.start({ assessPending: false })
