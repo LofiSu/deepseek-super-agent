@@ -55,6 +55,11 @@ export interface FeaturePrPublisherOptions {
   pushRemote?: string
   git?: GitRun
   gh?: GhRun
+  /**
+   * Plain HTTPS remote when using host App git auth (token via child env, not URL).
+   * Defaults to `https://github.com/${repo.full}.git`.
+   */
+  httpsPushRemote?: string
 }
 
 /**
@@ -71,7 +76,9 @@ export class FeaturePrPublisher {
   constructor(options: FeaturePrPublisherOptions) {
     this.repo = options.repo
     this.workspace = options.workspace
-    this.pushRemote = options.pushRemote ?? `https://github.com/${options.repo.full}.git`
+    this.pushRemote = options.pushRemote
+      ?? options.httpsPushRemote
+      ?? `https://github.com/${options.repo.full}.git`
     this.git = options.git ?? runGit
     this.gh = options.gh ?? runGh
   }

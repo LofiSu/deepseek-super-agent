@@ -26,7 +26,9 @@ import { defaultHome, runDemo } from './demo.ts'
 import { runGatewayCommand } from './gateway.ts'
 import { runImessageCommand } from './imessage.ts'
 import { resolveServeChannelConfigs, runChannelsCheck, startServeChannels } from './channels.ts'
-import { startDispatchLoopIfConfigured } from './dispatch-integration.ts'
+import { dispatchLoadRequested, startDispatchLoopIfConfigured } from './dispatch-integration.ts'
+import { loadDispatchOwnerConfig } from '../dispatch/config.ts'
+import { ghRunForDispatchHost } from '../dispatch/github-app-auth.ts'
 import { formatDispatchStatus, runDispatchCancel } from '../dispatch/cli.ts'
 import { backupUsage, runBackupCli } from './backup.ts'
 import { runUi } from './ui.ts'
@@ -345,10 +347,28 @@ async function serve(home: string): Promise<void> {
   // leave every permissioned resource untouched.
   const configs = resolveServeChannelConfigs()
 
+  let dispatchConfig: Awaited<ReturnType<typeof loadDispatchOwnerConfig>> | undefined
+  let featurePrPublisher: import('../runtime.ts').RuntimeOptions['featurePrPublisher'] | undefined
+  if (dispatchLoadRequested()) {
+    dispatchConfig = await loadDispatchOwnerConfig(home, { verifyMentions: true })
+    if (dispatchConfig?.githubAuthHost) {
+      const gh = await ghRunForDispatchHost(dispatchConfig.githubAuthHost)
+      const appGit = dispatchConfig.githubAuthHost.app
+        ? dispatchConfig.githubAuthHost.app.createAuthenticatedGitRun()
+        : undefined
+      featurePrPublisher = {
+        repo: dispatchConfig.github.repo,
+        gh,
+        ...(appGit ? { git: appGit } : {}),
+      }
+    }
+  }
+
   const runtime = Runtime.create({
     home,
     jobDelayMs: 20,
     watchdogIntervalMs: 60_000,
+    ...(featurePrPublisher ? { featurePrPublisher } : {}),
   })
   const canAssess = runtime.model.name !== 'MockModel'
   // Independent loops: each channel owns its AbortController and Outbox, but
@@ -438,7 +458,10 @@ async function serve(home: string): Promise<void> {
       throw error
     }
     try {
-      dispatchLoop = await startDispatchLoopIfConfigured(home, runtime, { verifyGh: true })
+      dispatchLoop = await startDispatchLoopIfConfigured(home, runtime, {
+        verifyGh: true,
+        ...(dispatchConfig ? { config: dispatchConfig } : {}),
+      })
       if (dispatchLoop) {
         runtime.log.info('[dispatch] github issue poll + shared job queue started (no issue comments)')
       }

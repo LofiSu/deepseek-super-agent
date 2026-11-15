@@ -19,6 +19,7 @@ const FORBIDDEN_PATH_RULES: readonly { re: RegExp; reason: string }[] = [
   { re: /^src\/channels\/vault/i, reason: 'vault' },
   { re: /credential-sentinel/i, reason: 'credential store' },
   { re: /^src\/env\/git-publish\.ts$/, reason: 'publish intermediary' },
+  { re: /^src\/env\/git-workspace\.ts$/, reason: 'credential hide paths' },
   { re: /^\.github\//, reason: 'github workflows' },
   { re: /memory-recall-eval\.test\.ts$/, reason: 'eval thresholds' },
   { re: /^src\/dispatch\/(implementer|job-runner|diff-path-policy|holdout)\.ts$/, reason: 'dispatch publish path' },
@@ -28,7 +29,9 @@ const FORBIDDEN_PATH_RULES: readonly { re: RegExp; reason: string }[] = [
   { re: /^src\/dispatch\/serve-loop\.ts$/, reason: 'serve loop' },
   { re: /^src\/dispatch\/github-poll\.ts$/, reason: 'github poll' },
   { re: /^src\/dispatch\/github-peanut\.ts$/, reason: 'github peanut' },
+  { re: /^src\/dispatch\/github-app-auth\.ts$/, reason: 'github app auth' },
   { re: /^src\/cli\/dispatch-integration\.ts$/, reason: 'dispatch integration' },
+  { re: /ds-agent-credentials/i, reason: 'credential path' },
 ]
 
 const RSI_EXTRA_FORBIDDEN: readonly { re: RegExp; reason: string }[] = [

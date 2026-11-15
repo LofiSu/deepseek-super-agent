@@ -1,8 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Runtime } from '../runtime.ts'
-import { runGh } from '../channels/github-source.ts'
 import { loadDispatchOwnerConfig } from '../dispatch/config.ts'
+import { ghRunForDispatchHost } from '../dispatch/github-app-auth.ts'
 import { createDefaultPollAdapter } from '../dispatch/github-poll.ts'
 import { hasOpenPeanutPrForRepo } from '../dispatch/github-peanut.ts'
 import { createClaudeDispatchJobRunner } from '../dispatch/implementer.ts'
@@ -21,23 +21,34 @@ export interface StartedDispatchLoop {
 export async function startDispatchLoopIfConfigured(
   home: string,
   runtime: Runtime,
-  opts: { verifyGh?: boolean; force?: boolean } = {},
+  opts: {
+    verifyGh?: boolean
+    force?: boolean
+    /** When serve already loaded + bootstrapped config, pass it to avoid duplicate verify. */
+    config?: Awaited<ReturnType<typeof loadDispatchOwnerConfig>>
+  } = {},
 ): Promise<StartedDispatchLoop | undefined> {
   if (!opts.force && !dispatchLoadRequested()) return undefined
-  const config = await loadDispatchOwnerConfig(home, {
+  const config = opts.config ?? await loadDispatchOwnerConfig(home, {
     verifyMentions: opts.verifyGh !== false,
   })
   if (!config) return undefined
 
+  const gh = await ghRunForDispatchHost(
+    config.githubAuthHost ?? { auth: config.github.auth ?? { mode: 'owner-gh' } },
+  )
+  const app = config.githubAuthHost?.app
+  const appGit = app ? app.createAuthenticatedGitRun() : undefined
+
   const abort = new AbortController()
   const poll = config.github.enabled
-    ? createDefaultPollAdapter(config.github.repo)
+    ? createDefaultPollAdapter(config.github.repo, gh)
     : undefined
 
   const repoFull = config.github.repo
   const hasOpenPeanutPr = async (headBranch: string): Promise<boolean> => {
     try {
-      return await hasOpenPeanutPrForRepo(repoFull, headBranch, runGh)
+      return await hasOpenPeanutPrForRepo(repoFull, headBranch, gh)
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       runtime.log.info(`[dispatch] hasOpenPeanutPr check failed (${msg}); skipping enqueue this tick`)
@@ -50,6 +61,8 @@ export async function startDispatchLoopIfConfigured(
     ? createClaudeDispatchJobRunner({
         github: config.github,
         defaultSourceRepo: process.cwd(),
+        gh,
+        git: appGit,
       })
     : createJobRunner()
 

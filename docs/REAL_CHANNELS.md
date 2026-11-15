@@ -48,6 +48,7 @@ enqueues fix work on a shared queue with bounded RSI jobs. See `docs/DISPATCH.md
 - **No auto issue comments** for status, cancel, or progress; PR-only publish via
   `FeaturePrPublisher`.
 - Config: `<DS_AGENT_HOME>/github-dispatch.json`; cursor seeds to now on first start.
+- Optional **`github.auth`** for GitHub App tokens (default: owner `gh`). See `docs/DISPATCH.md` for keys, fail-closed behavior, mention honesty, and the **Pull requests: write includes merge** warning.
 - Started from `serve` when enabled (optional `--github-dispatch`); **webhook ingress is not deployed**.
 
 ## GitHub Source + Outbox

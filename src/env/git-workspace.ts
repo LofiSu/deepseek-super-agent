@@ -20,6 +20,8 @@ export function defaultCredentialHidePaths(home = os.homedir()): string[] {
     path.join(home, '.claude'),
     path.join(home, '.config', 'claude'),
     '/workspace/ds-agent-notify-secrets',
+    path.join(home, 'ds-agent-credentials'),
+    '/home/box/ds-agent-credentials',
   ]
   return roots.filter(p => {
     try {

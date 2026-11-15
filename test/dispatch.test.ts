@@ -179,6 +179,13 @@ describe('dispatch config', () => {
     const cfg = loadDispatchOwnerConfigSync(home)!
     expect(cfg.github.pollIntervalMs).toBe(MIN_POLL_INTERVAL_MS)
   })
+
+  it('defaults github.auth to owner-gh when auth omitted', () => {
+    const home = tempHome()
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    expect(cfg.github.auth).toEqual({ mode: 'owner-gh' })
+  })
 })
 
 describe('dispatch job runner', () => {

@@ -14,7 +14,8 @@ import { arbitrateSubscribers } from './core/intake.ts'
 import { withSessionRole } from './core/session-role.ts'
 import { bindRolePorts } from './core/role-ports.ts'
 import type { Host } from './core/host.ts'
-import { githubRepoFromEnv } from './channels/github-source.ts'
+import { githubRepoFromEnv, parseRepo, runGh, type GhRun } from './channels/github-source.ts'
+import type { GitRun } from './env/git-publish.ts'
 import { parseBashAllowNetwork } from './env/bash-allow-network.ts'
 import { parseBashTimeoutMs } from './env/bash-timeout.ts'
 import { FeaturePrPublisher } from './env/git-publish.ts'
@@ -149,6 +150,15 @@ export interface RuntimeOptions {
    * rows are pruned on startup and after every append.
    */
   lifecycleRetention?: number
+  /**
+   * Host-side FeaturePrPublisher overrides (dispatch GitHub App auth).
+   * When omitted, publisher uses owner `gh` and plain HTTPS push URL.
+   */
+  featurePrPublisher?: {
+    repo?: string
+    gh?: GhRun
+    git?: GitRun
+  }
 }
 
 export interface MemoryRetention {
@@ -462,9 +472,14 @@ export class Runtime {
       sandbox: { enabled: true, allowNetwork: parseBashAllowNetwork(baseEnv) },
     })
     const ghRepo = githubRepoFromEnv(baseEnv)
+    const prRepo = opts.featurePrPublisher?.repo
+      ? parseRepo(opts.featurePrPublisher.repo)
+      : ghRepo
     const publishFeaturePr = new FeaturePrPublisher({
-      repo: ghRepo,
+      repo: prRepo,
       workspace: workerId => env.workspace(workerId),
+      gh: opts.featurePrPublisher?.gh ?? runGh,
+      ...(opts.featurePrPublisher?.git ? { git: opts.featurePrPublisher.git } : {}),
     })
     const now = opts.now ?? (() => new Date().toISOString())
     const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv, line => log.info(line))

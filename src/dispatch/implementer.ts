@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { parseRepo, runGh, type GhRun } from '../channels/github-source.ts'
-import { FeaturePrPublisher } from '../env/git-publish.ts'
+import { FeaturePrPublisher, type GitRun } from '../env/git-publish.ts'
 import { seedWorkspaceCheckout } from '../env/git-workspace.ts'
 import { UserError } from '../shared/errors.ts'
 import type { GithubDispatchConfig } from './config.ts'
@@ -36,6 +36,7 @@ export interface ClaudeGithubFixRunnerDeps {
   runCoder?: RunCoder
   runRsiCoder?: RunRsiCoder
   gh?: GhRun
+  git?: GitRun
   pushRemote?: string
   /** Resolved repo root to clone when sourceRepo is omitted (e.g. process.cwd()). */
   defaultSourceRepo?: string
@@ -280,6 +281,7 @@ async function runIsolatedImplementPublish(
       repo,
       workspace: () => workspace,
       gh,
+      ...(deps.git ? { git: deps.git } : {}),
       ...(deps.pushRemote ? { pushRemote: deps.pushRemote } : {}),
     })
     const result = await publisher.publish({

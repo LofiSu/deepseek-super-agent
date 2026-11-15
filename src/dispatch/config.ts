@@ -1,6 +1,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DEFAULT_GITHUB_REPO, parseRepo, runGh, type GhRun } from '../channels/github-source.ts'
+import {
+  bootstrapDispatchGithubAuth,
+  parseGithubAuthBlock,
+  type DispatchHostGithubAuth,
+  type GithubDispatchAuthConfig,
+} from './github-app-auth.ts'
 import { UserError } from '../shared/errors.ts'
 
 export const GITHUB_DISPATCH_FILE = 'github-dispatch.json'
@@ -17,10 +23,12 @@ export interface GithubDispatchConfig {
   /** Isolated checkout seed (`git clone --no-hardlinks`). */
   sourceRepo?: string
   /**
-   * Optional verified mention handles (without @). Each must match authenticated
-   * `gh api user` login unless a future GitHub App slug is verified.
+   * Optional verified mention handles (without @). Owner-gh: match `gh api user`.
+   * GitHub App: only GET /app `slug` and `{slug}[bot]` (no arbitrary slugs).
    */
   mentionHandles?: string[]
+  /** Host-only auth; default owner `gh` when omitted. */
+  auth?: GithubDispatchAuthConfig
   /**
    * `claude` enables the host-side Claude Code github_fix implementer.
    * Omitted or `none` keeps fail-closed publish.
@@ -41,6 +49,8 @@ export interface RsiConfig {
 export interface DispatchOwnerConfig {
   github: GithubDispatchConfig
   rsi: RsiConfig
+  /** Set when `github.auth.mode` is `github-app` after fail-closed verify. */
+  githubAuthHost?: DispatchHostGithubAuth
 }
 
 export const DEFAULT_AUTHORIZED_ACTORS = ['LofiSu'] as const
@@ -102,13 +112,48 @@ async function authenticatedGhLogin(gh: GhRun): Promise<string> {
   return login
 }
 
+function verifiedAppMentionSet(expectedSlug: string): Set<string> {
+  const slug = expectedSlug.trim()
+  return new Set([slug, `${slug}[bot]`].map(s => s.toLowerCase()))
+}
+
+function assertMentionHandlesForAuth(
+  mentionHandles: string[],
+  auth: GithubDispatchAuthConfig,
+): void {
+  for (const handle of mentionHandles) {
+    if (handle.toLowerCase() === UNOWNED_PUBLIC_HANDLE) {
+      throw new UserError(
+        `github-dispatch: mention handle "${handle}" is an unrelated public account`,
+      )
+    }
+  }
+  if (auth.mode === 'github-app' && auth.githubApp) {
+    const allowed = verifiedAppMentionSet(auth.githubApp.expectedSlug)
+    for (const handle of mentionHandles) {
+      if (!allowed.has(handle.toLowerCase())) {
+        throw new UserError(
+          `github-dispatch: mention handle "${handle}" is not the verified App slug`,
+        )
+      }
+    }
+    return
+  }
+}
+
 /**
  * Load owner config from outside writableRoots. Invalid or unverifiable config
  * fails closed. Tooling cannot override repo or actors from issue text.
  */
 export async function loadDispatchOwnerConfig(
   home: string,
-  opts: { gh?: GhRun; verifyMentions?: boolean } = {},
+  opts: {
+    gh?: GhRun
+    verifyMentions?: boolean
+    /** Pre-bootstrapped App auth; when omitted and mode is github-app, bootstrap runs here. */
+    githubAuthHost?: DispatchHostGithubAuth
+    cwd?: string
+  } = {},
 ): Promise<DispatchOwnerConfig | undefined> {
   const file = dispatchConfigPath(home)
   if (!fs.existsSync(file)) return undefined
@@ -160,6 +205,18 @@ export async function loadDispatchOwnerConfig(
     else throw new UserError(`github-dispatch: github.implementer must be "claude" or "none"`)
   }
 
+  const cwd = opts.cwd ?? process.cwd()
+  let githubAuthHost = opts.githubAuthHost
+  if (!githubAuthHost) {
+    const parsedAuth = parseGithubAuthBlock(ghBlock.auth, cwd)
+    if (parsedAuth.mode === 'github-app') {
+      githubAuthHost = await bootstrapDispatchGithubAuth(ghBlock.auth, repoFull, cwd)
+    } else {
+      githubAuthHost = { auth: parsedAuth }
+    }
+  }
+  const dispatchAuth = githubAuthHost.auth
+
   let mentionHandles: string[] | undefined
   const mentionRaw = ghBlock.mentionHandles ?? root.mentionHandles
   if (mentionRaw !== undefined) {
@@ -167,15 +224,8 @@ export async function loadDispatchOwnerConfig(
     mentionHandles = mentionRaw
       .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       .map(v => v.trim().replace(/^@/, ''))
-    for (const handle of mentionHandles) {
-      if (handle.toLowerCase() === UNOWNED_PUBLIC_HANDLE) {
-        throw new UserError(
-          `github-dispatch: mention handle "${handle}" is an unrelated public account; `
-          + 'refusing until a GitHub App or login you control is verified',
-        )
-      }
-    }
-    if (opts.verifyMentions !== false && mentionHandles.length > 0) {
+    assertMentionHandlesForAuth(mentionHandles, dispatchAuth)
+    if (opts.verifyMentions !== false && mentionHandles.length > 0 && dispatchAuth.mode !== 'github-app') {
       const gh = opts.gh ?? runGh
       const login = (await authenticatedGhLogin(gh)).toLowerCase()
       for (const handle of mentionHandles) {
@@ -202,7 +252,9 @@ export async function loadDispatchOwnerConfig(
       ...(sourceRepo ? { sourceRepo } : {}),
       ...(mentionHandles?.length ? { mentionHandles } : {}),
       ...(implementer ? { implementer } : {}),
+      auth: dispatchAuth,
     },
+    ...(githubAuthHost.auth.mode === 'github-app' ? { githubAuthHost } : {}),
     rsi: {
       enabled: rsiEnabled,
       intervalMs: rsiIntervalMs,
@@ -226,17 +278,14 @@ export function loadDispatchOwnerConfigSync(home: string): DispatchOwnerConfig |
   const repoFull = parseRepo(
     typeof ghBlock.repo === 'string' ? ghBlock.repo : DEFAULT_GITHUB_REPO,
   ).full
+  const dispatchAuth = parseGithubAuthBlock(ghBlock.auth, process.cwd())
   let mentionHandles: string[] | undefined
   const mentionRaw = ghBlock.mentionHandles as unknown
   if (Array.isArray(mentionRaw)) {
-    for (const h of mentionRaw) {
-      if (typeof h === 'string' && h.replace(/^@/, '').toLowerCase() === UNOWNED_PUBLIC_HANDLE) {
-        throw new UserError(`github-dispatch: unverifiable mention handle ${UNOWNED_PUBLIC_HANDLE}`)
-      }
-    }
     mentionHandles = mentionRaw
       .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       .map(v => v.trim().replace(/^@/, ''))
+    assertMentionHandlesForAuth(mentionHandles, dispatchAuth)
   }
   let syncImplementer: 'claude' | 'none' | undefined
   const implementerRaw = ghBlock.implementer ?? parsed.implementer
@@ -255,6 +304,7 @@ export function loadDispatchOwnerConfigSync(home: string): DispatchOwnerConfig |
       ...(typeof ghBlock.sourceRepo === 'string' ? { sourceRepo: ghBlock.sourceRepo } : {}),
       ...(mentionHandles?.length ? { mentionHandles } : {}),
       ...(syncImplementer ? { implementer: syncImplementer } : {}),
+      auth: dispatchAuth,
     },
     rsi: {
       enabled: rsiEnabled,
