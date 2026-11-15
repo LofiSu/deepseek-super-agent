@@ -15,7 +15,7 @@ import {
   FIXTURE_RETENTION,
   PROTOCOL_QUERIES,
   type ProtocolQuery,
-} from '../../scripts/t48-month-scale-protocol.ts'
+} from './t48-fixture.ts'
 
 /** Deterministic incremental inserts; one row per wall-clock / scheduled sample. */
 export const T48_INCREMENTAL_SAMPLES = FIXTURE_CORPUS
