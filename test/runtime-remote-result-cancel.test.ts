@@ -44,7 +44,7 @@ describe('Runtime remote result idempotence after cancel', () => {
     // The Harness chose this registered remote node for the ticket, and the
     // ticket then ended (cancel) before the worker's result arrived.
     runtime.engine.assignmentStarted(ticketId, assignmentId, `sess-${ticketId}`)
-    runtime.engine.assignmentPlaced(ticketId, assignmentId, REMOTE_NODE_ID)
+    runtime.engine.assignmentPlaced(ticketId, assignmentId, REMOTE_NODE_ID, WORKER_PEER)
     runtime.engine.report(ticketId, { kind: 'ready', text: 'done locally', deliver: false })
     expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.ended).toBeDefined()
 

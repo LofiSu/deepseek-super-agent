@@ -56,17 +56,19 @@ export class Assignments {
    * Persist logical Worker-mesh placement. The Harness decides the node, but
    * only the Engine writes the Assignment aggregate.
    */
-  placed(ticketId: string, assignmentId: string, node: string): void {
+  placed(ticketId: string, assignmentId: string, node: string, remotePeerId?: string): void {
     const ticket = this.must(ticketId)
     const assignment = ticket.assignments.find(item => item.id === assignmentId) ?? ticket.assignments.at(-1)
     if (!assignment) throw new UserError(`ticket ${ticketId} has no assignment`)
     assignment.node = node
+    assignment.remotePeerId = remotePeerId
     this.host.repo.putDoc('ticket', ticket.id, ticket)
     this.host.log(`[engine] Assignments.placed ticketId=${ticket.id} assignmentId=${assignment.id} node=${node}`)
     this.host.repo.addEvent('assignment.placed', {
       ticketId: ticket.id,
       assignmentId: assignment.id,
       node,
+      ...(remotePeerId ? { remotePeerId } : {}),
     })
   }
 

@@ -65,7 +65,8 @@ function placedTicket(runtime: Runtime, slug: string, node = NODE_A): { ticketId
   if (!ticketId) throw new Error('expected ticket')
   const assignmentId = runtime.store.getDoc<Ticket>('ticket', ticketId)!.assignments.at(-1)!.id
   runtime.engine.assignmentStarted(ticketId, assignmentId, `sess-${slug}`)
-  runtime.engine.assignmentPlaced(ticketId, assignmentId, node)
+  const peerId = node === NODE_A ? PEER_A : node === NODE_B ? PEER_B : undefined
+  runtime.engine.assignmentPlaced(ticketId, assignmentId, node, peerId)
   return { ticketId, assignmentId }
 }
 
@@ -102,6 +103,26 @@ describe('Runtime remote assignment result authorization', () => {
     const applied = runtime.store.getDoc<Ticket>('ticket', ticketId)!
     expect(applied.ended).toBeDefined()
     expect(applied.assignments.at(-1)?.report?.text).toBe('from-worker-a')
+  })
+
+  it('uses the dispatched peer persisted on the Assignment after registry replacement', () => {
+    const runtime = authRuntime()
+    const { ticketId, assignmentId } = placedTicket(runtime, 'persisted_peer')
+    const deliveryKey = `deliv-${ticketId}`
+
+    expect(runtime.placement.remote?.unregister(NODE_A)).toBe(true)
+    runtime.placement.registerRemoteNode({
+      id: NODE_A,
+      url: 'http://127.0.0.1:9/a2a',
+      peerId: PEER_B,
+      secret: SECRET,
+      capacity: 1,
+    })
+
+    runtime.applyRemoteAssignmentResult(result(ticketId, assignmentId, PEER_A, deliveryKey, 'original-peer'))
+
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(true)
+    expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.assignments.at(-1)?.report?.text).toBe('original-peer')
   })
 
   it('ignores a stale assignmentId from the correct peer without consuming the key', () => {

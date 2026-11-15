@@ -56,7 +56,7 @@ function placedTicket(runtime: Runtime, slug: string): { ticketId: string; assig
   if (!ticketId) throw new Error('expected ticket')
   const assignmentId = runtime.store.getDoc<Ticket>('ticket', ticketId)!.assignments.at(-1)!.id
   runtime.engine.assignmentStarted(ticketId, assignmentId, `sess-${slug}`)
-  runtime.engine.assignmentPlaced(ticketId, assignmentId, NODE_A)
+  runtime.engine.assignmentPlaced(ticketId, assignmentId, NODE_A, PEER_A)
   return { ticketId, assignmentId }
 }
 
@@ -102,6 +102,31 @@ describe('Runtime remote result report atomicity', () => {
     const applied = runtime.store.getDoc<Ticket>('ticket', ticketId)!
     expect(applied.ended).toBeDefined()
     expect(applied.assignments.at(-1)?.report?.text).toBe('second')
+  })
+
+  it('rolls back a report when receipt persistence fails, so the retry applies once', () => {
+    const runtime = atomicRuntime()
+    const { ticketId, assignmentId } = placedTicket(runtime, 'receipt_throw')
+    const deliveryKey = `deliv-${ticketId}`
+    const putDoc = runtime.store.putDoc.bind(runtime.store)
+    const putDocSpy = vi.spyOn(runtime.store, 'putDoc').mockImplementation((kind, id, value) => {
+      if (kind === 'mesh') throw new Error('receipt write failed')
+      putDoc(kind, id, value)
+    })
+
+    expect(() => runtime.applyRemoteAssignmentResult(result(ticketId, assignmentId, deliveryKey, 'first')))
+      .toThrow('receipt write failed')
+
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(false)
+    const rolledBack = runtime.store.getDoc<Ticket>('ticket', ticketId)!
+    expect(rolledBack.ended).toBeUndefined()
+    expect(rolledBack.assignments.at(-1)?.report).toBeUndefined()
+
+    putDocSpy.mockRestore()
+    runtime.applyRemoteAssignmentResult(result(ticketId, assignmentId, deliveryKey, 'second'))
+
+    expect(remoteResultSeen(runtime.store, PEER_A, deliveryKey)).toBe(true)
+    expect(runtime.store.getDoc<Ticket>('ticket', ticketId)?.assignments.at(-1)?.report?.text).toBe('second')
   })
 
   it('still archives a result for an already-ended ticket without reporting again', () => {

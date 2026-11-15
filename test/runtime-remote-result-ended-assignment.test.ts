@@ -52,7 +52,7 @@ function placedRuntime(): { runtime: Runtime; ticketId: string; assignmentId: st
   if (!ticketId) throw new Error('expected ticket')
   const assignmentId = runtime.store.getDoc<Ticket>('ticket', ticketId)!.assignments.at(-1)!.id
   runtime.engine.assignmentStarted(ticketId, assignmentId, `sess-${ticketId}`)
-  runtime.engine.assignmentPlaced(ticketId, assignmentId, REMOTE_NODE_ID)
+  runtime.engine.assignmentPlaced(ticketId, assignmentId, REMOTE_NODE_ID, WORKER_PEER)
   return { runtime, ticketId, assignmentId }
 }
 

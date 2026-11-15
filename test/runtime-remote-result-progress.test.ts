@@ -57,7 +57,7 @@ function placedTicket(runtime: Runtime, slug: string): { ticketId: string; assig
   if (!ticketId) throw new Error('expected ticket')
   const assignmentId = runtime.store.getDoc<Ticket>('ticket', ticketId)!.assignments.at(-1)!.id
   runtime.engine.assignmentStarted(ticketId, assignmentId, `sess-${slug}`)
-  runtime.engine.assignmentPlaced(ticketId, assignmentId, NODE_A)
+  runtime.engine.assignmentPlaced(ticketId, assignmentId, NODE_A, PEER_A)
   const node = runtime.placement.remote!.pick(ticketId)
   if (!node || node.id !== NODE_A) throw new Error('expected remote placement')
   return { ticketId, assignmentId }

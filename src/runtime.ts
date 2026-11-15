@@ -1604,7 +1604,7 @@ export class Runtime {
         engine.assignmentStarted(ticketId, assignmentId, sessionId)
       },
       assignmentPlaced: (ticketId, assignmentId, node) => {
-        engine.assignmentPlaced(ticketId, assignmentId, node)
+        engine.assignmentPlaced(ticketId, assignmentId, node, placement.remote?.get(node)?.peerId)
       },
       journal,
       metrics,
@@ -2014,7 +2014,7 @@ export class Runtime {
         ? 'stale-assignment'
         : !node || !this.placement.isRemote(node)
           ? 'not-remote'
-          : this.placement.remote?.get(node)?.peerId !== event.peerId
+          : assignment.remotePeerId !== event.peerId
             ? 'peer-mismatch'
             : undefined
     if (!ticket || !assignment || reason) {
@@ -2061,13 +2061,13 @@ export class Runtime {
     // An already-ended Ticket has no live Assignment to report to. Keep
     // accepting its authorized result as an idempotent archival copy.
     if (ticket.ended) {
-      recordRemoteResult(this.store, {
+      this.store.atomic(() => recordRemoteResult(this.store, {
         ticketId: event.ticketId,
         assignmentId: event.assignmentId,
         report,
         deliveryKey: event.deliveryKey,
         peerId: event.peerId,
-      })
+      }))
       this.remoteResultWait?.clear(event.ticketId)
       this.log.info(
         `[mesh] remote result after ticket end ticketId=${event.ticketId} outcome=${ticket.ended.outcome}`,
@@ -2075,27 +2075,34 @@ export class Runtime {
       this.placement.release(event.ticketId)
       return
     }
-    // Report first, then persist the delivery marker. Recording before the
-    // report made a throwing report permanently unretryable: the key looked
-    // handled while the outcome was lost. If `engine.report` throws here, keep
-    // the marker unwritten and leave the Assignment's timeout armed; that
-    // handler owns recovery and slot release, and the caller sees the error so
-    // it can replay the same deliveryKey.
+    // The report and receipt must commit together. Recording before a report
+    // can consume a retryable result, while recording after it leaves a crash
+    // window where a replay repeats durable report handling. `Engine.report`
+    // nests in this Store transaction, so Ticket, events, and receipt either
+    // all commit or all roll back.
+    let applied = false
     try {
-      this.engine.report(event.ticketId, report)
+      applied = this.store.atomic(() => {
+        if (remoteResultSeen(this.store, event.peerId, event.deliveryKey)) return false
+        this.engine.report(event.ticketId, report)
+        return recordRemoteResult(this.store, {
+          ticketId: event.ticketId,
+          assignmentId: event.assignmentId,
+          report,
+          deliveryKey: event.deliveryKey,
+          peerId: event.peerId,
+        })
+      })
     } catch (error) {
       this.log.info(
         `[mesh] remote result report failed ticketId=${event.ticketId} assignmentId=${event.assignmentId} error=${error instanceof Error ? error.message : String(error)}`,
       )
       throw error
     }
-    recordRemoteResult(this.store, {
-      ticketId: event.ticketId,
-      assignmentId: event.assignmentId,
-      report,
-      deliveryKey: event.deliveryKey,
-      peerId: event.peerId,
-    })
+    if (!applied) {
+      this.log.info(`[mesh] remote result duplicate deliveryKey=${event.deliveryKey}`)
+      return
+    }
     // A non-ending heartbeat (`progress`) leaves the Assignment running: it
     // must keep its result timeout armed and its mesh slot held, or a hung
     // remote worker is never recovered (`test/runtime-remote-result-progress`).
