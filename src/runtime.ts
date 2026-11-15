@@ -11,6 +11,14 @@ import type {
 import { pendingApproval } from './core/collab.ts'
 import { assessWithMainAgent } from './core/assessment.ts'
 import { Engine } from './core/engine.ts'
+import {
+  RECOVERY_BOUNDARY_DOC_ID,
+  recordLaunchFailed,
+  recordLaunchScheduled,
+  recoveryBoundaryFromOutcomes,
+  type RecoveryBoundaryRecord,
+} from './core/recovery-boundary.ts'
+import { finalizeUncertainExternalEffects } from './core/external-effects.ts'
 import { arbitrateSubscribers } from './core/intake.ts'
 import { withSessionRole } from './core/session-role.ts'
 import { bindRolePorts } from './core/role-ports.ts'
@@ -2265,15 +2273,44 @@ export class Runtime {
    * orchestrates the launch. `MockModel` must not consume interrupted work, so
    * a keyless process records the deferral and leaves the state untouched.
    */
+  private persistRecoveryBoundary(record: RecoveryBoundaryRecord): void {
+    if (!this.store.isOpen) return
+    try {
+      this.store.putDoc('recovery', RECOVERY_BOUNDARY_DOC_ID, record)
+    } catch (error) {
+      this.log.info(
+        `[recovery] boundary persist failed error=${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
   private recoverInterrupted(): void {
     if (!this.store.isOpen || this.recoveryAttempted) return
     // One scan per Runtime. A real restart constructs a new Runtime, so it
     // still recovers; repeated start() calls must not end a live replacement
     // that our own asynchronous launch has already marked `running`.
     this.recoveryAttempted = true
+    const attemptedAt = new Date().toISOString()
+    // A keyless process must leave interrupted work untouched. Finalizing
+    // uncertain external effects mutates the store (started ops become
+    // unknown_outcome, mid-send outbox rows flip, approvals queue), so the
+    // deferral has to happen before that call — not after it.
     if (this.model.name === 'MockModel') {
       this.log.info('[recovery] deferred reason=mock-model')
+      this.persistRecoveryBoundary(recoveryBoundaryFromOutcomes(
+        this.model.name,
+        attemptedAt,
+        'deferred',
+        [],
+        { deferReason: 'mock-model' },
+      ))
       return
+    }
+    const uncertain = finalizeUncertainExternalEffects(this.store, attemptedAt)
+    if (uncertain.unknownOps > 0 || uncertain.unknownOutbox > 0) {
+      this.log.info(
+        `[recovery] uncertain external effects ops=${uncertain.unknownOps} outbox=${uncertain.unknownOutbox} approvals=${uncertain.approvalsQueued}`,
+      )
     }
     // A fresh process has an empty sticky map. Rebuild it from persisted
     // Assignment.node before recovery ends those Assignments so `releaseSlot`
@@ -2292,8 +2329,30 @@ export class Runtime {
     try {
       recovered = this.engine.recoverInterrupted()
     } catch (error) {
-      this.log.info(`[recovery] failed error=${error instanceof Error ? error.message : String(error)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      this.log.info(`[recovery] failed error=${message}`)
+      this.persistRecoveryBoundary(recoveryBoundaryFromOutcomes(
+        this.model.name,
+        attemptedAt,
+        'scan_failed',
+        [],
+        { error: message },
+      ))
       return
+    }
+    let boundary = recoveryBoundaryFromOutcomes(
+      this.model.name,
+      attemptedAt,
+      'completed',
+      recovered,
+    )
+    // One live record for this scan. `boundary` is reassigned by both the
+    // scheduled and failed transitions, so a launch callback never writes a
+    // snapshot captured before later tickets were scheduled. The post-loop
+    // persist therefore cannot revert a synchronous launch_failed.
+    const recordFailure = (ticketId: string): void => {
+      boundary = recordLaunchFailed(boundary, ticketId)
+      this.persistRecoveryBoundary(boundary)
     }
     // The previous process may have committed recovery (ended Assignment, one
     // RECOVERED prompt, one pending replacement) and died before its queued
@@ -2336,8 +2395,13 @@ export class Runtime {
       this.log.info(
         `[recovery] relaunch ticketId=${outcome.ticketId} interrupted=${outcome.interruptedAssignmentIds.join(',') || '-'} replacementId=${outcome.replacementAssignmentId} mode=${outcome.relaunchOnly ? 'pending' : 'recovered'}`,
       )
-      this.launchRecovered(outcome.ticketId, ticket)
+      boundary = recordLaunchScheduled(boundary, outcome.ticketId)
+      // Persist the scheduled record before launching: an async harness
+      // rejection must extend the store's latest record, not a closure copy.
+      this.persistRecoveryBoundary(boundary)
+      this.launchRecovered(outcome.ticketId, ticket, recordFailure)
     }
+    this.persistRecoveryBoundary(boundary)
   }
 
   /**
@@ -2561,6 +2625,8 @@ export class Runtime {
    * Relaunch one recovered Ticket without letting a failure abort the others
    * or surface as an unhandled rejection. A launch failure changes no state:
    * the replacement stays `pending`, so a later restart can relaunch it.
+   * `recordFailure` applies the transition to the scan's live record, never to
+   * a snapshot of the boundary as it stood when this Ticket was scheduled.
    *
    * The launch itself still runs synchronously, so recovery stays synchronous
    * and a crash right after `start()` leaves the replacement pending. Only the
@@ -2571,11 +2637,16 @@ export class Runtime {
    * replacement and keeps the sticky slot. A Worker that still holds the old
    * Assignment is therefore told to stop before the new body reaches it.
    */
-  private launchRecovered(ticketId: string, ticket: Ticket): void {
+  private launchRecovered(
+    ticketId: string,
+    ticket: Ticket,
+    recordFailure: (ticketId: string) => void,
+  ): void {
     const failed = (error: unknown): void => {
       this.log.info(
         `[recovery] launch failed ticketId=${ticketId} error=${error instanceof Error ? error.message : String(error)}`,
       )
+      recordFailure(ticketId)
     }
     this.setRemoteDispatchBarrier(ticketId, this.settleRemoteCancelSends(ticketId))
     try {
@@ -2583,6 +2654,11 @@ export class Runtime {
     } catch (error) {
       failed(error)
     }
+  }
+
+  /** Latest persisted restart recovery boundary for operator/diagnostic views. */
+  recoveryBoundary(): RecoveryBoundaryRecord | undefined {
+    return this.store.getDoc<RecoveryBoundaryRecord>('recovery', RECOVERY_BOUNDARY_DOC_ID)
   }
 
   /**
