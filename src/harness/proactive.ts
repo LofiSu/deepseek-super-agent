@@ -98,7 +98,12 @@ export interface ProactiveContact {
 export interface ProactiveSignalReceipt {
   ticketId: string
   signalId: string
-  at: number
+  /**
+   * The receipt timestamp was added after the initial persisted format.
+   * Missing timestamps are legacy receipts: retain them while their exact
+   * signal is still current so an upgrade cannot re-contact the owner.
+   */
+  at?: number
 }
 
 export interface ProactiveState {
@@ -430,13 +435,13 @@ export class ProactiveScheduler {
         && typeof (contact as ProactiveContact).thread === 'string')
       : []
     const signalReceipts = Array.isArray(raw.signalReceipts)
-      ? raw.signalReceipts.filter((receipt): receipt is ProactiveSignalReceipt =>
-        receipt != null
-        && typeof receipt === 'object'
-        && typeof (receipt as ProactiveSignalReceipt).ticketId === 'string'
-        && typeof (receipt as ProactiveSignalReceipt).signalId === 'string'
-        && typeof (receipt as ProactiveSignalReceipt).at === 'number'
-        && Number.isFinite((receipt as ProactiveSignalReceipt).at))
+      ? raw.signalReceipts.filter((receipt): receipt is ProactiveSignalReceipt => {
+        if (receipt == null || typeof receipt !== 'object') return false
+        const candidate = receipt as ProactiveSignalReceipt
+        return typeof candidate.ticketId === 'string'
+          && typeof candidate.signalId === 'string'
+          && (candidate.at === undefined || (typeof candidate.at === 'number' && Number.isFinite(candidate.at)))
+      })
       : []
     return {
       ...(typeof raw.lastCheckAt === 'number' && Number.isFinite(raw.lastCheckAt)
@@ -463,7 +468,10 @@ export class ProactiveScheduler {
       if (signal) currentSignals.set(ticket.id, signal.id)
     }
     const signalReceipts = state.signalReceipts.filter(receipt =>
-      at - receipt.at <= SIGNAL_RECEIPT_RETENTION_MS
+      // Receipts written before `at` existed have no trustworthy age. Keep
+      // them only for their live signal; the next signal revision replaces
+      // them with a timestamped receipt.
+      (receipt.at === undefined || at - receipt.at <= SIGNAL_RECEIPT_RETENTION_MS)
       && currentSignals.get(receipt.ticketId) === receipt.signalId)
     const changed = signalReceipts.length !== state.signalReceipts.length
     if (!changed) return state

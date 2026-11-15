@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -392,6 +393,74 @@ describe('idle self-wake policy', () => {
     expect(runner.tick(T0 + 5 * 60 * MIN).action).toBe('silent')
     expect(fired).toHaveLength(1)
     expect(runner.state().signalReceipts).toEqual([current])
+  })
+
+  it('keeps a legacy receipt across restart so an unchanged signal is not recontacted', () => {
+    const store = tempStore()
+    const ticket = openTicket()
+    seed(store, { ticket })
+    const initial = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+    initial.scheduler.tick(T0)
+    initial.scheduler.tick(T0 + 31 * MIN)
+    const receipt = initial.scheduler.state().signalReceipts[0]!
+
+    // State written by the immediately preceding version had no `at` field.
+    store.putDoc('proactive', 'state', {
+      lastCheckAt: T0 + 31 * MIN,
+      signalReceipts: [{ ticketId: receipt.ticketId, signalId: receipt.signalId }],
+      contacts: [],
+    })
+    const restarted = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    expect(restarted.scheduler.tick(T0 + 62 * MIN).action).toBe('silent')
+    expect(restarted.fired).toHaveLength(0)
+    expect(restarted.scheduler.state().signalReceipts).toEqual([
+      { ticketId: receipt.ticketId, signalId: receipt.signalId },
+    ])
+  })
+
+  it('does not evict active receipts at the cap to contact a new signal', () => {
+    const store = tempStore()
+    const tickets = Array.from({ length: 257 }, (_, index) => openTicket({
+      id: `ticket_cap_${index}`,
+      assignments: [{
+        id: `asg_cap_${index}`,
+        state: 'ended',
+        speculative: false,
+        endedAt: new Date(T0 - 60 * MIN).toISOString(),
+        report: {
+          kind: 'waiting',
+          text: `等待确认 ${index}`,
+          deliver: false,
+          at: new Date(T0 - 60 * MIN).toISOString(),
+          question: `请确认 ${index}`,
+        },
+      }],
+    }))
+    for (const ticket of tickets) store.putDoc('ticket', ticket.id, ticket)
+    seed(store)
+    const receipts = tickets.slice(0, 256).map(ticket => {
+      const report = ticket.assignments[0]!.report!
+      const assignment = ticket.assignments[0]!
+      const signalId = createHash('sha256')
+        .update([ticket.id, 'report-question', assignment.id, report.at, report.kind, report.question]
+          .map(part => String(part ?? '')).join('\u0000'))
+        .digest('hex')
+        .slice(0, 16)
+      return { ticketId: ticket.id, signalId, at: T0 }
+    })
+    store.putDoc('proactive', 'state', { lastCheckAt: T0, contacts: [], signalReceipts: receipts })
+    const { scheduler: runner, fired } = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('silent')
+    expect(fired).toHaveLength(0)
+    expect(runner.state().signalReceipts).toEqual(receipts)
   })
 
   it('does not consume contact quota when ingress did not commit', () => {
