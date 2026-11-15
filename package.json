@@ -34,6 +34,8 @@
     "ds-agent": "NODE_NO_WARNINGS=1 tsx src/cli/main.ts",
     "bench:bakeoff": "NODE_NO_WARNINGS=1 tsx src/cli/bakeoff.ts",
     "t48:smoke": "NODE_NO_WARNINGS=1 tsx scripts/t48-month-scale-protocol.ts",
+    "t48:long": "CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 NODE_NO_WARNINGS=1 tsx scripts/t48-longitudinal-harness.ts",
+    "t48:observe": "CI=true DS_AGENT_ALLOW_MOCK_FIXTURE=1 NODE_NO_WARNINGS=1 tsx scripts/t48-wall-clock-observe.ts",
     "typecheck": "tsc --noEmit"
   },
   "pnpm": {
