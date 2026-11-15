@@ -116,6 +116,11 @@ export function ingestInstinctCapabilitiesFromFile(
   const text = fs.readFileSync(file, 'utf8')
   const lines = text.split(/\r?\n/)
   const created: DispatchGapDoc[] = []
+  const isMissingStatusCell = (cell: string | undefined): boolean => {
+    const v = (cell ?? '').replace(/`/g, '').trim().toLowerCase()
+    return v === 'missing' || v.startsWith('missing')
+  }
+
   for (const line of lines) {
     const trimmed = line.trim()
     if (!trimmed.startsWith('|') || trimmed.startsWith('|---')) continue
@@ -124,18 +129,28 @@ export function ingestInstinctCapabilitiesFromFile(
     if (cells.length < 6) continue
     const title = cells[1]
     if (!title || /^(#|能力项)$/.test(title)) continue
-    const statusRaw = cells[4]?.replace(/`/g, '').trim().toLowerCase()
-    if (statusRaw !== 'missing') continue
-    const acceptance = `Capability "${title}" marked missing in docs/INSTINCT_CAPABILITIES.md; add regression test or documented stub.`
-    const gap = ingestGap(store, {
+    if (!cells.some(isMissingStatusCell)) continue
+    const dedupeKey = `instinct-cap:${title.slice(0, 120)}`
+    const existing = findGapByDedupe(store, dedupeKey)
+    if (existing) {
+      created.push(existing)
+      continue
+    }
+    const gap: DispatchGapDoc = {
+      id: nextId('gap'),
       title,
       description: cells[2] ?? title,
-      acceptance,
+      acceptance: '',
+      risk: 'high',
+      priority: 0,
       sourceUrl: `file://${file}`,
       fetchedAt: new Date().toISOString(),
-      dedupeKey: `instinct-cap:${title.slice(0, 120)}`,
-    }, nextId)
-    if (gap) created.push(gap)
+      manusCue: 'unknown',
+      status: 'proposal',
+      dedupeKey,
+    }
+    putGap(store, gap)
+    created.push(gap)
   }
   return created
 }
@@ -206,9 +221,17 @@ export async function runRsiSchedulerTick(
 
   const pick = openGaps[0]!
   const branch = `peanut/rsi-${pick.id}`
-  if (deps.hasOpenPeanutPr && await deps.hasOpenPeanutPr(branch)) {
-    log(`[rsi] idle duplicate open PR for ${branch}`)
-    return { idle: true, reason: 'duplicate pr' }
+  if (deps.hasOpenPeanutPr) {
+    try {
+      if (await deps.hasOpenPeanutPr(branch)) {
+        log(`[rsi] idle duplicate open PR for ${branch}`)
+        return { idle: true, reason: 'duplicate pr' }
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      log(`[rsi] idle: open PR check failed (${msg}); refusing enqueue`)
+      return { idle: true, reason: 'pr check failed' }
+    }
   }
 
   const pending = store.listDocs<DispatchJobDoc>(DISPATCH_JOB_KIND)

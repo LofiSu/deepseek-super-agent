@@ -2,7 +2,7 @@ import { parseRepo, runGh } from '../channels/github-source.ts'
 import type { Store } from '../store/sqlite.ts'
 import type { DispatchOwnerConfig } from './config.ts'
 import { createJobRunner } from './job-runner.ts'
-import { fetchPollEvents, processGithubPoll, type GithubPollAdapter } from './github-poll.ts'
+import { fetchPollEvents, issueBodyDedupeId, processGithubPoll, type GithubPollAdapter } from './github-poll.ts'
 import { DISPATCH_CURSOR_ID, DISPATCH_CURSOR_KIND, recoverInterruptedJobs } from './store.ts'
 import { drainDispatchQueue } from './queue.ts'
 import { runRsiSchedulerTick } from './rsi.ts'
@@ -47,11 +47,23 @@ export async function runDispatchServeLoop(options: DispatchServeOptions): Promi
         const { comments, issueBodies } = await fetchPollEvents(poll, config, seededAt)
         const { jobs } = processGithubPoll(store, config, comments, p => store.nextId(p), issueBodies)
         for (const job of jobs) {
+          let title = job.issueTitle
+          let body = job.issueBody
           const ev = comments.find(e => String(e.comment.id) === job.commentId)
           if (ev) {
+            title = ev.issue.title ?? title
+            body = ev.issue.body ?? body
+          } else if (job.commentId.startsWith('issue-body:')) {
+            const iss = issueBodies.find(e => issueBodyDedupeId(e.issue) === job.commentId)
+            if (iss) {
+              title = iss.issue.title ?? title
+              body = iss.issue.body ?? body
+            }
+          }
+          if (title !== undefined || body !== undefined) {
             ctxByJob.set(job.id, {
-              issueTitle: ev.issue.title ?? '',
-              issueBody: ev.issue.body ?? '',
+              issueTitle: title ?? '',
+              issueBody: body ?? '',
             })
           }
         }

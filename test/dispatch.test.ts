@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import type { GithubComment, GithubIssue } from '../src/channels/github-source.ts'
+import { GhCliApi, type GithubComment, type GithubIssue } from '../src/channels/github-source.ts'
 import {
   admitDispatchComment,
   admitDispatchIssueBody,
@@ -14,7 +14,9 @@ import {
   MIN_POLL_INTERVAL_MS,
   UNOWNED_PUBLIC_HANDLE,
 } from '../src/dispatch/config.ts'
-import { processGithubPoll } from '../src/dispatch/github-poll.ts'
+import { apiPollAdapter, createDefaultPollAdapter, processGithubPoll } from '../src/dispatch/github-poll.ts'
+import { hasOpenPeanutPrForRepo } from '../src/dispatch/github-peanut.ts'
+import { createClaudeDispatchJobRunner } from '../src/dispatch/implementer.ts'
 import { createJobRunner, IMPLEMENTER_NOT_CONFIGURED } from '../src/dispatch/job-runner.ts'
 import { drainDispatchQueue } from '../src/dispatch/queue.ts'
 import { classifyGapRisk, ingestGap, runRsiSchedulerTick, RSI_RESEARCH_CACHE_KIND } from '../src/dispatch/rsi.ts'
@@ -22,6 +24,7 @@ import {
   recoverInterruptedJobs,
   seedDispatchCursorNow,
   wasCommentHandled,
+  type DispatchGapDoc,
   type DispatchJobDoc,
 } from '../src/dispatch/store.ts'
 import { trustedFetch } from '../src/dispatch/trusted-fetch.ts'
@@ -199,6 +202,28 @@ describe('dispatch job runner', () => {
   })
 })
 
+describe('createDefaultPollAdapter', () => {
+  it('defaults to runGh and uses injected gh for API calls', async () => {
+    const calls: string[][] = []
+    const gh = async (args: string[]) => {
+      calls.push(args)
+      return '[]'
+    }
+    const adapter = createDefaultPollAdapter(REPO, gh)
+    expect(adapter).toBeTruthy()
+    await adapter.listIssueComments(1)
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls[0]!.join(' ')).toMatch(/issues\/1\/comments/)
+  })
+
+  it('constructs GhCliApi-backed adapter without passing gh explicitly', () => {
+    const gh = vi.fn(async () => '[]')
+    const api = new GhCliApi(parseRepo(REPO), gh)
+    const poll = apiPollAdapter(api, REPO)
+    expect(poll).toBeTruthy()
+  })
+})
+
 describe('dispatch poll cursor and dedup', () => {
   it('seeds cursor to now and does not enqueue pre-cursor comments; replays dedupe', () => {
     const home = tempHome()
@@ -218,6 +243,8 @@ describe('dispatch poll cursor and dedup', () => {
       { repoFull: REPO, issue: issue(11), comment: fresh },
     ], p => store.nextId(p))
     expect(j1).toHaveLength(1)
+    expect(j1[0]!.issueTitle).toBe('bug')
+    expect(j1[0]!.issueBody).toBeTruthy()
 
     const { jobs: j2 } = processGithubPoll(store, cfg, [
       { repoFull: REPO, issue: issue(11), comment: fresh },
@@ -248,6 +275,8 @@ describe('dispatch poll cursor and dedup', () => {
     )
     expect(jobs).toHaveLength(1)
     expect(jobs[0]!.commentId).toBe('issue-body:4242')
+    expect(jobs[0]!.issueTitle).toBe('bug')
+    expect(jobs[0]!.issueBody).toBe('/ds-agent fix')
     expect(wasCommentHandled(store, 'issue-body:4242')).toBe(true)
     expect(cursor).toBeTruthy()
     store.close()
@@ -270,6 +299,37 @@ describe('dispatch local status and cancel', () => {
     expect(formatDispatchStatus(store)).toContain('dispatch_1')
     expect(runDispatchCancel(store, 'dispatch_1')).toContain('cancelled')
     expect(store.getDoc<DispatchJobDoc>('dispatch_job', 'dispatch_1')?.status).toBe('cancelled')
+    store.close()
+  })
+})
+
+describe('dispatch queue persisted issue context', () => {
+  it('drains github_fix using stored issueTitle/issueBody when ctx map is empty', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    let seenTitle = ''
+    let seenBody = ''
+    const runner = createJobRunner({
+      githubFix: async ctx => {
+        seenTitle = ctx.issueTitle
+        seenBody = ctx.issueBody
+        return {}
+      },
+    })
+    const job: DispatchJobDoc = {
+      id: 'persisted',
+      type: 'github_fix',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: 'issue-body:1',
+      issueNumber: 9,
+      issueTitle: 'stored title',
+      issueBody: 'stored body',
+    }
+    store.putDoc('dispatch_job', job.id, job)
+    await drainDispatchQueue({ store, runner }, new Map())
+    expect(seenTitle).toBe('stored title')
+    expect(seenBody).toBe('stored body')
     store.close()
   })
 })
@@ -377,6 +437,82 @@ describe('dispatch fix job with FeaturePrPublisher', () => {
   })
 })
 
+describe('hasOpenPeanutPrForRepo', () => {
+  it('returns true when gh lists an open PR for head branch', async () => {
+    const gh = vi.fn(async () => '[{"number":3}]')
+    await expect(hasOpenPeanutPrForRepo(REPO, 'peanut/dispatch-issue-1', gh)).resolves.toBe(true)
+    const firstCall = gh.mock.calls[0] as string[] | undefined
+    expect(firstCall?.[0]).toContain('pr')
+    expect(firstCall?.[0]).toContain(REPO)
+  })
+
+  it('throws when gh fails so scheduler can fail-safe', async () => {
+    const gh = vi.fn(async () => { throw new Error('gh auth') })
+    await expect(hasOpenPeanutPrForRepo(REPO, 'peanut/x', gh)).rejects.toThrow(/gh auth/)
+  })
+})
+
+describe('claude implementer fixture', () => {
+  it('checkout, runCoder change, peanut PR with issue link', async () => {
+    const root = tempHome()
+    const bare = path.join(root, 'remote.git')
+    execSync(`git init --bare -b main ${JSON.stringify(bare)}`, { stdio: 'ignore' })
+    const origin = path.join(root, 'origin')
+    fs.mkdirSync(origin)
+    execSync('git init -b main', { cwd: origin, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: origin })
+    fs.writeFileSync(path.join(origin, 'package.json'), '{"name":"t","scripts":{"typecheck":"exit 0","test":"exit 0"}}\n')
+    fs.writeFileSync(path.join(origin, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+    execSync('git add -A && git commit -m seed', { cwd: origin })
+    execSync(`git remote add origin ${JSON.stringify(bare)}`, { cwd: origin })
+    execSync('git push -u origin main', { cwd: origin, env: { GIT_CONFIG_NOSYSTEM: '1' } })
+
+    const gh = vi.fn(async (args: string[]) => {
+      if (args[1] === 'list') return '[]'
+      if (args[1] === 'create') return 'https://github.com/o/r/pull/9\n'
+      if (args[1] === 'view') return JSON.stringify({ number: 9, url: 'https://github.com/o/r/pull/9' })
+      return ''
+    })
+
+    const runner = createClaudeDispatchJobRunner({
+      github: {
+        enabled: true,
+        repo: REPO,
+        authorizedActors: ['LofiSu'],
+        pollIntervalMs: 60_000,
+        sourceRepo: origin,
+      },
+      gh,
+      pushRemote: bare,
+      baselineTests: () => undefined,
+      runCoder: async ({ workspace }) => {
+        fs.writeFileSync(path.join(workspace, 'fix.txt'), 'applied\n')
+      },
+    })
+
+    const home = tempHome()
+    const store = new Store(home)
+    const job: DispatchJobDoc = {
+      id: 'impl-9',
+      type: 'github_fix',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      commentId: 'c9',
+      issueNumber: 9,
+      issueUrl: `https://github.com/${REPO}/issues/9`,
+      issueTitle: 'fix me',
+      issueBody: 'details',
+    }
+    store.putDoc('dispatch_job', job.id, job)
+    await drainDispatchQueue({ store, runner })
+    const done = store.getDoc<DispatchJobDoc>('dispatch_job', job.id)
+    expect(done?.status).toBe('completed')
+    expect(done?.prUrl).toContain('/pull/9')
+    expect(gh).toHaveBeenCalled()
+    store.close()
+  })
+})
+
 describe('webhook verify', () => {
   it('returns false when secret is empty', () => {
     expect(verifyGithubWebhookSignature256('body', 'sha256=abc', '')).toBe(false)
@@ -404,6 +540,20 @@ describe('trusted-fetch SSRF', () => {
 
   it('refuses IPv4-mapped loopback host when allowlisted', async () => {
     await expect(trustedFetch('https://::ffff:127.0.0.1/', { allowHosts: ['::ffff:127.0.0.1'] })).rejects.toThrow()
+  })
+
+  it('refuses IPv4-mapped loopback hex when allowlisted (SSRF, not allowlist miss)', async () => {
+    await expect(
+      trustedFetch('https://[::ffff:7f00:1]/', { allowHosts: ['::ffff:7f00:1'] }),
+    ).rejects.toThrow(/private|blocked/i)
+  })
+
+  it('refuses 0.1.2.3 in 0.0.0.0/8 when allowlisted', async () => {
+    await expect(trustedFetch('https://0.1.2.3/', { allowHosts: ['0.1.2.3'] })).rejects.toThrow(/private|blocked/i)
+  })
+
+  it('refuses IPv6 unspecified when allowlisted', async () => {
+    await expect(trustedFetch('https://[::]/', { allowHosts: ['::'] })).rejects.toThrow(/private|blocked/i)
   })
 })
 
@@ -443,6 +593,31 @@ describe('RSI gap pool', () => {
       repoRoot: home,
     })
     expect(tick.idle).toBe(true)
+    store.close()
+  })
+
+  it('instinct missing WhatsApp-like row is proposal-only and does not enqueue rsi_implement', async () => {
+    const home = tempHome()
+    const store = new Store(home)
+    dispatchConfig(home)
+    const cfg = loadDispatchOwnerConfigSync(home)!
+    cfg.rsi.intervalMs = 0
+    const docDir = path.join(home, 'docs')
+    fs.mkdirSync(docDir)
+    fs.writeFileSync(path.join(docDir, 'INSTINCT_CAPABILITIES.md'), [
+      '| # | 能力项 | Instinct 公开证据 | 等级 | ds-agent 状态 | 本仓库路径 / 验收依据 |',
+      '|---|---|---|---|---|---|',
+      '| A2 | WhatsApp 入口 | evidence | teardown | `missing` | path notes |',
+    ].join('\n'))
+    const tick = await runRsiSchedulerTick(store, cfg, p => store.nextId(p), {
+      fetchPage: async () => ({ body: 'ok', fetchedAt: '2026-11-15T12:00:00Z' }),
+      repoRoot: home,
+    })
+    expect(tick.idle).toBe(true)
+    const impl = store.listDocs<DispatchJobDoc>('dispatch_job').filter(j => j.type === 'rsi_implement')
+    expect(impl).toHaveLength(0)
+    const gaps = store.listDocs<DispatchGapDoc>('dispatch_gap')
+    expect(gaps.some(g => g.status === 'proposal')).toBe(true)
     store.close()
   })
 

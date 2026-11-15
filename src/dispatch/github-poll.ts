@@ -1,6 +1,7 @@
 import {
   GhCliApi,
   parseRepo,
+  runGh,
   type GhRun,
   type GithubApi,
   type GithubComment,
@@ -49,7 +50,7 @@ export function apiPollAdapter(api: GithubApi, repoFull: string): GithubPollAdap
   }
 }
 
-export function createDefaultPollAdapter(repoFull: string, gh: GhRun = undefined as unknown as GhRun): GithubPollAdapter {
+export function createDefaultPollAdapter(repoFull: string, gh: GhRun = runGh): GithubPollAdapter {
   const repo = parseRepo(repoFull)
   const api = new GhCliApi(repo, gh)
   return apiPollAdapter(api, repoFull)
@@ -64,7 +65,7 @@ function commentCreatedAfter(comment: GithubComment, seededAt: string): boolean 
   return comment.created_at >= seededAt
 }
 
-function issueBodyDedupeId(issue: GithubIssue): string {
+export function issueBodyDedupeId(issue: GithubIssue): string {
   return `issue-body:${issue.id}`
 }
 
@@ -87,6 +88,8 @@ function enqueueFixJob(
     createdAt: new Date().toISOString(),
     issueNumber: ev.issue.number,
     issueUrl: ev.issue.html_url,
+    issueTitle: ev.issue.title ?? '',
+    issueBody: ev.issue.body ?? '',
     commentId: ev.dedupeId,
     actorLogin: ev.actorLogin,
     command: ev.command,
@@ -176,6 +179,8 @@ export function processGithubPoll(
       createdAt: new Date().toISOString(),
       issueNumber: ev.issue.number,
       issueUrl: ev.issue.html_url,
+      issueTitle: ev.issue.title ?? '',
+      issueBody: ev.issue.body ?? '',
       commentId: commentKey,
       actorLogin: admission.actorLogin,
       command: admission.command,

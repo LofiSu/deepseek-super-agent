@@ -32,6 +32,8 @@ export interface DispatchJobDoc {
   finishedAt?: string
   issueNumber?: number
   issueUrl?: string
+  issueTitle?: string
+  issueBody?: string
   commentId: string
   actorLogin?: string
   command?: string

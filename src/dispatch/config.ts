@@ -21,6 +21,11 @@ export interface GithubDispatchConfig {
    * `gh api user` login unless a future GitHub App slug is verified.
    */
   mentionHandles?: string[]
+  /**
+   * `claude` enables the host-side Claude Code github_fix implementer.
+   * Omitted or `none` keeps fail-closed publish.
+   */
+  implementer?: 'claude' | 'none'
 }
 
 export interface RsiConfig {
@@ -132,6 +137,15 @@ export async function loadDispatchOwnerConfig(
       ? root.sourceRepo.trim()
       : undefined
 
+  const implementerRaw = ghBlock.implementer ?? root.implementer
+  let implementer: 'claude' | 'none' | undefined
+  if (implementerRaw !== undefined && implementerRaw !== null && implementerRaw !== '') {
+    const v = String(implementerRaw).trim().toLowerCase()
+    if (v === 'claude') implementer = 'claude'
+    else if (v === 'none') implementer = 'none'
+    else throw new UserError(`github-dispatch: github.implementer must be "claude" or "none"`)
+  }
+
   let mentionHandles: string[] | undefined
   const mentionRaw = ghBlock.mentionHandles ?? root.mentionHandles
   if (mentionRaw !== undefined) {
@@ -173,6 +187,7 @@ export async function loadDispatchOwnerConfig(
       pollIntervalMs,
       ...(sourceRepo ? { sourceRepo } : {}),
       ...(mentionHandles?.length ? { mentionHandles } : {}),
+      ...(implementer ? { implementer } : {}),
     },
     rsi: {
       enabled: rsiEnabled,
@@ -208,6 +223,14 @@ export function loadDispatchOwnerConfigSync(home: string): DispatchOwnerConfig |
       .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       .map(v => v.trim().replace(/^@/, ''))
   }
+  let syncImplementer: 'claude' | 'none' | undefined
+  const implementerRaw = ghBlock.implementer ?? parsed.implementer
+  if (implementerRaw !== undefined && implementerRaw !== null && implementerRaw !== '') {
+    const v = String(implementerRaw).trim().toLowerCase()
+    if (v === 'claude') syncImplementer = 'claude'
+    else if (v === 'none') syncImplementer = 'none'
+    else throw new UserError(`github-dispatch: github.implementer must be "claude" or "none"`)
+  }
   return {
     github: {
       enabled,
@@ -216,6 +239,7 @@ export function loadDispatchOwnerConfigSync(home: string): DispatchOwnerConfig |
       pollIntervalMs: Math.max(MIN_POLL_INTERVAL_MS, Number(ghBlock.pollIntervalMs) || DEFAULT_POLL_INTERVAL_MS),
       ...(typeof ghBlock.sourceRepo === 'string' ? { sourceRepo: ghBlock.sourceRepo } : {}),
       ...(mentionHandles?.length ? { mentionHandles } : {}),
+      ...(syncImplementer ? { implementer: syncImplementer } : {}),
     },
     rsi: {
       enabled: rsiEnabled,

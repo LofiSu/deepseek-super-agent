@@ -20,17 +20,35 @@ function ipv4ToNum(ip: string): number | undefined {
   return n >>> 0
 }
 
+function parseIpv4MappedHexLower(lower: string): number | undefined {
+  const m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(lower)
+  if (!m) return undefined
+  const hi = Number.parseInt(m[1]!, 16)
+  const lo = Number.parseInt(m[2]!, 16)
+  if (!Number.isFinite(hi) || !Number.isFinite(lo)) return undefined
+  return ((hi & 0xffff) << 16) | (lo & 0xffff)
+}
+
 function isPrivateIp(ip: string): boolean {
   const lower = ip.toLowerCase()
   if (lower === '0.0.0.0') return true
-  if (lower === '127.0.0.1' || lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true
+  if (lower === '127.0.0.1' || lower === '::1' || lower === '0:0:0:0:0:0:0:1' || lower === '::') return true
 
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(lower)
   if (mapped) return isPrivateIp(mapped[1]!)
+  const mappedHex = parseIpv4MappedHexLower(lower)
+  if (mappedHex !== undefined) {
+    const a = (mappedHex >>> 24) & 0xff
+    const b = (mappedHex >>> 16) & 0xff
+    const c = (mappedHex >>> 8) & 0xff
+    const d = mappedHex & 0xff
+    return isPrivateIp(`${a}.${b}.${c}.${d}`)
+  }
 
   if (net.isIPv4(ip)) {
     const n = ipv4ToNum(ip)
     if (n === undefined) return false
+    if ((n & 0xff000000) === 0x00000000) return true // 0.0.0.0/8
     if ((n & 0xff000000) === 0x7f000000) return true // 127.0.0.0/8
     if ((n & 0xff000000) === 0x0a000000) return true // 10.0.0.0/8
     if ((n & 0xfff00000) === 0xac100000) return true // 172.16.0.0/12
@@ -44,9 +62,15 @@ function isPrivateIp(ip: string): boolean {
   return false
 }
 
+/** Strip IPv6 URL brackets so allowlist entries like `::ffff:7f00:1` match `[::ffff:7f00:1]`. */
+function normalizeHostname(hostname: string): string {
+  if (hostname.startsWith('[') && hostname.endsWith(']')) return hostname.slice(1, -1)
+  return hostname
+}
+
 function hostAllowed(host: string, allowHosts: readonly string[]): boolean {
-  const h = host.toLowerCase()
-  return allowHosts.some(a => a.toLowerCase() === h)
+  const h = normalizeHostname(host).toLowerCase()
+  return allowHosts.some(a => normalizeHostname(a).toLowerCase() === h)
 }
 
 async function assertResolvesPublic(hostname: string): Promise<void> {
@@ -77,10 +101,11 @@ export async function trustedFetch(
   }
   if (url.protocol === 'file:') throw new UserError('trusted-fetch: file:// refused')
   if (url.protocol !== 'https:') throw new UserError('trusted-fetch: only https:// allowed')
-  if (!hostAllowed(url.hostname, options.allowHosts)) {
+  const host = normalizeHostname(url.hostname)
+  if (!hostAllowed(host, options.allowHosts)) {
     throw new UserError(`trusted-fetch: host ${url.hostname} not in allowlist`)
   }
-  await assertResolvesPublic(url.hostname)
+  await assertResolvesPublic(host)
 
   const fetchImpl = options.fetchImpl ?? fetch
   const res = await fetchImpl(url.toString(), {

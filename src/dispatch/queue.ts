@@ -52,8 +52,8 @@ export async function drainDispatchQueue(
       const ctx = ctxByJobId.get(next.id)
       const out = await options.runner.runGithubFix({
         job: next,
-        issueTitle: ctx?.issueTitle ?? `Issue #${next.issueNumber ?? ''}`,
-        issueBody: ctx?.issueBody ?? '',
+        issueTitle: ctx?.issueTitle ?? next.issueTitle ?? `Issue #${next.issueNumber ?? ''}`,
+        issueBody: ctx?.issueBody ?? next.issueBody ?? '',
       })
       putDispatchJob(options.store, {
         ...getDispatchJob(options.store, next.id)!,
