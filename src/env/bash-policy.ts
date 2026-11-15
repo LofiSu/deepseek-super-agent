@@ -3,19 +3,32 @@ import { UserError } from '../shared/errors.ts'
 /** Protected branch names — no direct push or merge into these via dev shells. */
 export const PROTECTED_BRANCHES = new Set(['main', 'master'])
 
+export interface DevShellPolicyOptions {
+  /** Current branch (`git rev-parse --abbrev-ref HEAD`) when cwd is a git repo. */
+  headBranch?: string
+}
+
 /**
  * Returns a rejection reason when a non-isolated dev shell must not run `command`.
  * Pure text analysis; returns `null` when allowed.
  */
-export function devShellCommandRejection(command: string): string | null {
+export function devShellCommandRejection(
+  command: string,
+  options?: DevShellPolicyOptions,
+): string | null {
   const trimmed = command.trim()
   if (!trimmed) return null
+  const headBranch = options?.headBranch?.trim() || undefined
+  const onProtectedHead = headBranch ? protectedRefName(headBranch) : false
 
   if (rejectsGhPrMerge(trimmed)) {
     return 'dev shell policy: gh pr merge is not allowed (use a PR and owner/orchestrator merge)'
   }
-  if (rejectsGitPushToProtected(trimmed)) {
+  if (rejectsGitPushToProtected(trimmed, onProtectedHead)) {
     return 'dev shell policy: git push to main/master is not allowed'
+  }
+  if (onProtectedHead && rejectsMergeRebaseStatements(trimmed)) {
+    return 'dev shell policy: merge or rebase on main/master is not allowed'
   }
   if (rejectsCheckoutThenMergeIntoProtected(trimmed)) {
     return 'dev shell policy: merge or rebase onto main/master is not allowed'
@@ -23,8 +36,11 @@ export function devShellCommandRejection(command: string): string | null {
   return null
 }
 
-export function assertDevShellCommandAllowed(command: string): void {
-  const reason = devShellCommandRejection(command)
+export function assertDevShellCommandAllowed(
+  command: string,
+  options?: DevShellPolicyOptions,
+): void {
+  const reason = devShellCommandRejection(command, options)
   if (reason) throw new UserError(reason)
 }
 
@@ -64,11 +80,38 @@ function rejectsGhPrMerge(command: string): boolean {
   return splitShellStatements(command).some(stmt => /\bgh\s+pr\s+merge\b/.test(stmt))
 }
 
-function rejectsGitPushToProtected(command: string): boolean {
+function rejectsGitPushToProtected(command: string, onProtectedHead: boolean): boolean {
   return splitShellStatements(command).some(stmt => {
     if (!/\bgit\s+push\b/.test(stmt)) return false
+    if (onProtectedHead && gitPushHasNoNonProtectedDestRefspec(stmt)) return true
     return gitPushStatementTargetsProtected(stmt)
   })
+}
+
+/** True when push has no explicit refspec, or only `git push [remote]` (upstream/default push). */
+function gitPushHasNoNonProtectedDestRefspec(statement: string): boolean {
+  const tokens = tokenizeSimple(statement)
+  const pushIdx = tokens.findIndex((t, i) => t === 'push' && i > 0 && tokens[i - 1] === 'git')
+  if (pushIdx < 0) return false
+
+  const afterPush = tokens.slice(pushIdx + 1).filter(t => !t.startsWith('-'))
+  const refspecs: string[] = []
+  let skippedRemote = false
+  for (const arg of afterPush) {
+    if (!skippedRemote && looksLikeRemoteName(arg)) {
+      skippedRemote = true
+      continue
+    }
+    refspecs.push(arg)
+  }
+  if (refspecs.length === 0) return true
+  return !refspecs.some(refspec => !refspecTargetsProtectedBranch(refspec))
+}
+
+function rejectsMergeRebaseStatements(command: string): boolean {
+  return splitShellStatements(command).some(
+    stmt => /\bgit\s+merge\b/.test(stmt) || /\bgit\s+rebase\b/.test(stmt),
+  )
 }
 
 /**

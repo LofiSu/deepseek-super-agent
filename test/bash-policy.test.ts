@@ -54,6 +54,22 @@ describe('bash policy — compound commands', () => {
     expect(devShellCommandRejection('git checkout main; git merge feature/x')).toMatch(/main\/master/)
   })
 
+  it('rejects bare git push when HEAD is main', () => {
+    expect(devShellCommandRejection('git push', { headBranch: 'main' })).toMatch(/push/)
+    expect(devShellCommandRejection('git push origin', { headBranch: 'main' })).toMatch(/push/)
+    expect(devShellCommandRejection('git push origin', { headBranch: 'refs/heads/main' })).toMatch(/push/)
+  })
+
+  it('allows bare git push on feature branch', () => {
+    expect(devShellCommandRejection('git push origin', { headBranch: 'feature/x' })).toBeNull()
+  })
+
+  it('rejects git merge and rebase when HEAD is main without checkout chain', () => {
+    expect(devShellCommandRejection('git merge origin/feature', { headBranch: 'main' })).toMatch(/merge or rebase on/)
+    expect(devShellCommandRejection('git rebase origin/main', { headBranch: 'master' })).toMatch(/merge or rebase on/)
+    expect(devShellCommandRejection('git merge foo', { headBranch: 'feature/x' })).toBeNull()
+  })
+
   it('allows merge origin/main into feature branch', () => {
     expect(devShellCommandRejection('git merge origin/main')).toBeNull()
   })

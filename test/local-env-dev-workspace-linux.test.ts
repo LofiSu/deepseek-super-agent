@@ -141,4 +141,17 @@ describe.skipIf(!HAS_BWRAP)('LocalEnv dev workspace (Linux bwrap)', () => {
     execSync('echo x > f && git add f && git commit -m c', { cwd: ws })
     await expect(env.bash('git-bad', `git push ${JSON.stringify(bare)} HEAD:main`)).rejects.toThrow(UserError)
   })
+
+  it('rejects git push with no refspec when checked out on main', async () => {
+    const root = tempHome()
+    const env = prodLikeEnv(root)
+    const ws = env.workspace('main-no-ref')
+    const bare = path.join(ws, 'bare.git')
+    execSync(`git init --bare ${JSON.stringify(bare)}`, { stdio: 'ignore' })
+    execSync('git init -b main', { cwd: ws, env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } })
+    execSync(`git remote add origin ${JSON.stringify(bare)}`, { cwd: ws })
+    execSync('git config user.email t@t.com && git config user.name t', { cwd: ws })
+    execSync('echo x > f && git add f && git commit -m c', { cwd: ws })
+    await expect(env.bash('main-no-ref', 'git push origin')).rejects.toThrow(UserError)
+  })
 })

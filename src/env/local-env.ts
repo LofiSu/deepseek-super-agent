@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { execSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
@@ -112,11 +112,14 @@ export class LocalEnv implements EnvPort {
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     const isolated = opts?.isolated === true
     if (!command.trim()) throw new UserError('empty command')
-    if (!isolated) assertDevShellCommandAllowed(command)
+    const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
+    if (!isolated) {
+      const headBranch = resolveHeadBranch(cwd)
+      assertDevShellCommandAllowed(command, headBranch ? { headBranch } : undefined)
+    }
     if (isolated && leavesWorkdir(command)) {
       throw new UserError('speculative command leaves the isolated workdir')
     }
-    const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
     const wrapped = wrapBashCommand(command, {
       ...this.sandbox,
       writableRoots: [cwd],
@@ -247,8 +250,7 @@ export class LocalEnv implements EnvPort {
       env.XDG_CONFIG_HOME = path.join(cwd, '.config')
       env.GH_CONFIG_DIR = path.join(cwd, '.config', 'gh')
       fs.mkdirSync(env.XDG_CONFIG_HOME, { recursive: true, mode: 0o700 })
-      const sshConfig = path.join(cwd, '.ssh', 'config')
-      env.GIT_SSH_COMMAND = `ssh -o IdentitiesOnly=yes -o AddKeysToAgent=no -F ${JSON.stringify(sshConfig)}`
+      env.GIT_SSH_COMMAND = buildGitSshCommand(cwd)
     }
     return env
   }
@@ -339,6 +341,33 @@ export class LocalEnv implements EnvPort {
 }
 
 const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
+
+const WORKSPACE_SSH_KEY_NAMES = ['id_ed25519', 'id_rsa', 'id_ecdsa'] as const
+
+function resolveHeadBranch(cwd: string): string | undefined {
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    return branch && branch !== 'HEAD' ? branch : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function buildGitSshCommand(cwd: string): string {
+  const opts = ['-F', '/dev/null', '-o', 'IdentitiesOnly=yes', '-o', 'AddKeysToAgent=no']
+  const sshDir = path.join(cwd, '.ssh')
+  for (const name of WORKSPACE_SSH_KEY_NAMES) {
+    const keyPath = path.join(sshDir, name)
+    if (fs.existsSync(keyPath)) {
+      opts.push('-o', `IdentityFile=${keyPath}`)
+    }
+  }
+  return `ssh ${opts.map(o => (o.includes(' ') ? JSON.stringify(o) : o)).join(' ')}`
+}
 
 function symlinkEscape(): UserError {
   return new UserError('path escapes workspace: symlinks are not allowed')
