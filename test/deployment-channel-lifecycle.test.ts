@@ -360,6 +360,50 @@ describe('deployment resident channel lifecycle', () => {
     await rt.finish()
   })
 
+  it('feishu loop retries the whole window when cursor persistence fails', async () => {
+    const rt = runtime()
+    rt.start()
+    const messageMs = 1_761_958_800_000
+    const source = new WindowFeishuSource(
+      [feishuTrigger('cursor_retryable', messageMs)],
+      messageMs - 6_000,
+    )
+    const putDoc = rt.store.putDoc.bind(rt.store)
+    let cursorWriteAttempts = 0
+    rt.store.putDoc = (kind, id, value) => {
+      if (kind === 'feishu_cursor' && id === 'cursor' && cursorWriteAttempts++ === 0) {
+        throw new Error('simulated cursor persistence failure')
+      }
+      putDoc(kind, id, value)
+    }
+    const controller = new AbortController()
+    const loop = runFeishuLoop({
+      runtime: rt,
+      chatId: 'oc_test',
+      client: noNetworkFeishu(),
+      createSource: () => source,
+      intervalMs: 5,
+      signal: controller.signal,
+    })
+    const deadline = Date.now() + 3_000
+    while (!rt.store.getDoc<Trigger>('trigger', 'feishu_cursor_retryable') && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    while (!rt.store.getDoc('feishu_cursor', 'cursor') && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    controller.abort()
+    await loop
+    expect(cursorWriteAttempts).toBeGreaterThanOrEqual(2)
+    expect(source.batches.slice(0, 2)).toEqual([
+      ['feishu_cursor_retryable'],
+      ['feishu_cursor_retryable'],
+    ])
+    expect(rt.store.getDoc<{ chatId: string; lastCreateTimeMs: number }>('feishu_cursor', 'cursor'))
+      .toEqual({ chatId: 'oc_test', lastCreateTimeMs: messageMs })
+    await rt.finish()
+  })
+
   it('feishu loop logs poll errors and exits cleanly on abort', async () => {
     const rt = runtime()
     rt.start()

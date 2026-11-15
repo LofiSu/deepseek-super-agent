@@ -175,8 +175,10 @@ successful pull and ingest, and only when it advances. On restart the stored
 value is passed back to `FeishuSource`, so the previous window is not replayed.
 `FeishuSource` queries one second before the cursor to catch messages sharing a
 boundary second; any overlap is deduped by Trigger id (`feishu_<message_id>`) in
-`Runtime.ingest`, so a message already processed is never processed twice. A
-stored cursor whose `chatId` differs from the current chat is ignored.
+`Runtime.ingest`, so a message already processed is never processed twice. If
+the cursor write fails, the source cursor is restored to the beginning of that
+pull and the full window is retried. A stored cursor whose `chatId` differs from
+the current chat is ignored.
 
 **Admission semantics.** The loop calls `runtime.ingest(trigger)` with the
 Trigger returned by `feishuTriggerFromMessage`; it does not mark anything

@@ -183,9 +183,10 @@ function storedCursor(runtime: Runtime, chatId: string): number | undefined {
  * `Runtime.ingest`, so an already-processed message is never processed twice.
  *
  * Pull failures are logged and retried with bounded exponential backoff. An
- * ingest failure restores the source cursor to the start of that pull, so a
- * retry cannot advance past an uncommitted Trigger. The loop never closes the
- * client or finishes the Runtime: the caller owns those resources.
+ * ingest or cursor-persistence failure restores the source cursor to the start
+ * of that pull, so a retry cannot advance past an uncommitted Trigger. The
+ * loop never closes the client or finishes the Runtime: the caller owns those
+ * resources.
  */
 export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuLoopStopReason> {
   const { runtime, chatId, client, createSource } = options
@@ -259,11 +260,19 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
             && advanced > 0
             && (cursor === undefined || advanced > cursor)
           ) {
-            cursor = advanced
-            runtime.store.putDoc(CURSOR_KIND, CURSOR_ID, {
-              chatId,
-              lastCreateTimeMs: cursor,
-            } satisfies FeishuCursorDoc)
+            // Keep both cursor representations unchanged until the durable
+            // write succeeds. If persistence fails, the next pull must replay
+            // this entire window: keeping either cursor advanced would skip it.
+            try {
+              runtime.store.putDoc(CURSOR_KIND, CURSOR_ID, {
+                chatId,
+                lastCreateTimeMs: advanced,
+              } satisfies FeishuCursorDoc)
+              cursor = advanced
+            } catch (error) {
+              source.restoreCursor(cursorBeforePull)
+              throw error
+            }
           }
         }
         await runtime.jobsSettled().catch(error => {
