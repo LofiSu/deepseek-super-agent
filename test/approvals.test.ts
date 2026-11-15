@@ -555,6 +555,40 @@ describe('approval CLI', () => {
     }
   })
 
+  it('refuses retry for an ended delegate effect with no durable redrain path', () => {
+    const home = tempHome()
+    dirs.push(home)
+    const store = new Store(home)
+    try {
+      store.putDoc('ticket', 'ticket_delegate_ended', fabricate({
+        id: 'ticket_delegate_ended',
+        ended: { at: '2026-01-01T00:00:00.000Z', outcome: 'stopped', by: 'human' },
+      }))
+      store.putDoc(EXTERNAL_OP_KIND, 'extop_delegate_ended', {
+        schemaVersion: 1,
+        id: 'extop_delegate_ended',
+        kind: 'delegate_agent',
+        ticketId: 'ticket_delegate_ended',
+        idempotencyKey: 'delegate-ended',
+        phase: 'unknown_outcome',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      } satisfies ExternalOperationRecord)
+    } finally {
+      store.close()
+    }
+
+    const retried = runCli(home, ['recovery-effects', 'ticket_delegate_ended', 'retry', 'extop_delegate_ended'])
+    expect(retried.status).not.toBe(0)
+    expect(retried.stderr).toContain('has no durable retry path')
+    const after = new Store(home)
+    try {
+      expect(after.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_delegate_ended')?.phase).toBe('unknown_outcome')
+    } finally {
+      after.close()
+    }
+  })
+
   it('refuses to decide without a live model instead of consuming guidance on a mock', () => {
     const home = tempHome()
     dirs.push(home)

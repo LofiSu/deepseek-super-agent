@@ -2,7 +2,11 @@ import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
 import { Engine } from '../core/engine.ts'
-import { resolveUnknownOutcomeEffects, unknownEffectIds } from '../core/external-effects.ts'
+import {
+  resolveUnknownOutcomeEffects,
+  retryableUnknownEffectIds,
+  unknownEffectIds,
+} from '../core/external-effects.ts'
 import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
@@ -673,6 +677,11 @@ async function main(): Promise<void> {
       }
       if (!effectIds.includes(effectId)) {
         throw new Error(`unknown uncertain effect ${effectId} on ended ticket ${ticket.id}`)
+      }
+      if (resolution === 'retry' && !retryableUnknownEffectIds(ticket.id, store).includes(effectId)) {
+        throw new Error(
+          `effect ${effectId} has no durable retry path after ticket end; acknowledge it after verifying the remote result`,
+        )
       }
       const changed = resolveUnknownOutcomeEffects(store, ticket.id, [effectId], resolution, new Date().toISOString())
       if (changed === 0) throw new Error(`could not resolve effect ${effectId}; inspect recovery-effects again`)

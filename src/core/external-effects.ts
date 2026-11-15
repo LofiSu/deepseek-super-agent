@@ -277,6 +277,14 @@ export function unknownEffectIds(ticketId: string, store: Store): string[] {
   return [...ids].sort()
 }
 
+/** Only uncertain Outbox rows have a durable redrain path after a Ticket ends. */
+export function retryableUnknownEffectIds(ticketId: string, store: Store): string[] {
+  return store.listOutbox('unknown_outcome')
+    .filter(row => row.ticketId === ticketId)
+    .map(row => `outbox_${row.id}`)
+    .sort()
+}
+
 export function isUnknownOutcomeApproval(approval: ApprovalRequest): boolean {
   return approval.status === 'pending'
     && approval.requestedBy === 'recovery'
