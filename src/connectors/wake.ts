@@ -202,7 +202,10 @@ export class ConnectorWakeScheduler {
     const base: ConnectorWakeState = {
       ...state,
       lastCheckAt: at,
-      cursors,
+      // A fetched page is not a completed page until its possible ingress has
+      // committed. In particular, never let a failed `fire()` skip the page
+      // on the next pulse.
+      cursors: state.cursors,
       wakes: state.wakes
         .filter(row => at - row.at <= WAKE_RETENTION_MS)
         .slice(-MAX_WAKE_ROWS),
@@ -217,12 +220,13 @@ export class ConnectorWakeScheduler {
       skipped: upsert.skipped,
       ...(serviceErrors.length ? { serviceErrors } : {}),
     }
+    const committed = (): ConnectorWakeState => ({ ...base, cursors })
     if (pruned > 0) this.log(`[connector] index pruned=${pruned}`)
 
     // The first round only establishes the index and cursors. Waking from a
     // historical batch would be a burst, not a useful event.
     if (first) {
-      this.saveState(base)
+      this.saveState(committed())
       this.log(
         `[connector] backfill indexed=${upsert.records.length} inserted=${upsert.inserted} `
         + `services=${config.google.services.join(',')}`,
@@ -230,12 +234,12 @@ export class ConnectorWakeScheduler {
       return { action: 'backfill', ...counts }
     }
     if (!config.wake.enabled) {
-      this.saveState(base)
+      this.saveState(committed())
       this.log(`[connector] index-only indexed=${upsert.records.length} inserted=${upsert.inserted}`)
       return { action: 'polled', ...counts }
     }
     if (withinQuietHours(at, this.opts.proactive)) {
-      this.saveState(base)
+      this.saveState(committed())
       this.log(`[connector] quiet-hours now=${localTime(at, this.opts.proactive.timezone)}`)
       return { action: 'quiet-hours', ...counts }
     }
@@ -245,21 +249,21 @@ export class ConnectorWakeScheduler {
       base.lastWakeAt !== undefined
       && at - base.lastWakeAt < wakeConfig.minIntervalMinutes * 60_000
     ) {
-      this.saveState(base)
+      this.saveState(committed())
       this.log(`[connector] min-interval lastWakeAt=${new Date(base.lastWakeAt).toISOString()}`)
       return { action: 'min-interval', ...counts }
     }
     const today = dayKey(at, this.opts.proactive.timezone)
     const todayWakes = base.wakes.filter(row => dayKey(row.at, this.opts.proactive.timezone) === today)
     if (todayWakes.length >= wakeConfig.maxPerDay) {
-      this.saveState(base)
+      this.saveState(committed())
       this.log(`[connector] daily-cap count=${todayWakes.length} max=${wakeConfig.maxPerDay}`)
       return { action: 'daily-cap', ...counts }
     }
 
     const target = this.findWakeTarget(wakeConfig)
     if (!target) {
-      this.saveState(base)
+      this.saveState(committed())
       this.log(`[connector] silent reason=no-private-thread source=${wakeConfig.source} thread=${wakeConfig.thread}`)
       return { action: 'no-target', ...counts }
     }
@@ -291,7 +295,7 @@ export class ConnectorWakeScheduler {
         continue
       }
       const next: ConnectorWakeState = {
-        ...base,
+        ...committed(),
         lastWakeAt: at,
         wakes: [...base.wakes, {
           at,
@@ -307,6 +311,9 @@ export class ConnectorWakeScheduler {
       try {
         this.opts.fire(trigger)
       } catch (error) {
+        // The index may safely be retried, but the service checkpoint must
+        // stay before this page until Runtime ingress accepts the trigger.
+        this.saveState(base)
         this.log(`[connector] fire failed triggerId=${trigger.id}: ${messageOf(error)}`)
         return { action: 'wake', recordId: record.id, trigger, ...counts }
       }
@@ -317,7 +324,7 @@ export class ConnectorWakeScheduler {
       return { action: 'wake', recordId: record.id, trigger, ...counts }
     }
 
-    this.saveState(base)
+    this.saveState(committed())
     if (denied) {
       this.log(`[connector] silent reason=${denied}`)
       return { action: 'admission-denied', reason: denied, ...counts }

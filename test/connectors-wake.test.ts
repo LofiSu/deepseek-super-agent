@@ -327,6 +327,26 @@ describe('connector wake scheduler', () => {
     expect(fired[0]?.text).toContain('service=calendar')
   })
 
+  it('does not checkpoint a fetched service when connector ingress throws', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      wakes: [],
+      notified: [],
+    })
+    const { runner } = scheduler({ store, index, api: fakeApi([draft()]) })
+    const originalFire = (runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire
+    ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = () => {
+      throw new Error('ingress unavailable')
+    }
+
+    await expect(runner.poll(T0 + 16 * MIN)).resolves.toMatchObject({ action: 'wake' })
+    expect(loadConnectorWakeState(store).cursors?.gmail).toBeUndefined()
+
+    ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = originalFire
+  })
+
   it('marks connector wakes as messaging envelopes', () => {
     const ticket = {
       id: 'ticket_1',
