@@ -134,8 +134,6 @@ This repository implements that operating model in two layers:
 
 The Router is the sequence point: it talks to people, batches triggers, and dispatches work. Workers execute in isolated sessions. Triggers drive the loop. The Watchdog lives outside the control path and nudges or fails stuck work.
 
-The design vocabulary follows [从零打造 Personal Agent（三）](https://my.feishu.cn/docx/YtDVdzfxdobjAkxKZiIcl5Emnth): the `router` role is the **Main Agent / Main Session**, the `worker` role is the **Executor**, and a `Subscription` is a context-only Ticket ↔ Thread relation that grants no extra authority. Deviations and corrections are recorded in [docs/DOMAIN_ALIGNMENT.md](docs/DOMAIN_ALIGNMENT.md).
-
 ## Core features
 
 ### Proactive by construction

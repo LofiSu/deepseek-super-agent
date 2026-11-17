@@ -134,8 +134,6 @@ pnpm demo
 
 Router 是全局序点：它负责对话、批处理 Trigger 和分派。Worker 在隔离的 Session 里执行。Trigger 驱动整个循环。Watchdog 位于控制路径之外，负责提醒或判失败。
 
-领域命名以[《从零打造 Personal Agent（三）》](https://my.feishu.cn/docx/YtDVdzfxdobjAkxKZiIcl5Emnth)为准：`router` 角色是 **Main Agent / Main Session**，`worker` 角色是 **Executor**，`Subscription` 只是 Ticket ↔ Thread 的上下文关系，不增加任何授权。偏差与修正记录见 [docs/DOMAIN_ALIGNMENT.md](docs/DOMAIN_ALIGNMENT.md)。
-
 ## 核心能力
 
 ### 天生主动
