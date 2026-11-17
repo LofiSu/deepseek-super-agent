@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
@@ -8,6 +8,7 @@ import {
   BROWSER_PROTOCOL,
   BrowserErrands,
   IRREVERSIBLE_BROWSER_ACTIONS,
+  MAX_BROWSER_OUTPUT_BYTES,
   assertAllowedUrl,
   createBrowserDriver,
   loadBrowserErrands,
@@ -256,6 +257,21 @@ describe('browser URL allowlist', () => {
       await expect(operation).rejects.toThrow(/allowlist/)
     }
   })
+
+  it('requires a post-action URL for every safe operation', async () => {
+    const actions = ['navigate', 'read', 'fill', 'extract'] as const
+    for (const action of actions) {
+      const { errands } = fakeErrands(() => ({ text: 'page', filled: 1, items: [] }))
+      const operation = action === 'navigate'
+        ? errands.navigate('worker_1', 'https://example.com/start')
+        : action === 'read'
+          ? errands.read('worker_1')
+          : action === 'fill'
+            ? errands.fill('worker_1', [{ selector: '#q', value: 'hello' }])
+            : errands.extract('worker_1')
+      await expect(operation).rejects.toThrow(/result needs a string url/)
+    }
+  })
 })
 
 describe('command browser driver', () => {
@@ -399,6 +415,40 @@ describe('remote (http) browser driver', () => {
       session: 'worker_http',
       url: 'https://example.com/page',
     })
+  })
+
+  it('streams HTTP responses, caps UTF-8 bytes, and cancels oversized bodies', async () => {
+    const chunk = new TextEncoder().encode('€'.repeat(20_000))
+    let emitted = 0
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (emitted === 32) {
+          controller.close()
+          return
+        }
+        emitted += 1
+        controller.enqueue(chunk)
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, { status: 200 }))
+    try {
+      const config = enabled({
+        enabled: true,
+        driver: { kind: 'http', url: 'http://127.0.0.1:8080/errand' },
+        allowedHosts: ['example.com'],
+      })
+      const errands = new BrowserErrands(createBrowserDriver(config), config)
+      await expect(errands.read('worker_http')).rejects.toThrow(/exceeded the capture limit/)
+      expect(emitted * chunk.byteLength).toBeGreaterThan(MAX_BROWSER_OUTPUT_BYTES)
+      expect(emitted).toBeLessThan(32)
+      expect(cancelled).toBe(true)
+    } finally {
+      fetchMock.mockRestore()
+    }
   })
 
   it('fails on a non-2xx response and does not follow redirects', async () => {

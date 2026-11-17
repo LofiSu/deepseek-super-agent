@@ -94,11 +94,13 @@ Actions and required result fields:
 
 | Action | Request fields | Result fields |
 |---|---|---|
-| `navigate` | `url` | optional `url`, `title` |
-| `read` | — | `text` (bounded by `maxReadChars`) |
-| `fill` | `fields`: `[{selector,value}]` | `filled` (integer) |
-| `extract` | optional `selector` | `items`: strings (bounded by `maxExtractItems`) |
+| `navigate` | `url` | `url` (required, post-action location), optional `title` |
+| `read` | — | `url` (required, current location), `text` (bounded by `maxReadChars`) |
+| `fill` | `fields`: `[{selector,value}]` | `url` (required, current location), `filled` (integer) |
+| `extract` | optional `selector` | `url` (required, current location), `items`: strings (bounded by `maxExtractItems`) |
 
+Every action must report its post-action page URL. The adapter checks it against
+the owner allowlist, so a missing URL or a redirect to another host fails closed.
 The driver may return extra keys on `result`; the adapter ignores them. Invalid
 shapes fail the tool call instead of reaching the model.
 

@@ -631,10 +631,7 @@ class HttpBrowserDriver implements BrowserDriver {
         redirect: 'manual',
       })
       if (!response.ok) throw new UserError(`browser driver returned HTTP ${response.status}`)
-      const text = await response.text()
-      if (text.length > MAX_BROWSER_OUTPUT_BYTES) {
-        throw new UserError('browser driver response exceeded the capture limit')
-      }
+      const text = await readBoundedResponseBody(response.body)
       return parseEnvelope(text)
     } catch (error) {
       if (this.closed) throw new UserError('browser driver is shut down')
@@ -759,6 +756,28 @@ function killGroup(pid: number | undefined, child: ReturnType<typeof spawn>): vo
     } catch {
       // Already gone.
     }
+  }
+}
+
+async function readBoundedResponseBody(body: ReadableStream<Uint8Array> | null): Promise<string> {
+  if (!body) return ''
+  const reader = body.getReader()
+  const chunks: Buffer[] = []
+  let size = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > MAX_BROWSER_OUTPUT_BYTES) {
+        await reader.cancel().catch(() => {})
+        throw new UserError('browser driver response exceeded the capture limit')
+      }
+      chunks.push(Buffer.from(value))
+    }
+    return Buffer.concat(chunks, size).toString('utf8')
+  } finally {
+    reader.releaseLock()
   }
 }
 
