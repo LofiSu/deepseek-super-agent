@@ -37,7 +37,7 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
         agents: [{
           id: 'ipc-hold',
           command: process.execPath,
-          args: ['test/fixtures/delegate-ipc-hold.mjs', '{task}'],
+          args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
           timeoutMs: 60_000,
         }],
       }),
