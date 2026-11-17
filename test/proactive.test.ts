@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { approvalActionId } from '../src/core/collab.ts'
 import {
   OUTBOX_RETRY_BASE_KEY,
   Outbox,
@@ -140,6 +140,7 @@ function scheduler(
     now?: number
     env?: NodeJS.ProcessEnv
     memoryFor?: (ticket: Ticket) => string[]
+    fire?: (trigger: Trigger) => 'stored' | 'duplicate' | 'filtered'
   } = {},
 ): { scheduler: ProactiveScheduler; fired: Trigger[]; lines: string[] } {
   const fired: Trigger[] = []
@@ -150,7 +151,10 @@ function scheduler(
     config: options.config ?? config(),
     env: options.env ?? {},
     ...(options.memoryFor ? { memoryFor: options.memoryFor } : {}),
-    fire: trigger => { fired.push(trigger) },
+    fire: options.fire ?? (trigger => {
+      fired.push(trigger)
+      return 'stored'
+    }),
     log: line => { lines.push(line) },
   })
   return { scheduler, fired, lines }
@@ -331,6 +335,155 @@ describe('idle self-wake policy', () => {
     expect(second.fired).toHaveLength(0)
   })
 
+  it('contacts a signal revision once across days and wakes again after it changes', () => {
+    const store = tempStore()
+    const ticket = openTicket()
+    seed(store, { ticket })
+    const { scheduler: runner, fired } = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    runner.tick(T0)
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('contact')
+    const firstId = fired[0]!.id
+
+    // The same report remains visible after midnight, but is no longer new.
+    expect(runner.tick(T0 + 15 * 60 * MIN).action).toBe('silent')
+    expect(fired).toHaveLength(1)
+
+    const revised = store.getDoc<Ticket>('ticket', ticket.id)!
+    const assignment = revised.assignments[0]!
+    assignment.report = {
+      ...assignment.report!,
+      at: new Date(T0 + 15 * 60 * MIN + MIN).toISOString(),
+      question: '附件版本改了，按哪一版继续？',
+    }
+    store.putDoc('ticket', revised.id, revised)
+
+    expect(runner.tick(T0 + 16 * 60 * MIN).action).toBe('contact')
+    expect(fired).toHaveLength(2)
+    expect(fired[1]!.id).not.toBe(firstId)
+  })
+
+  it('prunes stale or ended receipts without recontacting an unchanged active signal', () => {
+    const store = tempStore()
+    const ticket = openTicket()
+    seed(store, { ticket })
+    const { scheduler: runner, fired } = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    runner.tick(T0)
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('contact')
+    const current = runner.state().signalReceipts[0]!
+    const ended = openTicket({
+      id: 'ticket_ended',
+      ended: { at: new Date(T0).toISOString(), outcome: 'done', by: 'executor' },
+    })
+    store.putDoc('ticket', ended.id, ended)
+    store.putDoc('proactive', 'state', {
+      ...runner.state(),
+      signalReceipts: [
+        current,
+        { ticketId: ended.id, signalId: 'ended', at: T0 },
+        { ticketId: 'ticket_missing', signalId: 'stale', at: T0 - 31 * 86_400_000 },
+      ],
+    })
+
+    expect(runner.tick(T0 + 5 * 60 * MIN).action).toBe('silent')
+    expect(fired).toHaveLength(1)
+    expect(runner.state().signalReceipts).toEqual([current])
+  })
+
+  it('keeps a legacy receipt across restart so an unchanged signal is not recontacted', () => {
+    const store = tempStore()
+    const ticket = openTicket()
+    seed(store, { ticket })
+    const initial = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+    initial.scheduler.tick(T0)
+    initial.scheduler.tick(T0 + 31 * MIN)
+    const receipt = initial.scheduler.state().signalReceipts[0]!
+
+    // State written by the immediately preceding version had no `at` field.
+    store.putDoc('proactive', 'state', {
+      lastCheckAt: T0 + 31 * MIN,
+      signalReceipts: [{ ticketId: receipt.ticketId, signalId: receipt.signalId }],
+      contacts: [],
+    })
+    const restarted = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    expect(restarted.scheduler.tick(T0 + 62 * MIN).action).toBe('silent')
+    expect(restarted.fired).toHaveLength(0)
+    expect(restarted.scheduler.state().signalReceipts).toEqual([
+      { ticketId: receipt.ticketId, signalId: receipt.signalId },
+    ])
+  })
+
+  it('does not evict active receipts at the cap to contact a new signal', () => {
+    const store = tempStore()
+    const tickets = Array.from({ length: 257 }, (_, index) => openTicket({
+      id: `ticket_cap_${index}`,
+      assignments: [{
+        id: `asg_cap_${index}`,
+        state: 'ended',
+        speculative: false,
+        endedAt: new Date(T0 - 60 * MIN).toISOString(),
+        report: {
+          kind: 'waiting',
+          text: `等待确认 ${index}`,
+          deliver: false,
+          at: new Date(T0 - 60 * MIN).toISOString(),
+          question: `请确认 ${index}`,
+        },
+      }],
+    }))
+    for (const ticket of tickets) store.putDoc('ticket', ticket.id, ticket)
+    seed(store)
+    const receipts = tickets.slice(0, 256).map(ticket => {
+      const report = ticket.assignments[0]!.report!
+      const assignment = ticket.assignments[0]!
+      const signalId = createHash('sha256')
+        .update([ticket.id, 'report-question', assignment.id, report.at, report.kind, report.question]
+          .map(part => String(part ?? '')).join('\u0000'))
+        .digest('hex')
+        .slice(0, 16)
+      return { ticketId: ticket.id, signalId, at: T0 }
+    })
+    store.putDoc('proactive', 'state', { lastCheckAt: T0, contacts: [], signalReceipts: receipts })
+    const { scheduler: runner, fired } = scheduler(store, {
+      config: config({ quietStart: '00:00', quietEnd: '00:00', minIntervalMinutes: 15 }),
+    })
+
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('silent')
+    expect(fired).toHaveLength(0)
+    expect(runner.state().signalReceipts).toEqual(receipts)
+  })
+
+  it('does not consume contact quota when ingress did not commit', () => {
+    const store = tempStore()
+    seed(store, { ticket: openTicket() })
+    const attempts: Trigger[] = []
+    const { scheduler: runner } = scheduler(store, {
+      fire: trigger => {
+        attempts.push(trigger)
+        return 'filtered'
+      },
+    })
+
+    runner.tick(T0)
+    expect(runner.tick(T0 + 31 * MIN).action).toBe('silent')
+    expect(runner.state().contacts).toHaveLength(0)
+    expect(runner.state().lastContactAt).toBeUndefined()
+
+    expect(runner.tick(T0 + 62 * MIN).action).toBe('silent')
+    expect(attempts).toHaveLength(2)
+    expect(runner.state().contacts).toHaveLength(0)
+  })
+
   it('never auto-approves an irreversible pending action', () => {
     const store = tempStore()
     const ticket = openTicket({
@@ -353,7 +506,6 @@ describe('idle self-wake policy', () => {
           id: 'ap_1',
           at: new Date(T0 - 30 * MIN).toISOString(),
           action: '向客户发送最终报价邮件',
-          actionId: approvalActionId('向客户发送最终报价邮件'),
           reason: '不可撤销的外部发送',
           requestedBy: 'worker_ticket_seed',
           status: 'pending',

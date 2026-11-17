@@ -4,11 +4,18 @@ import { imTrigger } from '../channels/im.ts'
 import { formatApprovalCard } from '../core/approval-card.ts'
 import { approvalActionId } from '../core/collab.ts'
 import { Engine } from '../core/engine.ts'
+import {
+  resolveUnknownOutcomeEffects,
+  retryableUnknownEffectIds,
+  unknownEffectIds,
+} from '../core/external-effects.ts'
 import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
 import { createModelFromEnv, requireLiveModelFromEnv, type Model } from '../harness/model.ts'
-import { buildSystemPrompt, describePromptLayers, loadPromptFiles } from '../harness/prompts.ts'
+import { buildSystemPrompt, describePromptSections, loadPrompts } from '../harness/prompts.ts'
+import { parseMcpServers } from '../harness/mcp-config.ts'
+import { redactSecrets, secretValues } from '../env/sanitize.ts'
 import { LOCAL_AGENTS_FILE, loadLocalAgents } from '../env/local-agents.ts'
 import { SKILLS_DIR, SKILL_FILE, SkillRegistry } from '../env/skills.ts'
 import { loadRoutines, ROUTINES_ENV, ROUTINES_FILE } from '../harness/routines.ts'
@@ -108,6 +115,28 @@ function withEngine<T>(
   }
 }
 
+/**
+ * The same secret list the runtime redacts with: secret-named environment
+ * values plus the env blocks of configured MCP servers. Prompt files are owner
+ * text, so inspection output must not leak a credential the owner pasted in.
+ */
+function promptRedactor(env: NodeJS.ProcessEnv): (text: string) => string {
+  let mcpEnvs: NodeJS.ProcessEnv[] = []
+  const raw = env.DS_AGENT_MCP_SERVERS?.trim()
+  if (raw) {
+    try {
+      mcpEnvs = parseMcpServers(JSON.parse(raw)).map(config => config.env)
+    } catch {
+      mcpEnvs = []
+    }
+  }
+  const secrets = [...new Set([
+    ...secretValues(env),
+    ...mcpEnvs.flatMap(values => secretValues(values)),
+  ])].sort((a, b) => b.length - a.length)
+  return text => redactSecrets(text, secrets)
+}
+
 function help(): void {
   console.log(`ds-agent — local super-agent demo (not an official DeepSeek product)
 
@@ -155,6 +184,8 @@ function help(): void {
   pnpm ds-agent agents [--json]  # local specialist agents configured for delegation
   pnpm ds-agent skills [--json]  # owner-authored playbooks the agent can load
   pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
+  pnpm ds-agent recovery-effects <ticketId> [retry|acknowledge <effectId>] [--json]
+                            # inspect or resolve one uncertain external effect on an ended Ticket
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -650,6 +681,52 @@ async function main(): Promise<void> {
     }
     return
   }
+  if (cmd === 'recovery-effects') {
+    const [ticketRef, resolution, effectId] = bare(3)
+    if (!ticketRef) {
+      throw new Error('usage: ds-agent recovery-effects <ticketId> [retry|acknowledge <effectId>] [--json]')
+    }
+    const store = new Store(home)
+    try {
+      const ticket = resolveTicket(store, ticketRef)
+      if (!ticket.ended) {
+        throw new Error(`ticket ${ticket.id} is still live; decide its recovery approval with ds-agent approve or deny`)
+      }
+      const effectIds = unknownEffectIds(ticket.id, store)
+      if (!resolution) {
+        if (process.argv.includes('--json')) {
+          console.log(JSON.stringify({ ticketId: ticket.id, ended: ticket.ended, effectIds }, null, 2))
+        } else if (effectIds.length === 0) {
+          console.log(`no unknown effects for ended ticket ${ticket.id}`)
+        } else {
+          console.log(`unknown effects for ended ticket ${ticket.id}:`)
+          for (const id of effectIds) console.log(`  ${id}`)
+          console.log(`resolve one: pnpm ds-agent recovery-effects ${ticket.id} retry|acknowledge <effectId>`)
+        }
+        return
+      }
+      if (resolution !== 'retry' && resolution !== 'acknowledge') {
+        throw new Error('recovery-effects action must be retry or acknowledge')
+      }
+      if (!effectId) {
+        throw new Error(`usage: ds-agent recovery-effects ${ticket.id} ${resolution} <effectId>`)
+      }
+      if (!effectIds.includes(effectId)) {
+        throw new Error(`unknown uncertain effect ${effectId} on ended ticket ${ticket.id}`)
+      }
+      if (resolution === 'retry' && !retryableUnknownEffectIds(ticket.id, store).includes(effectId)) {
+        throw new Error(
+          `effect ${effectId} has no durable retry path after ticket end; acknowledge it after verifying the remote result`,
+        )
+      }
+      const changed = resolveUnknownOutcomeEffects(store, ticket.id, [effectId], resolution, new Date().toISOString())
+      if (changed === 0) throw new Error(`could not resolve effect ${effectId}; inspect recovery-effects again`)
+      console.log(`${resolution} ${effectId} on ended ticket ${ticket.id}`)
+    } finally {
+      store.close()
+    }
+    return
+  }
   if (cmd === 'approve' || cmd === 'deny' || cmd === 'dismiss') {
     const rest = bare(3, ['note', 'action-id'])
     const ticketRef = rest[0]
@@ -881,24 +958,29 @@ async function main(): Promise<void> {
       ...(agent.description ? { description: agent.description } : {}),
     }))
     const skills = SkillRegistry.fromHome(home)
+    const { files, sources } = loadPrompts(home, process.env, line => console.error(line))
     const input = {
       role: role as Role,
-      ...loadPromptFiles(home, process.env),
+      ...files,
+      sources,
       ...(agents.length ? { localAgents: agents } : {}),
       ...(skills.size ? { skills: skills.list() } : {}),
     }
-    const layers = describePromptLayers(input)
+    const redact = promptRedactor(process.env)
+    const sections = describePromptSections(input)
+      .map(section => ({ ...section, text: redact(section.text) }))
     if (process.argv.includes('--json')) {
-      console.log(JSON.stringify(layers, null, 2))
+      console.log(JSON.stringify(sections, null, 2))
       return
     }
     if (process.argv.includes('--layers')) {
-      for (const layer of layers) {
-        console.log(`${layer.id.padEnd(14)}${layer.text.length} chars  ${layer.source}`)
+      const width = Math.max(20, ...sections.map(section => section.id.length + 2))
+      for (const section of sections) {
+        console.log(`${section.id.padEnd(width)}${section.text.length} chars  ${section.source}`)
       }
       return
     }
-    console.log(buildSystemPrompt(input))
+    console.log(redact(buildSystemPrompt(input)))
     return
   }
   if (cmd === 'routines') {

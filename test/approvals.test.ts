@@ -4,6 +4,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { approvalActionId } from '../src/core/collab.ts'
 import { Engine } from '../src/core/engine.ts'
+import {
+  EXTERNAL_OP_KIND,
+  finalizeUncertainExternalEffects,
+  type ExternalOperationRecord,
+} from '../src/core/external-effects.ts'
 import type { Host } from '../src/core/host.ts'
 import { ticketStage } from '../src/core/stage.ts'
 import { bindRolePorts } from '../src/core/role-ports.ts'
@@ -79,6 +84,40 @@ afterEach(async () => {
 })
 
 describe('approval domain', () => {
+  it('releases only the recovery effect ids captured before owner approval', () => {
+    const { engine, store } = openEngine()
+    const now = '2026-01-01T00:00:00.000Z'
+    store.putDoc('ticket', 'ticket_1', fabricate())
+    store.putDoc(EXTERNAL_OP_KIND, 'extop_before', {
+      schemaVersion: 1,
+      id: 'extop_before',
+      kind: 'delegate_agent',
+      ticketId: 'ticket_1',
+      idempotencyKey: 'before',
+      phase: 'started',
+      startedAt: now,
+      updatedAt: now,
+    } satisfies ExternalOperationRecord)
+    finalizeUncertainExternalEffects(store, now)
+    store.putDoc(EXTERNAL_OP_KIND, 'extop_after', {
+      schemaVersion: 1,
+      id: 'extop_after',
+      kind: 'delegate_agent',
+      ticketId: 'ticket_1',
+      idempotencyKey: 'after',
+      phase: 'unknown_outcome',
+      startedAt: now,
+      updatedAt: now,
+    } satisfies ExternalOperationRecord)
+
+    const approval = store.getDoc<Ticket>('ticket', 'ticket_1')!.collab!.approvals![0]!
+    expect(approval.recovery?.effectIds).toEqual(['extop_before'])
+    engine.decideApproval('ticket_1', approval.id, 'approved')
+
+    expect(store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_before')?.phase).toBe('operator_released')
+    expect(store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_after')?.phase).toBe('unknown_outcome')
+  })
+
   it('records a pending approval without pausing the ticket', () => {
     const { engine, store } = openEngine()
     store.putDoc('ticket', 'ticket_1', fabricate())
@@ -569,6 +608,78 @@ describe('approval CLI', () => {
     const result = runCli(home, ['approvals'])
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('no approvals pending')
+  })
+
+  it('lists and resolves one unknown effect on an ended ticket through the CLI', () => {
+    const home = tempHome()
+    dirs.push(home)
+    const store = new Store(home)
+    try {
+      store.putDoc('ticket', 'ticket_ended', fabricate({
+        id: 'ticket_ended',
+        ended: { at: '2026-01-01T00:00:00.000Z', outcome: 'stopped', by: 'human' },
+      }))
+      store.putDoc(EXTERNAL_OP_KIND, 'extop_ended', {
+        schemaVersion: 1,
+        id: 'extop_ended',
+        kind: 'delegate_agent',
+        ticketId: 'ticket_ended',
+        idempotencyKey: 'ended',
+        phase: 'unknown_outcome',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      } satisfies ExternalOperationRecord)
+    } finally {
+      store.close()
+    }
+
+    const listed = runCli(home, ['recovery-effects', 'ticket_ended'])
+    expect(listed.status, listed.stderr).toBe(0)
+    expect(listed.stdout).toContain('extop_ended')
+
+    const acknowledged = runCli(home, ['recovery-effects', 'ticket_ended', 'acknowledge', 'extop_ended'])
+    expect(acknowledged.status, acknowledged.stderr).toBe(0)
+    expect(acknowledged.stdout).toContain('acknowledge extop_ended')
+    const after = new Store(home)
+    try {
+      expect(after.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_ended')?.phase).toBe('operator_acknowledged')
+    } finally {
+      after.close()
+    }
+  })
+
+  it('refuses retry for an ended delegate effect with no durable redrain path', () => {
+    const home = tempHome()
+    dirs.push(home)
+    const store = new Store(home)
+    try {
+      store.putDoc('ticket', 'ticket_delegate_ended', fabricate({
+        id: 'ticket_delegate_ended',
+        ended: { at: '2026-01-01T00:00:00.000Z', outcome: 'stopped', by: 'human' },
+      }))
+      store.putDoc(EXTERNAL_OP_KIND, 'extop_delegate_ended', {
+        schemaVersion: 1,
+        id: 'extop_delegate_ended',
+        kind: 'delegate_agent',
+        ticketId: 'ticket_delegate_ended',
+        idempotencyKey: 'delegate-ended',
+        phase: 'unknown_outcome',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      } satisfies ExternalOperationRecord)
+    } finally {
+      store.close()
+    }
+
+    const retried = runCli(home, ['recovery-effects', 'ticket_delegate_ended', 'retry', 'extop_delegate_ended'])
+    expect(retried.status).not.toBe(0)
+    expect(retried.stderr).toContain('has no durable retry path')
+    const after = new Store(home)
+    try {
+      expect(after.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'extop_delegate_ended')?.phase).toBe('unknown_outcome')
+    } finally {
+      after.close()
+    }
   })
 
   it('refuses to decide without a live model instead of consuming guidance on a mock', () => {

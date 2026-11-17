@@ -1,0 +1,229 @@
+import type { A2ADelivery } from '../channels/a2a.ts'
+import type { A2ASecret } from '../channels/a2a-auth.ts'
+import { RemoteMeshRegistry, type RemoteEligibleReason, type RemoteNodeRegistration } from './remote-node.ts'
+import { WorkerMeshRegistry } from './mesh.ts'
+
+function parseCapabilitiesCsv(raw: string | undefined): string[] {
+  if (!raw?.trim()) return []
+  return [...new Set(raw.split(',').map(s => s.trim()).filter(s => s.length > 0))]
+}
+
+/** Required remote worker capabilities for placement (`DS_AGENT_MESH_REQUIRED_CAPABILITIES`). */
+export function requiredMeshCapabilities(env: NodeJS.ProcessEnv): string[] {
+  return parseCapabilitiesCsv(env.DS_AGENT_MESH_REQUIRED_CAPABILITIES)
+}
+
+/** One remote peer from `DS_AGENT_REMOTE_MESH` JSON. Secrets stay env-local only. */
+export interface RemoteMeshEnvNode {
+  id: string
+  url: string
+  peerId: string
+  secret: A2ASecret
+  capacity?: number
+  capabilities?: readonly string[]
+}
+
+function nonEmpty(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+/** Parse `DS_AGENT_REMOTE_MESH` (JSON array). Malformed config logs and yields []. */
+export function parseRemoteMeshNodesFromEnv(env: NodeJS.ProcessEnv): RemoteMeshEnvNode[] {
+  const raw = env.DS_AGENT_REMOTE_MESH?.trim()
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    const nodes: RemoteMeshEnvNode[] = []
+    for (const item of parsed) {
+      if (typeof item !== 'object' || item === null) continue
+      const row = item as Record<string, unknown>
+      if (!nonEmpty(row.id) || !nonEmpty(row.url) || !nonEmpty(row.peerId) || row.secret == null) continue
+      nodes.push({
+        id: row.id,
+        url: row.url,
+        peerId: row.peerId,
+        secret: row.secret as A2ASecret,
+        capacity: typeof row.capacity === 'number' ? row.capacity : undefined,
+        capabilities: Array.isArray(row.capabilities)
+          ? row.capabilities.filter((c): c is string => typeof c === 'string' && c.trim().length > 0)
+          : undefined,
+      })
+    }
+    return nodes
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Unified logical placement across the in-process node and optional remote peers.
+ * Release always clears both registries for a ticket.
+ */
+export class WorkerPlacement {
+  private remoteRegistry?: RemoteMeshRegistry
+  private remoteEligibleListener?: (nodeId: string, reason: RemoteEligibleReason) => void
+
+  get remote(): RemoteMeshRegistry | undefined {
+    return this.remoteRegistry
+  }
+
+  constructor(
+    readonly localNodeId: string,
+    readonly local: WorkerMeshRegistry,
+    remote?: RemoteMeshRegistry,
+  ) {
+    this.remoteRegistry = remote
+  }
+
+  /**
+   * Wire the wake callback for a remote node that becomes eligible again.
+   * Applied to the current registry (when one exists) and to a registry this
+   * placement creates later through `registerRemoteNode`.
+   */
+  setRemoteEligibleListener(
+    listener: ((nodeId: string, reason: RemoteEligibleReason) => void) | undefined,
+  ): void {
+    this.remoteEligibleListener = listener
+    this.remoteRegistry?.setOnBecameEligible(listener)
+  }
+
+  /** Register a remote peer after worker inbox URL is known (tests / late bind). */
+  registerRemoteNode(node: RemoteNodeRegistration): void {
+    const registry = this.remoteRegistry ?? new RemoteMeshRegistry({ localPeerId: this.localNodeId })
+    if (!this.remoteRegistry) {
+      this.remoteRegistry = registry
+      registry.setOnBecameEligible(this.remoteEligibleListener)
+    }
+    registry.register(node)
+  }
+
+  static fromEnv(
+    env: NodeJS.ProcessEnv,
+    localNodeId: string,
+    local: WorkerMeshRegistry,
+    log: (line: string) => void,
+  ): WorkerPlacement {
+    const nodes = parseRemoteMeshNodesFromEnv(env)
+    if (nodes.length === 0) return new WorkerPlacement(localNodeId, local)
+    const remote = new RemoteMeshRegistry({ localPeerId: localNodeId })
+    for (const node of nodes) {
+      try {
+        remote.register(node)
+        log(`[mesh] remote registered id=${node.id} url=${node.url}`)
+      } catch (error) {
+        log(`[mesh] remote register failed id=${node.id} error=${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    return new WorkerPlacement(localNodeId, local, remote)
+  }
+
+  pickNode(ticketId: string, requiredCapabilities: readonly string[] = []): string | undefined {
+    if (requiredCapabilities.length > 0) {
+      // The in-process local node advertises no capabilities, so it can never
+      // satisfy a non-empty requirement. Drop any sticky local assignment for
+      // this ticket before asking a remote that matches.
+      this.local.release(ticketId)
+      return this.remote?.pick(ticketId, undefined, requiredCapabilities)?.id
+    }
+    if (this.remote?.hasTicketAssignment(ticketId)) {
+      // A ticket already placed on a remote peer stays there while that peer
+      // remains eligible, even if local capacity has since freed. Ask the
+      // remote registry first so a repeat pick cannot dual-assign it locally;
+      // an ineligible sticky is released there and this call still falls
+      // through to the local-then-remote search below.
+      const remoteNode = this.remote.pick(ticketId, undefined, requiredCapabilities)
+      if (remoteNode) {
+        // Heal any leftover local assignment from a prior race; no-op if clean.
+        this.local.release(ticketId)
+        return remoteNode.id
+      }
+    }
+    const localNode = this.local.pickNode(ticketId)
+    if (localNode) return localNode.id
+    return this.remote?.pick(ticketId, undefined, requiredCapabilities)?.id
+  }
+
+  release(ticketId: string): void {
+    this.local.release(ticketId)
+    this.remote?.release(ticketId)
+  }
+
+  isRemote(nodeId: string | undefined): boolean {
+    if (!nodeId || nodeId === this.localNodeId) return false
+    return !!this.remote?.get(nodeId)
+  }
+
+  dispatch(ticketId: string, assignment: unknown): Promise<A2ADelivery | undefined> {
+    return this.remote?.dispatch(ticketId, assignment) ?? Promise.resolve(undefined)
+  }
+
+  remoteHasTicket(ticketId: string): boolean {
+    return this.remote?.hasTicketAssignment(ticketId) ?? false
+  }
+
+  /** Node currently holding the ticket's sticky remote reservation, if any. */
+  remoteNodeFor(ticketId: string): string | undefined {
+    return this.remote?.nodeFor(ticketId)
+  }
+
+  /**
+   * Restore a persisted remote sticky reservation without picking. Used by
+   * startup recovery so a cancel can reach the node that actually ran the
+   * interrupted Assignment. Unknown node or no remote registry → `false`.
+   */
+  restoreRemoteTicket(ticketId: string, nodeId: string): boolean {
+    return this.remote?.bind(ticketId, nodeId) ?? false
+  }
+
+  /**
+   * Authenticated HTTP cancel to the child runtime; releases mesh capacity after
+   * send. Pass `{ release: false }` to tell the remote worker to stop without
+   * clearing the sticky reservation, so a live replacement that already owns
+   * the ticket's remote slot keeps its capacity.
+   *
+   * `opts.nodeId` sends the cancel to that specific registered node, which lets
+   * a superseded historical Assignment be cancelled on the worker that still
+   * holds it even when the Ticket's sticky reservation moved elsewhere. The
+   * sticky slot remains the single owner of keep-vs-release.
+   *
+   * Returns whether the Worker acknowledged the cancel. `false` covers every
+   * fail-soft outcome (unknown/ineligible node, transport error, non-2xx); a
+   * caller that keeps a retry record can use it to tell a lost send from a
+   * delivered one without changing the transport's fail-soft contract.
+   */
+  async cancelRemote(
+    ticketId: string,
+    assignmentId: string,
+    opts?: { release?: boolean; nodeId?: string },
+  ): Promise<boolean> {
+    const release = opts?.release ?? true
+    const nodeId = opts?.nodeId
+    // An explicit node target does not depend on a sticky reservation: the
+    // historical worker must be told to stop regardless of where the Ticket
+    // currently sits.
+    if (nodeId === undefined && !this.remote?.hasTicketAssignment(ticketId)) {
+      if (release) this.release(ticketId)
+      return false
+    }
+    try {
+      const delivery = await this.remote?.dispatchCancel(
+        ticketId,
+        assignmentId,
+        { release, ...(nodeId ? { nodeId } : {}) },
+      )
+      return delivery?.status === 'delivered'
+    } finally {
+      // Release both registries: a leftover local sticky from a prior race must
+      // not leak local capacity after the remote assignment is cancelled.
+      if (release) this.release(ticketId)
+    }
+  }
+}
+
+export function registerRemoteNodes(
+  registry: RemoteMeshRegistry,
+  nodes: readonly RemoteNodeRegistration[],
+): void {
+  for (const node of nodes) registry.register(node)
+}

@@ -3,6 +3,12 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Outbox, PermanentDeliveryError, type OutboundAdapter } from '../src/channels/outbox-adapter.ts'
+import {
+  EXTERNAL_OP_KIND,
+  finalizeUncertainExternalEffects,
+  UNKNOWN_OUTCOME_PREFIX,
+  type ExternalOperationRecord,
+} from '../src/core/external-effects.ts'
 import { Replies, splitChatText } from '../src/core/replies.ts'
 import type { Host } from '../src/core/host.ts'
 import type { OutboxRow, Ticket } from '../src/shared/types.ts'
@@ -290,6 +296,74 @@ describe('durable outbox', () => {
     await outbox.flush()
     expect(calls).toBe(1)
     expect(store.listOutbox()[0]!.status).toBe('pending')
+    store.close()
+  })
+
+  it('closes the started send op when a retry is scheduled', async () => {
+    const store = tempStore()
+    store.enqueueOutbox(row())
+    // Seed an open ticket so a stray unknown_outcome op would queue an approval.
+    store.putDoc('ticket', 'ticket_1', ticket())
+
+    const adapter: OutboundAdapter = {
+      channel: 'github',
+      send: async () => {
+        throw new Error('network down')
+      },
+    }
+    const outbox = new Outbox(store, [adapter])
+    const result = await outbox.flush()
+    expect(result).toEqual({ sent: 0, failed: 0, pending: 1 })
+
+    const after = store.listOutbox()[0]!
+    expect(after.status).toBe('pending')
+    expect(after.attempts).toBe(1)
+    expect(after.nextAttemptAt).toBeTruthy()
+
+    // The throw is a known failed attempt, not an interrupted in-flight send.
+    const op = store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'outbox_outbox_1')
+    expect(op?.phase).toBe('failed')
+
+    const now = new Date().toISOString()
+    const finalized = finalizeUncertainExternalEffects(store, now)
+    expect(finalized.unknownOps).toBe(0)
+    expect(store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'outbox_outbox_1')?.phase).toBe('failed')
+    const saved = store.getDoc<Ticket>('ticket', 'ticket_1')!
+    const unknownApprovals = (saved.collab?.approvals ?? []).filter(
+      item => item.status === 'pending' && item.action.startsWith(UNKNOWN_OUTCOME_PREFIX),
+    )
+    expect(unknownApprovals).toHaveLength(0)
+    store.close()
+  })
+
+  it('completes the send operation on a later successful retry', async () => {
+    const store = tempStore()
+    store.enqueueOutbox(row())
+
+    let calls = 0
+    const adapter: OutboundAdapter = {
+      channel: 'github',
+      send: async () => {
+        calls += 1
+        if (calls === 1) throw new Error('network down')
+        return { externalId: '4242' }
+      },
+    }
+    const outbox = new Outbox(store, [adapter])
+    await outbox.flush()
+    expect(calls).toBe(1)
+    expect(store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'outbox_outbox_1')?.phase).toBe('failed')
+
+    // Make the row due again without waiting for the real backoff.
+    store.markOutboxRetry('outbox_1', 'network down', new Date(Date.now() - 1_000).toISOString(), 1)
+    const result = await outbox.flush()
+    expect(result).toEqual({ sent: 1, failed: 0, pending: 0 })
+    expect(calls).toBe(2)
+
+    const after = store.listOutbox()[0]!
+    expect(after.status).toBe('sent')
+    expect(after.externalId).toBe('4242')
+    expect(store.getDoc<ExternalOperationRecord>(EXTERNAL_OP_KIND, 'outbox_outbox_1')?.phase).toBe('completed')
     store.close()
   })
 

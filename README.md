@@ -172,7 +172,7 @@ For mid-task collaboration, the CLI exposes `pause`, `intervene`, `resume`, and 
 - **Approvals.** A Worker can call `request_approval` with an exact outward action instead of performing it. The ticket holds; the Router asks; `ds-agent approve` / `ds-agent deny` records the decision and resumes through the normal path. The model may request, never decide, and chat text is not consent. See [docs/APPROVALS.md](docs/APPROVALS.md).
 - **Routines.** `routines.json` schedules a prompt every N minutes, or once per UTC day at a chosen time and weekdays, on a chosen channel and thread. The daemon fires a missed slot once after a gap, not per missed interval. Routines pass through normal ingress and rules; the model cannot create or edit one. See [docs/ROUTINES.md](docs/ROUTINES.md).
 - **Skills.** An owner-authored `skills/<id>/SKILL.md` adds a playbook without a code change. The prompt carries only an id and description index (capped at 2000 characters); `read_skill` loads the body on demand. A skill cannot grant a tool or widen a role. See [docs/SKILLS.md](docs/SKILLS.md).
-- **Prompt stack.** Identity, owner voice, standing instructions, owner context, team, skills, reach, rules, memory guidance, style, and the role contract are assembled in dependency order. `PERSONA.md`, `AGENTS.md`, and `USER.md` in the agent home refine the editable layers. `ds-agent prompt --layers` shows every layer and its source. See [docs/PROMPTS.md](docs/PROMPTS.md).
+- **Prompt architecture.** One stable system prompt composed from 33 ordered sections, plus nine owner-written runtime files: `SOUL.md`, `IDENTITY.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, and `PROACTIVE_PREFERENCES.md`. `SOUL.md` is optional: a built-in default voice always renders. Core file sections always fit; optional ones are omitted whole under the 20,000-character budget, and each file is capped at 4,000 characters. `PERSONA.md` still loads as a deprecated soul fallback. `ds-agent prompt --layers` shows every section and its source. See [docs/PROMPTS.md](docs/PROMPTS.md).
 
 ### Channels
 
@@ -462,7 +462,7 @@ Partial and owner-gated areas, stated plainly:
 | [docs/SKILLS.md](docs/SKILLS.md) | Owner-authored skills. |
 | [docs/ROUTINES.md](docs/ROUTINES.md) | Scheduled routines. |
 | [docs/APPROVALS.md](docs/APPROVALS.md) | Approval holds for outward actions. |
-| [docs/PROMPTS.md](docs/PROMPTS.md) | The layered system-prompt stack. |
+| [docs/PROMPTS.md](docs/PROMPTS.md) | The composed system prompt and runtime files. |
 | [docs/UI.md](docs/UI.md) | The read-only dashboard. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Roadmap and current gaps. |
 
