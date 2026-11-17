@@ -9,7 +9,6 @@ English | [简体中文](README.zh-CN.md)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9%2B-3178C6?logo=typescript&logoColor=white)](./package.json)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![PRs: owner-only](https://img.shields.io/badge/PRs-owner--only-lightgrey)](#contributing)
 
 **An independent, MIT-licensed super-agent harness in TypeScript.**
 
@@ -47,7 +46,6 @@ A thin async ReAct runtime at the bottom. A proactive domain engine on top:
 - [Safety and deployment](#safety-and-deployment)
 - [Status](#status)
 - [Documentation](#documentation)
-- [Contributing](#contributing)
 - [Credits](#credits)
 - [License](#license)
 
@@ -467,24 +465,6 @@ Partial and owner-gated areas, stated plainly:
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Roadmap and current gaps. |
 
 Chinese pages live under [docs/zh/](docs/zh/index.md).
-
-## Contributing
-
-This is an **owner-only repository**: only LofiSu contributes, and external pull requests are not accepted. Bug reports and design questions are welcome through GitHub Issues.
-
-If you are working in this repository, keep `main` green:
-
-```bash
-pnpm typecheck
-pnpm lint
-pnpm test
-```
-
-- Branch off current `main`; never commit directly to `main`.
-- One concern per pull request. Never force-push a shared branch.
-- Live suites are explicit: `pnpm test:live`, `pnpm test:demo:real`, `pnpm demo`.
-- Name features by what they do and by the M0–M11 module boundary — not by phased milestones.
-- Secrets and runtime state never enter the repository.
 
 ## Credits
 

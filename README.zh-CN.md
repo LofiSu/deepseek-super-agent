@@ -9,7 +9,6 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9%2B-3178C6?logo=typescript&logoColor=white)](./package.json)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![PRs: owner-only](https://img.shields.io/badge/PRs-owner--only-lightgrey)](#参与贡献)
 
 **一个独立实现、MIT 许可的 TypeScript super-agent harness。**
 
@@ -47,7 +46,6 @@
 - [安全与部署](#安全与部署)
 - [当前状态](#当前状态)
 - [文档](#文档)
-- [参与贡献](#参与贡献)
 - [致谢](#致谢)
 - [许可](#许可)
 
@@ -447,24 +445,6 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 故意保留真实 issue
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 路线图与当前缺口。 |
 
 英文文档从 [docs/index.md](docs/index.md) 开始。
-
-## 参与贡献
-
-这是一个**主人独占（owner-only）仓库**：只有 LofiSu 可以贡献，不接受外部 pull request。问题反馈与设计讨论请走 GitHub Issues。
-
-如果你在本仓库内工作，请保持 `main` 为绿：
-
-```bash
-pnpm typecheck
-pnpm lint
-pnpm test
-```
-
-- 从当前 `main` 切分支；不要直接提交到 `main`。
-- 一个 pull request 只做一件事；不要 force-push 共享分支。
-- 实况测试是显式入口：`pnpm test:live`、`pnpm test:demo:real`、`pnpm demo`。
-- 功能按实际作用和 M0–M11 模块边界命名，不要用阶段式里程碑命名。
-- 密钥与运行时状态永远不进仓库。
 
 ## 致谢
 
