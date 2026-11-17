@@ -91,6 +91,8 @@ export interface BrowserErrandRequest {
   url?: string
   selector?: string
   fields?: { selector: string; value: string }[]
+  /** Owner allowlist; fill drivers must check the active page before applying values. */
+  allowedHosts?: string[]
 }
 
 export interface BrowserDriver {
@@ -402,6 +404,8 @@ export function normalizeBrowserFields(raw: unknown): { selector: string; value:
 export class BrowserErrands {
   private readonly log: (line: string) => void
   private readonly maxConcurrent: number
+  private readonly activeSessions = new Set<string>()
+  private readonly blockedSessions = new Set<string>()
   private running = 0
   private closed = false
 
@@ -478,7 +482,12 @@ export class BrowserErrands {
   async fill(session: string, fields: readonly { selector: string; value: string }[]): Promise<BrowserErrandResult> {
     // Re-validate here too: a caller outside the tool layer must not weaken this.
     const normalized = normalizeBrowserFields(fields)
-    const result = await this.run({ action: 'fill', session, fields: normalized })
+    const result = await this.run({
+      action: 'fill',
+      session,
+      fields: normalized,
+      allowedHosts: [...this.config.allowedHosts],
+    })
     this.assertAllowedResultUrl(result)
     const filled = requiredInteger(result, 'filled')
     if (filled < 0 || filled > normalized.length) {
@@ -517,16 +526,30 @@ export class BrowserErrands {
     if (this.closed) throw new UserError('browser errands are shut down')
     assertSafeBrowserAction(input.action)
     if (!input.session.trim()) throw new UserError('browser errand needs a session')
+    if (this.blockedSessions.has(input.session)) {
+      throw new UserError('browser session is blocked after an invalid driver response')
+    }
+    if (this.activeSessions.has(input.session)) {
+      throw new UserError('browser session already has an in-flight action')
+    }
     if (this.running >= this.maxConcurrent) {
       throw new UserError(`browser errand slots are busy (${this.running}/${this.maxConcurrent})`)
     }
     this.running += 1
+    this.activeSessions.add(input.session)
     try {
       const result = await this.driver.run({ protocol: BROWSER_PROTOCOL, ...input })
+      this.assertAllowedResultUrl(result)
       this.log(`[browser] action=${input.action} session=${input.session} driver=${this.driver.kind}`)
       return result
+    } catch (error) {
+      // A failed or disallowed action may have left the stateful browser on an
+      // unknown page. Never send later field values to that session.
+      this.blockedSessions.add(input.session)
+      throw error
     } finally {
       this.running -= 1
+      this.activeSessions.delete(input.session)
     }
   }
 
@@ -651,6 +674,9 @@ function assertSafeRequest(request: BrowserErrandRequest): void {
   assertSafeBrowserAction(request.action)
   if (typeof request.session !== 'string' || !request.session.trim()) {
     throw new UserError('browser errand needs a session')
+  }
+  if (request.action === 'fill') {
+    normalizeAllowedHosts(request.allowedHosts)
   }
 }
 

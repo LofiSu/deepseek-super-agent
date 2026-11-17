@@ -82,7 +82,10 @@ class FakeDriver implements BrowserDriver {
   readonly kind = 'command' as const
   readonly requests: BrowserErrandRequest[] = []
 
-  constructor(private readonly respond: (request: BrowserErrandRequest) => Record<string, unknown>) {}
+  constructor(
+    private readonly respond: (request: BrowserErrandRequest) =>
+      Record<string, unknown> | Promise<Record<string, unknown>>,
+  ) {}
 
   async run(request: BrowserErrandRequest): Promise<Record<string, unknown>> {
     this.requests.push(request)
@@ -258,6 +261,49 @@ describe('browser URL allowlist', () => {
     }
   })
 
+  it('blocks writes after a disallowed location and serializes session actions', async () => {
+    let finish!: (result: Record<string, unknown>) => void
+    const driver = new FakeDriver(() => new Promise<Record<string, unknown>>(resolve => { finish = resolve }))
+    const errands = new BrowserErrands(driver, enabled())
+    const navigation = errands.navigate('worker_1', 'https://example.com/start')
+
+    expect(driver.requests).toHaveLength(1)
+    await expect(errands.fill('worker_1', [{ selector: '#q', value: 'private value' }]))
+      .rejects.toThrow(/in-flight action/)
+    expect(driver.requests).toHaveLength(1)
+
+    finish({ url: 'https://evil.test/redirected' })
+    await expect(navigation).rejects.toThrow(/allowlist/)
+    await expect(errands.fill('worker_1', [{ selector: '#q', value: 'private value' }]))
+      .rejects.toThrow(/session is blocked/)
+    expect(driver.requests).toHaveLength(1)
+  })
+
+  it('passes the owner allowlist so the driver can precheck fill origin', async () => {
+    let currentUrl = 'https://example.com/start'
+    let appliedValues = 0
+    const { driver, errands } = fakeErrands(request => {
+      if (request.action === 'navigate') return { url: currentUrl }
+      if (request.action === 'fill') {
+        const currentHost = new URL(currentUrl).hostname
+        if (!request.allowedHosts?.includes(currentHost)) {
+          throw new Error('active page URL is not allowlisted')
+        }
+        appliedValues += request.fields?.length ?? 0
+        return { url: currentUrl, filled: request.fields?.length ?? 0 }
+      }
+      return { url: currentUrl, text: 'page', items: [] }
+    })
+
+    await errands.navigate('worker_1', 'https://example.com/start')
+    currentUrl = 'https://evil.test/redirected'
+    await expect(errands.fill('worker_1', [{ selector: '#q', value: 'private value' }]))
+      .rejects.toThrow(/active page URL is not allowlisted/)
+
+    expect(driver.requests[1]?.allowedHosts).toEqual(['example.com', '*.example.org'])
+    expect(appliedValues).toBe(0)
+  })
+
   it('requires a post-action URL for every safe operation', async () => {
     const actions = ['navigate', 'read', 'fill', 'extract'] as const
     for (const action of actions) {
@@ -313,6 +359,16 @@ describe('command browser driver', () => {
     const extract = await errands.extract('worker_1', 'a')
     expect(extract.items).toEqual(['one', 'two'])
     expect(extract.truncated).toBe(true)
+  })
+
+  it('requires owner allowlists on raw fill requests', async () => {
+    const driver = createBrowserDriver(enabled())
+    await expect(driver.run({
+      protocol: BROWSER_PROTOCOL,
+      action: 'fill',
+      session: 'worker_1',
+      fields: [{ selector: '#q', value: 'private value' }],
+    })).rejects.toThrow(/allowedHosts/)
   })
 
   it('refuses irreversible actions even when a caller bypasses the typed API', async () => {

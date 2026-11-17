@@ -96,11 +96,19 @@ Actions and required result fields:
 |---|---|---|
 | `navigate` | `url` | `url` (required, post-action location), optional `title` |
 | `read` | — | `url` (required, current location), `text` (bounded by `maxReadChars`) |
-| `fill` | `fields`: `[{selector,value}]` | `url` (required, current location), `filled` (integer) |
+| `fill` | `fields`: `[{selector,value}]`, `allowedHosts` (owner-supplied) | `url` (required, current location), `filled` (integer) |
 | `extract` | optional `selector` | `url` (required, current location), `items`: strings (bounded by `maxExtractItems`) |
 
 Every action must report its post-action page URL. The adapter checks it against
-the owner allowlist, so a missing URL or a redirect to another host fails closed.
+the owner allowlist, so a missing URL or a redirect to another host fails closed
+and blocks that Worker session for the rest of the Runtime. A session accepts
+only one in-flight action, preventing concurrent navigation and field entry.
+As part of the same `fill` operation, immediately before applying any values,
+the driver must check the active page URL against the request's owner-supplied
+`allowedHosts`. If it is outside the list, the driver must refuse and leave every
+field untouched. This precheck prevents delayed redirects from receiving form
+data; the adapter's post-action check is additional.
+Driver failures block the session because its page location is then unknown.
 The driver may return extra keys on `result`; the adapter ignores them. Invalid
 shapes fail the tool call instead of reaching the model.
 
