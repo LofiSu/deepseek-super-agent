@@ -11,6 +11,12 @@ export class Daemon {
     private readonly onResume?: (machineId: string) => void,
     /** Owner-defined routines, due-checked on the same pulse as the watchdog. */
     private readonly routines?: { tick: (now: number) => unknown },
+    /**
+     * Built-in idle self-wake, due-checked on the same pulse. It never owns a
+     * timer or a second loop; `tick` decides one round and may hand a trigger
+     * to the normal ingress path.
+     */
+    private readonly proactive?: { tick: (now: number) => unknown },
   ) {}
 
   /**
@@ -18,10 +24,11 @@ export class Daemon {
    * leave it false: firing a routine from a short-lived `approve`/`retry`
    * process starts owner-level work whose channel loop is not running.
    */
-  start(options: { routines?: boolean } = {}): void {
+  start(options: { routines?: boolean; proactive?: boolean } = {}): void {
     this.log('[daemon] start')
     this.safeTick(() => this.watchdog.tick())
     if (options.routines !== false) this.safeTick(() => this.routines?.tick(Date.now()))
+    if (options.proactive !== false) this.safeTick(() => this.proactive?.tick(Date.now()))
     this.timer = setInterval(() => this.tick(), this.watchdog.intervalMs)
   }
 
@@ -41,6 +48,7 @@ export class Daemon {
     }
     this.safeTick(() => this.watchdog.tick())
     this.safeTick(() => this.routines?.tick(now))
+    this.safeTick(() => this.proactive?.tick(now))
   }
 
   /**

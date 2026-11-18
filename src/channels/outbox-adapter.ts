@@ -1,3 +1,4 @@
+import { finishOutboxSendOperation, recordOutboxSendStart } from '../core/external-effects.ts'
 import type { OutboxRow } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 
@@ -26,6 +27,20 @@ export interface OutboxResult {
 }
 
 const MAX_ATTEMPTS = 5
+/**
+ * Proactive rows carry a reserved target key so a transient failure waits
+ * minutes, not seconds. The key is ignored by every channel adapter; it only
+ * changes this dispatcher's backoff.
+ */
+export const OUTBOX_RETRY_BASE_KEY = '__ds_retry_base_ms'
+export const PROACTIVE_RETRY_BASE_MS = 10 * 60_000
+const DEFAULT_RETRY_BASE_MS = 1_000
+const DEFAULT_RETRY_CAP_MS = 60_000
+
+function retryBaseMs(row: OutboxRow): number {
+  const raw = Number(row.target[OUTBOX_RETRY_BASE_KEY])
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_RETRY_BASE_MS
+}
 
 export interface OutboxOptions {
   log?: (line: string) => void
@@ -53,10 +68,8 @@ export class Outbox {
 
   start(intervalMs = 500): void {
     if (this.timer) return
-    // A crashed process may have left a row in `sending`. Requeue it; the
-    // Channel uses the idempotency key to avoid a duplicate post.
-    const requeued = this.store.requeueSending()
-    if (requeued > 0) this.log(`[outbox] requeued=${requeued} from interrupted sends`)
+    const marked = this.store.markSendingOutboxUnknownOutcome()
+    if (marked > 0) this.log(`[outbox] unknown_outcome=${marked} from interrupted sends`)
     void this.flush().catch(() => undefined)
     this.timer = setInterval(() => { void this.flush().catch(() => undefined) }, intervalMs)
     // Do not keep a short-lived demo process alive just for the outbox timer.
@@ -88,26 +101,31 @@ export class Outbox {
         if (row.channel === 'cli') {
           this.store.markOutboxSent(row.id, `cli_${row.id}`)
           this.store.markReplySent(row.replyId)
+          finishOutboxSendOperation(this.store, row, 'completed', now, `cli_${row.id}`)
           sent += 1
           this.log(`[outbox] sent outboxId=${row.id} channel=cli externalId=cli_${row.id}`)
           continue
         }
         const error = `no outbound adapter for channel ${row.channel}`
         this.store.markOutboxFailed(row.id, error)
+        finishOutboxSendOperation(this.store, row, 'failed', now, error)
         failed += 1
         this.log(`[outbox] failed outboxId=${row.id} channel=${row.channel} error=${error}`)
         continue
       }
       try {
+        recordOutboxSendStart(this.store, row, now)
         const result = await adapter.send(row)
         this.store.markOutboxSent(row.id, result.externalId)
         this.store.markReplySent(row.replyId)
+        finishOutboxSendOperation(this.store, row, 'completed', now, result.externalId)
         sent += 1
         this.log(`[outbox] sent outboxId=${row.id} channel=${row.channel} externalId=${result.externalId}`)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         if (error instanceof PermanentDeliveryError) {
           this.store.markOutboxFailed(row.id, message)
+          finishOutboxSendOperation(this.store, row, 'failed', now, message)
           failed += 1
           this.log(
             `[outbox] failed outboxId=${row.id} channel=${row.channel} permanent=true error=${message}`,
@@ -117,12 +135,22 @@ export class Outbox {
         const attempts = (row.attempts ?? 0) + 1
         if (attempts >= MAX_ATTEMPTS) {
           this.store.markOutboxFailed(row.id, message)
+          finishOutboxSendOperation(this.store, row, 'failed', now, message)
           failed += 1
           this.log(`[outbox] failed outboxId=${row.id} channel=${row.channel} attempts=${attempts} error=${message}`)
         } else {
-          const delay = Math.min(60_000, 1_000 * 2 ** attempts)
+          const base = retryBaseMs(row)
+          // Standard rows keep the historical 1s..60s curve. A proactive row
+          // starts at 10 minutes; its cap scales with the base so a restart
+          // cannot turn one failed contact into a tight retry burst.
+          const cap = base > DEFAULT_RETRY_BASE_MS ? base * 8 : DEFAULT_RETRY_CAP_MS
+          const delay = Math.min(cap, base * 2 ** attempts)
           const nextAttemptAt = new Date(Date.now() + delay).toISOString()
           this.store.markOutboxRetry(row.id, message, nextAttemptAt, attempts)
+          // The throw is a known failed attempt, not an interrupted in-flight
+          // send: close the started op so restart recovery does not treat it
+          // as unknown_outcome. The next due flush records a new start.
+          finishOutboxSendOperation(this.store, row, 'failed', now, message)
           this.log(
             `[outbox] retry outboxId=${row.id} channel=${row.channel} attempts=${attempts} next=${nextAttemptAt} error=${message}`,
           )
