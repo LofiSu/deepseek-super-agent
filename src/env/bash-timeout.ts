@@ -30,4 +30,3 @@ export function parseBashTimeoutMs(
   }
   return ms
 }
-

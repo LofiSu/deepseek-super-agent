@@ -28,4 +28,3 @@ describe('normalizePeanutBranch', () => {
     expect(() => normalizePeanutBranch(undefined, 'peanut/main')).toThrow(UserError)
   })
 })
-

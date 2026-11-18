@@ -213,4 +213,3 @@ function tokenizeSimple(statement: string): string[] {
   if (cur) tokens.push(cur)
   return tokens
 }
-

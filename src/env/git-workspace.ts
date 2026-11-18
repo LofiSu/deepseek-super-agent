@@ -214,4 +214,3 @@ export function normalizePeanutBranch(slug: string | undefined, head: string | u
   assertPeanutFeatureBranch(head)
   return head
 }
-

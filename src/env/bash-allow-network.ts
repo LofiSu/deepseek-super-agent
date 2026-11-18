@@ -14,4 +14,3 @@ export function parseBashAllowNetwork(env: NodeJS.ProcessEnv = process.env): boo
     `invalid DS_AGENT_BASH_ALLOW_NETWORK: "${raw}" (expected 0, 1, false, or true)`,
   )
 }
-

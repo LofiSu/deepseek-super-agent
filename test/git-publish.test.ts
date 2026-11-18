@@ -230,4 +230,3 @@ describe('FeaturePrPublisher', () => {
     expect(pushArgs).toContain('HEAD:peanut/x')
   })
 })
-
