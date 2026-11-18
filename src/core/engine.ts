@@ -5,7 +5,6 @@ import { Assignments, type Recovery, type ReportResult } from './assignments.ts'
 import { blocksRestartRecovery, isUnknownOutcomeApproval, releaseUnknownOutcomeEffects } from './external-effects.ts'
 import {
   Collaborations,
-  pendingApproval,
   type ApprovalDecision,
   type CollaborationView,
   type DecideApprovalInput,

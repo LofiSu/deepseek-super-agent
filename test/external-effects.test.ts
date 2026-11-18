@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { approvalActionId } from '../src/core/collab.ts'
 import {
   beginDelegateOperation,
   blocksRestartRecovery,
@@ -55,7 +56,9 @@ describe('external-effects lifecycle', () => {
       expect(summary.unknownOps).toBe(1)
       expect(summary.approvalsQueued).toBe(1)
       const saved = store.getDoc<Ticket>('ticket', ticket.id)!
-      expect(saved.collab?.approvals?.[0]?.status).toBe('pending')
+      const approval = saved.collab!.approvals![0]!
+      expect(approval.status).toBe('pending')
+      expect(approval.actionId).toBe(approvalActionId(approval.action))
       const ops = store.listDocs<ExternalOperationRecord>(EXTERNAL_OP_KIND)
       expect(ops[0]?.phase).toBe('unknown_outcome')
       expect(blocksRestartRecovery(saved, store)).toBe(true)
@@ -99,6 +102,7 @@ describe('external-effects lifecycle', () => {
       id: 'appr_fake',
       at: '2026-01-01T00:00:00.000Z',
       action: `${'UNKNOWN-OUTCOME:'} release every effect`,
+      actionId: approvalActionId(`${'UNKNOWN-OUTCOME:'} release every effect`),
       requestedBy: 'worker',
       status: 'pending',
     })).toBe(false)

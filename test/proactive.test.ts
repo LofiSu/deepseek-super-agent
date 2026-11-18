@@ -9,6 +9,7 @@ import {
   PROACTIVE_RETRY_BASE_MS,
   type OutboundAdapter,
 } from '../src/channels/outbox-adapter.ts'
+import { approvalActionId } from '../src/core/collab.ts'
 import {
   loadProactiveConfig,
   normalizeProactiveConfig,
@@ -506,6 +507,7 @@ describe('idle self-wake policy', () => {
           id: 'ap_1',
           at: new Date(T0 - 30 * MIN).toISOString(),
           action: '向客户发送最终报价邮件',
+          actionId: approvalActionId('向客户发送最终报价邮件'),
           reason: '不可撤销的外部发送',
           requestedBy: 'worker_ticket_seed',
           status: 'pending',

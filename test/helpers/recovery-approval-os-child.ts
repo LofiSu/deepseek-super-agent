@@ -3,6 +3,7 @@
  */
 import fs from 'node:fs'
 import { Store } from '../../src/store/sqlite.ts'
+import { approvalActionId } from '../../src/core/collab.ts'
 import type { Ticket } from '../../src/shared/types.ts'
 import { Runtime } from '../../src/runtime.ts'
 import { ScriptedModel } from '../scripted-model.ts'
@@ -52,6 +53,7 @@ function fabricate(id: string, withApproval: boolean): Ticket {
         id: 'appr_os',
         at,
         action: 'publish the release',
+        actionId: approvalActionId('publish the release'),
         requestedBy: 'worker',
         status: 'pending',
       }],
