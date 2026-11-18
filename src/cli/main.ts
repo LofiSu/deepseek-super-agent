@@ -2,6 +2,11 @@ import { githubTrigger } from '../channels/github.ts'
 import { cliTrigger } from '../channels/cli.ts'
 import { imTrigger } from '../channels/im.ts'
 import { Engine } from '../core/engine.ts'
+import {
+  resolveUnknownOutcomeEffects,
+  retryableUnknownEffectIds,
+  unknownEffectIds,
+} from '../core/external-effects.ts'
 import type { Host } from '../core/host.ts'
 import { executionView, formatExecution } from '../core/panel.ts'
 import { ticketStage } from '../core/stage.ts'
@@ -183,6 +188,8 @@ function help(): void {
   pnpm ds-agent agents [--json]  # local specialist agents configured for delegation
   pnpm ds-agent skills [--json]  # owner-authored playbooks the agent can load
   pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
+  pnpm ds-agent recovery-effects <ticketId> [retry|acknowledge <effectId>] [--json]
+                            # inspect or resolve one uncertain external effect on an ended Ticket
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -422,9 +429,10 @@ async function serve(home: string): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
   try {
-    // Only the long-lived serving process ticks owner routines; one-shot
-    // commands (approve, retry, chat, resume, emit) must not fire them.
-    runtime.start({ assessPending: canAssess, routines: true })
+    // Only the long-lived serving process ticks owner routines and the
+    // owner-gated idle wake; one-shot commands (approve, retry, chat, resume,
+    // emit) must not fire them.
+    runtime.start({ assessPending: canAssess, routines: true, proactive: true })
   } catch (error) {
     channels?.abort()
     channels?.close()
@@ -720,6 +728,52 @@ async function main(): Promise<void> {
       console.log(`${item.ticketId}  ${item.approvalId}  ${item.action}`)
       console.log(`  ${item.title}${item.reason ? ` — ${item.reason}` : ''}`)
       console.log(`  requested by ${item.requestedBy} at ${item.at}`)
+    }
+    return
+  }
+  if (cmd === 'recovery-effects') {
+    const [ticketRef, resolution, effectId] = bare(3)
+    if (!ticketRef) {
+      throw new Error('usage: ds-agent recovery-effects <ticketId> [retry|acknowledge <effectId>] [--json]')
+    }
+    const store = new Store(home)
+    try {
+      const ticket = resolveTicket(store, ticketRef)
+      if (!ticket.ended) {
+        throw new Error(`ticket ${ticket.id} is still live; decide its recovery approval with ds-agent approve or deny`)
+      }
+      const effectIds = unknownEffectIds(ticket.id, store)
+      if (!resolution) {
+        if (process.argv.includes('--json')) {
+          console.log(JSON.stringify({ ticketId: ticket.id, ended: ticket.ended, effectIds }, null, 2))
+        } else if (effectIds.length === 0) {
+          console.log(`no unknown effects for ended ticket ${ticket.id}`)
+        } else {
+          console.log(`unknown effects for ended ticket ${ticket.id}:`)
+          for (const id of effectIds) console.log(`  ${id}`)
+          console.log(`resolve one: pnpm ds-agent recovery-effects ${ticket.id} retry|acknowledge <effectId>`)
+        }
+        return
+      }
+      if (resolution !== 'retry' && resolution !== 'acknowledge') {
+        throw new Error('recovery-effects action must be retry or acknowledge')
+      }
+      if (!effectId) {
+        throw new Error(`usage: ds-agent recovery-effects ${ticket.id} ${resolution} <effectId>`)
+      }
+      if (!effectIds.includes(effectId)) {
+        throw new Error(`unknown uncertain effect ${effectId} on ended ticket ${ticket.id}`)
+      }
+      if (resolution === 'retry' && !retryableUnknownEffectIds(ticket.id, store).includes(effectId)) {
+        throw new Error(
+          `effect ${effectId} has no durable retry path after ticket end; acknowledge it after verifying the remote result`,
+        )
+      }
+      const changed = resolveUnknownOutcomeEffects(store, ticket.id, [effectId], resolution, new Date().toISOString())
+      if (changed === 0) throw new Error(`could not resolve effect ${effectId}; inspect recovery-effects again`)
+      console.log(`${resolution} ${effectId} on ended ticket ${ticket.id}`)
+    } finally {
+      store.close()
     }
     return
   }

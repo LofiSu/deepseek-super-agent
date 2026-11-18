@@ -171,4 +171,3 @@ export class FeaturePrPublisher {
     return { number: parsed.number, url: parsed.url || url }
   }
 }
-

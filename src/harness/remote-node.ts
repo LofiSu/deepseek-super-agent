@@ -39,7 +39,13 @@ export const DEFAULT_REMOTE_MAX_NODES = 256
 export const DEFAULT_REMOTE_MAX_ADDRESSES = 64
 
 /** Body kinds accepted by the remote mesh inbox. Everything else fails closed. */
-export const REMOTE_MESH_BODY_KINDS = ['register', 'heartbeat', 'assignment'] as const
+export const REMOTE_MESH_BODY_KINDS = [
+  'register',
+  'heartbeat',
+  'assignment',
+  'assignment_cancel',
+  'assignment_result',
+] as const
 export type RemoteMeshBodyKind = (typeof REMOTE_MESH_BODY_KINDS)[number]
 
 export interface RemoteNodeRegistration {
@@ -54,6 +60,8 @@ export interface RemoteNodeRegistration {
   secret: A2ASecret
   /** Maximum concurrent assignments. Defaults to 1. */
   capacity?: number
+  /** Advertised worker capabilities (for example `linux`, `bwrap`). Empty means generic. */
+  capabilities?: readonly string[]
 }
 
 /** Public, secret-free view of a registered remote node. */
@@ -62,6 +70,7 @@ export interface RemoteMeshNode {
   url: string
   peerId: string
   capacity: number
+  capabilities: string[]
   online: boolean
   lastHeartbeatAt: number
   inFlight: number
@@ -185,6 +194,14 @@ function boundedInteger(value: number | undefined, fallback: number): number {
 /** Injectable transport constructor used by tests. */
 export type RemoteTransportFactory = (options: A2AHttpTransportOptions) => A2ATransport
 
+/**
+ * Why a node became eligible. A successful `register` always inserts a
+ * brand-new node (a duplicate id throws), so it is a first sighting even when
+ * this id was registered before and later `unregister`ed. A `heartbeat` only
+ * reports an already-registered node coming back from offline/stale.
+ */
+export type RemoteEligibleReason = 'register' | 'heartbeat'
+
 export interface RemoteMeshRegistryOptions {
   /** This process's authenticated A2A identity; signs every outbound envelope. */
   localPeerId?: string
@@ -200,6 +217,13 @@ export interface RemoteMeshRegistryOptions {
   createTransport?: RemoteTransportFactory
   /** Maximum registered nodes. Defaults to 256. */
   maxNodes?: number
+  /**
+   * Notified with the node id when a node becomes eligible: a successful
+   * register adds a new eligible node, and a heartbeat transitions an
+   * ineligible (offline or stale) node back to eligible. Late wiring uses
+   * `setOnBecameEligible` instead. The registry never starts dispatch itself.
+   */
+  onBecameEligible?: (nodeId: string, reason: RemoteEligibleReason) => void
 }
 
 interface RemoteNodeRecord {
@@ -208,8 +232,23 @@ interface RemoteNodeRecord {
   peerId: string
   secret: A2ASecret
   capacity: number
+  capabilities: string[]
   online: boolean
   lastHeartbeatAt: number
+}
+
+function normalizeCapabilities(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const caps: string[] = []
+  for (const item of value) {
+    if (typeof item === 'string' && item.trim().length > 0) caps.push(item.trim())
+  }
+  return [...new Set(caps)]
+}
+
+function capabilitiesMatch(nodeCaps: readonly string[], required: readonly string[]): boolean {
+  if (required.length === 0) return true
+  return required.every(cap => nodeCaps.includes(cap))
 }
 
 function defaultTransportFactory(options: A2AHttpTransportOptions): A2ATransport {
@@ -234,6 +273,7 @@ export class RemoteMeshRegistry {
   private readonly nodes = new Map<string, RemoteNodeRecord>()
   private readonly assignments = new Map<string, string>()
   private readonly transports = new Map<string, A2ATransport>()
+  private becameEligibleListener?: (nodeId: string, reason: RemoteEligibleReason) => void
 
   constructor(options: RemoteMeshRegistryOptions | string = {}) {
     const resolved: RemoteMeshRegistryOptions = typeof options === 'string'
@@ -252,6 +292,33 @@ export class RemoteMeshRegistry {
     this.createTransport = resolved.transportFactory
       ?? resolved.createTransport
       ?? defaultTransportFactory
+    this.becameEligibleListener = resolved.onBecameEligible
+  }
+
+  /**
+   * Replace the eligible-node listener. The Runtime wires this after the
+   * Harness exists so a heartbeat that brings a node back, or a late-bound
+   * register that adds an eligible node, can wake a parked mesh queue. Passing
+   * `undefined` removes the listener.
+   */
+  setOnBecameEligible(
+    listener: ((nodeId: string, reason: RemoteEligibleReason) => void) | undefined,
+  ): void {
+    this.becameEligibleListener = listener
+  }
+
+  /**
+   * Notify the wake listener after registry state made a node eligible. The
+   * transition already happened, so a listener error must not turn an accepted
+   * register/heartbeat into a failed delivery (a replay would not fire again
+   * because the node is now eligible).
+   */
+  private notifyBecameEligible(nodeId: string, reason: RemoteEligibleReason): void {
+    try {
+      this.becameEligibleListener?.(nodeId, reason)
+    } catch {
+      // See the method comment: the registry operation already succeeded.
+    }
   }
 
   /** Register a node. A duplicate id throws. The URL guard is the A2A transport's. */
@@ -277,23 +344,38 @@ export class RemoteMeshRegistry {
       peerId,
       secret,
       capacity,
+      capabilities: normalizeCapabilities(input.capabilities),
       online: true,
       lastHeartbeatAt: this.clock(),
     }
     this.nodes.set(id, record)
+    // A successful register always inserts a brand-new eligible node. Treat it
+    // as the ineligible → eligible transition the heartbeat path reports: a
+    // late-bound node (registerRemoteNode / mesh inbox handleRegister) is the
+    // production "a placeable node just appeared" event and must wake a parked
+    // FIFO without waiting for an unrelated Worker turn. Failed registers throw
+    // above, so they never reach this notification.
+    this.notifyBecameEligible(id, 'register')
     return this.view(record, record.lastHeartbeatAt)
   }
 
   /**
    * Record a heartbeat. A heartbeat also brings an offline node back online.
-   * Unknown ids return `false` instead of throwing.
+   * Unknown ids return `false` instead of throwing. A heartbeat that makes an
+   * ineligible node eligible again notifies the optional listener exactly once,
+   * after the registry state is updated.
    */
   heartbeat(id: string, at: number = this.clock()): boolean {
     const node = this.nodes.get(id)
     if (!node) return false
     if (!Number.isFinite(at)) return false
+    const now = this.clock()
+    const wasEligible = this.eligible(node, now)
     node.lastHeartbeatAt = at
     node.online = true
+    if (!wasEligible && this.eligible(node, now)) {
+      this.notifyBecameEligible(id, 'heartbeat')
+    }
     return true
   }
 
@@ -317,27 +399,36 @@ export class RemoteMeshRegistry {
 
   /**
    * Least-loaded eligible node for a ticket. A ticket keeps its node on repeat
-   * picks while that node remains eligible. A stale/offline/unknown assignment
-   * is released so its capacity is not leaked; callers may then pick again.
+   * picks while that node remains eligible. A stale/offline/unknown or
+   * capability-mismatched assignment is released so its capacity is not leaked,
+   * and the same call then keeps searching: it may assign another eligible node
+   * or still return `undefined` when none is available.
    */
-  pick(ticketId: string, now: number = this.clock()): RemoteMeshNode | undefined {
+  pick(
+    ticketId: string,
+    now: number = this.clock(),
+    requiredCapabilities: readonly string[] = [],
+  ): RemoteMeshNode | undefined {
     if (!nonEmptyString(ticketId)) return undefined
     const at = finiteNow(now, this.clock())
 
     const assignedId = this.assignments.get(ticketId)
     if (assignedId !== undefined) {
       const assigned = this.nodes.get(assignedId)
-      if (!assigned || !this.eligible(assigned, at)) {
-        this.assignments.delete(ticketId)
-        return undefined
+      if (assigned && this.eligible(assigned, at)
+        && capabilitiesMatch(assigned.capabilities, requiredCapabilities)) {
+        return this.view(assigned, at)
       }
-      return this.view(assigned, at)
+      // Release the ineligible sticky assignment, then fall through to the
+      // least-loaded search below instead of stalling until a second pick.
+      this.assignments.delete(ticketId)
     }
 
     let best: RemoteNodeRecord | undefined
     let bestLoad = Number.POSITIVE_INFINITY
     for (const node of this.nodes.values()) {
       if (!this.eligible(node, at)) continue
+      if (!capabilitiesMatch(node.capabilities, requiredCapabilities)) continue
       const load = this.inFlight(node.id)
       if (load >= node.capacity || load >= bestLoad) continue
       best = node
@@ -351,6 +442,24 @@ export class RemoteMeshRegistry {
   /** Release a ticket's node slot. Unknown tickets are a no-op `false`. */
   release(ticketId: string): boolean {
     return this.assignments.delete(ticketId)
+  }
+
+  /**
+   * Rebuild a persisted sticky reservation without picking. Startup recovery
+   * uses this to remember which peer ran an interrupted Assignment so a later
+   * cancel can reach it. Unlike `pick`, it consults no eligibility, load, or
+   * capacity: it restores pre-crash truth even when the peer is stale/offline
+   * (the cancel itself stays fail-soft). An empty or unregistered node is a
+   * no-op `false`; a ticket already bound to another node is left untouched.
+   * Returns whether the ticket is bound to `nodeId` afterwards.
+   */
+  bind(ticketId: string, nodeId: string): boolean {
+    if (!nonEmptyString(ticketId) || !nonEmptyString(nodeId)) return false
+    if (!this.nodes.has(nodeId)) return false
+    const assigned = this.assignments.get(ticketId)
+    if (assigned !== undefined) return assigned === nodeId
+    this.assignments.set(ticketId, nodeId)
+    return true
   }
 
   /** Current assignment count for a node. */
@@ -379,9 +488,13 @@ export class RemoteMeshRegistry {
    * node holding the ticket, after a successful `pick`. Returns `undefined`
    * when the ticket has no assignment or the node is stale/offline/unknown.
    *
-   * `delivered` keeps the in-flight assignment. `unroutable` and `failed`
-   * release it. No transport error is ever thrown; the returned delivery never
-   * carries peer-supplied error text or a secret.
+   * `delivered` keeps the in-flight assignment. Any outcome after the send
+   * settles, including `unroutable`, `failed`, a thrown transport, or an
+   * invalid delivery, also keeps it: the caller owns the decision because the
+   * ticket may already have moved on to a live replacement Assignment. Callers
+   * must `release` when the failed dispatch should free the slot. No transport
+   * error is ever thrown; the returned delivery never carries peer-supplied
+   * error text or a secret.
    */
   async dispatch(ticketId: string, assignment: unknown): Promise<A2ADelivery | undefined> {
     if (!nonEmptyString(ticketId)) return undefined
@@ -413,16 +526,103 @@ export class RemoteMeshRegistry {
       delivery = await transport.send(envelope)
     } catch {
       // A remote transport may throw arbitrary text; never surface it.
-      this.assignments.delete(ticketId)
+      // The send settled: keep the sticky reservation so the caller can tell
+      // a genuine failure from a late result for a replaced Assignment.
       return failedDelivery(envelope)
     }
     if (!isDelivery(delivery)) {
-      this.assignments.delete(ticketId)
       return failedDelivery(envelope)
     }
 
-    if (delivery.status === 'delivered') return safeDelivery(delivery)
-    this.assignments.delete(ticketId)
+    return safeDelivery(delivery)
+  }
+
+  hasTicketAssignment(ticketId: string): boolean {
+    return this.assignments.has(ticketId)
+  }
+
+  /**
+   * The node currently holding the ticket's sticky reservation, if any.
+   *
+   * Read-only: used to attribute an in-flight fail-soft `assignment_cancel` to
+   * the node it targets, so a later dispatch to that same node can wait for it.
+   * No placement, capacity, or cancel-transport behavior changes.
+   */
+  nodeFor(ticketId: string): string | undefined {
+    return this.assignments.get(ticketId)
+  }
+
+  /**
+   * Propagate ticket end / local cancel to the assigned remote worker inbox.
+   *
+   * `delivered` keeps the in-flight assignment. Any outcome after the send
+   * settles, including `unroutable`, `failed`, a thrown transport, or an
+   * invalid delivery, also keeps it: the caller owns the decision because the
+   * ticket may already have moved on to a live replacement Assignment.
+   *
+   * By default (`release: true`), a stale/offline/unknown target or a transport
+   * factory failure before the send drops the reservation. Pass
+   * `{ release: false }` to keep the sticky assignment in those pre-send cases
+   * too: a keep-slot cancel must never steal capacity from a live replacement
+   * that already owns the ticket's slot, even when the old target is
+   * unreachable. No transport error is ever thrown; the returned delivery never
+   * carries peer-supplied error text or a secret.
+   *
+   * `opts.nodeId` targets a specific registered node instead of the Ticket's
+   * current sticky reservation. Historical Assignment cancels use it so the
+   * worker that still holds an older Assignment learns to stop it even after
+   * the Ticket moved to a different remote node. An unknown or ineligible
+   * explicit target stays fail-soft and never touches the live sticky slot.
+   */
+  async dispatchCancel(
+    ticketId: string,
+    assignmentId: string,
+    opts?: { release?: boolean; nodeId?: string },
+  ): Promise<A2ADelivery | undefined> {
+    if (!nonEmptyString(ticketId) || !nonEmptyString(assignmentId)) return undefined
+    const release = opts?.release ?? true
+    const sticky = this.assignments.get(ticketId)
+    const nodeId = opts?.nodeId ?? sticky
+    if (nodeId === undefined) return undefined
+    const node = this.nodes.get(nodeId)
+    if (!node || !this.eligible(node, this.clock())) {
+      // A keep-slot cancel must leave the sticky map alone even when the
+      // assigned node is offline/stale/unknown. An explicit historical target
+      // is not the sticky reservation, so it must never clear that slot.
+      if (release && nodeId === sticky) this.assignments.delete(ticketId)
+      return undefined
+    }
+
+    const envelope: A2AEnvelope = {
+      from: this.localPeerId,
+      to: node.peerId,
+      body: { kind: 'assignment_cancel', ticketId, assignmentId },
+    }
+
+    let transport: A2ATransport
+    try {
+      transport = this.transportFor(node)
+    } catch {
+      // Same keep-assignment contract as the ineligible-target branch above:
+      // only a releasing cancel frees the slot before the send, and only when
+      // it targets the sticky reservation itself.
+      if (release && nodeId === sticky) this.assignments.delete(ticketId)
+      return failedDelivery(envelope)
+    }
+
+    let delivery: unknown
+    try {
+      delivery = await transport.send(envelope)
+    } catch {
+      // A remote transport may throw arbitrary text; never surface it.
+      // The send settled: keep the sticky reservation so the caller can tell
+      // a genuine failure from a late cancel for a replaced Assignment.
+      return failedDelivery(envelope)
+    }
+    if (!isDelivery(delivery)) {
+      return failedDelivery(envelope)
+    }
+
     return safeDelivery(delivery)
   }
 
@@ -455,6 +655,7 @@ export class RemoteMeshRegistry {
       url: node.url,
       peerId: node.peerId,
       capacity: node.capacity,
+      capabilities: [...node.capabilities],
       online: node.online,
       lastHeartbeatAt: node.lastHeartbeatAt,
       inFlight: this.inFlight(node.id),
@@ -472,6 +673,23 @@ export interface RemoteMeshAssignmentEvent {
   envelope: A2AEnvelope
 }
 
+export interface RemoteMeshAssignmentCancelEvent {
+  peerId: string
+  ticketId: string
+  assignmentId: string
+  envelope: A2AEnvelope
+}
+
+export interface RemoteMeshAssignmentResultEvent {
+  peerId: string
+  ticketId: string
+  assignmentId: string
+  report: unknown
+  /** Stable idempotence key from the authenticated inbound request. */
+  deliveryKey: string
+  envelope: A2AEnvelope
+}
+
 export interface RemoteMeshHandlerOptions {
   /**
    * Registry to update for `register`/`heartbeat`. When omitted the inbox
@@ -484,6 +702,16 @@ export interface RemoteMeshHandlerOptions {
    * reject an `async` callback; a thrown error becomes a non-leaking 502.
    */
   onAssignment: (event: RemoteMeshAssignmentEvent) => undefined
+  /**
+   * Inbound cancel from the host router. When omitted, `assignment_cancel` bodies
+   * fail closed like any unsupported kind.
+   */
+  onAssignmentCancel?: (event: RemoteMeshAssignmentCancelEvent) => undefined
+  /**
+   * Optional inbound worker results. When omitted, `assignment_result` bodies
+   * fail closed like any unsupported kind.
+   */
+  onAssignmentResult?: (event: RemoteMeshAssignmentResultEvent) => undefined
   /** Inbound peer secret lookup, also used for the outbound registry entry. */
   resolveSecret: A2ASecretResolver
   /** Local identity; also the default inbox address. */
@@ -638,6 +866,12 @@ export class MeshInbox {
       case 'assignment':
         this.handleAssignment(peerId, body, envelope)
         return
+      case 'assignment_cancel':
+        this.handleAssignmentCancel(peerId, body, envelope)
+        return
+      case 'assignment_result':
+        this.handleAssignmentResult(peerId, body, envelope)
+        return
       default:
         // Unknown kinds are a failed delivery (HTTP 502) and never reach the
         // assignment callback.
@@ -685,6 +919,7 @@ export class MeshInbox {
       peerId,
       secret,
       capacity: capacity as number | undefined,
+      capabilities: normalizeCapabilities(body.capabilities),
     })
   }
 
@@ -741,6 +976,73 @@ export class MeshInbox {
         void Promise.resolve(result).catch(() => {})
       }
       throw new Error('mesh assignment callback must be synchronous')
+    }
+  }
+
+  private handleAssignmentCancel(
+    peerId: string,
+    body: Record<string, unknown>,
+    envelope: A2AEnvelope,
+  ): void {
+    const callback = this.options.onAssignmentCancel
+    if (!callback) throw new Error('unsupported mesh body kind')
+    if (!nonEmptyString(body.ticketId)) throw new Error('mesh assignment_cancel requires a ticketId')
+    if (!nonEmptyString(body.assignmentId)) throw new Error('mesh assignment_cancel requires an assignmentId')
+    const event: RemoteMeshAssignmentCancelEvent = {
+      peerId,
+      ticketId: body.ticketId,
+      assignmentId: body.assignmentId,
+      envelope,
+    }
+    if ((callback as unknown as { constructor?: { name?: string } })
+      .constructor?.name === 'AsyncFunction') {
+      throw new Error('mesh assignment_cancel callback must be synchronous')
+    }
+    const result: unknown = callback(event)
+    if (result !== undefined) {
+      if (result !== null && typeof (result as PromiseLike<unknown>).then === 'function') {
+        void Promise.resolve(result).catch(() => {})
+      }
+      throw new Error('mesh assignment_cancel callback must be synchronous')
+    }
+  }
+
+  private handleAssignmentResult(
+    peerId: string,
+    body: Record<string, unknown>,
+    envelope: A2AEnvelope,
+  ): void {
+    const callback = this.options.onAssignmentResult
+    if (!callback) throw new Error('unsupported mesh body kind')
+    if (!nonEmptyString(body.ticketId)) throw new Error('mesh assignment_result requires a ticketId')
+    if (!nonEmptyString(body.assignmentId)) throw new Error('mesh assignment_result requires an assignmentId')
+    if (!hasOwn(body, 'report')) throw new Error('mesh assignment_result requires a report')
+    // The transport mints a fresh envelope id on every send, so it cannot be an
+    // idempotence key: a retry would look like a new result. Require the worker
+    // to send the same `deliveryKey` on retries and a distinct key per logical
+    // result.
+    if (!nonEmptyString(body.deliveryKey)) {
+      throw new Error('mesh assignment_result requires a deliveryKey')
+    }
+    const deliveryKey = body.deliveryKey
+    const event: RemoteMeshAssignmentResultEvent = {
+      peerId,
+      ticketId: body.ticketId,
+      assignmentId: body.assignmentId,
+      report: body.report,
+      deliveryKey,
+      envelope,
+    }
+    if ((callback as unknown as { constructor?: { name?: string } })
+      .constructor?.name === 'AsyncFunction') {
+      throw new Error('mesh assignment_result callback must be synchronous')
+    }
+    const result: unknown = callback(event)
+    if (result !== undefined) {
+      if (result !== null && typeof (result as PromiseLike<unknown>).then === 'function') {
+        void Promise.resolve(result).catch(() => {})
+      }
+      throw new Error('mesh assignment_result callback must be synchronous')
     }
   }
 

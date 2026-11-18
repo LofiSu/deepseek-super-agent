@@ -66,7 +66,7 @@ function putTicket(runtime: Runtime, id: string, overrides: Partial<Ticket> = {}
     threadKeys: [],
     channels: [],
     inputs: [],
-    assignments: [],
+    assignments: [{ id: 'asg_default', state: 'running', speculative: false }],
     speculative: false,
     originTriggerId: 'trigger_test',
     createdAt: '2026-11-05T00:00:00.000Z',

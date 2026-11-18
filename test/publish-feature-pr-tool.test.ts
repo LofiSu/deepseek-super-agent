@@ -59,4 +59,3 @@ describe('publish_feature_pr tool', () => {
     expect((await tools.specsFor('worker')).some(s => s.name === 'publish_feature_pr')).toBe(true)
   })
 })
-

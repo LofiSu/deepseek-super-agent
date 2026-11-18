@@ -48,4 +48,3 @@ describe('LocalEnv dev policy and GIT_SSH_COMMAND', () => {
     expect(result.stdout).not.toContain('id_rsa')
   })
 })
-

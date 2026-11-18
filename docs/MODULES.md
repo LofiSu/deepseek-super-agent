@@ -50,6 +50,16 @@ bounds inbound nodes and addresses, and rejects peer-registered loopback
 endpoints unless the operator opts in; its assignment callback is synchronous.
 The module starts no listener and makes no remote-execution claim; mounting it
 in Runtime/CLI remains owner-gated.
+`WorkerPlacement` (`mesh-runtime.ts`) merges the in-process node with optional
+`DS_AGENT_REMOTE_MESH` peers for `pick`/`release`/`dispatch`. Remote nodes may
+advertise `capabilities`; `DS_AGENT_MESH_REQUIRED_CAPABILITIES` (comma-separated)
+restricts which remote peer may receive a ticket when the local slot is full.
+Inbound `assignment_result` is handled via `Runtime.applyRemoteAssignmentResult`
+when operators mount `createRemoteMeshHandler` (idempotent on `deliveryKey`;
+late results after ticket end are ignored). `releaseMesh` clears remote result
+wait timers on ticket end/cancel. Physical multi-machine placement is still
+operator-gated; loopback integration tests cover the HTTP path only.
+
 Capacity is enforced in-process with a bounded FIFO queue owned by the Harness
 (the registry stays pure accounting):
 
@@ -133,7 +143,9 @@ shows the sections and each one's source; see `docs/PROMPTS.md`.
 
 ## M3 — engine
 
-`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. `collab.ts`
+`engine.ts` wires Intake → Evals → Tickets → Assignments → Replies. Persisted
+`recovery/latest` documents the last startup recovery boundary (outcome, per-ticket
+transitions). `collab.ts`
 owns pause/intervene/resume plus the approval hold: a Worker records a pending
 action, Worker turns stop while it is pending, the Router may still speak, and
 the owner's decision writes guidance before the RESUME turns. `lifecycle.ts`

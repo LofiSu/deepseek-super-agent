@@ -19,4 +19,3 @@ describe('parseBashAllowNetwork', () => {
     expect(() => parseBashAllowNetwork({ DS_AGENT_BASH_ALLOW_NETWORK: 'maybe' })).toThrow(UserError)
   })
 })
-

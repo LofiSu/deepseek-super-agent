@@ -2,12 +2,13 @@ import { withSessionRole } from '../core/session-role.ts'
 import { redactRecord } from '../env/sanitize.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { formatRefs } from '../memory/graph.ts'
-import type { ObjectRef, Role, Ticket, Trigger } from '../shared/types.ts'
+import type { Assignment, ObjectRef, Role, Ticket, Trigger } from '../shared/types.ts'
 import type { Model, ModelMessage } from './model.ts'
 import type { SkillInfo } from '../env/skills.ts'
 import { systemPrompt, type PromptFiles } from './prompts.ts'
 import type { LocalAgentInfo } from '../env/local-agents.ts'
 import { directChatThread, routerSessionId, workerSessionId, type JournalEntry, type SessionJournal } from './session.ts'
+import { isProactiveTicket } from './proactive.ts'
 import { TeamRegistry } from './team.ts'
 import { ToolRegistry } from './tools.ts'
 import type { Store } from '../store/sqlite.ts'
@@ -33,7 +34,11 @@ export interface HarnessOptions {
   /** Router shards for a ticket. Default `['router']`; a shard owns one Router session. */
   routerSessions?: (ticket: Ticket) => string[]
   /** Logical Worker mesh placement. Released by the host on ticket end. */
-  pickNode?: (ticketId: string) => string | undefined
+  pickNode?: (ticketId: string, ticket: Ticket) => string | undefined
+  /** When true, the Worker turn runs on a remote peer instead of this process. */
+  isRemoteNode?: (nodeId: string | undefined) => boolean
+  /** Deliver assignment to a remote mesh node (no local ReAct turn). */
+  dispatchRemote?: (ticket: Ticket, node: string) => Promise<void>
   /**
    * Maximum Workers waiting for mesh capacity. `0` rejects instead of queueing.
    * Default 100. The queue lives in the Harness scheduler; the mesh registry
@@ -46,6 +51,11 @@ export interface HarnessOptions {
   repliedTo?: (ticketId: string) => boolean
   /** End a direct-chat ticket the Router already answered, before a Worker starts. */
   stopAnsweredDirectChat?: (ticket: Ticket, reason: string) => void
+  /**
+   * End a proactive messaging envelope after its Router turn. There is no
+   * Worker follow-up: if the Router stayed silent, the ticket ends silently.
+   */
+  stopProactiveTicket?: (ticket: Ticket, reason: string) => void
   /** Cross-ticket recall lines injected into Router and Worker turns. */
   memory?: (ticket: Ticket) => { id: string; spillId?: string; text: string; refs?: ObjectRef[] }[]
   /** Owner-editable persona, standing instructions, and owner context. */
@@ -67,6 +77,13 @@ export interface HarnessOptions {
 /** Bound for an in-process Worker backlog. Environment parsing already sanitizes. */
 export const DEFAULT_QUEUE_LIMIT = 100
 
+/**
+ * Report kinds that end an Assignment. Mirrors `REMOTE_ENDING_REPORT_KINDS` in
+ * `src/runtime.ts`: a remote result with one of these is settled, even when a
+ * pause holds its verdict.
+ */
+const TERMINAL_REPORT_KINDS = new Set(['ready', 'failed', 'dropped', 'blocked', 'waiting'])
+
 /** One redacted entry in a resident Router Session's journal. */
 export interface RouterObservation {
   kind: string
@@ -83,6 +100,7 @@ export function normalizeQueueLimit(value: number | undefined): number {
 export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = []): string {
   const mode = ticket.speculative ? 'speculative' : 'normal'
   const directChat = directChatThread(ticket)
+  const proactive = isProactiveTicket(ticket)
   return [
     ticket.speculative ? 'SPECULATIVE' : 'TICKET_CREATED',
     `ticketId=${ticket.id}`,
@@ -90,9 +108,17 @@ export function routerPromptFor(ticket: Ticket, extraLines: readonly string[] = 
     `title=${ticket.title}`,
     // The title is capped at 80 characters; a direct chat needs the whole
     // message because the Router answers it without a Worker reading the brief.
-    ...(directChat ? [`message=${ticket.brief}`] : []),
+    // A proactive wake carries the concrete fact the same way.
+    ...(directChat || proactive ? [`message=${ticket.brief}`] : []),
     `mode=${mode}`,
     'decision=accepted-by-gate',
+    ...(proactive ? [
+      'proactive=true',
+      'This is an idle self-wake in an existing private thread. There is no Worker follow-up.',
+      'Send at most one short message only if the fact above is genuinely useful.',
+      'Do not send an acknowledgement, a ticket inventory, or a request for a reply; do not mention that this was a scheduled check.',
+      'If nothing is useful, call assess_trigger kind=stop and do not reply.',
+    ] : []),
     ...extraLines,
     // A direct iMessage is a conversation, not a thread ticket: the Router may
     // answer it briefly instead of leaving a vetoed message unanswered. Group
@@ -236,6 +262,15 @@ export class Harness {
     // (assess_trigger stop/ignore) ends the ticket, and the Worker never starts.
     // Capacity is picked after the Routers so a veto never consumes a slot.
     const startWorker = (): Promise<void> | undefined => {
+      // A proactive idle wake is a messaging envelope, not a work request: the
+      // Router's one turn is the whole deliverable. End it even when the
+      // Router stayed silent, so no Worker is ever spawned for it.
+      if (isProactiveTicket(ticket)) {
+        const latest = this.opts.store.getDoc<Ticket>('ticket', ticket.id)
+        this.opts.log(`[harness] worker skipped ticketId=${ticket.id} ended=proactive-message`)
+        if (!latest?.ended) this.opts.stopProactiveTicket?.(ticket, 'proactive message turn complete')
+        return undefined
+      }
       // A direct chat the Router already answered is finished. Give the
       // conversation no Worker even when the Router forgot assess_trigger
       // stop: a conversational reply is the whole deliverable.
@@ -297,7 +332,7 @@ export class Harness {
     }
     // No mesh configured: keep the original no-placement behavior.
     if (!this.opts.pickNode) return this.startNow(latest)
-    const node = this.opts.pickNode(latest.id)
+    const node = this.opts.pickNode(latest.id, latest)
     if (!node) return this.enqueueWorker(latest.id)
     this.opts.log(`[mesh] place ticketId=${latest.id} node=${node}`)
     return this.startNow(latest, node)
@@ -364,15 +399,15 @@ export class Harness {
     while (this.queued.length > 0) {
       const next = this.queued[0]!
       const check = this.queueState(next.ticketId)
-      if (check.skip) {
+      if (check.skip || !check.ticket) {
         this.queued.shift()
         this.opts.metrics.increment('mesh.dequeued')
-        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length} skipped=${check.skip}`)
+        this.opts.log(`[mesh] mesh.dequeued ticketId=${next.ticketId} depth=${this.queued.length} skipped=${check.skip ?? 'ticket-missing'}`)
         next.resolve()
         continue
       }
       if (this.opts.pickNode) {
-        const node = this.opts.pickNode(next.ticketId)
+        const node = this.opts.pickNode(next.ticketId, check.ticket)
         if (!node) return
         this.queued.shift()
         this.opts.metrics.increment('mesh.dequeued')
@@ -434,7 +469,20 @@ export class Harness {
       return
     }
     // The queued launch resolves when this Worker turn settles, or on drain.
-    work.then(() => entry.resolve(), () => entry.resolve())
+    // A turn that rejects after it started must return the mesh slot `pump`
+    // reserved for it. `startWorkerTurn` clears the active marker and pumps in
+    // its `finally`, but at that point the failed turn still owns the slot, so
+    // that pump cannot dequeue anything. Release here, then pump again; without
+    // this the slot leaked and every later Worker stalled behind it forever.
+    work.then(
+      () => entry.resolve(),
+      error => {
+        this.opts.releaseNode?.(entry.ticketId)
+        this.opts.log(`[harness] queued worker failed ticketId=${entry.ticketId} error=${String(error)}`)
+        this.pump()
+        entry.resolve()
+      },
+    )
     this.track(work)
   }
 
@@ -448,12 +496,33 @@ export class Harness {
     this.pump()
   }
 
+  /**
+   * Wake the mesh queue after an external capacity event (a remote node became
+   * eligible again through a heartbeat). Extra pumps are harmless: `pump`
+   * stops at the FIFO head when no slot is free, and it can never start a
+   * Worker that is already active.
+   */
+  pumpQueue(): void {
+    this.pump()
+  }
+
   private startWorkerTurn(ticket: Ticket, node?: string): Promise<void> {
     const sessionId = workerSessionId(ticket.id)
     const assignment = ticket.assignments.at(-1)
     if (!assignment) {
       this.opts.log(`[harness] worker skipped ticketId=${ticket.id} no-assignment`)
       return Promise.resolve()
+    }
+    if (node && this.opts.isRemoteNode?.(node)) {
+      this.activeWorkers.add(ticket.id)
+      this.opts.log(`[mesh] remote dispatch ticketId=${ticket.id} node=${node}`)
+      this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
+      this.opts.assignmentPlaced(ticket.id, assignment.id, node)
+      const work = (this.opts.dispatchRemote?.(ticket, node) ?? Promise.resolve())
+      return work.finally(() => {
+        this.activeWorkers.delete(ticket.id)
+        this.pump()
+      })
     }
     this.activeWorkers.add(ticket.id)
     this.opts.log(`[harness] ExecutorSession start session=${sessionId} ticketId=${ticket.id} role=worker`)
@@ -545,6 +614,30 @@ export class Harness {
     }
     const assignment = ticket.assignments.at(-1)
     if (!assignment) throw new Error(`ticket ${ticket.id} has no assignment`)
+    // A pending Assignment with no node was never placed: it was parked in the
+    // mesh FIFO because no eligible node had a free slot, then paused. Starting
+    // a local Worker turn here would absorb required-capability work on the
+    // host, or race the FIFO and run the same Ticket both locally and remotely.
+    // Let `startOrQueue` / `pump` place it through `pickNode` instead.
+    const resumeThroughMesh = Boolean(this.opts.pickNode)
+      && assignment.state === 'pending'
+      && assignment.node === undefined
+    // An already-placed remote Assignment that is still in progress is still
+    // running on the peer. Starting a local Worker turn here would run the same
+    // required-capability work locally and remotely (P1 / scenario D). Leave the
+    // remote Assignment and its reserved mesh slot alone: when it posts a
+    // terminal result, `applyRemoteAssignmentResult` applies it to the now
+    // unpaused Ticket. A pause-held terminal report is scenario P instead — the
+    // remote work is already done and its slot was released — so that case must
+    // keep the local RESUME Worker path that applies the held verdict.
+    const remoteInProgress = (candidate: Assignment | undefined): boolean =>
+      Boolean(this.opts.pickNode)
+      && candidate !== undefined
+      && candidate.state === 'running'
+      && candidate.node !== undefined
+      && this.opts.isRemoteNode?.(candidate.node) === true
+      && !(candidate.report && TERMINAL_REPORT_KINDS.has(candidate.report.kind))
+    const resumeRemoteInProgress = remoteInProgress(assignment)
     const sessionId = workerSessionId(ticket.id)
     const since = ticket.collab?.resumes.at(-1)?.pausedAt
     const pending = since
@@ -556,10 +649,12 @@ export class Harness {
       ? []
       : this.opts.routerSessions?.(ticket) ?? ['default']
     for (const shard of shards) this.armRouter(shard)
-    this.opts.log(
-      `[harness] ExecutorSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
-    )
-    if (assignment.state === 'pending') {
+    if (!resumeRemoteInProgress) {
+      this.opts.log(
+        `[harness] ExecutorSession resume session=${sessionId} ticketId=${ticket.id} role=worker guidanceSince=${since ?? '-'}`,
+      )
+    }
+    if (assignment.state === 'pending' && !resumeThroughMesh) {
       this.opts.assignmentStarted(ticket.id, assignment.id, sessionId)
     }
 
@@ -621,6 +716,31 @@ export class Harness {
           ? this.opts.store.getDoc<Ticket>('ticket', ticket.id)
           : undefined
         if (!latest || latest.ended) return
+        if (resumeThroughMesh) {
+          // A concurrent pump may have placed the Assignment while the Router
+          // ran. Never start a second Worker turn for an Assignment the mesh
+          // already dispatched.
+          const current = latest.assignments.at(-1)
+          if (!current || current.state !== 'pending' || current.node !== undefined) return
+          // The Ticket may still be in the FIFO (a pump skipped it as paused).
+          // Clearing the pause is enough: wake the queue without adding a
+          // second entry. Otherwise it was skipped or never queued, so place it
+          // again through `startOrQueue`.
+          if (this.queued.some(entry => entry.ticketId === ticket.id)) {
+            this.pump()
+            return
+          }
+          return this.startOrQueue(ticket.id)
+        }
+        if (resumeRemoteInProgress) {
+          // The remote keeps the Assignment and its mesh slot. The pause is
+          // already cleared, so its terminal result will apply normally rather
+          // than be held. No local Worker session and no second dispatch.
+          this.opts.log(
+            `[collab] resume kept remote ticketId=${ticket.id} node=${latest.assignments.at(-1)?.node ?? assignment.node ?? '-'}`,
+          )
+          return
+        }
         return this.enqueue(sessionId, () => guarded(sessionId, 'worker', workerPrompt))
       })
       .then(() => undefined)
