@@ -1100,4 +1100,3 @@ describe('rsi implementer fixture', () => {
     store.close()
   })
 })
-

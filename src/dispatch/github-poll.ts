@@ -222,4 +222,3 @@ export async function fetchPollEvents(
   }
   return { comments, issueBodies }
 }
-

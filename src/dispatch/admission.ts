@@ -173,4 +173,3 @@ export function rejectInjectedPolicyFields(payload: Record<string, unknown>): st
   }
   return undefined
 }
-

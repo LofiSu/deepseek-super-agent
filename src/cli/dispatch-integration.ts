@@ -100,4 +100,3 @@ export function dispatchLoadRequested(
     'github-dispatch.json',
   ))
 }
-

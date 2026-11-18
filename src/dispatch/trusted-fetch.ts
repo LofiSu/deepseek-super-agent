@@ -146,4 +146,3 @@ export async function trustedFetch(
     return { url: parsed.toString(), body, fetchedAt: new Date().toISOString() }
   }
 }
-

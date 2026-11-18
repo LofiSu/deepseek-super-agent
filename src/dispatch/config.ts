@@ -315,4 +315,3 @@ export function loadDispatchOwnerConfigSync(home: string): DispatchOwnerConfig |
     },
   }
 }
-

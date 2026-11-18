@@ -22,4 +22,3 @@ export async function hasOpenPeanutPrForRepo(
   const items = out.trim() ? (JSON.parse(out) as { number: number }[]) : []
   return items.length > 0
 }
-

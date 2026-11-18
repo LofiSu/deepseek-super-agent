@@ -99,4 +99,3 @@ GitHub’s permission model treats **Pull requests: write as including merge**. 
 `serve` loads dispatch when the file enables `github` and/or `rsi`, or when `--github-dispatch` / `DS_AGENT_GITHUB_DISPATCH=1` is set (config must still validate).
 
 Default sandbox `allowNetwork` stays off; research fetch is host-side only.
-
