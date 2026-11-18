@@ -1,8 +1,8 @@
 <div align="center">
-  <img src="docs/assets/ds-agent-banner.png" alt="deepseek-super-agent banner" width="100%" />
+  <img src="docs/assets/ds-agent-banner.png" alt="dsh-super-agent banner" width="100%" />
 </div>
 
-# 🤖 deepseek-super-agent
+# 🤖 dsh-super-agent
 
 English | [简体中文](README.zh-CN.md)
 
@@ -10,7 +10,7 @@ English | [简体中文](README.zh-CN.md)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**An independent, MIT-licensed super-agent harness in TypeScript.**
+A demo inspired by a DeepSeek blog post I read at the time.
 
 A thin async ReAct runtime at the bottom. A proactive domain engine on top:
 **Router / Worker**, **Triggers**, **Threads**, **Eval**, **Tickets**, **Assignments**, and a **Watchdog**.
@@ -18,7 +18,7 @@ A thin async ReAct runtime at the bottom. A proactive domain engine on top:
 [Documentation](docs/index.md) · [Quick start](#quick-start) · [Core features](#core-features) · [Architecture](#architecture) · [Safety](docs/safety.md) · [Modules](docs/MODULES.md) · [Demo](#demo-real-channels)
 
 > [!NOTE]
-> This is **not** an official DeepSeek product. It is an independent implementation inspired by DeepSeek's public Super-agent article and prototype. It does not ship, wrap, or depend on DeepSeek Harness, Cordis, or any `@deepseek-ai/dsh*` package.
+> Not an official DeepSeek project or a complete product; I iterate on it when I can.
 
 ---
 
@@ -54,7 +54,7 @@ A thin async ReAct runtime at the bottom. A proactive domain engine on top:
 If you use Claude Code, Codex, Cursor, or another coding agent, hand it this sentence:
 
 ```text
-Clone https://github.com/LofiSu/deepseek-super-agent, run pnpm install, then run
+Clone https://github.com/LofiSu/dsh-super-agent, run pnpm install, then run
 pnpm typecheck and pnpm lint. Read README.md and docs/install.md. Stop before
 pnpm test or pnpm demo so I can supply model credentials and a writable GitHub repo.
 ```
@@ -66,8 +66,8 @@ The agent should stop with the exact commands you still need to run, rather than
 Requires **Node.js 22+** (the store uses `node:sqlite`) and [pnpm](https://pnpm.io/).
 
 ```bash
-git clone https://github.com/LofiSu/deepseek-super-agent.git
-cd deepseek-super-agent
+git clone https://github.com/LofiSu/dsh-super-agent.git
+cd dsh-super-agent
 pnpm install
 
 pnpm typecheck
@@ -324,7 +324,7 @@ Use a small model for the Router and Watchdog and a stronger one for Workers. Th
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `DS_AGENT_HOME` | `./.ds-agent` | State directory (SQLite, metrics, gateway token). |
-| `DS_AGENT_GH_REPO` | `LofiSu/deepseek-super-agent` | Repository the GitHub demo writes to. |
+| `DS_AGENT_GH_REPO` | `LofiSu/dsh-super-agent` | Repository the GitHub demo writes to. |
 | `DS_AGENT_SLOW_PATH` | rules only | Set to `model` to enable the model-based ingress policy. |
 | `DS_AGENT_SHARDS` | one default shard | Router shard JSON. |
 | `DS_AGENT_MESH_CAPACITY` | in-process default | Maximum concurrent Worker nodes. |
@@ -382,13 +382,13 @@ export DS_AGENT_MCP_SERVERS='[
 | `02-spill-github` | one real issue body + two real comments | Router replies as issue comments |
 | `03-watchdog-github` | one real issue pulled via `gh api` | acknowledgement issue comment |
 
-Each run creates fresh issues on `DS_AGENT_GH_REPO` (default `LofiSu/deepseek-super-agent`), waits for the live model, posts real comments, then re-reads those comments from the GitHub API as proof. Logs and JSON proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`.
+Each run creates fresh issues on `DS_AGENT_GH_REPO` (default `LofiSu/dsh-super-agent`), waits for the live model, posts real comments, then re-reads those comments from the GitHub API as proof. Logs and JSON proofs land in `/tmp/ds-agent-live-e2e-logs/demos/`.
 
 ```bash
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
 export DS_AGENT_API_KEY=magpie
 export DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash
-export DS_AGENT_GH_REPO=LofiSu/deepseek-super-agent
+export DS_AGENT_GH_REPO=LofiSu/dsh-super-agent
 gh auth login
 
 pnpm demo                              # all three scenarios
@@ -482,4 +482,4 @@ Built on Node.js, TypeScript, `node:sqlite`, `tsx`, and Vitest — no agent fram
 
 [MIT](./LICENSE)
 
-[![Star History Chart](https://api.star-history.com/svg?repos=LofiSu/deepseek-super-agent&type=Date)](https://star-history.com/#LofiSu/deepseek-super-agent&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=LofiSu/dsh-super-agent&type=Date)](https://star-history.com/#LofiSu/dsh-super-agent&Date)
