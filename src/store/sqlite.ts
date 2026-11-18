@@ -3,19 +3,68 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { LifecycleEvent } from '../core/lifecycle.ts'
 import type { DomainEventName } from '../shared/events.ts'
+import { UserError } from '../shared/errors.ts'
 import type { JobRow, ObjectRef, OutboxRow, ReplyRow, SessionRow } from '../shared/types.ts'
-import { migrate } from './schema.ts'
+import { LATEST_SCHEMA_VERSION, migrate } from './schema.ts'
+
+function readSchemaVersion(db: DatabaseSync): number {
+  const ledger = db.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+  ).get()
+  if (!ledger) return 0
+
+  const row = db.prepare(
+    'SELECT MAX(version) AS version FROM schema_migrations',
+  ).get() as { version: number | null }
+  const version = row.version == null ? Number.NaN : Number(row.version)
+  if (!Number.isSafeInteger(version) || version < 1) {
+    throw new UserError('database schema ledger contains an invalid version')
+  }
+  if (version > LATEST_SCHEMA_VERSION) {
+    throw new UserError(
+      `database schema version ${version} is newer than this build supports (${LATEST_SCHEMA_VERSION}); ` +
+      'upgrade ds-agent before opening this store',
+    )
+  }
+  return version
+}
+
+function supportsReadOnlyDatabaseSync(): boolean {
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number)
+  return major > 22 || (major === 22 && minor >= 12)
+}
 
 export class Store {
   readonly path: string
   private readonly db: DatabaseSync
+  private readonly readOnly: boolean
   private depth = 0
   private closed = false
   private schemaVersionValue = 0
 
-  constructor(home: string) {
-    fs.mkdirSync(home, { recursive: true })
+  static openReadOnly(home: string): Store {
+    return new Store(home, { readOnly: true })
+  }
+
+  constructor(home: string, options: { readOnly?: boolean } = {}) {
     this.path = path.join(home, 'ds-agent.db')
+    this.readOnly = options.readOnly === true
+    if (this.readOnly) {
+      if (!supportsReadOnlyDatabaseSync()) {
+        throw new Error('read-only SQLite access requires Node.js 22.12 or newer')
+      }
+      if (!fs.existsSync(this.path)) throw new Error('local state database does not exist')
+      this.db = new DatabaseSync(this.path, { readOnly: true })
+      try {
+        this.schemaVersionValue = readSchemaVersion(this.db)
+      } catch (error) {
+        this.db.close()
+        throw error
+      }
+      return
+    }
+
+    fs.mkdirSync(home, { recursive: true })
     this.db = new DatabaseSync(this.path)
     try {
       this.schemaVersionValue = migrate(this.db)
@@ -43,7 +92,7 @@ export class Store {
 
   close(): void {
     if (this.closed) return
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    if (!this.readOnly) this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
     this.db.close()
     this.closed = true
   }
@@ -97,10 +146,31 @@ export class Store {
     return row ? JSON.parse(row.payload) as T : undefined
   }
 
+  /** Return at most two matching keys to resolve an exact or unique prefix. */
+  listDocIdsByPrefix(kind: string, prefix: string): string[] {
+    const rows = this.db.prepare(
+      `SELECT id FROM documents
+       WHERE kind = ? AND instr(id, ?) = 1
+       ORDER BY id LIMIT 2`,
+    ).all(kind, prefix) as { id: string }[]
+    return rows.map(row => row.id)
+  }
+
   listDocs<T>(kind: string): T[] {
     const rows = this.db.prepare(
       'SELECT payload FROM documents WHERE kind = ? ORDER BY rowid',
     ).all(kind) as { payload: string }[]
+    return rows.map(row => JSON.parse(row.payload) as T)
+  }
+
+  /** Read only documents whose JSON payload belongs to one Ticket. */
+  listDocsForTicket<T>(kind: string, ticketId: string): T[] {
+    const rows = this.db.prepare(
+      `SELECT payload FROM documents
+       WHERE kind = ?
+         AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.ticketId') END = ?
+       ORDER BY rowid`,
+    ).all(kind, ticketId) as { payload: string }[]
     return rows.map(row => JSON.parse(row.payload) as T)
   }
 
@@ -174,7 +244,7 @@ export class Store {
     this.db.prepare(`UPDATE replies SET status = 'sent' WHERE id = ?`).run(id)
   }
 
-    listReplies(): ReplyRow[] {
+  listReplies(): ReplyRow[] {
     const rows = this.db.prepare(
       'SELECT id, ticket_id, channel, purpose, text, status, created_at FROM replies ORDER BY rowid',
     ).all() as Record<string, string>[]
@@ -184,6 +254,19 @@ export class Store {
       channel: row.channel,
       purpose: row.purpose,
       text: row.text,
+      status: row.status as ReplyRow['status'],
+      createdAt: row.created_at,
+    }))
+  }
+
+  /** Receipt metadata for one Ticket, deliberately excluding reply bodies. */
+  listReceiptReplies(ticketId: string): Pick<ReplyRow, 'id' | 'channel' | 'status' | 'createdAt'>[] {
+    const rows = this.db.prepare(
+      `SELECT id, channel, status, created_at FROM replies WHERE ticket_id = ? ORDER BY rowid`,
+    ).all(ticketId) as { id: string; channel: string; status: string; created_at: string }[]
+    return rows.map(row => ({
+      id: row.id,
+      channel: row.channel,
       status: row.status as ReplyRow['status'],
       createdAt: row.created_at,
     }))
@@ -217,6 +300,28 @@ export class Store {
       ).all(status)
       : this.db.prepare('SELECT * FROM outbox ORDER BY rowid').all()) as Record<string, string | null>[]
     return rows.map(outboxFromRow)
+  }
+
+  /** Receipt metadata for one Ticket, excluding body, target, and error fields. */
+  listReceiptOutbox(
+    ticketId: string,
+  ): Pick<OutboxRow, 'id' | 'channel' | 'status' | 'createdAt' | 'sentAt'>[] {
+    const rows = this.db.prepare(
+      `SELECT id, channel, status, created_at, sent_at FROM outbox WHERE ticket_id = ? ORDER BY rowid`,
+    ).all(ticketId) as {
+      id: string
+      channel: string
+      status: string
+      created_at: string
+      sent_at: string | null
+    }[]
+    return rows.map(row => ({
+      id: row.id,
+      channel: row.channel,
+      status: row.status as OutboxRow['status'],
+      createdAt: row.created_at,
+      ...(row.sent_at ? { sentAt: row.sent_at } : {}),
+    }))
   }
 
   /** Pending rows whose backoff has elapsed. */

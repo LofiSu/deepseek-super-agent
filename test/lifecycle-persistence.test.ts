@@ -380,7 +380,7 @@ describe('lifecycle_events schema migration', () => {
     expect(tableNames(home)).toContain('lifecycle_events')
     expect(lifecycleColumns(home)).toEqual(['id', 'at', 'kind', 'payload'])
     const migrationsAfter = lifecycleMigrations(home)
-    expect(migrationsAfter.map(row => row.version)).toEqual([1, 2, 3, LATEST_SCHEMA_VERSION])
+    expect(migrationsAfter.map(row => row.version)).toEqual([1, 2, 3, 4, LATEST_SCHEMA_VERSION])
     // Version 1 and 2 ledger rows are untouched by the later steps.
     expect(migrationsAfter.slice(0, 2)).toEqual(migrationsBefore)
   })
@@ -390,14 +390,14 @@ describe('lifecycle_events schema migration', () => {
     const store = new Store(home)
     try {
       expect(store.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
-      expect(LATEST_SCHEMA_VERSION).toBe(4)
+      expect(LATEST_SCHEMA_VERSION).toBe(5)
     } finally {
       store.close()
     }
 
     expect(tableNames(home)).toContain('lifecycle_events')
     expect(lifecycleColumns(home)).toEqual(['id', 'at', 'kind', 'payload'])
-    expect(lifecycleMigrations(home).map(row => row.version)).toEqual([1, 2, 3, 4])
+    expect(lifecycleMigrations(home).map(row => row.version)).toEqual([1, 2, 3, 4, 5])
 
     // Reopening applies no migration twice.
     const reopened = new Store(home)
@@ -406,7 +406,7 @@ describe('lifecycle_events schema migration', () => {
     } finally {
       reopened.close()
     }
-    expect(lifecycleMigrations(home).map(row => row.version)).toEqual([1, 2, 3, 4])
+    expect(lifecycleMigrations(home).map(row => row.version)).toEqual([1, 2, 3, 4, 5])
   })
 })
 
