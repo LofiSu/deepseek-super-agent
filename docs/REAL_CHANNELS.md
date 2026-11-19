@@ -179,15 +179,15 @@ boundary second; any overlap is deduped by Trigger id (`feishu_<message_id>`) in
 stored cursor whose `chatId` differs from the current chat is ignored.
 
 **Admission semantics.** The loop calls `runtime.ingest(trigger)` with the
-Trigger returned by `feishuTriggerFromMessage`; it does not mark anything
-`direct` and does not bypass the ingress filter. That mapper sets
+Trigger returned by `feishuTriggerFromMessage`; it does not bypass the ingress
+filter. Group messages and messages with a missing or unknown `chat_type` keep
 `channel.address.group = message.chat_id`, so `DS_AGENT_GROUP_ALLOWLIST=<chat id>`
-admits or denies the chat in `src/ingress/filter.ts`. It sets
-`addressed='mention'` only when the text or mentions actually name the bot;
-otherwise `addressed` is unset and normal keyword/observed admission applies.
-`trigger.meta` carries provider ids for outbox routing only and is never read by
-admission. A denied message is persisted as a filtered disposition and cannot
-become a Ticket.
+admits or denies them in `src/ingress/filter.ts`. Set
+`DS_AGENT_FEISHU_P2P_DIRECT=1` to mark only messages explicitly tagged
+`chat_type=p2p` as direct, allowing short 1:1 messages through the noise filter.
+A real bot mention still sets `addressed='mention'`. `trigger.meta` carries
+provider ids for outbox routing only and is never read by admission. A denied
+message is persisted as a filtered disposition and cannot become a Ticket.
 
 **Shutdown.** The first SIGINT/SIGTERM aborts every inbound poll loop, waits for
 both in-flight polls and their drains (jobs, outbox flush), closes the iMessage

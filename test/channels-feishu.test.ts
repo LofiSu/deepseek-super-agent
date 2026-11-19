@@ -30,6 +30,7 @@ function message(overrides: Partial<FeishuMessage> = {}): FeishuMessage {
   return {
     message_id: 'om_1',
     chat_id: 'oc_chat',
+    chat_type: 'group',
     msg_type: 'text',
     body: { content: JSON.stringify({ text: '@ds-agent please fix the login timeout' }) },
     create_time: '1761958800000',
@@ -166,11 +167,41 @@ describe('Feishu message mapping', () => {
     process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
     try {
       const trigger = feishuTriggerFromMessage(message({
+        chat_type: 'p2p',
         body: { content: JSON.stringify({ text: '你好' }) },
       }), config)
       expect(trigger.addressed).toBe('direct')
       expect(trigger.channel?.address?.group).toBeUndefined()
       expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({ action: 'pass' })
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
+  })
+
+  it('keeps group messages grouped under the p2p direct override', () => {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const trigger = feishuTriggerFromMessage(message({
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        body: { content: JSON.stringify({ text: '你好' }) },
+      }), config)
+      expect(trigger.addressed).toBeUndefined()
+      expect(trigger.channel?.address?.group).toBe('oc_group')
+      expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_allowed',
+      }))).toMatchObject({
+        action: 'drop',
+        layer: 'fast',
+        reason: 'group-not-allowlisted',
+      })
+      expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({
+        action: 'drop',
+        layer: 'fast',
+        reason: 'noise',
+      })
     } finally {
       if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
       else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
@@ -183,6 +214,7 @@ describe('Feishu message mapping', () => {
     try {
       for (const text of utterances) {
         const trigger = feishuTriggerFromMessage(message({
+          chat_type: 'p2p',
           body: { content: JSON.stringify({ text }) },
         }), config)
         expect(trigger.addressed).toBeUndefined()
@@ -194,6 +226,7 @@ describe('Feishu message mapping', () => {
       process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
       for (const text of utterances) {
         const trigger = feishuTriggerFromMessage(message({
+          chat_type: 'p2p',
           body: { content: JSON.stringify({ text }) },
         }), config)
         expect(trigger.addressed).toBe('direct')
@@ -203,6 +236,7 @@ describe('Feishu message mapping', () => {
 
       process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
       const mentioned = feishuTriggerFromMessage(message({
+        chat_type: 'p2p',
         body: { content: JSON.stringify({ text: '@ds-agent 你现在可以改了' }) },
         mentions: [{ id: { open_id: 'ou_bot' }, name: 'ds-agent' }],
       }), config)

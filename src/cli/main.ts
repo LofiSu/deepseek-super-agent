@@ -221,9 +221,11 @@ FEISHU_APP_ID/FEISHU_APP_SECRET and FEISHU_CHAT_ID or --chat <id>, validates the
 before SQLite is opened, and stores its cursor in SQLite as
 { chatId, lastCreateTimeMs }. --since <epoch-ms> overrides the stored cursor for
 one start; otherwise the stored cursor for that chat seeds the poll, otherwise
-the source starts at now-5min. Feishu triggers keep the chat id in
-channel.address.group, so DS_AGENT_GROUP_ALLOWLIST admits by chat; only a real
-bot mention sets addressed=mention, and group messages are never marked direct.
+the source starts at now-5min. Feishu group messages keep the chat id in
+channel.address.group, so DS_AGENT_GROUP_ALLOWLIST admits by chat. Set
+DS_AGENT_FEISHU_P2P_DIRECT=1 to mark messages whose Feishu chat_type is explicitly
+p2p as direct, allowing short 1:1 messages through the noise filter; group and
+unknown chat types keep their group identity and are not promoted to direct.
 --imessage and --feishu may be combined: both configurations are resolved before
 Runtime.create, one Runtime/SQLite store is shared, and each loop keeps its own
 AbortController, cursor, and outbox. If either configuration is absent or

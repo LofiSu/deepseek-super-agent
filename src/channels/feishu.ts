@@ -70,6 +70,7 @@ export interface FeishuMention {
 export interface FeishuMessage {
   message_id: string
   chat_id: string
+  chat_type?: 'p2p' | 'group' | string
   msg_type: string
   body?: { content?: string }
   content?: string
@@ -264,9 +265,10 @@ function mentionsBot(message: FeishuMessage, config?: FeishuConfig): boolean {
 export function feishuTriggerFromMessage(message: FeishuMessage, config?: FeishuConfig): Trigger {
   const text = flattenFeishuMessage(message)
   const thread = feishuThread(message.chat_id, message.thread_id)
-  // Local ops flag for a verified p2p bind: treat as direct chat like CLI/iMessage 1:1.
-  // Keeps group allowlist usable when unset; when set, serve should rely on actor allowlist + single chat poll.
-  const p2pDirect = process.env.DS_AGENT_FEISHU_P2P_DIRECT?.trim() === '1'
+  // The override applies only when Feishu identifies this message as a p2p chat.
+  // Missing or unknown chat types retain group admission and noise filtering.
+  const p2pDirect = message.chat_type === 'p2p'
+    && process.env.DS_AGENT_FEISHU_P2P_DIRECT?.trim() === '1'
   const addressed = mentionsBot(message, config) ? 'mention' as const : (p2pDirect ? 'direct' as const : undefined)
   const senderType = message.sender?.sender_type
   return {
