@@ -67,6 +67,31 @@ describe('Google OAuth token provider', () => {
 })
 
 describe('Google Workspace mapping', () => {
+  it('sends continuation tokens for Gmail, Drive, Calendar, and Tasks pages', async () => {
+    const services = ['gmail', 'drive', 'calendar', 'tasks'] as const
+    for (const service of services) {
+      const seen: string[] = []
+      const fetchImpl: FetchLike = async input => {
+        const url = new URL(String(input))
+        seen.push(url.toString())
+        const body = service === 'gmail' ? { messages: [] }
+          : service === 'drive' ? { files: [] }
+            : service === 'calendar' ? { items: [] }
+              : { items: [] }
+        return new Response(JSON.stringify({ ...body, nextPageToken: 'next-page' }), { status: 200 })
+      }
+      const api = new HttpGoogleWorkspaceApi(fixedToken, {
+        fetch: fetchImpl,
+        now: () => T0,
+        apiBase: 'https://example.test',
+      })
+      const first = await api.fetchPage(service, query())
+      expect(first.nextPageToken).toBe('next-page')
+      await api.fetchPage(service, query({ pageToken: first.nextPageToken }))
+      expect(new URL(seen[1]!).searchParams.get('pageToken')).toBe('next-page')
+    }
+  })
+
   it('maps Gmail messages and marks unread important mail', async () => {
     const seen: string[] = []
     const fetchImpl: FetchLike = async input => {

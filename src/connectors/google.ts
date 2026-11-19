@@ -16,15 +16,23 @@ export interface GoogleFetchQuery {
   since: string
   /** Poll time (ISO 8601). */
   until: string
-  /** Per-service provider page size. */
+  /** Per-service provider page size and maximum records handled this poll. */
   limit: number
+  /** Provider continuation token from the previous bounded poll. */
+  pageToken?: string
   /** Imminent-event / due-task window. */
   lookaheadMinutes: number
   signal?: AbortSignal
 }
 
+export interface GoogleFetchPage {
+  drafts: ConnectorDraft[]
+  nextPageToken?: string
+}
+
 export interface GoogleWorkspaceApi {
   fetch(service: GoogleService, query: GoogleFetchQuery): Promise<ConnectorDraft[]>
+  fetchPage?(service: GoogleService, query: GoogleFetchQuery): Promise<GoogleFetchPage>
 }
 
 export interface HttpGoogleWorkspaceApiOptions {
@@ -63,6 +71,10 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
   }
 
   async fetch(service: GoogleService, query: GoogleFetchQuery): Promise<ConnectorDraft[]> {
+    return (await this.fetchPage(service, query)).drafts
+  }
+
+  async fetchPage(service: GoogleService, query: GoogleFetchQuery): Promise<GoogleFetchPage> {
     switch (service) {
       case 'calendar': return this.calendar(query)
       case 'gmail': return this.gmail(query)
@@ -75,8 +87,9 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
     }
   }
 
-  private async calendar(query: GoogleFetchQuery): Promise<ConnectorDraft[]> {
-    const now = this.now()
+  private async calendar(query: GoogleFetchQuery): Promise<GoogleFetchPage> {
+    const queryAt = Date.parse(query.until)
+    const now = Number.isFinite(queryAt) ? queryAt : this.now()
     // Index a useful window, but only treat an event as wake-worthy inside the
     // configured lookahead. Past events are still searchable for a day.
     const indexWindowMinutes = Math.max(query.lookaheadMinutes, 7 * 24 * 60)
@@ -89,10 +102,11 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       orderBy: 'startTime',
       maxResults: String(query.limit),
       showDeleted: 'false',
+      pageToken: query.pageToken,
     }, query.signal)
     const items = arrayOf(data, 'items')
     const drafts: ConnectorDraft[] = []
-    for (const item of items) {
+    for (const item of items.slice(0, query.limit)) {
       const event = record(item)
       const start = dateTimeOf(event.start) ?? str(record(event.start).date)
       const end = dateTimeOf(event.end) ?? str(record(event.end).date)
@@ -125,15 +139,16 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
         ...(status !== 'cancelled' && imminent ? { wakeReason: 'calendar event starting soon' } : {}),
       })
     }
-    return drafts
+    return { drafts, ...(str(record(data).nextPageToken) ? { nextPageToken: str(record(data).nextPageToken)! } : {}) }
   }
 
-  private async gmail(query: GoogleFetchQuery): Promise<ConnectorDraft[]> {
+  private async gmail(query: GoogleFetchQuery): Promise<GoogleFetchPage> {
     const after = Math.max(0, Math.floor((Date.parse(query.since) - 60_000) / 1_000))
     const list = await this.get('/gmail/v1/users/me/messages', {
       q: `after:${after}`,
       maxResults: String(query.limit),
       includeSpamTrash: 'false',
+      pageToken: query.pageToken,
     }, query.signal)
     const stubs = arrayOf(list, 'messages')
     const drafts: ConnectorDraft[] = []
@@ -168,10 +183,10 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
         ...(wanted ? { wakeReason: 'unread important mail' } : {}),
       })
     }
-    return drafts
+    return { drafts, ...(str(record(list).nextPageToken) ? { nextPageToken: str(record(list).nextPageToken)! } : {}) }
   }
 
-  private async drive(service: GoogleService, query: GoogleFetchQuery): Promise<ConnectorDraft[]> {
+  private async drive(service: GoogleService, query: GoogleFetchQuery): Promise<GoogleFetchPage> {
     const conditions = [`modifiedTime > '${query.since}'`, 'trashed = false']
     const mime = DOC_MIME[service]
     if (mime) conditions.push(`mimeType = '${mime}'`)
@@ -182,6 +197,7 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       fields: DRIVE_FIELDS,
       includeItemsFromAllDrives: 'true',
       supportsAllDrives: 'true',
+      pageToken: query.pageToken,
     }, query.signal)
     const drafts: ConnectorDraft[] = []
     for (const item of arrayOf(data, 'files').slice(0, query.limit)) {
@@ -215,16 +231,17 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
         ...(wanted ? { wakeReason: 'shared document changed by another person' } : {}),
       })
     }
-    return drafts
+    return { drafts, ...(str(record(data).nextPageToken) ? { nextPageToken: str(record(data).nextPageToken)! } : {}) }
   }
 
-  private async tasks(query: GoogleFetchQuery): Promise<ConnectorDraft[]> {
+  private async tasks(query: GoogleFetchQuery): Promise<GoogleFetchPage> {
     const now = this.now()
     const data = await this.get('/tasks/v1/lists/@default/tasks', {
       updatedMin: query.since,
       showCompleted: 'false',
       showHidden: 'false',
       maxResults: String(query.limit),
+      pageToken: query.pageToken,
     }, query.signal)
     const drafts: ConnectorDraft[] = []
     for (const item of arrayOf(data, 'items').slice(0, query.limit)) {
@@ -257,7 +274,7 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
         ...(wanted ? { wakeReason: 'task due soon' } : {}),
       })
     }
-    return drafts
+    return { drafts, ...(str(record(data).nextPageToken) ? { nextPageToken: str(record(data).nextPageToken)! } : {}) }
   }
 
   private async get(

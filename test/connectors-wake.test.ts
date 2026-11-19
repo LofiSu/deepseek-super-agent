@@ -115,7 +115,10 @@ function scheduler(input: {
       ...(input.quiet ?? {}),
     }),
     ...(input.admission ? { admission: input.admission } : {}),
-    fire: trigger => { fired.push(trigger) },
+    fire: trigger => {
+      fired.push(trigger)
+      input.store.putDoc('trigger', trigger.id, trigger)
+    },
     log: line => { lines.push(line) },
   })
   return { runner, fired, lines }
@@ -327,7 +330,7 @@ describe('connector wake scheduler', () => {
     expect(fired[0]?.text).toContain('service=calendar')
   })
 
-  it('does not checkpoint a fetched service when connector ingress throws', async () => {
+  it('keeps an ingress failure in the durable pending wake outbox', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
     store.putDoc('connector_wake', 'state', {
@@ -342,9 +345,92 @@ describe('connector wake scheduler', () => {
     }
 
     await expect(runner.poll(T0 + 16 * MIN)).resolves.toMatchObject({ action: 'wake' })
-    expect(loadConnectorWakeState(store).cursors?.gmail).toBeUndefined()
+    expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+    expect(loadConnectorWakeState(store).notified).toHaveLength(0)
 
     ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = originalFire
+  })
+
+  it('resumes a persisted page token within the record bound without advancing the time cursor', async () => {
+    const { store, index } = setup()
+    const pages: { pageToken?: string; since: string; until: string; ids: string[] }[] = []
+    const api: GoogleWorkspaceApi = {
+      async fetch() { return [] },
+      async fetchPage(_service, query) {
+        pages.push({ pageToken: query.pageToken, since: query.since, until: query.until, ids: [] })
+        const pageNumber = query.pageToken ? 2 : 1
+        const ids = pageNumber === 1 ? ['old-1'] : ['old-2']
+        pages.at(-1)!.ids = ids
+        return {
+          drafts: ids.map(id => draft({ externalId: id, occurredAt: new Date(T0 - 10 * MIN).toISOString() })),
+          ...(pageNumber === 1 ? { nextPageToken: 'page-2' } : {}),
+        }
+      },
+    }
+    const { runner } = scheduler({
+      store, index, api,
+      config: {
+        google: { services: ['gmail'] },
+        poll: { intervalMinutes: 15, maxRecordsPerPoll: 1 },
+        wake: { enabled: false, services: ['gmail'] },
+      },
+    })
+
+    expect((await runner.poll(T0)).action).toBe('backfill')
+    expect(index.stats().count).toBe(1)
+    expect(loadConnectorWakeState(store).cursors?.gmail).toBeUndefined()
+    expect(loadConnectorWakeState(store).pageTokens?.gmail).toBe('page-2')
+    expect((await runner.poll(T0 + 16 * MIN)).action).toBe('backfill')
+    expect(pages[1]?.pageToken).toBe('page-2')
+    expect(pages[1]?.since).toBe(pages[0]?.since)
+    expect(pages[1]?.until).toBe(pages[0]?.until)
+    expect(index.stats().count).toBe(2)
+    expect(loadConnectorWakeState(store).cursors?.gmail).toBe(new Date(T0).toISOString())
+    expect(loadConnectorWakeState(store).pageTokens?.gmail).toBeUndefined()
+    expect(index.query({ limit: 10 }).map(record => record.externalId).sort()).toEqual(['old-1', 'old-2'])
+  })
+
+  it('replays an outbox wake after restart when the crash precedes ingress persistence', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    store.putDoc('connector_wake', 'state', { lastCheckAt: T0, wakes: [], notified: [] })
+    const first = scheduler({ store, index, api: fakeApi([draft()]) })
+    ;(first.runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = () => {
+      throw new Error('simulated crash before ingress commit')
+    }
+    const result = await first.runner.poll(T0 + 16 * MIN)
+    expect(result.action).toBe('wake')
+    expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+    expect(loadConnectorWakeState(store).notified).toHaveLength(0)
+    expect(store.listDocs<Trigger>('trigger').filter(trigger => trigger.id.startsWith(CONNECTOR_TRIGGER_PREFIX))).toHaveLength(0)
+
+    const restarted = scheduler({ store, index, api: fakeApi([draft()]) })
+    const replay = await restarted.runner.poll(T0 + 32 * MIN)
+    expect(replay.action).toBe('silent')
+    expect(restarted.fired).toHaveLength(1)
+    expect(loadConnectorWakeState(store).pending ?? []).toHaveLength(0)
+    expect(loadConnectorWakeState(store).notified).toHaveLength(1)
+    expect(store.listDocs<Trigger>('trigger').filter(trigger => trigger.id.startsWith(CONNECTOR_TRIGGER_PREFIX))).toHaveLength(1)
+  })
+
+  it('recognizes ingress accepted before a crash and does not replay the Trigger', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    store.putDoc('connector_wake', 'state', { lastCheckAt: T0, wakes: [], notified: [] })
+    const first = scheduler({ store, index, api: fakeApi([draft()]) })
+    ;(first.runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = trigger => {
+      store.putDoc('trigger', trigger.id, trigger)
+      throw new Error('simulated crash after ingress commit')
+    }
+    await first.runner.poll(T0 + 16 * MIN)
+    expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+
+    const restarted = scheduler({ store, index, api: fakeApi([draft()]) })
+    await restarted.runner.poll(T0 + 32 * MIN)
+    expect(restarted.fired).toHaveLength(0)
+    expect(loadConnectorWakeState(store).pending ?? []).toHaveLength(0)
+    expect(loadConnectorWakeState(store).notified).toHaveLength(1)
+    expect(store.listDocs<Trigger>('trigger').filter(trigger => trigger.id.startsWith(CONNECTOR_TRIGGER_PREFIX))).toHaveLength(1)
   })
 
   it('marks connector wakes as messaging envelopes', () => {

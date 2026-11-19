@@ -56,10 +56,21 @@ export interface ConnectorNotifiedRow {
   triggerId: string
 }
 
+export interface ConnectorPendingWake {
+  at: number
+  trigger: Trigger
+  recordId: string
+  service: GoogleService
+}
+
 export interface ConnectorWakeState {
   lastCheckAt?: number
   lastWakeAt?: number
+  backfillPending?: boolean
   cursors?: Partial<Record<GoogleService, string>>
+  pageTokens?: Partial<Record<GoogleService, string>>
+  pageQueries?: Partial<Record<GoogleService, { since: string; until: string }>>
+  pending?: ConnectorPendingWake[]
   wakes: ConnectorWakeRow[]
   notified: ConnectorNotifiedRow[]
 }
@@ -145,8 +156,13 @@ export class ConnectorWakeScheduler {
     const api = this.opts.api
     if (!api) return { action: 'disabled', reason: 'no-api' }
 
-    const state = this.loadState()
-    const first = state.lastCheckAt === undefined
+    let state = this.loadState()
+    state = this.reconcilePending(state)
+    if (state.pending?.length) {
+      const pending = state.pending[0]!
+      return { action: 'wake', recordId: pending.recordId, trigger: pending.trigger }
+    }
+    const first = state.lastCheckAt === undefined || state.backfillPending === true
     if (!first) {
       if (typeof state.lastCheckAt !== 'number' || !Number.isFinite(state.lastCheckAt)) {
         this.saveState({ ...state, lastCheckAt: at })
@@ -171,6 +187,8 @@ export class ConnectorWakeScheduler {
     const until = new Date(at).toISOString()
     const lookbackMs = config.wake.lookbackMinutes * 60_000
     const cursors: Partial<Record<GoogleService, string>> = { ...(state.cursors ?? {}) }
+    const pageTokens: Partial<Record<GoogleService, string>> = { ...(state.pageTokens ?? {}) }
+    const pageQueries: Partial<Record<GoogleService, { since: string; until: string }>> = { ...(state.pageQueries ?? {}) }
     const drafts: ConnectorDraft[] = []
     const serviceErrors: string[] = []
     for (const service of config.google.services) {
@@ -179,18 +197,29 @@ export class ConnectorWakeScheduler {
       const since = Number.isFinite(previousMs)
         ? new Date(previousMs - CURSOR_OVERLAP_MS).toISOString()
         : new Date(at - lookbackMs).toISOString()
+      const pageQuery = pageQueries[service]
       try {
-        const fetched = await api.fetch(service, {
-          since,
-          until,
+        const query = {
+          since: pageQuery?.since ?? since,
+          until: pageQuery?.until ?? until,
           limit: config.poll.maxRecordsPerPoll,
           lookaheadMinutes: config.wake.calendarLookaheadMinutes,
-        })
-        drafts.push(...fetched)
-        // Advance from the poll start, not the newest record: a provider with
-        // no new rows still completes a round. A small overlap above absorbs
-        // provider clock skew; trigger ids make the repeat harmless.
-        cursors[service] = until
+          ...(pageTokens[service] ? { pageToken: pageTokens[service] } : {}),
+        }
+        const page = api.fetchPage
+          ? await api.fetchPage(service, query)
+          : { drafts: await api.fetch(service, query) }
+        drafts.push(...page.drafts.slice(0, config.poll.maxRecordsPerPoll))
+        if (page.nextPageToken) {
+          pageTokens[service] = page.nextPageToken
+          pageQueries[service] = { since: query.since, until: query.until }
+        } else {
+          delete pageTokens[service]
+          delete pageQueries[service]
+          // Advance the time cursor only after the provider reports the page is
+          // complete. Continuations retain the original provider query bounds.
+          cursors[service] = query.until
+        }
       } catch (error) {
         serviceErrors.push(`${service}: ${messageOf(error)}`)
         this.log(`[connector] poll failed service=${service}: ${messageOf(error)}`)
@@ -202,10 +231,11 @@ export class ConnectorWakeScheduler {
     const base: ConnectorWakeState = {
       ...state,
       lastCheckAt: at,
-      // A fetched page is not a completed page until its possible ingress has
-      // committed. In particular, never let a failed `fire()` skip the page
-      // on the next pulse.
+      // Keep the previously committed checkpoints until the new page state is
+      // saved; a wake page is saved together with its durable outbox row.
       cursors: state.cursors,
+      pageTokens: state.pageTokens,
+      pageQueries: state.pageQueries,
       wakes: state.wakes
         .filter(row => at - row.at <= WAKE_RETENTION_MS)
         .slice(-MAX_WAKE_ROWS),
@@ -220,7 +250,13 @@ export class ConnectorWakeScheduler {
       skipped: upsert.skipped,
       ...(serviceErrors.length ? { serviceErrors } : {}),
     }
-    const committed = (): ConnectorWakeState => ({ ...base, cursors })
+    const committed = (): ConnectorWakeState => ({
+      ...base,
+      cursors,
+      pageTokens: Object.keys(pageTokens).length ? pageTokens : undefined,
+      pageQueries: Object.keys(pageQueries).length ? pageQueries : undefined,
+      backfillPending: first && Object.keys(pageTokens).length > 0,
+    })
     if (pruned > 0) this.log(`[connector] index pruned=${pruned}`)
 
     // The first round only establishes the index and cursors. Waking from a
@@ -294,29 +330,20 @@ export class ConnectorWakeScheduler {
         this.log(`[connector] wake suppressed triggerId=${trigger.id} reason=${reason}`)
         continue
       }
-      const next: ConnectorWakeState = {
-        ...committed(),
-        lastWakeAt: at,
-        wakes: [...base.wakes, {
-          at,
-          triggerId: trigger.id,
-          recordId: record.id,
-          service: record.service,
-        }].slice(-MAX_WAKE_ROWS),
-        notified: [...base.notified, { at, triggerId: trigger.id }].slice(-MAX_NOTIFIED_ROWS),
-      }
-      // Record before fire: a crash between this write and the ingress commit
-      // must not replay the same source revision on the next pulse.
-      this.saveState(next)
+      const pending: ConnectorPendingWake = { at, trigger, recordId: record.id, service: record.service }
+      this.saveState({ ...committed(), pending: [...(base.pending ?? []), pending] })
       try {
         this.opts.fire(trigger)
       } catch (error) {
-        // The index may safely be retried, but the service checkpoint must
-        // stay before this page until Runtime ingress accepts the trigger.
-        this.saveState(base)
-        this.log(`[connector] fire failed triggerId=${trigger.id}: ${messageOf(error)}`)
+        this.log(`[connector] fire deferred triggerId=${trigger.id}: ${messageOf(error)}`)
         return { action: 'wake', recordId: record.id, trigger, ...counts }
       }
+      const accepted = this.opts.store.getDoc<Trigger>('trigger', trigger.id)
+      if (!accepted) {
+        this.log(`[connector] ingress did not persist triggerId=${trigger.id}; wake remains pending`)
+        return { action: 'wake', recordId: record.id, trigger, ...counts }
+      }
+      this.finishPending(this.loadState(), pending)
       this.log(
         `[connector] wake service=${record.service} recordId=${record.id} `
         + `triggerId=${trigger.id} source=${target.channel.source} thread=${target.channel.thread}`,
@@ -355,6 +382,39 @@ export class ConnectorWakeScheduler {
       return { channel, actor: candidate.trigger.actor }
     }
     return undefined
+  }
+
+  private reconcilePending(state: ConnectorWakeState): ConnectorWakeState {
+    for (const pending of state.pending ?? []) {
+      if (!this.opts.store.getDoc<Trigger>('trigger', pending.trigger.id)) {
+        try {
+          this.opts.fire(pending.trigger)
+        } catch (error) {
+          this.log(`[connector] pending wake retry failed triggerId=${pending.trigger.id}: ${messageOf(error)}`)
+          break
+        }
+      }
+      if (!this.opts.store.getDoc<Trigger>('trigger', pending.trigger.id)) break
+      state = this.finishPending(state, pending)
+    }
+    return state
+  }
+
+  private finishPending(state: ConnectorWakeState, pending: ConnectorPendingWake): ConnectorWakeState {
+    const next: ConnectorWakeState = {
+      ...state,
+      lastWakeAt: pending.at,
+      pending: (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id),
+      wakes: [...state.wakes, {
+        at: pending.at,
+        triggerId: pending.trigger.id,
+        recordId: pending.recordId,
+        service: pending.service,
+      }].slice(-MAX_WAKE_ROWS),
+      notified: [...state.notified, { at: pending.at, triggerId: pending.trigger.id }].slice(-MAX_NOTIFIED_ROWS),
+    }
+    this.saveState(next)
+    return next
   }
 
   private loadState(): ConnectorWakeState {
@@ -396,6 +456,34 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
       }
     }
   }
+  const pageTokens: Partial<Record<GoogleService, string>> = {}
+  if (raw.pageTokens && typeof raw.pageTokens === 'object' && !Array.isArray(raw.pageTokens)) {
+    for (const [service, value] of Object.entries(raw.pageTokens)) {
+      if (typeof value === 'string' && value.length > 0) pageTokens[service as GoogleService] = value
+    }
+  }
+  const pageQueries: Partial<Record<GoogleService, { since: string; until: string }>> = {}
+  if (raw.pageQueries && typeof raw.pageQueries === 'object' && !Array.isArray(raw.pageQueries)) {
+    for (const [service, value] of Object.entries(raw.pageQueries)) {
+      if (!value || typeof value !== 'object') continue
+      const query = value as { since?: unknown; until?: unknown }
+      if (
+        typeof query.since === 'string' && Number.isFinite(Date.parse(query.since))
+        && typeof query.until === 'string' && Number.isFinite(Date.parse(query.until))
+      ) pageQueries[service as GoogleService] = { since: query.since, until: query.until }
+    }
+  }
+  const pending = Array.isArray(raw.pending)
+    ? raw.pending.filter((row): row is ConnectorPendingWake => {
+      if (!row || typeof row !== 'object') return false
+      const candidate = row as ConnectorPendingWake
+      return Number.isFinite(candidate.at)
+        && typeof candidate.recordId === 'string'
+        && typeof candidate.service === 'string'
+        && candidate.trigger != null
+        && typeof candidate.trigger.id === 'string'
+    })
+    : []
   return {
     ...(typeof raw.lastCheckAt === 'number' && Number.isFinite(raw.lastCheckAt)
       ? { lastCheckAt: raw.lastCheckAt }
@@ -403,7 +491,11 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
     ...(typeof raw.lastWakeAt === 'number' && Number.isFinite(raw.lastWakeAt)
       ? { lastWakeAt: raw.lastWakeAt }
       : {}),
+    ...(raw.backfillPending === true ? { backfillPending: true } : {}),
     ...(Object.keys(cursors).length ? { cursors } : {}),
+    ...(Object.keys(pageTokens).length ? { pageTokens } : {}),
+    ...(Object.keys(pageQueries).length ? { pageQueries } : {}),
+    ...(pending.length ? { pending } : {}),
     wakes,
     notified,
   }

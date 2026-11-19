@@ -16,7 +16,12 @@ export {
   type GoogleCredentials,
 } from './connectors/config.ts'
 export { ConnectorIndex, type ConnectorIndexStats, type ConnectorUpsert } from './connectors/index-store.ts'
-export { HttpGoogleWorkspaceApi, type GoogleWorkspaceApi, type GoogleFetchQuery } from './connectors/google.ts'
+export {
+  HttpGoogleWorkspaceApi,
+  type GoogleWorkspaceApi,
+  type GoogleFetchPage,
+  type GoogleFetchQuery,
+} from './connectors/google.ts'
 export { RefreshTokenProvider, type GoogleTokenProvider } from './connectors/oauth.ts'
 export {
   CONNECTOR_TRIGGER_PREFIX,
@@ -24,6 +29,7 @@ export {
   connectorTrigger,
   isConnectorWakeTicket,
   loadConnectorWakeState,
+  type ConnectorPendingWake,
   type ConnectorWakeAction,
   type ConnectorWakeResult,
   type ConnectorWakeState,
