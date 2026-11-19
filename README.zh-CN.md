@@ -1,17 +1,16 @@
 <div align="center">
-  <img src="docs/assets/ds-agent-banner.png" alt="deepseek-super-agent banner" width="100%" />
+  <img src="docs/assets/ds-agent-banner.png" alt="dsh-super-agent banner" width="100%" />
 </div>
 
-# 🤖 deepseek-super-agent
+# 🤖 dsh-super-agent
 
 [English](README.md) | 简体中文
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9%2B-3178C6?logo=typescript&logoColor=white)](./package.json)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![PRs: owner-only](https://img.shields.io/badge/PRs-owner--only-lightgrey)](#参与贡献)
 
-**一个独立实现、MIT 许可的 TypeScript super-agent harness。**
+这是我当时读到 DeepSeek 博客后受到启发做的一个 demo。
 
 底层是轻量的异步 ReAct 运行时，上层是主动式领域引擎：
 **Router / Worker**、**Trigger**、**Thread**、**Eval**、**Ticket**、**Assignment**，以及 **Watchdog**。
@@ -19,7 +18,7 @@
 [文档](docs/zh/index.md) · [快速开始](#快速开始) · [核心能力](#核心能力) · [架构](#架构) · [安全](docs/zh/safety.md) · [模块](docs/MODULES.md) · [Demo](#demo真实信道)
 
 > [!NOTE]
-> 本项目**不是** DeepSeek 官方产品。它是对 DeepSeek 公开 Super-agent 文章与原型的一次独立实现，不包含、不封装、也不依赖 DeepSeek Harness、Cordis 或任何 `@deepseek-ai/dsh*` 包。
+> 这不是 DeepSeek 官方项目，也不是完整产品；我有空时会继续迭代。
 
 ---
 
@@ -47,7 +46,6 @@
 - [安全与部署](#安全与部署)
 - [当前状态](#当前状态)
 - [文档](#文档)
-- [参与贡献](#参与贡献)
 - [致谢](#致谢)
 - [许可](#许可)
 
@@ -56,7 +54,7 @@
 如果你用 Claude Code、Codex、Cursor 或其他编码 Agent，可以直接把这句话交给它：
 
 ```text
-克隆 https://github.com/LofiSu/deepseek-super-agent，执行 pnpm install，然后运行
+克隆 https://github.com/LofiSu/dsh-super-agent，执行 pnpm install，然后运行
 pnpm typecheck 和 pnpm lint。阅读 README.md 与 docs/install.md。在 pnpm test 或
 pnpm demo 之前停下来，等我提供模型凭据和可写的 GitHub 仓库。
 ```
@@ -68,8 +66,8 @@ pnpm demo 之前停下来，等我提供模型凭据和可写的 GitHub 仓库�
 需要 **Node.js 22+**（存储层使用 `node:sqlite`）和 [pnpm](https://pnpm.io/)。
 
 ```bash
-git clone https://github.com/LofiSu/deepseek-super-agent.git
-cd deepseek-super-agent
+git clone https://github.com/LofiSu/dsh-super-agent.git
+cd dsh-super-agent
 pnpm install
 
 pnpm typecheck
@@ -135,8 +133,6 @@ pnpm demo
 - **Engine**：Intake → Eval（Gate + Assessment）→ Mandate/Ticket → Assignment → Outbox。领域状态只在 Engine 写入。
 
 Router 是全局序点：它负责对话、批处理 Trigger 和分派。Worker 在隔离的 Session 里执行。Trigger 驱动整个循环。Watchdog 位于控制路径之外，负责提醒或判失败。
-
-领域命名以[《从零打造 Personal Agent（三）》](https://my.feishu.cn/docx/YtDVdzfxdobjAkxKZiIcl5Emnth)为准：`router` 角色是 **Main Agent / Main Session**，`worker` 角色是 **Executor**，`Subscription` 只是 Ticket ↔ Thread 的上下文关系，不增加任何授权。偏差与修正记录见 [docs/DOMAIN_ALIGNMENT.md](docs/DOMAIN_ALIGNMENT.md)。
 
 ## 核心能力
 
@@ -328,7 +324,7 @@ Router 和 Watchdog 适合用轻量模型，Worker 适合用更强的模型。�
 | 变量 | 默认值 | 作用 |
 |------|--------|------|
 | `DS_AGENT_HOME` | `./.ds-agent` | 状态目录（SQLite、metrics、gateway token）。 |
-| `DS_AGENT_GH_REPO` | `LofiSu/deepseek-super-agent` | GitHub demo 写入的仓库。 |
+| `DS_AGENT_GH_REPO` | `LofiSu/dsh-super-agent` | GitHub demo 写入的仓库。 |
 | `DS_AGENT_SLOW_PATH` | 仅规则 | 设为 `model` 启用模型化入站策略。 |
 | `DS_AGENT_SHARDS` | 一个默认 shard | Router 分片 JSON。 |
 | `DS_AGENT_MESH_CAPACITY` | 进程内默认值 | 最大并发 Worker 节点数。 |
@@ -366,13 +362,13 @@ export DS_AGENT_MCP_SERVERS='[
 | `02-spill-github` | 一个真实 issue 正文 + 两条真实 comment | Router 回复写成 issue comment |
 | `03-watchdog-github` | 一个真实 GitHub issue | acknowledgement issue comment |
 
-每次运行在 `DS_AGENT_GH_REPO`（默认 `LofiSu/deepseek-super-agent`）创建新 issue，等待真实模型，发布真实 comment，再通过 GitHub API 重新读取 comment 作为证据。日志与 JSON 证据在 `/tmp/ds-agent-live-e2e-logs/demos/`。
+每次运行在 `DS_AGENT_GH_REPO`（默认 `LofiSu/dsh-super-agent`）创建新 issue，等待真实模型，发布真实 comment，再通过 GitHub API 重新读取 comment 作为证据。日志与 JSON 证据在 `/tmp/ds-agent-live-e2e-logs/demos/`。
 
 ```bash
 export DS_AGENT_API_BASE=http://127.0.0.1:3425/v1
 export DS_AGENT_API_KEY=magpie
 export DS_AGENT_API_MODEL=workbuddy/deepseek-v4.1-flash
-export DS_AGENT_GH_REPO=LofiSu/deepseek-super-agent
+export DS_AGENT_GH_REPO=LofiSu/dsh-super-agent
 gh auth login
 
 pnpm demo                              # 三个场景
@@ -448,24 +444,6 @@ DS_AGENT_GH_KEEP=1 pnpm demo           # 故意保留真实 issue
 
 英文文档从 [docs/index.md](docs/index.md) 开始。
 
-## 参与贡献
-
-这是一个**主人独占（owner-only）仓库**：只有 LofiSu 可以贡献，不接受外部 pull request。问题反馈与设计讨论请走 GitHub Issues。
-
-如果你在本仓库内工作，请保持 `main` 为绿：
-
-```bash
-pnpm typecheck
-pnpm lint
-pnpm test
-```
-
-- 从当前 `main` 切分支；不要直接提交到 `main`。
-- 一个 pull request 只做一件事；不要 force-push 共享分支。
-- 实况测试是显式入口：`pnpm test:live`、`pnpm test:demo:real`、`pnpm demo`。
-- 功能按实际作用和 M0–M11 模块边界命名，不要用阶段式里程碑命名。
-- 密钥与运行时状态永远不进仓库。
-
 ## 致谢
 
 本项目的形态来自 DeepSeek 的公开文章与原型，代码是独立实现。
@@ -484,4 +462,4 @@ pnpm test
 
 [MIT](./LICENSE)
 
-[![Star History Chart](https://api.star-history.com/svg?repos=LofiSu/deepseek-super-agent&type=Date)](https://star-history.com/#LofiSu/deepseek-super-agent&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=LofiSu/dsh-super-agent&type=Date)](https://star-history.com/#LofiSu/dsh-super-agent&Date)
