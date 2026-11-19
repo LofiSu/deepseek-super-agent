@@ -80,14 +80,34 @@ def install_subreaper():
         raise OSError(code, os.strerror(code))
 
 
-def install_parent_death_signal():
+def install_parent_death_signal(expected_parent_pid):
     parent_pid = os.getppid()
+    if parent_pid != expected_parent_pid:
+        raise SupervisorInterrupted(
+            f'launching worker PID mismatch before PDEATHSIG: expected {expected_parent_pid}, found {parent_pid}'
+        )
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
         code = ctypes.get_errno()
         raise OSError(code, os.strerror(code))
-    if os.getppid() != parent_pid:
-        raise SupervisorInterrupted('test worker exited before supervisor setup completed')
+    if os.getppid() != expected_parent_pid:
+        raise SupervisorInterrupted(
+            f'launching worker PID mismatch after PDEATHSIG: expected {expected_parent_pid}, found {os.getppid()}'
+        )
+
+
+def wait_for_test_bootstrap_gate():
+    gate = os.environ.get('DS_AGENT_TEST_PARENT_RACE_GATE')
+    if not gate:
+        return
+    gate_path = Path(gate)
+    gate_path.with_suffix('.ready').write_text(f'{os.getpid()}\n')
+    release_path = gate_path.with_suffix('.release')
+    deadline = time.monotonic() + 20.0
+    while not release_path.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError('timed out waiting for the test parent-race bootstrap gate')
+        time.sleep(0.01)
 
 
 def read_delegate_pid(pid_file, helper_pid, fixture):
@@ -214,14 +234,17 @@ def cleanup_group(pgid, initial_start_time, report, timeout_s=10.0):
     raise RuntimeError('timed out waiting for detached process-group members to exit and be reaped')
 
 
-def run(mode, home, repo_root, task):
+def run(mode, home, repo_root, task, expected_parent_pid):
+    wait_for_test_bootstrap_gate()
     if mode not in ('fault', 'assertion-failure', 'timeout-failure'):
         raise ValueError(f'unsupported supervisor mode: {mode}')
+    if expected_parent_pid <= 1:
+        raise ValueError('expected launching worker PID must be greater than 1')
 
     install_subreaper()
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGINT, interrupt)
-    install_parent_death_signal()
+    install_parent_death_signal(expected_parent_pid)
 
     home_path = Path(home).resolve()
     root_path = Path(repo_root).resolve()
@@ -261,6 +284,9 @@ def run(mode, home, repo_root, task):
     failure = None
 
     try:
+        helper_launch_marker = os.environ.get('DS_AGENT_TEST_HELPER_LAUNCH_MARKER')
+        if helper_launch_marker:
+            Path(helper_launch_marker).write_text(f'{os.getpid()}\n')
         helper = subprocess.Popen(
             [os.environ.get('DS_AGENT_NODE', 'node'), '--import', 'tsx', helper_script, str(home_path)],
             cwd=str(root_path),
@@ -359,15 +385,17 @@ def run(mode, home, repo_root, task):
 
 
 def main():
-    if len(sys.argv) != 5:
-        print(json.dumps({'fatal': 'usage: supervisor.py MODE HOME REPO_ROOT TASK'}))
+    if len(sys.argv) != 6:
+        print(json.dumps({'fatal': 'usage: supervisor.py MODE HOME REPO_ROOT TASK EXPECTED_PARENT_PID'}))
         return 2
     try:
-        report, status = run(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+        expected_parent_pid = int(sys.argv[5])
+        report, status = run(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], expected_parent_pid)
     except BaseException as error:
         report = {'fatal': f'{type(error).__name__}: {str(error)[:240]}'}
         status = 1
-    print(json.dumps(report, separators=(',', ':')), flush=True)
+    output = json.dumps(report, separators=(',', ':'))
+    print(output, flush=True)
     return status
 
 

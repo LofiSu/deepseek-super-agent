@@ -137,6 +137,43 @@ describe('delegate_agent OS fault boundary', () => {
     await waitForExit(second)
   }, 90_000)
 
+  it('fails closed when the launching worker exits before supervisor parent-death setup', async () => {
+    const home = tempHome()
+    const raceHarness = spawn(
+      'python3',
+      [
+        path.resolve(process.cwd(), 'test/helpers/delegate-os-parent-race.py'),
+        home,
+        process.cwd(),
+        path.resolve(process.cwd(), 'test/helpers/delegate-os-supervisor.py'),
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, DS_AGENT_NODE: process.execPath },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
+    raceHarness.once('close', () => closedChildren.add(raceHarness))
+    children.push(raceHarness)
+    let stdout = ''
+    let stderr = ''
+    raceHarness.stdout?.setEncoding('utf8')
+    raceHarness.stderr?.setEncoding('utf8')
+    raceHarness.stdout?.on('data', chunk => { stdout += chunk })
+    raceHarness.stderr?.on('data', chunk => { stderr += chunk })
+    await waitForExit(raceHarness)
+
+    expect(raceHarness.exitCode, stderr || stdout).toBe(0)
+    const result = JSON.parse(stdout.trim()) as Record<string, unknown>
+    expect(result.worker_exited_before_supervisor_setup).toBe(true)
+    expect(result.supervisor_exit_code).not.toBe(0)
+    expect((result.supervisor_report as Record<string, unknown>).fatal).toContain('launching worker PID mismatch')
+    expect(result.helper_launch_attempted).toBe(false)
+    expect(result.recovery_helper_marker_exists).toBe(false)
+    expect(result.delegate_pid_file_exists).toBe(false)
+    expect(result.remaining_owned_children).toEqual([])
+  }, 30_000)
+
   it.each([
     ['assertion-failure', 'AssertionError'],
     ['timeout-failure', 'TimeoutError'],

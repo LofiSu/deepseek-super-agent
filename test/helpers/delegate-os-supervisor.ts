@@ -31,7 +31,7 @@ export async function runDelegateOsSupervisor(
     throw new Error('delegate OS-fault supervisor requires Linux subreaper support')
   }
   const script = path.resolve(process.cwd(), 'test/helpers/delegate-os-supervisor.py')
-  const child = spawn('python3', [script, mode, home, process.cwd(), task], {
+  const child = spawn('python3', [script, mode, home, process.cwd(), task, String(process.pid)], {
     cwd: process.cwd(),
     env: { ...process.env, DS_AGENT_NODE: process.execPath },
     stdio: ['ignore', 'pipe', 'pipe'],
