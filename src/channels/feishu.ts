@@ -287,8 +287,10 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
         provider: 'feishu',
         chat_id: message.chat_id,
         // Group admission reads only `address.group`; a Feishu chat is the group.
-        // For verified p2p direct mode, omit group so short chatter is not noise-dropped.
-        ...(p2pDirect ? {} : { group: message.chat_id }),
+        // The p2p marker scopes the override and its group-allowlist exemption.
+        ...(p2pDirect
+          ? { chat_type: 'p2p' }
+          : { group: message.chat_id }),
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
       },

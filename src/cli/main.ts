@@ -224,8 +224,9 @@ one start; otherwise the stored cursor for that chat seeds the poll, otherwise
 the source starts at now-5min. Feishu group messages keep the chat id in
 channel.address.group, so DS_AGENT_GROUP_ALLOWLIST admits by chat. Set
 DS_AGENT_FEISHU_P2P_DIRECT=1 to mark messages whose Feishu chat_type is explicitly
-p2p as direct, allowing short 1:1 messages through the noise filter; group and
-unknown chat types keep their group identity and are not promoted to direct.
+p2p as direct, allowing short 1:1 messages through the noise filter. The group
+allowlist applies to groups; actor allowlists still apply to P2P senders. Group
+and unknown chat types keep their group identity and are not promoted to direct.
 --imessage and --feishu may be combined: both configurations are resolved before
 Runtime.create, one Runtime/SQLite store is shared, and each loop keeps its own
 AbortController, cursor, and outbox. If either configuration is absent or

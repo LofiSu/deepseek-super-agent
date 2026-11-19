@@ -172,7 +172,16 @@ describe('Feishu message mapping', () => {
       }), config)
       expect(trigger.addressed).toBe('direct')
       expect(trigger.channel?.address?.group).toBeUndefined()
-      expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({ action: 'pass' })
+      expect(trigger.channel?.address?.chat_type).toBe('p2p')
+      const groupScoped = admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_group_only',
+        DS_AGENT_ACTOR_ALLOWLIST: 'ou_alice',
+      })
+      expect(filterTrigger(trigger, ruleSemantic, groupScoped)).toMatchObject({ action: 'pass' })
+      expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_group_only',
+        DS_AGENT_ACTOR_ALLOWLIST: 'ou_someone_else',
+      }))).toMatchObject({ action: 'drop', reason: 'actor-not-allowlisted' })
     } finally {
       if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
       else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev

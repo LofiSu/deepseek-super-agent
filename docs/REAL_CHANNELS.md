@@ -185,9 +185,11 @@ filter. Group messages and messages with a missing or unknown `chat_type` keep
 admits or denies them in `src/ingress/filter.ts`. Set
 `DS_AGENT_FEISHU_P2P_DIRECT=1` to mark only messages explicitly tagged
 `chat_type=p2p` as direct, allowing short 1:1 messages through the noise filter.
-A real bot mention still sets `addressed='mention'`. `trigger.meta` carries
-provider ids for outbox routing only and is never read by admission. A denied
-message is persisted as a filtered disposition and cannot become a Ticket.
+These verified P2P messages are outside the group-only allowlist; configured
+actor allowlists still apply. A real bot mention still sets `addressed='mention'`.
+`trigger.meta` carries provider ids for outbox routing only and is never read by
+admission. A denied message is persisted as a filtered disposition and cannot
+become a Ticket.
 
 **Shutdown.** The first SIGINT/SIGTERM aborts every inbound poll loop, waits for
 both in-flight polls and their drains (jobs, outbox flush), closes the iMessage

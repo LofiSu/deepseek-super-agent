@@ -34,7 +34,8 @@ export interface AdmissionRules {
   /**
    * When non-empty, only these group ids may pass. The id comes from the
    * channel address (`trigger.channel.address.group`), never from `meta`.
-   * A missing group is not allowed while this list is active.
+   * A missing group is not allowed while this list is active; verified Feishu
+   * p2p direct messages are outside the group rule.
    */
   groups?: string[]
   /** Always drop when `trigger.actor.id` matches, e.g. the daemon's own bot id. */
@@ -48,8 +49,14 @@ function admissionDeny(trigger: Trigger, rules?: AdmissionRules): string | undef
     return 'actor-not-allowlisted'
   }
   if (rules.groups?.length) {
-    const group = trigger.channel?.address?.group?.trim()
-    if (!group || !rules.groups.includes(group)) return 'group-not-allowlisted'
+    const address = trigger.channel?.address
+    const verifiedFeishuP2p = trigger.channel?.source === 'im'
+      && address?.provider === 'feishu'
+      && address.chat_type === 'p2p'
+    if (!verifiedFeishuP2p) {
+      const group = address?.group?.trim()
+      if (!group || !rules.groups.includes(group)) return 'group-not-allowlisted'
+    }
   }
   return undefined
 }
