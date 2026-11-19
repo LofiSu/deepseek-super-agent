@@ -449,7 +449,7 @@ export class ConnectorWakeScheduler {
   private reconcilePending(state: ConnectorWakeState, decisionAt: number, enabled: boolean): ConnectorWakeState {
     for (const pending of state.pending ?? []) {
       if (!this.ingressComplete(pending.trigger.id)) {
-        const reason = this.pendingAuthorizationReason(pending, decisionAt, enabled)
+        const reason = this.pendingAuthorizationReason(state, pending, decisionAt, enabled)
         if (reason) {
           this.log(`[connector] pending wake held triggerId=${pending.trigger.id} reason=${reason}`)
           break
@@ -470,6 +470,7 @@ export class ConnectorWakeScheduler {
   }
 
   private pendingAuthorizationReason(
+    state: ConnectorWakeState,
     pending: ConnectorPendingWake,
     at: number,
     connectorEnabled: boolean,
@@ -479,6 +480,15 @@ export class ConnectorWakeScheduler {
     if (!wake.enabled) return 'wake-disabled'
     if (withinQuietHours(at, this.opts.proactive)) return 'quiet-hours'
     if (!wake.services.includes(pending.service)) return 'service-disabled'
+    const denied = admissionDenial(pending.trigger, this.opts.admission)
+    if (denied) return denied
+    if (
+      state.lastWakeAt !== undefined
+      && at - state.lastWakeAt < wake.minIntervalMinutes * 60_000
+    ) return 'min-interval'
+    const today = dayKey(at, this.opts.proactive.timezone)
+    const todayWakes = state.wakes.filter(row => dayKey(row.at, this.opts.proactive.timezone) === today)
+    if (todayWakes.length >= wake.maxPerDay) return 'daily-cap'
     const currentTarget = this.findWakeTarget(wake)
     if (!currentTarget) return 'no-current-private-target'
     return sameWakeTarget(currentTarget, pending.trigger) ? undefined : 'private-target-changed'

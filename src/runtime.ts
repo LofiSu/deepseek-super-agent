@@ -2931,9 +2931,9 @@ export class Runtime {
   /** A persisted trigger id is a duplicate; re-receive so the Engine stays authoritative. */
   private duplicate(trigger: Trigger): ReceiveResult | undefined {
     if (!this.store.getDoc<Trigger>('trigger', trigger.id)) return undefined
-    // Intake writes the trigger before its thread, disposition, and event work.
-    // An existing row without a disposition is an interrupted ingress that may
-    // be safely resumed; a completed row remains an ordinary duplicate.
+    // Engine.receive commits Intake's trigger, routing, and disposition in one
+    // Store transaction; a process crash rolls them all back. Resume a legacy or
+    // fault-injected trigger-only row; a completed row remains a duplicate.
     if (!this.store.getDoc<Disposition>('disposition', trigger.id)) return undefined
     const result = this.engine.receive(trigger)
     this.log.info(`[engine] Intake.receive id=${trigger.id} result=${result}`)

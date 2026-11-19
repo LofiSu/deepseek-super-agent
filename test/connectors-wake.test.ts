@@ -710,14 +710,29 @@ describe('connector wake scheduler', () => {
       name: string
       wake: Record<string, unknown>
       quiet?: { quietStart: string; quietEnd: string; timezone: string }
+      admission?: { actors?: string[]; groups?: string[] }
+      reason?: string
     }[] = [
-      { name: 'disabled', wake: { enabled: false } },
+      { name: 'disabled', wake: { enabled: false }, reason: 'wake-disabled' },
       {
         name: 'quiet-hours',
         wake: {},
         quiet: { quietStart: '10:00', quietEnd: '11:00', timezone: 'UTC' },
+        reason: 'quiet-hours',
       },
-      { name: 'changed-target', wake: { source: 'cli', thread: 'other' } },
+      { name: 'changed-target', wake: { source: 'cli', thread: 'other' }, reason: 'no-current-private-target' },
+      {
+        name: 'actor-revoked',
+        wake: {},
+        admission: { actors: ['another-owner'] },
+        reason: 'actor-not-allowlisted',
+      },
+      {
+        name: 'group-revoked',
+        wake: {},
+        admission: { groups: ['another-group'] },
+        reason: 'group-not-allowlisted',
+      },
     ]
     for (const entry of cases) {
       const { store, index } = setup()
@@ -730,7 +745,7 @@ describe('connector wake scheduler', () => {
         wakes: [],
         notified: [],
       })
-      const { runner } = scheduler({
+      const { runner, lines } = scheduler({
         store,
         index,
         api: fakeApi([]),
@@ -738,6 +753,7 @@ describe('connector wake scheduler', () => {
           google: { services: ['gmail'] },
           wake: { enabled: true, services: ['gmail'], source: 'cli', thread: 'local', ...entry.wake },
         },
+        ...(entry.admission ? { admission: entry.admission } : {}),
         ...(entry.quiet ? { quiet: entry.quiet } : {}),
       })
       let fires = 0
@@ -748,6 +764,7 @@ describe('connector wake scheduler', () => {
       expect(loadConnectorWakeState(store).pending).toHaveLength(1)
       expect(loadConnectorWakeState(store).wakes).toHaveLength(0)
       expect(loadConnectorWakeState(store).notified).toHaveLength(0)
+      expect(lines.some(line => line.includes(`reason=${entry.reason}`))).toBe(true)
     }
 
     const { store, index } = setup()
@@ -782,6 +799,52 @@ describe('connector wake scheduler', () => {
     expect(state.lastWakeAt).toBe(Date.parse(completedAt))
     expect(state.wakes[0]?.at).toBe(Date.parse(completedAt))
     expect(state.notified[0]?.at).toBe(Date.parse(completedAt))
+  })
+
+  it('rechecks min-interval and daily caps before replaying incomplete pending wakes', async () => {
+    for (const policy of ['min-interval', 'daily-cap'] as const) {
+      const { store, index } = setup()
+      seedOwnerThread(store)
+      const pending = pendingWake(index, T0, `replay-${policy}`)
+      const priorAt = T0 + 10 * MIN
+      store.putDoc('connector_wake', 'state', {
+        lastCheckAt: T0,
+        ...(policy === 'min-interval' ? { lastWakeAt: priorAt } : {}),
+        cursors: { gmail: new Date(T0).toISOString() },
+        pending: [pending],
+        wakes: policy === 'daily-cap' ? [{
+          at: priorAt,
+          triggerId: 'trg_prior_wake',
+          recordId: 'record_prior_wake',
+          service: 'gmail',
+        }] : [],
+        notified: [],
+      })
+      const { runner, fired, lines } = scheduler({
+        store,
+        index,
+        api: fakeApi([]),
+        config: {
+          google: { services: ['gmail'] },
+          wake: {
+            enabled: true,
+            services: ['gmail'],
+            source: 'cli',
+            thread: 'local',
+            minIntervalMinutes: 15,
+            maxPerDay: policy === 'daily-cap' ? 1 : 3,
+          },
+        },
+      })
+      ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = trigger => {
+        fired.push(trigger)
+      }
+      expect((await runner.poll(T0 + 16 * MIN)).action).toBe('wake')
+      expect(fired).toHaveLength(0)
+      expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+      expect(loadConnectorWakeState(store).cursors?.gmail).toBe(new Date(T0 + 16 * MIN).toISOString())
+      expect(lines.some(line => line.includes(`reason=${policy}`))).toBe(true)
+    }
   })
 
   it('uses ingress completion time for caps and min-interval after cross-day replay', async () => {
