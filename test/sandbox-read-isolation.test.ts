@@ -17,10 +17,6 @@ const SYSTEM_PATHS = [
   '/etc',
   '/private/var/db/dyld',
   '/dev',
-  '/private/tmp',
-  '/tmp',
-  '/var/folders',
-  '/private/var/folders',
 ]
 
 function darwinProfile(policy: SandboxPolicy, execPath = '/opt/node/bin/node'): string {
@@ -66,6 +62,9 @@ describe('strict read isolation (Darwin)', () => {
     // The writable root is readable and writable.
     expect(profile).toContain(`(allow file-read* (subpath "${workspace}"))`)
     expect(profile).toContain(`(allow file-write* (subpath "${workspace}"))`)
+    // Temporary directories are not host-readable or writable in strict mode.
+    expect(profile).not.toContain('(allow file-read* (subpath "/tmp"))')
+    expect(profile).not.toContain('(allow file-write* (subpath "/tmp"))')
     // Write, exec, and network rules keep today's shape.
     expect(profile).toContain('(deny default)')
     expect(profile).toContain('(allow process-exec)')
@@ -137,7 +136,9 @@ describe('strict read isolation (Linux)', () => {
     expect(argv.join(' ')).toContain('--ro-bind /opt/extra-tools /opt/extra-tools')
     expect(argv.join(' ')).toContain('--dev /dev')
     expect(argv.join(' ')).toContain('--proc /proc')
-    expect(argv.join(' ')).toContain('--ro-bind /tmp /tmp')
+    expect(argv.join(' ')).not.toContain('--ro-bind /tmp /tmp')
+    expect(argv.join(' ')).toContain('--tmpfs /tmp')
+    expect(argv.join(' ')).not.toContain('--ro-bind / /')
     expect(argv.join(' ')).toContain(`--bind ${workspace} ${workspace}`)
     // Network stays isolated unless explicitly allowed.
     expect(argv).toContain('--unshare-net')

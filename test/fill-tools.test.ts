@@ -58,6 +58,49 @@ class RecordingTarget implements FillTarget {
   }
 }
 
+class UncertainTarget extends RecordingTarget {
+  calls = 0
+  override fill(field: FillField, value: string): void {
+    super.fill(field, value)
+    this.calls += 1
+    if (this.calls === 1) throw new Error('simulated lost response after external write')
+  }
+}
+
+class BlockingTarget extends RecordingTarget {
+  started!: () => void
+  release!: () => void
+  readonly startedPromise = new Promise<void>(resolve => { this.started = resolve })
+  private readonly blocked = new Promise<void>(resolve => { this.release = resolve })
+
+  override async fill(field: FillField, value: string): Promise<void> {
+    this.started()
+    await this.blocked
+    super.fill(field, value)
+  }
+}
+
+function buildTools(store: Store, home: string, vault: FillVault, target: FillTarget, logs: string[]) {
+  const host: Host = {
+    repo: store,
+    now: () => new Date().toISOString(),
+    metrics: new Metrics(home),
+    log: line => logs.push(line),
+    scope: { admit: () => ({ listened: true, reason: 'test' }) },
+  }
+  return new ToolRegistry({
+    store,
+    ports: bindRolePorts(new Engine(host)),
+    env: new LocalEnv(path.join(home, 'workspaces'), { sandbox: { enabled: false } }),
+    metrics: new Metrics(home),
+    redact: text => text,
+    log: line => logs.push(line),
+    scheduleJob: () => {},
+    routerTurn: async () => {},
+    fill: { vault, target },
+  })
+}
+
 function open(opts: { target?: FillTarget } = {}) {
   const home = tempHome()
   dirs.push(home)
@@ -178,6 +221,65 @@ describe('fill vault tools', () => {
       ctx,
     )).rejects.toThrow(/already used for a fill/)
     expect(target.writes).toHaveLength(2)
+  })
+
+  it('consumes approval before an uncertain target effect and preserves that state across restart', async () => {
+    const target = new UncertainTarget()
+    const { tools, engine, store, vault, logs, home } = open({ target })
+    const plan = await tools.invoke(
+      { id: 'uncertain-plan', name: 'prepare_fill', args: { entry: 'visa', fields: 'number' } },
+      ctx,
+    ) as { action: string }
+    const requested = await tools.invoke(
+      { id: 'uncertain-approval', name: 'request_approval', args: { action: plan.action } },
+      ctx,
+    ) as { approvalId: string }
+    engine.decideApproval('ticket_1', requested.approvalId, 'approved')
+    const call = {
+      id: 'uncertain-fill',
+      name: 'fill_credential',
+      args: { entry: 'visa', fields: 'number', approvalId: requested.approvalId },
+    }
+
+    await expect(tools.invoke(call, ctx)).rejects.toThrow(/simulated lost response/)
+    expect(target.calls).toBe(1)
+    expect(target.writes).toHaveLength(1)
+    expect(store.getDoc<Ticket>('ticket', 'ticket_1')!.collab!.approvals![0]!.fillState).toBe('unknown')
+    await expect(tools.invoke({ ...call, id: 'uncertain-replay' }, ctx)).rejects.toThrow(/unknown fill outcome/)
+    expect(target.calls).toBe(1)
+
+    store.close()
+    const restartedStore = new Store(home)
+    stores.push(restartedStore)
+    const restartedTools = buildTools(restartedStore, home, vault, target, logs)
+    await expect(restartedTools.invoke({ ...call, id: 'uncertain-after-restart' }, ctx))
+      .rejects.toThrow(/unknown fill outcome/)
+    expect(target.calls).toBe(1)
+  })
+
+  it('blocks concurrent calls while the durable approval claim is in flight', async () => {
+    const target = new BlockingTarget()
+    const { tools, engine, store } = open({ target })
+    const plan = await tools.invoke(
+      { id: 'concurrent-plan', name: 'prepare_fill', args: { entry: 'visa', fields: 'number' } },
+      ctx,
+    ) as { action: string }
+    const requested = await tools.invoke(
+      { id: 'concurrent-approval', name: 'request_approval', args: { action: plan.action } },
+      ctx,
+    ) as { approvalId: string }
+    engine.decideApproval('ticket_1', requested.approvalId, 'approved')
+    const call = {
+      name: 'fill_credential',
+      args: { entry: 'visa', fields: 'number', approvalId: requested.approvalId },
+    }
+    const first = tools.invoke({ ...call, id: 'concurrent-first' }, ctx)
+    await target.startedPromise
+    await expect(tools.invoke({ ...call, id: 'concurrent-second' }, ctx)).rejects.toThrow(/in_flight fill outcome/)
+    target.release()
+    await expect(first).resolves.toMatchObject({ entry: 'visa', fields: ['number'] })
+    expect(target.writes).toHaveLength(1)
+    expect(store.getDoc<Ticket>('ticket', 'ticket_1')!.collab!.approvals![0]!.fillState).toBe('completed')
   })
 
   it('rejects an approval whose exact action text is for another fill', async () => {

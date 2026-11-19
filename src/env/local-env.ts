@@ -19,8 +19,8 @@ export interface LocalEnvOptions {
   /** Secret names from the vault to inject into child processes. */
   vaultNames?: readonly string[]
   /**
-   * Extra values to scrub from bash/read output. The fill vault uses this so a
-   * Worker that cats the config file still cannot read a value back. Never log.
+   * Extra values to scrub from bash/read output as defense in depth. This is
+   * not a filesystem confidentiality boundary. Never log these values.
    */
   redactValues?: readonly string[]
   sandbox?: SandboxPolicy

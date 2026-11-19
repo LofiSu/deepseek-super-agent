@@ -236,10 +236,15 @@ The UI is not a substitute for OS file permissions or full-disk encryption.
   and requires group/world permission bits to be clear (typically `0600`); it
   exposes names, kinds, field names, and a receipt,
   never a value. `fill()` calls a trusted `FillTarget`; missing or unsafe config
-  means fill is unavailable. The Runtime adds fill values to the redaction list
-  at any length, and `LocalEnv` scrubs them from `bash`/`read_file` output, so a
-  Worker that reads the config file still sees `[redacted]`. A fill also needs
-  an owner-approved card whose exact action text matches.
+  means fill is unavailable. When a fill vault loads, the Runtime enables strict
+  worker read isolation. Worker filesystem access is limited to system/toolchain
+  roots and its workspace; broad temporary-directory access is not granted.
+  Output redaction remains defense in depth and is not a confidentiality
+  boundary. A fill needs an owner-approved card whose exact action text matches.
+  The Runtime durably claims that approval before calling the target. A crash
+  leaves it `in_flight`; a target error leaves it `unknown`, since some fields
+  may already have been applied. Neither state permits replay; an owner must
+  issue a new approval before a retry.
 - **Worker tool scope.** Executor tools exclude `reply_user`, `decide`, and
   `receive`; only the Router can speak or terminate (`src/harness/tools.ts:299`).
 

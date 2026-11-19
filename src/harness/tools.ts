@@ -403,14 +403,53 @@ function requireApprovedFillAction(
   if (approval.status !== 'approved') {
     throw new UserError(`approval ${approvalId} is ${approval.status}; owner approval is required before a fill`)
   }
-  if (approval.usedAt) {
+  if (approval.usedAt || approval.fillState === 'completed') {
     throw new UserError(`approval ${approvalId} was already used for a fill; request a new approval`)
+  }
+  if (approval.fillState === 'in_flight' || approval.fillState === 'unknown') {
+    throw new UserError(`approval ${approvalId} has a ${approval.fillState} fill outcome; request a new owner approval before retrying`)
   }
   const storedActionId = approval.actionId || approvalActionId(approval.action)
   if (approval.action !== action || storedActionId !== approvalActionId(action)) {
     throw new UserError(`approval ${approvalId} does not match this fill; request approval for the exact action`)
   }
   return approval
+}
+
+/** Atomically consume an approved fill before any external field write starts. */
+function claimApprovedFill(
+  store: Store,
+  ticketId: string,
+  approvalId: string,
+  action: string,
+): ApprovalRequest {
+  return store.atomic(() => {
+    const fresh = store.getDoc<Ticket>('ticket', ticketId)
+    if (!fresh || fresh.ended) throw new UserError(`ticket ${ticketId} is unavailable for a fill`)
+    const approval = requireApprovedFillAction(fresh, approvalId, action)
+    approval.fillState = 'in_flight'
+    approval.fillClaimedAt = new Date().toISOString()
+    store.putDoc('ticket', fresh.id, fresh)
+    return approval
+  })
+}
+
+function persistFillOutcome(
+  store: Store,
+  ticketId: string,
+  approvalId: string,
+  state: 'unknown' | 'completed',
+): void {
+  store.atomic(() => {
+    const fresh = store.getDoc<Ticket>('ticket', ticketId)
+    const current = fresh?.collab?.approvals?.find(item => item.id === approvalId)
+    if (!fresh || !current || current.fillState !== 'in_flight') {
+      throw new UserError(`fill claim ${approvalId} could not be finalized`)
+    }
+    current.fillState = state
+    if (state === 'completed') current.usedAt = new Date().toISOString()
+    store.putDoc('ticket', fresh.id, fresh)
+  })
 }
 
 function fillEntryOf(fill: FillTools, entry: string): { kind: FillKind; fields: FillField[] } {
@@ -752,17 +791,21 @@ function fillTools(
         const { fields: available } = fillEntryOf(fill, entry)
         const fields = parseFillFields(args.fields, available)
         const plan = plannedFill(fill, entry, fields)
-        const approval = requireApprovedFillAction(ticket, String(args.approvalId ?? ''), plan.action)
+        const approvalId = String(args.approvalId ?? '')
+        // Claim durably before calling a target that may apply a field and then
+        // lose its response. A crash leaves in_flight, which remains consumed.
+        const approval = claimApprovedFill(store, ticket.id, approvalId, plan.action)
         const target = requireFillTarget(fill)
-        const receipt = await fill.vault.fill({ entry, fields: plan.fields, target })
-        // One approved card authorizes one fill. Re-read before writing so a
-        // concurrent decision is not overwritten.
-        const fresh = store.getDoc<Ticket>('ticket', ticket.id)
-        const current = fresh?.collab?.approvals?.find(item => item.id === approval.id)
-        if (fresh && current) {
-          current.usedAt = new Date().toISOString()
-          store.putDoc('ticket', fresh.id, fresh)
+        let receipt
+        try {
+          receipt = await fill.vault.fill({ entry, fields: plan.fields, target })
+        } catch (error) {
+          // The target may have applied some fields before failing. Mark the
+          // result unknown and never make this approval replayable.
+          persistFillOutcome(store, ticket.id, approval.id, 'unknown')
+          throw error
         }
+        persistFillOutcome(store, ticket.id, approval.id, 'completed')
         log(
           `[fill] filled entry=${receipt.entry} kind=${receipt.kind} fields=${receipt.fields.join(',')}`
           + ` target=${receipt.target} approvalId=${approval.id}`,

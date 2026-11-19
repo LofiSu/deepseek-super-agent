@@ -44,10 +44,6 @@ const DARWIN_READ_PATHS = [
   '/etc',
   '/private/var/db/dyld',
   '/dev',
-  '/private/tmp',
-  '/tmp',
-  '/var/folders',
-  '/private/var/folders',
 ] as const
 
 /** System/toolchain roots bound read-only for bash and Node in strict Linux mode. */
@@ -84,7 +80,9 @@ function darwinReadPaths(policy: SandboxPolicy, execPath: string): string[] {
 }
 
 function darwinProfile(policy: SandboxPolicy, execPath: string): string {
-  const writes = ['/private/tmp', '/tmp', '/var/folders', '/private/var/folders', ...(policy.writableRoots ?? [])]
+  const writes = policy.readIsolation
+    ? [...(policy.writableRoots ?? [])]
+    : ['/private/tmp', '/tmp', '/var/folders', '/private/var/folders', ...(policy.writableRoots ?? [])]
   const lines = [
     '(version 1)',
     '(deny default)',
@@ -124,7 +122,7 @@ function linuxStrictArgv(policy: SandboxPolicy, exists: (path: string) => boolea
     ...reads,
     '--dev', '/dev',
     '--proc', '/proc',
-    '--ro-bind', '/tmp', '/tmp',
+    '--tmpfs', '/tmp',
     ...writable,
     '--',
   ]

@@ -254,7 +254,11 @@ export interface ApprovalRequest {
   decidedAt?: string
   decidedBy?: string
   note?: string
-  /** Set after a vault fill consumes this approval; an approved card is one fill. */
+  /** Set before the external fill call; this approval is never automatically reusable. */
+  fillState?: 'in_flight' | 'unknown' | 'completed'
+  /** Timestamp for the durable fill claim, including interrupted/uncertain attempts. */
+  fillClaimedAt?: string
+  /** Set after a vault fill completes; retained for legacy approval displays. */
   usedAt?: string
 }
 

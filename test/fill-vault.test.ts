@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import {
   FillVault,
   ProcessFillTarget,
@@ -195,22 +196,31 @@ describe('fill-only vault', () => {
     expect(message).not.toContain('stdin-only-value')
   })
 
-  it('redacts short vault values from a worker shell even if the file is readable', async () => {
-    const dir = home()
-    const file = writeVault(dir, {
-      fill: { card: { kind: 'card', number: '4111111111111111', cvc: '987' } },
-    })
-    const { vault } = loadFillVault(file)
-    const env = new LocalEnv(path.join(dir, 'workspaces'), {
-      env: { PATH: process.env.PATH },
-      sandbox: { enabled: false },
-      redactValues: vault!.redactionValues(),
-    })
-    const result = await env.bash('w1', `cat ${file}`)
-    expect(result.stdout).not.toContain('4111111111111111')
-    expect(result.stdout).not.toContain('987')
-    expect(result.stdout).toContain('[redacted]')
-  })
+  it.skipIf(process.platform !== 'linux' || spawnSync('which', ['bwrap'], { stdio: 'ignore' }).status !== 0)(
+    'denies shell reads and transformed output for a synthetic vault outside the workspace',
+    async () => {
+      const dir = home()
+      const file = writeVault(dir, {
+        fill: { card: { kind: 'card', number: 'SYNTHETIC-SECRET-173', cvc: 'SYNTHETIC-CVC-173' } },
+      })
+      const { vault } = loadFillVault(file)
+      const env = new LocalEnv(path.join(dir, 'workspaces'), {
+        timeoutMs: 10_000,
+        env: { PATH: process.env.PATH },
+        readIsolation: true,
+        redactValues: vault!.redactionValues(),
+      })
+      const result = await env.bash(
+        'w1',
+        `set -o pipefail; cat ${file} | base64 || echo read-denied`,
+      )
+      expect(result.code).toBe(0)
+      expect(result.stdout).toContain('read-denied')
+      expect(result.stdout).not.toContain('SYNTHETIC-SECRET-173')
+      expect(result.stdout).not.toContain(Buffer.from('SYNTHETIC-SECRET-173').toString('base64'))
+      await expect(env.readFile('w1', file)).rejects.toThrow(/path escapes workspace/)
+    },
+  )
 
   it('parses a document for an embedding app without exposing values in summaries', () => {
     const vault = FillVault.fromDocument({

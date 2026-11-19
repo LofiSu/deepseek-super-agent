@@ -540,10 +540,9 @@ export class Runtime {
   static create(opts: RuntimeOptions): Runtime {
     const baseEnv = opts.env ?? process.env
     const mcpConfig = mcpServersFromConfig(opts.mcpServers, baseEnv)
-    // Fill-vault values never enter the environment or the Store. They join
-    // the redaction list so an accidental tool output or log line cannot
-    // replay one; LocalEnv also scrubs them from bash/read_file results at any
-    // length.
+    // Fill-vault values never enter the environment or the Store. Redaction is
+    // defense in depth only: when a vault loads, worker shell filesystem reads
+    // are strictly confined so the source file is not readable by the worker.
     const fillLoad: { vault?: FillVault; reason?: string } = opts.fillVault === false
       ? { reason: 'disabled' }
       : opts.fillVault
@@ -579,7 +578,10 @@ export class Runtime {
     const metrics = new Metrics(opts.home)
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), {
       env: baseEnv,
-      ...(fillVault ? { redactValues: fillVault.redactionValues() } : {}),
+      ...(fillVault ? {
+        redactValues: fillVault.redactionValues(),
+        readIsolation: true,
+      } : {}),
     })
     const now = opts.now ?? (() => new Date().toISOString())
     const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv, line => log.info(line))

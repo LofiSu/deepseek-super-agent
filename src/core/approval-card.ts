@@ -25,6 +25,9 @@ export function formatApprovalCard(approval: ApprovalRequest, indent = ''): stri
   ]
   if (approval.reason) lines.push(`${indent}  reason: ${approval.reason}`)
   if (approval.note) lines.push(`${indent}  note: ${approval.note}`)
+  if (approval.fillState && approval.fillState !== 'completed') {
+    lines.push(`${indent}  fill outcome: ${approval.fillState}; request a new owner approval before retrying`)
+  }
   if (approval.usedAt) lines.push(`${indent}  used by fill: ${approval.usedAt}`)
   lines.push(`${indent}  answers: ${APPROVAL_ANSWERS.join(' | ')}`)
   return lines.join('\n')
