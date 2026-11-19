@@ -4,6 +4,7 @@ import {
   finishDelegateOperation,
 } from '../core/external-effects.ts'
 import { ticketStage } from '../core/stage.ts'
+import { normalizeBrowserFields, type BrowserErrands } from '../env/browser-errands.ts'
 import { redactUnknown } from '../env/sanitize.ts'
 import type { LocalAgentRegistry } from '../env/local-agents.ts'
 import type { SkillRegistry } from '../env/skills.ts'
@@ -53,6 +54,8 @@ export interface ToolDeps {
   localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks. Absent means read_skill is unavailable. */
   skills?: SkillRegistry
+  /** Owner-configured browser errands. Absent means the browser tools are off. */
+  browserErrands?: BrowserErrands
 }
 
 interface ToolDef extends ToolSpec {
@@ -99,6 +102,7 @@ export class ToolRegistry {
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
       ...(deps.localAgents ? localAgentTools(deps.localAgents, store, log) : []),
       ...(deps.skills ? skillTools(deps.skills) : []),
+      ...(deps.browserErrands ? browserErrandTools(deps.browserErrands, store) : []),
     ]
   }
 
@@ -681,6 +685,85 @@ function localAgentTools(
       }),
     },
   ]
+}
+
+/**
+ * Owner-configured browser errands. These run inside a Worker ticket, not a
+ * second agent loop. Only safe page actions are exposed; an irreversible step
+ * (submit, purchase, send, delete, account settings) is refused by the adapter
+ * and remains behind the existing request_approval hold. A speculative Worker
+ * may read but may not fill, because fill changes remote page state.
+ */
+function browserErrandTools(errands: BrowserErrands, store: Store): ToolDef[] {
+  const ticketFor = (tool: string, ctx: { ticketId?: string }): Ticket => {
+    const ticket = ticketOf(store, ctx)
+    if (!ticket) throw new UserError(`${tool} needs an active ticket`)
+    if (ticket.ended) throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome})`)
+    return ticket
+  }
+  return [
+    {
+      name: 'browser_navigate',
+      description: 'Open an absolute http(s) URL in the owner-configured browser driver. The host must be on the owner allowlist.',
+      parameters: schema({ url: { type: 'string', description: 'Absolute http(s) URL on an allowed host.' } }),
+      roles: ['worker'],
+      run: guard('worker', 'browser_navigate', async (args, ctx) => {
+        ticketFor('browser_navigate', ctx)
+        return errands.navigate(ctx.sessionId, String(args.url ?? ''))
+      }),
+    },
+    {
+      name: 'browser_read',
+      description: 'Read the current browser page as bounded visible text. Read-only.',
+      parameters: schema(),
+      roles: ['worker'],
+      run: guard('worker', 'browser_read', async (_args, ctx) => {
+        ticketFor('browser_read', ctx)
+        return errands.read(ctx.sessionId)
+      }),
+    },
+    {
+      name: 'browser_fill',
+      description: 'Fill form fields on the current page. It never submits, clicks, or confirms; an irreversible step still needs request_approval.',
+      parameters: schema({
+        fields: {
+          type: 'string',
+          description: 'JSON array of {"selector":"css","value":"text"} entries, at most 20. Only selector and value are accepted.',
+        },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'browser_fill', async (args, ctx) => {
+        const ticket = ticketFor('browser_fill', ctx)
+        if (ticket.speculative) {
+          throw new UserError('browser_fill is unavailable to speculative workers (it changes remote page state)')
+        }
+        return errands.fill(ctx.sessionId, parseBrowserFields(args.fields))
+      }),
+    },
+    {
+      name: 'browser_extract',
+      description: 'Extract text items from the current page, optionally under one CSS selector. Read-only.',
+      parameters: schema({ selector: { type: 'string', description: 'Optional CSS selector.' } }),
+      roles: ['worker'],
+      run: guard('worker', 'browser_extract', async (args, ctx) => {
+        ticketFor('browser_extract', ctx)
+        const selector = args.selector == null ? undefined : String(args.selector)
+        return errands.extract(ctx.sessionId, selector)
+      }),
+    },
+  ]
+}
+
+function parseBrowserFields(raw: unknown): { selector: string; value: string }[] {
+  const text = String(raw ?? '').trim()
+  if (!text) throw new UserError('browser_fill needs a fields JSON array')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new UserError('browser_fill fields must be valid JSON')
+  }
+  return normalizeBrowserFields(parsed)
 }
 
 /** Watchdog tools close over WatchdogPorts. They fail stuck work; they do not speak. */

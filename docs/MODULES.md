@@ -409,7 +409,14 @@ the process group on timeout. `local-agents.ts` exposes an opt-in,
 owner-configured list of local specialist CLIs (`local-agents.json` or
 `DS_AGENT_LOCAL_AGENTS`); a Worker can only name an id and pass a task, and the
 runner uses `spawn(command, argv)` with `shell: false`, the Worker workspace as
-cwd, a timeout, an output cap, and an allowlisted environment. `skills.ts` reads
+cwd, a timeout, an output cap, and an allowlisted environment. `browser-errands.ts`
+adds an owner-gated browser adapter (`browser-errands.json` or
+`DS_AGENT_BROWSER_ERRANDS`): the owner configures a local command driver or a
+remote HTTP driver, and Workers can only ask for `navigate`, `read`, `fill`, or
+`extract` inside a Ticket. Missing config registers no tools; malformed config,
+a missing executable, or an unset token env fails startup. The adapter rejects
+irreversible action names, never submits or confirms, bounds output, does not
+follow driver-endpoint redirects, and is not Instinct's hosted browser. `skills.ts` reads
 owner playbooks from `skills/<id>/SKILL.md`: regular files only (symlinks are
 skipped), a 2000-character prompt index, a 16000-character body cap, and a
 `read_skill` tool that is documentation, not a capability. `sanitize.ts`
