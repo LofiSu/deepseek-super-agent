@@ -197,6 +197,7 @@ export function startServeChannels(options: StartServeChannelsOptions): StartedS
       createSource: sinceMs => new FeishuSource(client, feishu.chatId, {
         ...(sinceMs !== undefined ? { sinceMs } : {}),
         config: feishu.config,
+        log,
       }),
       intervalMs: feishu.intervalMs,
       since: feishu.since,
@@ -428,7 +429,8 @@ export async function checkFeishuChannel(options: FeishuCheckOptions = {}): Prom
   lines.push(`[feishu] chat: ${chatId ? 'present (polling exactly one chat)' : 'missing'}`)
   lines.push(
     '[feishu] scopes: im:message, im:message:send_as_bot, im:message:readonly, '
-    + 'im:message.group_msg (group history); publish an app version after adding them',
+    + 'im:message.group_msg (group history); DS_AGENT_FEISHU_P2P_DIRECT requires '
+    + 'im:chat:readonly (or im:chat:read/im:chat) to resolve chat_mode; publish an app version after adding them',
   )
 
   let config: FeishuCliConfig | undefined

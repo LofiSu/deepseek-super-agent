@@ -29,6 +29,25 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
     return dir
   }
 
+  it('delegate hold fixture stays alive with stdin ignored', async () => {
+    const child = spawn(
+      process.execPath,
+      [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs')],
+      { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'ignore'] },
+    )
+    children.push(child)
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', () => resolve())
+      child.once('error', reject)
+    })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(child.exitCode).toBeNull()
+    expect(child.signalCode).toBeNull()
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    child.kill('SIGKILL')
+    await closed
+  })
+
   it('SIGKILL during delegate_agent queues UNKNOWN-OUTCOME approval and skips auto recovery replay', async () => {
     const home = tempHome()
     fs.writeFileSync(

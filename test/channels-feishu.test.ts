@@ -485,17 +485,35 @@ describe('Feishu client and outbox', () => {
     const { fn } = fakeFetch(url => {
       if (url.includes('tenant_access_token')) return tokenHandler(url)
       if (url.includes('/open-apis/im/v1/messages?')) {
-        return { body: { code: 0, data: { has_more: false, items: [apiMessage()] } } }
+        return {
+          body: {
+            code: 0,
+            data: {
+              has_more: false,
+              items: [apiMessage(), apiMessage({ message_id: 'om_poll_2', create_time: '1761958860000' })],
+            },
+          },
+        }
       }
       if (url.endsWith('/open-apis/im/v1/chats/oc_chat')) return metadataResponse
       return { body: { code: 999, msg: `unexpected ${url}` } }
     })
     const client = new FeishuClient(config, fn)
-    const source = new FeishuSource(client, 'oc_chat', { sinceMs: 1761958000000, config })
+    const logs: string[] = []
+    const source = new FeishuSource(client, 'oc_chat', {
+      sinceMs: 1761958000000,
+      config,
+      log: line => logs.push(line),
+    })
     const previous = process.env.DS_AGENT_FEISHU_P2P_DIRECT
     process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
     try {
-      const trigger = (await source.pull())[0]!
+      const triggers = await source.pull()
+      const trigger = triggers[0]!
+      expect(triggers).toHaveLength(2)
+      expect(logs).toHaveLength(1)
+      expect(logs[0]).toContain('chat=oc_chat')
+      expect(logs[0]).toMatch(/chat mode lookup (failed|unverified)/)
       expect(trigger.addressed).toBeUndefined()
       expect(trigger.channel?.address?.group).toBe('oc_chat')
       expect(trigger.channel?.address?.chat_type).toBeUndefined()

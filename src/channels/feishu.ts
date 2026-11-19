@@ -15,8 +15,11 @@ import type { OutboundAdapter } from './outbox-adapter.ts'
  *   FEISHU_BASE_URL (default https://open.feishu.cn; use https://open.larksuite.com)
  *   FEISHU_VERIFICATION_TOKEN, FEISHU_ENCRYPT_KEY, FEISHU_BOT_OPEN_ID
  *
- * Bot permissions: im:message, im:message.send_as_bot, im:message:readonly (or
- * the corresponding granular scopes). The bot must be a member of the chat.
+ * Bot permissions: im:message, im:message:send_as_bot, im:message:readonly (or
+ * the corresponding granular scopes), plus im:message.group_msg for group
+ * history. DS_AGENT_FEISHU_P2P_DIRECT requires chat-information permission to
+ * verify chat_mode: prefer im:chat:readonly; im:chat:read or im:chat also satisfy
+ * Feishu's official endpoint scope list. The bot must be a member of the chat.
  */
 
 export interface FeishuConfig {
@@ -324,17 +327,25 @@ export class FeishuSource {
   constructor(
     private readonly client: FeishuClient,
     private readonly chatId: string,
-    options: { sinceMs?: number; threadId?: string; pageSize?: number; config?: FeishuConfig } = {},
+    options: {
+      sinceMs?: number
+      threadId?: string
+      pageSize?: number
+      config?: FeishuConfig
+      log?: (line: string) => void
+    } = {},
   ) {
     this.cursorMsValue = options.sinceMs ?? Date.now() - 5 * 60_000
     this.threadId = options.threadId
     this.pageSize = options.pageSize
     this.config = options.config
+    this.log = options.log
   }
 
   private readonly threadId?: string
   private readonly pageSize?: number
   private readonly config?: FeishuConfig
+  private readonly log?: (line: string) => void
 
   private async verifiedChatType(chatId: string): Promise<'p2p' | 'group' | undefined> {
     const cached = this.chatTypeCache.get(chatId)
@@ -347,9 +358,14 @@ export class FeishuSource {
           ? 'group'
           : undefined
       if (chatType) this.chatTypeCache.set(chatId, chatType)
+      else {
+        this.log?.(`[feishu] chat mode lookup unverified chat=${chatId} mode=${mode ?? '<missing>'}; keeping conservative group admission`)
+      }
       return chatType
-    } catch {
+    } catch (error) {
       // Metadata is advisory for polling; failure keeps conservative group admission.
+      const detail = error instanceof Error ? error.message : String(error)
+      this.log?.(`[feishu] chat mode lookup failed chat=${chatId} error=${detail}; keeping conservative group admission`)
       return undefined
     }
   }

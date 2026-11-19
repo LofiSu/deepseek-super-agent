@@ -78,10 +78,15 @@ Set these for a live Feishu/Lark channel:
 
 Bot permissions: `im:message`, `im:message:send_as_bot`, `im:message:readonly`,
 and for group chats the sensitive scope `im:message.group_msg` (list/poll
-messages in groups the bot belongs to). Also useful for setup:
-`im:chat:readonly` to list chats, and `im:chat:create` only for demo creation.
-The bot must be a member of `FEISHU_CHAT_ID`. Publish a new app version after
-adding scopes.
+messages in groups the bot belongs to). `im:chat:create` is needed only for demo
+creation. When `DS_AGENT_FEISHU_P2P_DIRECT=1` is used, chat-information permission
+is required for polling to verify `chat_mode`: use the least-privilege
+`im:chat:readonly`; `im:chat:read` or `im:chat` also satisfy Feishu's official
+"Enable any scope from the list" requirement for [Obtain group information](https://open.feishu.cn/document/server-docs/group/chat/get-2?lang=en-US).
+Without one of these scopes, lookup failures are logged and messages remain
+conservatively in group admission, so short P2P polls may be filtered. The bot
+must be a member of `FEISHU_CHAT_ID`. Publish a new app version after adding
+scopes.
 
 One-time setup:
 
@@ -183,10 +188,13 @@ Trigger returned by `feishuTriggerFromMessage`; it does not bypass the ingress
 filter. Group messages and messages with a missing or unknown `chat_type` keep
 `channel.address.group = message.chat_id`, so `DS_AGENT_GROUP_ALLOWLIST=<chat id>`
 admits or denies them in `src/ingress/filter.ts`. Set
-`DS_AGENT_FEISHU_P2P_DIRECT=1` to mark only messages explicitly tagged
-`chat_type=p2p` as direct, allowing short 1:1 messages through the noise filter.
-These verified P2P messages are outside the group-only allowlist; configured
-actor allowlists still apply. A real bot mention still sets `addressed='mention'`.
+`DS_AGENT_FEISHU_P2P_DIRECT=1` to mark only messages verified as P2P by the
+chat-information `chat_mode` lookup as direct, allowing short 1:1 messages through
+the noise filter. This polling path requires `im:chat:readonly` (or `im:chat:read`
+or `im:chat`) as described above; failed or unrecognized lookups are logged and
+stay in conservative group admission. These verified P2P messages are outside the
+group-only allowlist; configured actor allowlists still apply. A real bot mention
+still sets `addressed='mention'`.
 `trigger.meta` carries provider ids for outbox routing only and is never read by
 admission. A denied message is persisted as a filtered disposition and cannot
 become a Ticket.
