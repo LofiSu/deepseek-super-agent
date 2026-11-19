@@ -2,8 +2,9 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { UserError } from '../shared/errors.ts'
-import { ENV_ALLOWLIST } from './sanitize.ts'
+import { ENV_ALLOWLIST, redactKnownSecrets, secretValues } from './sanitize.ts'
 
 /**
  * Owner-gated browser errands.
@@ -48,7 +49,6 @@ export const MAX_BROWSER_FIELDS = 20
 export const MAX_BROWSER_SELECTOR_CHARS = 500
 export const MAX_BROWSER_VALUE_CHARS = 4_000
 export const MAX_BROWSER_OUTPUT_BYTES = 1_000_000
-const MAX_BROWSER_STDERR_CHARS = 2_000
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const COMMAND = /^[A-Za-z0-9._-]+$/
@@ -97,7 +97,11 @@ export interface BrowserErrandRequest {
 
 export interface BrowserDriver {
   readonly kind: 'command' | 'http'
-  /** One request in, one `{ok, result}` or `{ok, error}` envelope out. */
+  /**
+   * Run one request and return the unwrapped result object (for example, an
+   * object with a top-level `url`). Reject on failure. The `{ok, result}` or
+   * `{ok, error}` envelope is only the command/HTTP wire contract.
+   */
   run(request: BrowserErrandRequest): Promise<Record<string, unknown>>
   /** Kill any in-flight driver work. Called on Runtime shutdown. */
   killAll?(): void
@@ -295,13 +299,31 @@ export function createBrowserDriver(
     const command = resolveExecutable(config.driver.command, env)
     return new CommandBrowserDriver({ ...config.driver, command }, { env })
   }
+  assertSafeHttpDriverEndpoint(config.driver.url)
   return new HttpBrowserDriver(config.driver, { env })
+}
+
+function assertSafeHttpDriverEndpoint(raw: string): URL {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new UserError('driver.url must be an absolute URL')
+  }
+  if (url.username || url.password) {
+    throw new UserError('driver.url must not contain credentials; use tokenEnv')
+  }
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHost(url.hostname))) {
+    throw new UserError('driver.url must use https (http is allowed only on loopback)')
+  }
+  return url
 }
 
 /** Fail closed when the owner's command is not executable right now. */
 function resolveExecutable(command: string, env: NodeJS.ProcessEnv): string {
   if (path.isAbsolute(command)) {
     try {
+      if (!fs.statSync(command).isFile()) throw new Error('not a regular file')
       fs.accessSync(command, fs.constants.X_OK)
       return command
     } catch {
@@ -316,6 +338,7 @@ function resolveExecutable(command: string, env: NodeJS.ProcessEnv): string {
     if (!dir) continue
     const candidate = path.join(dir, command)
     try {
+      if (!fs.statSync(candidate).isFile()) continue
       fs.accessSync(candidate, fs.constants.X_OK)
       return candidate
     } catch {
@@ -412,6 +435,7 @@ export class BrowserErrands {
   private readonly maxConcurrent: number
   private readonly activeSessions = new Set<string>()
   private readonly blockedSessions = new Set<string>()
+  private readonly assignmentSessions = new Map<string, { assignmentId: string; driverSession: string }>()
   private running = 0
   private closed = false
 
@@ -439,6 +463,18 @@ export class BrowserErrands {
     }
   }
 
+  /** Give each new Assignment an isolated stateful-driver session. */
+  beginAssignment(session: string, assignmentId: string): void {
+    if (!session.trim() || !assignmentId.trim()) {
+      throw new UserError('browser errand Assignment needs a session and id')
+    }
+    if (this.assignmentSessions.get(session)?.assignmentId === assignmentId) return
+    this.assignmentSessions.set(session, {
+      assignmentId,
+      driverSession: `${session}#${assignmentId}`,
+    })
+  }
+
   /** Kill in-flight driver work and refuse later calls. */
   killAll(): void {
     this.closed = true
@@ -460,7 +496,10 @@ export class BrowserErrands {
 
   async navigate(session: string, rawUrl: string): Promise<BrowserErrandResult> {
     const url = assertAllowedUrl(rawUrl, this.config.allowedHosts)
-    const result = await this.run({ action: 'navigate', session, url: url.toString() })
+    const result = await this.run(
+      { action: 'navigate', session, url: url.toString() },
+      response => { optionalString(response, 'title') },
+    )
     const finalUrl = this.assertAllowedResultUrl(result)
     const title = optionalString(result, 'title')
     return {
@@ -471,7 +510,14 @@ export class BrowserErrands {
   }
 
   async read(session: string): Promise<BrowserErrandResult> {
-    const result = await this.run({ action: 'read', session })
+    const result = await this.run(
+      { action: 'read', session },
+      response => {
+        requiredString(response, 'text')
+        optionalString(response, 'title')
+        optionalBoolean(response, 'truncated')
+      },
+    )
     const text = requiredString(result, 'text')
     const url = this.assertAllowedResultUrl(result)
     const title = optionalString(result, 'title')
@@ -488,12 +534,18 @@ export class BrowserErrands {
   async fill(session: string, fields: readonly { selector: string; value: string }[]): Promise<BrowserErrandResult> {
     // Re-validate here too: a caller outside the tool layer must not weaken this.
     const normalized = normalizeBrowserFields(fields)
+    const validate = (response: Record<string, unknown>): void => {
+      const filled = requiredInteger(response, 'filled')
+      if (filled < 0 || filled > normalized.length) {
+        throw new UserError(`browser driver reported ${filled} filled fields for ${normalized.length} fields`)
+      }
+    }
     const result = await this.run({
       action: 'fill',
       session,
       fields: normalized,
       allowedHosts: [...this.config.allowedHosts],
-    })
+    }, validate)
     this.assertAllowedResultUrl(result)
     const filled = requiredInteger(result, 'filled')
     if (filled < 0 || filled > normalized.length) {
@@ -511,28 +563,56 @@ export class BrowserErrands {
       action: 'extract',
       session,
       ...(normalizedSelector ? { selector: normalizedSelector } : {}),
+    }, response => {
+      const items = response.items
+      if (!Array.isArray(items) || items.some(item => typeof item !== 'string')) {
+        throw new UserError('browser driver returned invalid extract items')
+      }
+      optionalBoolean(response, 'truncated')
     })
-    const items = result.items
-    if (!Array.isArray(items) || items.some(item => typeof item !== 'string')) {
-      throw new UserError('browser driver returned invalid extract items')
-    }
+    const rawItems = result.items as string[]
     const url = this.assertAllowedResultUrl(result)
-    const truncated = items.length > this.config.maxExtractItems || result.truncated === true
+    const items: string[] = []
+    let remainingChars = this.config.maxReadChars
+    let truncated = rawItems.length > this.config.maxExtractItems || result.truncated === true
+    let returnedUrl: string | undefined = url
+    if (url.length > remainingChars) {
+      returnedUrl = undefined
+      truncated = true
+    } else {
+      remainingChars -= url.length
+    }
+    const itemLimit = Math.min(rawItems.length, this.config.maxExtractItems)
+    for (let index = 0; index < itemLimit; index += 1) {
+      const item = rawItems[index]!
+      if (item.length > remainingChars) {
+        if (remainingChars > 0) items.push(item.slice(0, remainingChars))
+        truncated = true
+        remainingChars = 0
+        break
+      }
+      items.push(item)
+      remainingChars -= item.length
+    }
+    if (items.length < rawItems.length && items.length === this.config.maxExtractItems) truncated = true
+    if (remainingChars === 0 && rawItems.slice(items.length).some(item => item.length > 0)) truncated = true
     return {
       action: 'extract',
-      items: (items as string[]).slice(0, this.config.maxExtractItems),
-      ...(url ? { url } : {}),
+      items,
+      ...(returnedUrl ? { url: returnedUrl } : {}),
       ...(truncated ? { truncated: true } : {}),
     }
   }
 
   private async run(
     input: Omit<BrowserErrandRequest, 'protocol'>,
+    validateResult?: (result: Record<string, unknown>) => void,
   ): Promise<Record<string, unknown>> {
     if (this.closed) throw new UserError('browser errands are shut down')
     assertSafeBrowserAction(input.action)
     if (!input.session.trim()) throw new UserError('browser errand needs a session')
-    if (this.blockedSessions.has(input.session)) {
+    const driverSession = this.assignmentSessions.get(input.session)?.driverSession ?? input.session
+    if (this.blockedSessions.has(driverSession)) {
       throw new UserError('browser session is blocked after an invalid driver response')
     }
     if (this.activeSessions.has(input.session)) {
@@ -544,14 +624,15 @@ export class BrowserErrands {
     this.running += 1
     this.activeSessions.add(input.session)
     try {
-      const result = await this.driver.run({ protocol: BROWSER_PROTOCOL, ...input })
+      const result = await this.driver.run({ protocol: BROWSER_PROTOCOL, ...input, session: driverSession })
       this.assertAllowedResultUrl(result)
+      validateResult?.(result)
       this.log(`[browser] action=${input.action} session=${input.session} driver=${this.driver.kind}`)
       return result
     } catch (error) {
       // A failed or disallowed action may have left the stateful browser on an
-      // unknown page. Never send later field values to that session.
-      this.blockedSessions.add(input.session)
+      // unknown page. Never send later field values to that Assignment session.
+      this.blockedSessions.add(driverSession)
       throw error
     } finally {
       this.running -= 1
@@ -573,7 +654,7 @@ export class BrowserErrands {
 class CommandBrowserDriver implements BrowserDriver {
   readonly kind = 'command' as const
   private readonly env: NodeJS.ProcessEnv
-  private readonly active = new Set<ReturnType<typeof spawn>>()
+  private readonly active = new Set<AbortController>()
   private closed = false
 
   constructor(
@@ -585,34 +666,38 @@ class CommandBrowserDriver implements BrowserDriver {
 
   killAll(): void {
     this.closed = true
-    const children = [...this.active]
+    for (const controller of this.active) controller.abort()
     this.active.clear()
-    for (const child of children) killGroup(child.pid, child)
   }
 
   async run(request: BrowserErrandRequest): Promise<Record<string, unknown>> {
     assertSafeRequest(request)
     if (this.closed) throw new UserError('browser driver is shut down')
     const timeoutMs = Math.min(MAX_BROWSER_TIMEOUT_MS, this.config.timeoutMs)
+    const controller = new AbortController()
+    this.active.add(controller)
+    const env = driverEnv(this.env, this.config.env)
+    const secrets = driverSecretValues(this.env, this.config.env)
     const result = await spawnDriver({
       command: this.config.command,
       args: this.config.args,
       request,
-      env: driverEnv(this.env, this.config.env),
+      env,
       timeoutMs,
-      onSpawn: child => this.active.add(child),
-      onDone: child => this.active.delete(child),
+      signal: controller.signal,
+      onDone: () => this.active.delete(controller),
     })
+    if (this.closed) throw new UserError('browser driver is shut down')
     if (result.timedOut) throw new UserError(`browser driver timed out after ${timeoutMs} ms`)
     if (result.truncated) throw new UserError('browser driver output exceeded the capture limit')
     if (result.code !== 0) {
-      const detail = result.stderr.replace(/\s+/g, ' ').trim().slice(0, 300)
+      const detail = redactKnownSecrets(result.stderr, secrets, secrets).replace(/\s+/g, ' ').trim().slice(0, 300)
       throw new UserError(
         `browser driver exited with code ${result.code ?? 'null'}${result.signal ? ` (${result.signal})` : ''}`
         + `${detail ? `: ${detail}` : ''}`,
       )
     }
-    return parseEnvelope(result.stdout)
+    return parseEnvelope(result.stdout, secrets)
   }
 }
 
@@ -627,6 +712,7 @@ function resolveHttpToken(config: HttpBrowserDriverConfig, env: NodeJS.ProcessEn
 class HttpBrowserDriver implements BrowserDriver {
   readonly kind = 'http' as const
   private readonly token?: string
+  private readonly secrets: string[]
   private readonly active = new Set<AbortController>()
   private closed = false
 
@@ -635,6 +721,7 @@ class HttpBrowserDriver implements BrowserDriver {
     options: { env: NodeJS.ProcessEnv },
   ) {
     if (config.tokenEnv) this.token = resolveHttpToken(config, options.env)
+    this.secrets = [...new Set([...secretValues(options.env), ...(this.token ? [this.token] : [])])]
   }
 
   killAll(): void {
@@ -663,9 +750,12 @@ class HttpBrowserDriver implements BrowserDriver {
         // A redirect could escape the endpoint the owner configured.
         redirect: 'manual',
       })
-      if (!response.ok) throw new UserError(`browser driver returned HTTP ${response.status}`)
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {})
+        throw new UserError(`browser driver returned HTTP ${response.status}`)
+      }
       const text = await readBoundedResponseBody(response.body)
-      return parseEnvelope(text)
+      return parseEnvelope(text, this.secrets)
     } catch (error) {
       if (this.closed) throw new UserError('browser driver is shut down')
       if (controller.signal.aborted) throw new UserError(`browser driver timed out after ${timeoutMs} ms`)
@@ -705,73 +795,112 @@ function spawnDriver(input: {
   request: BrowserErrandRequest
   env: NodeJS.ProcessEnv
   timeoutMs: number
-  onSpawn?: (child: ReturnType<typeof spawn>) => void
-  onDone?: (child: ReturnType<typeof spawn>) => void
+  signal: AbortSignal
+  onDone?: () => void
 }): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>
     try {
       child = spawn(input.command, input.args, {
         env: input.env,
-        // Lead a process group so a timeout can kill grandchildren too.
+        // Lead a process group so best-effort cleanup can kill descendants too.
         detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       })
     } catch (error) {
+      input.onDone?.()
       reject(new UserError(`could not start browser driver: ${messageOf(error)}`))
       return
     }
-    input.onSpawn?.(child)
+    const stdoutDecoder = new StringDecoder('utf8')
+    const stderrDecoder = new StringDecoder('utf8')
     let stdout = ''
     let stderr = ''
+    let stdoutBytes = 0
+    let stderrBytes = 0
+    let stderrTruncated = false
     let truncated = false
     let timedOut = false
     let settled = false
-    const append = (current: string, chunk: Buffer, limit: number): { text: string; overflow: boolean } => {
-      if (current.length >= limit) return { text: current, overflow: true }
-      const next = current + String(chunk)
-      if (next.length <= limit) return { text: next, overflow: false }
-      return { text: next.slice(0, limit), overflow: true }
-    }
-    child.stdout?.on('data', (chunk: Buffer) => {
-      const next = append(stdout, chunk, MAX_BROWSER_OUTPUT_BYTES)
-      stdout = next.text
-      if (next.overflow) truncated = true
-    })
-    // stderr detail is bounded and only used in a tool error, which the Harness
-    // redacts before it reaches the model or the journal.
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr = append(stderr, chunk, MAX_BROWSER_STDERR_CHARS).text
-    })
-    // The driver may exit before reading its request; that is an exit-code
-    // error below, not an unhandled EPIPE.
-    child.stdin?.on('error', () => {})
-    const timer = setTimeout(() => {
-      timedOut = true
-      killGroup(child.pid, child)
-    }, input.timeoutMs)
+    let timer: ReturnType<typeof setTimeout>
     const finish = (result: SpawnResult): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      input.onDone?.(child)
+      input.signal.removeEventListener('abort', abort)
+      input.onDone?.()
       resolve(result)
     }
-    child.on('error', error => {
+    const finishError = (error: Error): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      input.onDone?.(child)
+      input.signal.removeEventListener('abort', abort)
+      input.onDone?.()
       reject(new UserError(`could not start browser driver: ${messageOf(error)}`))
+    }
+    const stop = (timeout: boolean): void => {
+      if (settled) return
+      timedOut = timeout
+      // Process cleanup is best effort. Settle and close our pipe ends regardless
+      // of whether a descendant inherited them or survives in another group.
+      killGroup(child.pid, child)
+      child.stdin?.destroy()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      finish({
+        code: null,
+        signal: 'SIGKILL',
+        timedOut,
+        truncated,
+        stdout,
+        stderr: stderrTruncated ? '[stderr capture limit exceeded]' : stderr,
+      })
+    }
+    const abort = (): void => stop(false)
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      const remaining = MAX_BROWSER_OUTPUT_BYTES - stdoutBytes
+      const length = Math.max(0, Math.min(bytes.byteLength, remaining))
+      if (length > 0) {
+        stdout += stdoutDecoder.write(bytes.subarray(0, length))
+        stdoutBytes += length
+      }
+      if (length < bytes.byteLength) truncated = true
     })
+    // Keep diagnostics bounded in bytes; if this cap is hit, suppress the whole
+    // diagnostic so a credential split at the boundary cannot leak a fragment.
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      const remaining = MAX_BROWSER_OUTPUT_BYTES - stderrBytes
+      const length = Math.max(0, Math.min(bytes.byteLength, remaining))
+      if (length > 0) {
+        stderr += stderrDecoder.write(bytes.subarray(0, length))
+        stderrBytes += length
+      }
+      if (length < bytes.byteLength) stderrTruncated = true
+    })
+    // The driver may exit before reading its request; that is an exit-code
+    // error below, not an unhandled EPIPE.
+    child.stdin?.on('error', () => {})
+    timer = setTimeout(() => stop(true), input.timeoutMs)
+    input.signal.addEventListener('abort', abort, { once: true })
+    if (input.signal.aborted) {
+      abort()
+      return
+    }
+    child.on('error', finishError)
     child.on('close', (code, signal) => {
+      if (settled) return
+      stdout += stdoutDecoder.end()
+      stderr += stderrDecoder.end()
       finish({
         code,
         ...(signal ? { signal } : {}),
         timedOut,
         truncated,
         stdout,
-        stderr,
+        stderr: stderrTruncated ? '[stderr capture limit exceeded]' : stderr,
       })
     })
     try {
@@ -817,7 +946,7 @@ async function readBoundedResponseBody(body: ReadableStream<Uint8Array> | null):
   }
 }
 
-function parseEnvelope(raw: string): Record<string, unknown> {
+function parseEnvelope(raw: string, secrets: readonly string[] = []): Record<string, unknown> {
   const text = raw.trim()
   if (!text) throw new UserError('browser driver returned no output')
   let parsed: unknown
@@ -832,7 +961,7 @@ function parseEnvelope(raw: string): Record<string, unknown> {
   const envelope = parsed as Record<string, unknown>
   if (envelope.ok !== true) {
     const detail = typeof envelope.error === 'string'
-      ? envelope.error.replace(/\s+/g, ' ').trim().slice(0, 300)
+      ? redactKnownSecrets(envelope.error, secrets, secrets).replace(/\s+/g, ' ').trim().slice(0, 300)
       : 'unknown error'
     throw new UserError(`browser driver failed: ${detail}`)
   }
@@ -850,6 +979,14 @@ function driverEnv(parent: NodeJS.ProcessEnv, extra: readonly string[]): NodeJS.
     if (typeof value === 'string') env[name] = value
   }
   return env
+}
+
+function driverSecretValues(parent: NodeJS.ProcessEnv, extra: readonly string[]): string[] {
+  const env = driverEnv(parent, extra)
+  const explicitlyConfigured = extra
+    .map(name => parent[name])
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+  return [...new Set([...secretValues(env), ...explicitlyConfigured])]
 }
 
 function assertKeys(record: Record<string, unknown>, label: string, allowed: readonly string[]): void {
@@ -891,6 +1028,13 @@ function optionalString(record: Record<string, unknown>, field: string): string 
   const value = record[field]
   if (value === undefined) return undefined
   if (typeof value !== 'string') throw new UserError(`browser driver result ${field} must be a string`)
+  return value
+}
+
+function optionalBoolean(record: Record<string, unknown>, field: string): boolean | undefined {
+  const value = record[field]
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') throw new UserError(`browser driver result ${field} must be a boolean`)
   return value
 }
 

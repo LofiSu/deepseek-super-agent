@@ -31,7 +31,7 @@ import {
   loadBrowserErrands,
   type BrowserErrandConfig,
 } from './env/browser-errands.ts'
-import { redactLiteralSecrets, redactSecrets, secretValues } from './env/sanitize.ts'
+import { redactKnownSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { loadRoutines, normalizeRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
@@ -543,11 +543,26 @@ export class Runtime {
       ...secretValues(baseEnv),
       ...mcpConfig.configs.flatMap(config => secretValues(config.env)),
     ])].sort((a, b) => b.length - a.length)
-    const redact = (text: string) => redactSecrets(redactLiteralSecrets(text, browserSecrets), secrets)
+    const redact = (text: string) => redactKnownSecrets(text, browserSecrets, secrets)
     const log = new RedactingLogger(redact)
     if (mcpConfig.error) log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${mcpConfig.error}`)
     const model = opts.model ?? createModelFromEnv(baseEnv)
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
+    // Validate and build the owner-gated adapter before opening SQLite so a
+    // malformed endpoint or unusable executable cannot leak a Store handle.
+    const browserErrands = browserConfig
+      ? new BrowserErrands(
+        createBrowserDriver(browserConfig, { env: baseEnv }),
+        browserConfig,
+        { log: line => log.info(line) },
+      )
+      : undefined
+    if (browserErrands) {
+      log.info(
+        `[browser] enabled driver=${browserErrands.driverKind}`
+        + ` hosts=${browserErrands.allowedHosts.join(',')}`,
+      )
+    }
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
@@ -567,22 +582,6 @@ export class Runtime {
     if (skills.size) {
       log.info(`[skill] configured skills=${skills.list().map(skill => skill.id).join(',')}`)
     }
-    // Owner-gated and off by default. A malformed file, an unusable command, or
-    // a missing token env fails startup instead of leaving a half-working tool.
-    const browserErrands = browserConfig
-      ? new BrowserErrands(
-        createBrowserDriver(browserConfig, { env: baseEnv }),
-        browserConfig,
-        { log: line => log.info(line) },
-      )
-      : undefined
-    if (browserErrands) {
-      log.info(
-        `[browser] enabled driver=${browserErrands.driverKind}`
-        + ` hosts=${browserErrands.allowedHosts.join(',')}`,
-      )
-    }
-
     // The scheduler is built before the Runtime exists; the closure forwards
     // into Runtime.ingest once construction finishes, so routines take the
     // normal filter, spill, dedupe, and Engine path.
@@ -1687,6 +1686,7 @@ export class Runtime {
       tools,
       store,
       assignmentStarted: (ticketId, assignmentId, sessionId) => {
+        browserErrands?.beginAssignment(sessionId, assignmentId)
         engine.assignmentStarted(ticketId, assignmentId, sessionId)
       },
       assignmentPlaced: (ticketId, assignmentId, node) => {

@@ -87,6 +87,43 @@ export function redactLiteralSecrets(text: string, secrets: readonly string[]): 
   return out
 }
 
+/** Match explicit and discovered secrets against the same original text. */
+export function redactKnownSecrets(
+  text: string,
+  explicitSecrets: readonly string[],
+  discoveredSecrets: readonly string[],
+): string {
+  const candidates = [
+    ...new Set([
+      ...explicitSecrets.filter(secret => secret.length > 0),
+      ...discoveredSecrets.filter(secret => secret.length >= MIN_SECRET_LENGTH),
+    ]),
+  ]
+  const matches: { start: number; end: number }[] = []
+  for (const secret of candidates) {
+    let start = text.indexOf(secret)
+    while (start !== -1) {
+      matches.push({ start, end: start + secret.length })
+      start = text.indexOf(secret, start + 1)
+    }
+  }
+  matches.sort((left, right) => left.start - right.start || right.end - left.end)
+  let out = ''
+  let cursor = 0
+  let index = 0
+  while (index < matches.length) {
+    let { start, end } = matches[index++]!
+    while (index < matches.length && matches[index]!.start <= end) {
+      end = Math.max(end, matches[index]!.end)
+      index += 1
+    }
+    out += text.slice(cursor, start) + '[redacted]'
+    cursor = end
+  }
+  out += text.slice(cursor)
+  return redactCredentialPatterns(out)
+}
+
 export function allowlistedEnv(
   env: NodeJS.ProcessEnv,
   allow: readonly string[] = ENV_ALLOWLIST,

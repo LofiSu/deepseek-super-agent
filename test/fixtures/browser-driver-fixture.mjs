@@ -1,5 +1,7 @@
 // Test driver for ds-agent-browser-errand/v1. It never touches a real browser.
 import process from 'node:process'
+import fs from 'node:fs'
+import { spawn } from 'node:child_process'
 
 const mode = process.argv[2] ?? 'echo'
 let raw = ''
@@ -27,6 +29,40 @@ process.stdin.on('end', () => {
   }
   if (mode === 'error') {
     process.stdout.write(JSON.stringify({ ok: false, error: 'driver exploded\nsecond line' }))
+    return
+  }
+  if (mode === 'error-token') {
+    process.stdout.write(JSON.stringify({
+      ok: false,
+      error: `${'x'.repeat(295)}${process.env.DIAG_TOKEN ?? ''}`,
+    }))
+    return
+  }
+  if (mode === 'split-utf8') {
+    const output = Buffer.from(JSON.stringify({
+      ok: true,
+      result: { url: 'https://example.com/page', text: '€' },
+    }))
+    const euro = output.indexOf(Buffer.from('€'))
+    process.stdout.write(output.subarray(0, euro + 1))
+    setTimeout(() => process.stdout.write(output.subarray(euro + 1, euro + 2)), 10)
+    setTimeout(() => process.stdout.end(output.subarray(euro + 2)), 20)
+    return
+  }
+  if (mode === 'oversized-utf8') {
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      result: { url: 'https://example.com/page', text: '€'.repeat(400_000) },
+    }))
+    return
+  }
+  if (mode === 'inherited-pipe') {
+    const helper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5_000)'], {
+      detached: true,
+      stdio: 'inherit',
+    })
+    fs.writeFileSync(process.argv[3], String(helper.pid))
+    process.stdout.write(JSON.stringify({ ok: true, result: { url: 'https://example.com/page' } }))
     return
   }
   if (mode === 'irreversible') {

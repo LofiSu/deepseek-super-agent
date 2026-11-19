@@ -213,9 +213,28 @@ describe('browser errand configuration', () => {
     expect(() => httpConfig('https://user:pass@browser.example.net/errand')).toThrow(/credentials/)
   })
 
+  it('enforces the HTTP endpoint policy for programmatic config too', () => {
+    const config = {
+      ...enabled(),
+      driver: {
+        kind: 'http' as const,
+        url: 'http://browser.example.net/errand',
+        tokenEnv: 'BROWSER_TOKEN',
+        timeoutMs: 5_000,
+      },
+    }
+    expect(() => createBrowserDriver(config, { env: { BROWSER_TOKEN: 'synthetic-token' } }))
+      .toThrow(/loopback/)
+  })
+
   it('fails closed when the configured command is not on PATH', () => {
     const config = enabled(rawCommandConfig('echo', { command: 'definitely-not-a-real-browser-driver' }))
     expect(() => createBrowserDriver(config)).toThrow(/not found on PATH/)
+  })
+
+  it('rejects executable directories during startup validation', () => {
+    const config = enabled(rawCommandConfig('echo', { command: configHome() }))
+    expect(() => createBrowserDriver(config)).toThrow(/not executable/)
   })
 
   it('fails closed when a configured token environment name is unset', () => {
@@ -305,6 +324,37 @@ describe('browser URL allowlist', () => {
 
     expect(driver.requests[1]?.allowedHosts).toEqual(['example.com', '*.example.org'])
     expect(appliedValues).toBe(0)
+  })
+
+  it('bounds total extract text including the returned URL metadata', async () => {
+    const config = enabled({ ...rawCommandConfig(), maxReadChars: 100 })
+    const driver = new FakeDriver(() => ({
+      url: 'https://example.com/page',
+      items: ['x'.repeat(900_000), 'second item'],
+    }))
+    const errands = new BrowserErrands(driver, config)
+    const result = await errands.extract('worker_extract')
+    expect(result.url).toBe('https://example.com/page')
+    const returnedTextLength = (result.items ?? []).join('').length
+    expect(returnedTextLength + result.url!.length).toBeLessThanOrEqual(100)
+    expect(result.items?.[0]).toHaveLength(100 - result.url!.length)
+    expect(result.truncated).toBe(true)
+  })
+
+  it('blocks an Assignment after incomplete results and gives retries a fresh driver session', async () => {
+    const driver = new FakeDriver(request => request.action === 'read'
+      ? { url: 'https://example.com/page' }
+      : { url: 'https://example.com/page', filled: 1 })
+    const errands = new BrowserErrands(driver, enabled())
+    await expect(errands.read('worker_retry')).rejects.toThrow(/needs a string text/)
+    await expect(errands.fill('worker_retry', [{ selector: '#q', value: 'x' }]))
+      .rejects.toThrow(/session is blocked/)
+    expect(driver.requests).toHaveLength(1)
+
+    errands.beginAssignment('worker_retry', 'assignment_retry_2')
+    await expect(errands.fill('worker_retry', [{ selector: '#q', value: 'x' }]))
+      .resolves.toMatchObject({ action: 'fill', filled: 1 })
+    expect(driver.requests[1]?.session).toBe('worker_retry#assignment_retry_2')
   })
 
   it('requires a post-action URL for every safe operation', async () => {
@@ -406,6 +456,64 @@ describe('command browser driver', () => {
     await expect(bad.read('worker_1')).rejects.toThrow(/invalid JSON/)
   })
 
+  it('preserves UTF-8 characters split across stdout chunks', async () => {
+    const errands = commandErrands('split-utf8')
+    cleanups.push(() => errands.killAll())
+    await expect(errands.read('worker_split')).resolves.toMatchObject({ text: '€' })
+  })
+
+  it('enforces the stdout capture limit in UTF-8 bytes', async () => {
+    const errands = commandErrands('oversized-utf8')
+    cleanups.push(() => errands.killAll())
+    await expect(errands.read('worker_oversized')).rejects.toThrow(/output exceeded the capture limit/)
+  })
+
+  it('redacts command envelope errors before clipping them', async () => {
+    const token = 'command-diagnostic-token-sentinel'
+    const config = enabled(rawCommandConfig('error-token', { env: ['DIAG_TOKEN'] }))
+    const errands = new BrowserErrands(
+      createBrowserDriver(config, { env: { DIAG_TOKEN: token } }),
+      config,
+    )
+    let message = ''
+    try {
+      await errands.read('worker_diag')
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toContain('browser driver failed:')
+    expect(message).not.toContain(token)
+    expect(message).not.toContain(token.slice(0, 5))
+  })
+
+  it('settles timed-out commands when a detached helper keeps stdout open', async () => {
+    const home = configHome()
+    const pidPath = path.join(home, 'detached-helper.pid')
+    const config = enabled(rawCommandConfig('inherited-pipe', {
+      args: [fixture, 'inherited-pipe', pidPath],
+      timeoutMs: 150,
+    }))
+    const driver = createBrowserDriver(config)
+    let helperPid: number | undefined
+    const started = Date.now()
+    try {
+      await expect(driver.run({
+        protocol: BROWSER_PROTOCOL,
+        action: 'navigate',
+        session: 'worker_pipe',
+        url: 'https://example.com/',
+      })).rejects.toThrow(/timed out/)
+      expect(Date.now() - started).toBeLessThan(1_000)
+      helperPid = Number(fs.readFileSync(pidPath, 'utf8'))
+      expect(Number.isInteger(helperPid)).toBe(true)
+    } finally {
+      driver.killAll?.()
+      if (helperPid && Number.isInteger(helperPid)) {
+        try { process.kill(helperPid, 'SIGKILL') } catch { /* helper already exited */ }
+      }
+    }
+  })
+
   it('kills a timed-out driver and refuses later calls after shutdown', async () => {
     const timed = commandErrands('slow', { timeoutMs: 150 })
     await expect(timed.read('worker_1')).rejects.toThrow(/timed out/)
@@ -505,6 +613,70 @@ describe('remote (http) browser driver', () => {
       expect(emitted * chunk.byteLength).toBeGreaterThan(MAX_BROWSER_OUTPUT_BYTES)
       expect(emitted).toBeLessThan(32)
       expect(cancelled).toBe(true)
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
+  it('cancels non-2xx response bodies before releasing the request', async () => {
+    let didClose = false
+    let resolveSocketClosed!: () => void
+    const socketClosed = new Promise<void>(resolve => { resolveSocketClosed = resolve })
+    const server = http.createServer((_request, response) => {
+      response.writeHead(500, { 'content-type': 'text/plain' })
+      response.write('synthetic open error body')
+    })
+    server.on('connection', socket => socket.once('close', () => {
+      didClose = true
+      resolveSocketClosed()
+    }))
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('test server has no address')
+    const closeServer = () => new Promise<void>(resolve => {
+      server.closeAllConnections()
+      if (!server.listening) resolve()
+      else server.close(() => resolve())
+    })
+    cleanups.push(closeServer)
+    const config = enabled({
+      enabled: true,
+      driver: { kind: 'http', url: `http://127.0.0.1:${address.port}/errand`, timeoutMs: 5_000 },
+      allowedHosts: ['example.com'],
+    })
+    const errands = new BrowserErrands(createBrowserDriver(config), config)
+    await expect(errands.read('worker_http_open_error')).rejects.toThrow(/HTTP 500/)
+    errands.killAll()
+    await Promise.race([socketClosed, new Promise(resolve => setTimeout(resolve, 1_000))])
+    expect(didClose).toBe(true)
+  })
+
+  it('redacts an HTTP envelope credential before clipping its diagnostic', async () => {
+    const token = 'http-diagnostic-token-sentinel'
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ ok: false, error: `${'x'.repeat(295)}${token}` }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ))
+    try {
+      const config = enabled({
+        enabled: true,
+        driver: { kind: 'http', url: 'https://browser.invalid/errand', tokenEnv: 'HTTP_TOKEN' },
+        allowedHosts: ['example.com'],
+      })
+      const errands = new BrowserErrands(
+        createBrowserDriver(config, { env: { HTTP_TOKEN: token } }),
+        config,
+      )
+      let message = ''
+      try { await errands.read('worker_http_diag') } catch (error) {
+        message = error instanceof Error ? error.message : String(error)
+      }
+      expect(message).toContain('browser driver failed:')
+      expect(message).not.toContain(token)
+      expect(message).not.toContain(token.slice(0, 5))
     } finally {
       fetchMock.mockRestore()
     }
@@ -651,6 +823,7 @@ describe('browser errand tools', () => {
   it('redacts an echoed HTTP token from the Worker model and journal', async () => {
     const sentinel = 'browser-sentinel-7f3a'
     const tokenEnv = 'BROWSER_HANDLE'
+    const overlappingSecret = `prefix-${sentinel}-suffix`
     expect(isSecretEnvName(tokenEnv)).toBe(false)
     let authorization: unknown
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
@@ -664,7 +837,7 @@ describe('browser errand tools', () => {
       const runtime = Runtime.create({
         home: tempHome(),
         model: scriptedModel,
-        env: { [tokenEnv]: sentinel },
+        env: { [tokenEnv]: sentinel, SERVICE_API_KEY: overlappingSecret },
         jobDelayMs: 0,
         watchdogIntervalMs: 60_000,
         browserErrands: enabled({
@@ -692,6 +865,7 @@ describe('browser errand tools', () => {
       }
       const tools = toolsFor(runtime, runtime.browserErrands!)
       const redact = (runtime as unknown as { redact: (text: string) => string }).redact
+      expect(redact(`embedded=${overlappingSecret}`)).toBe('embedded=[redacted]')
       const journal = new SessionJournal(path.join(runtime.home, 'sessions'), runtime.store, () => {})
       const session = { id: 'worker_ticket_redact', role: 'worker' as const, ticketId: 'ticket_redact' }
       await runTurn({
@@ -743,13 +917,15 @@ describe('runtime wiring', () => {
       watchdogIntervalMs: 60_000,
     })).toThrow(/not valid JSON/)
 
+    const invalidDriverHome = configHome()
     expect(() => Runtime.create({
-      home: tempHome(),
+      home: invalidDriverHome,
       model: scriptedModel,
       jobDelayMs: 0,
       watchdogIntervalMs: 60_000,
       browserErrands: enabled(rawCommandConfig('echo', { command: 'definitely-not-a-real-browser-driver' })),
     })).toThrow(/not found on PATH/)
+    expect(fs.existsSync(path.join(invalidDriverHome, 'ds-agent.db'))).toBe(false)
   })
 
   it('honors an explicit disable even when a config file exists', () => {
