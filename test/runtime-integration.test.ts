@@ -173,6 +173,58 @@ describe('Runtime service integration', () => {
     }
   })
 
+  it('restores pending Eval for legacy partial bot and context-only routing', () => {
+    for (const scenario of [
+      { name: 'bot', human: false, contextOnly: false },
+      { name: 'context-only', human: true, contextOnly: true },
+    ]) {
+      const runtime = start()
+      const threadId = `recovery/${scenario.name}-eval`
+      const seed = imTrigger({
+        id: `trg_${scenario.name}_eval_seed`,
+        thread: threadId,
+        text: '@ds-agent please fix the timeout issue',
+      })
+      runtime.engine.receive(seed)
+      const decision = runtime.engine.evaluateDue()[0]
+      const ticket = runtime.store.getDoc<Ticket>('ticket', decision!.ticketId!)!
+      const follow = {
+        ...imTrigger({
+          id: `trg_${scenario.name}_eval_partial`,
+          thread: threadId,
+          text: 'background CI timeout details need review',
+        }),
+        human: scenario.human,
+      }
+      const key = threadKey(follow.threads[0]!)
+      if (scenario.contextOnly) runtime.engine.followForContext(ticket.id, key)
+      ticket.inputs.push({
+        id: `input_${scenario.name}_eval_partial`,
+        kind: 'context',
+        triggerId: follow.id,
+        text: follow.text,
+        at: follow.at,
+        human: follow.human,
+      })
+      runtime.store.putDoc('ticket', ticket.id, ticket)
+      runtime.store.putDoc('trigger', follow.id, follow)
+      const thread = runtime.store.getDoc<Thread>('thread', key)!
+      thread.pending = thread.pending.filter(triggerId => triggerId !== follow.id)
+      runtime.store.putDoc('thread', key, thread)
+
+      expect(runtime.ingest(follow)).toBe('stored')
+      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toMatchObject({
+        fanout: [],
+        context: [ticket.id],
+      })
+      expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.filter(input => input.triggerId === follow.id))
+        .toHaveLength(1)
+      const evalQueued = runtime.store.getDoc<Thread>('thread', key)?.pending.includes(follow.id)
+        || runtime.store.listDocs<Ticket>('ticket').some(row => row.originTriggerId === follow.id)
+      expect(evalQueued).toBe(true)
+    }
+  })
+
   it('rolls back Intake routing and disposition together on a mid-receive failure', () => {
     const runtime = start()
     const threadId = 'recovery/atomic'

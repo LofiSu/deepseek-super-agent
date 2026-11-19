@@ -72,6 +72,15 @@ export class Intake {
         const context = routedTickets.flatMap(ticket =>
           ticket.inputs.some(input => input.triggerId === trigger.id && input.kind === 'context') ? [ticket.id] : [],
         )
+        const needsEval = commandOf(owned.text) != null || trigger.human === false || fanout.length === 0
+        if (needsEval) {
+          const primary = this.ensure(trigger.threads[0]!)
+          if (!primary.pending.includes(trigger.id)) {
+            primary.pending = [...primary.pending, trigger.id]
+            this.host.repo.putDoc('thread', primary.key, primary)
+            this.host.onQueued?.(primary.key, trigger.id, primary.pending)
+          }
+        }
         const disposition: Disposition = {
           fanout,
           context,
