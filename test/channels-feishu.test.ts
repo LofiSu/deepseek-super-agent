@@ -482,7 +482,7 @@ describe('Feishu client and outbox', () => {
     ['unknown chat mode', { body: { code: 0, data: { chat_mode: 'future-mode' } } }],
     ['chat metadata error', { body: { code: 230002, msg: 'metadata unavailable' } }],
   ])('keeps polled messages conservative on %s', async (_case, metadataResponse) => {
-    const { fn } = fakeFetch(url => {
+    const { fn, calls } = fakeFetch(url => {
       if (url.includes('tenant_access_token')) return tokenHandler(url)
       if (url.includes('/open-apis/im/v1/messages?')) {
         return {
@@ -520,6 +520,77 @@ describe('Feishu client and outbox', () => {
       expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
         DS_AGENT_GROUP_ALLOWLIST: 'oc_chat',
       }))).toMatchObject({ action: 'drop', layer: 'fast', reason: 'noise' })
+      await source.pull()
+      expect(logs).toHaveLength(1)
+      expect(calls.filter(call => call.url.endsWith('/open-apis/im/v1/chats/oc_chat'))).toHaveLength(2)
+      expect(logs[0]).not.toContain('future-mode')
+      expect(logs[0]).not.toContain('metadata unavailable')
+    } finally {
+      if (previous === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = previous
+    }
+  })
+
+  it('retries failed chat-mode verification across pulls, warns once, then caches verified mode', async () => {
+    let listCalls = 0
+    let metadataCalls = 0
+    const { fn, calls } = fakeFetch(url => {
+      if (url.includes('tenant_access_token')) return tokenHandler(url)
+      if (url.includes('/open-apis/im/v1/messages?')) {
+        listCalls += 1
+        return {
+          body: {
+            code: 0,
+            data: {
+              has_more: false,
+              items: [apiMessage({
+                message_id: `om_retry_${listCalls}`,
+                create_time: String(1761958800000 + listCalls * 1_000),
+              })],
+            },
+          },
+        }
+      }
+      if (url.endsWith('/open-apis/im/v1/chats/oc_chat')) {
+        metadataCalls += 1
+        if (metadataCalls === 1) {
+          return { body: { code: 230002, msg: 'private provider details should not be logged' } }
+        }
+        if (metadataCalls === 2) throw new Error('private custom-fetch details should not be logged')
+        return { body: { code: 0, data: { chat_mode: 'p2p', chat_type: 'private' } } }
+      }
+      return { body: { code: 999, msg: `unexpected ${url}` } }
+    })
+    const client = new FeishuClient(config, fn)
+    const logs: string[] = []
+    const source = new FeishuSource(client, 'oc_chat', {
+      sinceMs: 1761958000000,
+      config,
+      log: line => logs.push(line),
+    })
+    const previous = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const first = (await source.pull())[0]!
+      const second = (await source.pull())[0]!
+      expect(first.addressed).toBeUndefined()
+      expect(first.channel?.address?.group).toBe('oc_chat')
+      expect(second.addressed).toBeUndefined()
+      expect(second.channel?.address?.group).toBe('oc_chat')
+      expect(metadataCalls).toBe(2)
+      expect(logs).toHaveLength(1)
+      expect(logs[0]).toContain('code=230002')
+      expect(logs[0]).not.toContain('private provider details')
+      expect(logs[0]).not.toContain('private custom-fetch details')
+
+      const verified = (await source.pull())[0]!
+      expect(verified.addressed).toBe('direct')
+      expect(verified.channel?.address?.chat_type).toBe('p2p')
+      expect(verified.channel?.address?.group).toBeUndefined()
+      await source.pull()
+      expect(metadataCalls).toBe(3)
+      expect(calls.filter(call => call.url.endsWith('/open-apis/im/v1/chats/oc_chat'))).toHaveLength(3)
+      expect(logs).toHaveLength(1)
     } finally {
       if (previous === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
       else process.env.DS_AGENT_FEISHU_P2P_DIRECT = previous

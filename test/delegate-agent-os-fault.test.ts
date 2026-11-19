@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { LocalAgentRegistry, type LocalAgentSpec } from '../src/env/local-agents.ts'
 import { Store } from '../src/store/sqlite.ts'
 import type { Ticket } from '../src/shared/types.ts'
+import { runDelegateOsSupervisor } from './helpers/delegate-os-supervisor.ts'
 
 const children: ChildProcess[] = []
+const closedChildren = new WeakSet<ChildProcess>()
 const homes: string[] = []
 
 function tempHome(): string {
@@ -38,6 +40,7 @@ function spawnRecoveryChild(home: string, mode: 'seed' | 'restart', task: string
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
+  child.once('close', () => closedChildren.add(child))
   children.push(child)
   return child
 }
@@ -55,14 +58,15 @@ async function waitForMarker(home: string, timeoutMs = 45_000): Promise<Record<s
 }
 
 async function waitForExit(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  await once(child, 'exit')
+  if (!closedChildren.has(child)) await once(child, 'close')
 }
 
-afterEach(() => {
-  for (const child of children.splice(0)) {
+afterEach(async () => {
+  const pending = children.splice(0)
+  for (const child of pending) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   }
+  await Promise.all(pending.map(waitForExit))
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true })
 })
 
@@ -80,6 +84,7 @@ describe('delegate_agent OS fault boundary', () => {
             // repository root. Keep this fixture path valid across that
             // boundary so the effect remains in-flight until SIGKILL.
             args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
+            env: ['DS_AGENT_TEST_DELEGATE_PID_FILE'],
             timeoutMs: 60_000,
           },
           {
@@ -92,16 +97,22 @@ describe('delegate_agent OS fault boundary', () => {
       }),
     )
     const task = 'delegate-crash-probe-task'
-    const first = spawnRecoveryChild(home, 'seed', task)
-    const during = await waitForMarker(home)
+    const supervisor = await runDelegateOsSupervisor('fault', home, task)
+    expect(supervisor.subreaper).toBe(true)
+    expect(supervisor.helper_exit_signal).toBe(9)
+    expect(supervisor.helper_waited).toBe(true)
+    expect(supervisor.delegate_pid).toBeGreaterThan(0)
+    expect(supervisor.delegate_pgid).toBe(supervisor.delegate_pid)
+    expect(supervisor.group_signal_sent).toBe(true)
+    expect(supervisor.group_absent).toBe(true)
+    expect(supervisor.reaped_pids).toContain(supervisor.delegate_pid)
+    expect(supervisor.reaped_delegate_pid).toBe(true)
+    const during = JSON.parse(fs.readFileSync(markerPath(home), 'utf8')) as Record<string, unknown>
     expect(during.phase).toBe('delegating')
     expect(during.delegateActive).toBe(1)
     expect(during.delegateOperationPhase).toBe('started')
     expect(during.delegateOperationId).toMatch(/^extop_/)
     expect(during.durableStarted).toBe(true)
-
-    first.kill('SIGKILL')
-    await waitForExit(first)
 
     const store = new Store(home)
     try {
@@ -123,6 +134,37 @@ describe('delegate_agent OS fault boundary', () => {
     expect(after.recoveredInputs).toBe(0)
     expect(after.unknownApprovals).toBeGreaterThanOrEqual(1)
     second.kill('SIGTERM')
+    await waitForExit(second)
+  }, 90_000)
+
+  it.each([
+    ['assertion-failure', 'AssertionError'],
+    ['timeout-failure', 'TimeoutError'],
+  ] as const)('supervisor kills and reaps the delegate on %s', async (mode, failureKind) => {
+    const home = tempHome()
+    fs.writeFileSync(
+      path.join(home, 'local-agents.json'),
+      JSON.stringify({
+        agents: [{
+          id: 'ipc-hold',
+          command: process.execPath,
+          args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
+          env: ['DS_AGENT_TEST_DELEGATE_PID_FILE'],
+          timeoutMs: 60_000,
+        }],
+      }),
+    )
+
+    const report = await runDelegateOsSupervisor(mode, home)
+    expect(report.failure_kind).toBe(failureKind)
+    expect(report.expected_failure).toBe(true)
+    expect(report.helper_waited).toBe(true)
+    expect(report.group_signal_sent).toBe(true)
+    expect(report.group_absent).toBe(true)
+    expect(report.delegate_pid).toBeGreaterThan(0)
+    expect(report.reaped_pids).toContain(report.delegate_pid)
+    expect(report.reaped_delegate_pid).toBe(true)
+    expect(report.cleanup_error).toBeNull()
   }, 90_000)
 
   it('killAll on LocalAgentRegistry ends a slow specialist without duplicate stdout replay', async () => {
@@ -137,14 +179,19 @@ describe('delegate_agent OS fault boundary', () => {
       workspace: () => fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-ws-')),
     })
     const pending = reg.run('slow', 'wait', 'worker_kill')
-    for (let i = 0; i < 100 && reg.activeCount === 0; i++) {
-      await new Promise(resolve => setTimeout(resolve, 10))
+    try {
+      for (let i = 0; i < 100 && reg.activeCount === 0; i++) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(reg.activeCount).toBe(1)
+      reg.killAll()
+      const result = await pending
+      expect(result.code).not.toBe(0)
+      expect(reg.activeCount).toBe(0)
+      await expect(reg.run('slow', 'again', 'worker_kill')).rejects.toThrow(/shut down/)
+    } finally {
+      reg.killAll()
+      await pending.catch(() => undefined)
     }
-    expect(reg.activeCount).toBe(1)
-    reg.killAll()
-    const result = await pending
-    expect(result.code).not.toBe(0)
-    expect(reg.activeCount).toBe(0)
-    await expect(reg.run('slow', 'again', 'worker_kill')).rejects.toThrow(/shut down/)
   })
 })

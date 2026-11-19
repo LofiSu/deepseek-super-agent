@@ -323,6 +323,7 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
 export class FeishuSource {
   private cursorMsValue: number
   private readonly chatTypeCache = new Map<string, 'p2p' | 'group'>()
+  private readonly warnedChatModeLookupChatIds = new Set<string>()
 
   constructor(
     private readonly client: FeishuClient,
@@ -347,6 +348,12 @@ export class FeishuSource {
   private readonly config?: FeishuConfig
   private readonly log?: (line: string) => void
 
+  private warnChatModeLookupOnce(chatId: string, category: string): void {
+    if (this.warnedChatModeLookupChatIds.has(chatId)) return
+    this.warnedChatModeLookupChatIds.add(chatId)
+    this.log?.(`[feishu] chat mode lookup ${category} chat=${chatId}; keeping conservative group admission`)
+  }
+
   private async verifiedChatType(chatId: string): Promise<'p2p' | 'group' | undefined> {
     const cached = this.chatTypeCache.get(chatId)
     if (cached) return cached
@@ -359,13 +366,19 @@ export class FeishuSource {
           : undefined
       if (chatType) this.chatTypeCache.set(chatId, chatType)
       else {
-        this.log?.(`[feishu] chat mode lookup unverified chat=${chatId} mode=${mode ?? '<missing>'}; keeping conservative group admission`)
+        const category = mode === undefined ? 'unverified category=missing_mode' : 'unverified category=unrecognized_mode'
+        this.warnChatModeLookupOnce(chatId, category)
       }
       return chatType
     } catch (error) {
       // Metadata is advisory for polling; failure keeps conservative group admission.
-      const detail = error instanceof Error ? error.message : String(error)
-      this.log?.(`[feishu] chat mode lookup failed chat=${chatId} error=${detail}; keeping conservative group admission`)
+      // Provider/custom-fetch messages may contain arbitrary or sensitive details.
+      const code = error instanceof FeishuApiError
+        && Number.isSafeInteger(error.code)
+        && Math.abs(error.code) <= 999_999_999
+        ? `api_error code=${error.code}`
+        : 'lookup_error'
+      this.warnChatModeLookupOnce(chatId, `failed category=${code}`)
       return undefined
     }
   }
