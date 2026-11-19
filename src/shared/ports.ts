@@ -1,4 +1,4 @@
-import type { Decision, ReceiveResult, Role, Trigger } from './types.ts'
+import type { Decision, PublishApprovalBinding, ReceiveResult, Role, Trigger } from './types.ts'
 
 /** Scope port: whether a source listens to this trigger. */
 export interface SourceScope {
@@ -98,7 +98,11 @@ export interface WorkerPorts {
    * until the owner decides; the Router may still ask the question. A Worker
    * can request, never decide.
    */
-  requestApproval(ticketId: string, input: { action: string; reason?: string }): {
+  requestApproval(ticketId: string, input: {
+    action: string
+    reason?: string
+    publish?: PublishApprovalBinding
+  }): {
     approvalId: string
     status: 'pending'
   }

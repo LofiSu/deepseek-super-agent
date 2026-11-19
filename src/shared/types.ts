@@ -226,11 +226,22 @@ export interface ResumeRecord {
  * One action a Worker paused to ask the owner about. The owner decides through
  * the CLI; the model can request, never decide.
  */
+export interface PublishApprovalBinding {
+  repo: string
+  head: string
+  branch: string
+  base: 'main'
+  title: string
+  body?: string
+}
+
 export interface ApprovalRequest {
   id: string
   at: string
   /** The exact action the Worker will perform if approved. One line. */
   action: string
+  /** Structured, immutable publish intent when this approval covers a PR publish. */
+  publish?: PublishApprovalBinding
   reason?: string
   /** Session id that asked. */
   requestedBy: string

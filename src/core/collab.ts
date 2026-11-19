@@ -42,6 +42,7 @@ export interface CollaborationView {
 export interface RequestApprovalInput {
   action: string
   reason?: string
+  publish?: ApprovalRequest['publish']
   /** Session id that asked. Derived from the assignment when omitted. */
   requestedBy?: string
 }
@@ -63,7 +64,7 @@ export interface DecideApprovalOutcome {
 }
 
 /** Longest action description a Worker may put in front of the owner. */
-export const MAX_APPROVAL_ACTION_CHARS = 300
+export const MAX_APPROVAL_ACTION_CHARS = 1200
 /** Longest reason shown with the request. */
 export const MAX_APPROVAL_REASON_CHARS = 300
 /** Longest owner note stored with a decision. */
@@ -214,6 +215,7 @@ export class Collaborations {
       at: this.host.now(),
       action,
       ...(reason ? { reason } : {}),
+      ...(input.publish ? { publish: structuredClone(input.publish) } : {}),
       requestedBy: input.requestedBy
         || ticket.assignments.at(-1)?.workerSessionId
         || 'worker',

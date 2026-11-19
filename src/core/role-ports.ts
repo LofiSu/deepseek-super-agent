@@ -10,7 +10,7 @@ import {
   type WorkerPorts,
   type WorkerReport,
 } from '../shared/ports.ts'
-import type { ReceiveResult, Trigger } from '../shared/types.ts'
+import type { PublishApprovalBinding, ReceiveResult, Trigger } from '../shared/types.ts'
 import type { Engine } from './engine.ts'
 
 /**
@@ -46,10 +46,15 @@ export function bindRolePorts(engine: Engine): RolePorts {
     handback: (ticketId: string, triggerId: string, reason: string): boolean => (
       engine.handback(ticketId, triggerId, reason)
     ),
-    requestApproval: (ticketId: string, input: { action: string; reason?: string }) => {
+    requestApproval: (ticketId: string, input: {
+      action: string
+      reason?: string
+      publish?: PublishApprovalBinding
+    }) => {
       const { approval } = engine.requestApproval(ticketId, {
         action: input.action,
         ...(input.reason ? { reason: input.reason } : {}),
+        ...(input.publish ? { publish: input.publish } : {}),
         requestedBy: '',
       })
       return { approvalId: approval.id, status: 'pending' as const }
