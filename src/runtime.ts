@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import type {
   ApprovalDecision,
@@ -32,6 +33,7 @@ import {
   type FillTarget,
 } from './env/fill-vault.ts'
 import { LocalEnv } from './env/local-env.ts'
+import { strictReadIsolationIncludesPath } from './env/seccomp.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
@@ -547,7 +549,21 @@ export class Runtime {
       ? { reason: 'disabled' }
       : opts.fillVault
         ? { vault: opts.fillVault }
-        : loadFillVault(fillVaultPath(opts.home, baseEnv))
+        : (() => {
+          const filePath = fillVaultPath(opts.home, baseEnv)
+          let resolvedPath = filePath
+          try { resolvedPath = fs.realpathSync(filePath) } catch { /* loadFillVault reports missing/unreadable */ }
+          const strictPolicy = {
+            enabled: true,
+            readIsolation: true,
+            writableRoots: [path.join(opts.home, 'workspaces')],
+          }
+          if (
+            strictReadIsolationIncludesPath(filePath, strictPolicy)
+            || strictReadIsolationIncludesPath(resolvedPath, strictPolicy)
+          ) return { reason: 'worker-readable-location' }
+          return loadFillVault(filePath)
+        })()
     const fillVault = fillLoad.vault
     let fillTarget: FillTarget | undefined
     let fillTargetReason: string | undefined

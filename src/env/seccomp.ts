@@ -1,4 +1,5 @@
 import { platform } from 'node:os'
+import path from 'node:path'
 import { dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -65,6 +66,32 @@ function strictReadRoots(policy: SandboxPolicy): readonly string[] {
   for (const root of policy.writableRoots ?? []) assertStrictRoot(root, 'writable root')
   for (const root of policy.readRoots ?? []) assertStrictRoot(root, 'read root')
   return policy.readRoots ?? []
+}
+
+/** True when a path falls under a root intentionally exposed by strict mode. */
+export function strictReadIsolationIncludesPath(
+  candidate: string,
+  policy: SandboxPolicy,
+  system: SandboxSystem = {
+    platform: platform(),
+    available: () => false,
+    exists: existsSync,
+  },
+): boolean {
+  const roots = system.platform === 'linux'
+    ? [
+      ...LINUX_READ_PATHS.filter(root => (system.exists ?? existsSync)(root)),
+      ...(policy.writableRoots ?? []),
+      ...strictReadRoots(policy),
+    ]
+    : system.platform === 'darwin'
+      ? darwinReadPaths(policy, system.execPath ?? process.execPath)
+      : []
+  const target = path.resolve(candidate)
+  return roots.some(root => {
+    const relative = path.relative(path.resolve(root), target)
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  })
 }
 
 function darwinReadPaths(policy: SandboxPolicy, execPath: string): string[] {

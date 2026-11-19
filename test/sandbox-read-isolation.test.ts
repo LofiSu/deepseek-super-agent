@@ -2,7 +2,12 @@ import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 import { LocalEnv, type LocalEnvOptions } from '../src/env/local-env.ts'
-import { readIsolationFromEnv, wrapBashCommand, type SandboxPolicy } from '../src/env/seccomp.ts'
+import {
+  readIsolationFromEnv,
+  strictReadIsolationIncludesPath,
+  wrapBashCommand,
+  type SandboxPolicy,
+} from '../src/env/seccomp.ts'
 import { UserError } from '../src/shared/errors.ts'
 import { tempHome } from './fixtures.ts'
 
@@ -36,6 +41,28 @@ function linuxArgv(policy: SandboxPolicy, exists: (path: string) => boolean = ()
     exists,
   }).argv
 }
+
+describe('strict read path boundaries', () => {
+  it('identifies exposed system, executable, and workspace paths but not host temporary paths', () => {
+    const linux = {
+      platform: 'linux' as NodeJS.Platform,
+      available: () => true,
+      exists: () => true,
+    }
+    const policy: SandboxPolicy = {
+      enabled: true,
+      readIsolation: true,
+      writableRoots: ['/workspace/worker'],
+    }
+    expect(strictReadIsolationIncludesPath('/etc/vault.json', policy, linux)).toBe(true)
+    expect(strictReadIsolationIncludesPath('/tmp/vault.json', policy, linux)).toBe(false)
+    expect(strictReadIsolationIncludesPath('/workspace/worker/file', policy, linux)).toBe(true)
+
+    const darwin = { ...linux, platform: 'darwin' as NodeJS.Platform, execPath: '/opt/node/bin/node' }
+    expect(strictReadIsolationIncludesPath('/opt/node/bin/vault.json', policy, darwin)).toBe(true)
+    expect(strictReadIsolationIncludesPath('/private/tmp/vault.json', policy, darwin)).toBe(false)
+  })
+})
 
 describe('strict read isolation (Darwin)', () => {
   it('replaces the host-wide read wildcard with an explicit path allowlist', () => {

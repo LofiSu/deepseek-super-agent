@@ -239,6 +239,7 @@ The UI is not a substitute for OS file permissions or full-disk encryption.
   means fill is unavailable. When a fill vault loads, the Runtime enables strict
   worker read isolation. Worker filesystem access is limited to system/toolchain
   roots and its workspace; broad temporary-directory access is not granted.
+  Vault files under those readable roots are rejected, including symlink targets.
   Output redaction remains defense in depth and is not a confidentiality
   boundary. A fill needs an owner-approved card whose exact action text matches.
   The Runtime durably claims that approval before calling the target. A crash
