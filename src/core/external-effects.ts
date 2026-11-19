@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { OutboxRow, Ticket } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 import type { ApprovalRequest } from '../shared/types.ts'
-import { ensureCollaboration, pendingApproval } from './collab.ts'
+import { approvalActionId, ensureCollaboration, pendingApproval } from './collab.ts'
 
 export const EXTERNAL_OP_KIND = 'external_op'
 export const UNKNOWN_OUTCOME_PREFIX = 'UNKNOWN-OUTCOME:'
@@ -182,10 +182,12 @@ function queueUnknownOutcomeApproval(store: Store, ticketId: string, now: string
   if (unknownApprovalForTicket(collab.approvals)) return false
   const effectIds = unknownEffectIds(ticketId, store)
   if (effectIds.length === 0) return false
+  const action = `${UNKNOWN_OUTCOME_PREFIX} ${describeUnknownEffects(ticketId, store)}`
   const approval: ApprovalRequest = {
     id: store.nextId('appr'),
     at: now,
-    action: `${UNKNOWN_OUTCOME_PREFIX} ${describeUnknownEffects(ticketId, store)}`,
+    action,
+    actionId: approvalActionId(action),
     reason: 'Process stopped before an external effect finished; approve only after verifying remote state.',
     requestedBy: 'recovery',
     recovery: { source: 'crash-boundary', effectIds },

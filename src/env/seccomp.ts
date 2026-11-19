@@ -1,4 +1,5 @@
 import { platform } from 'node:os'
+import path from 'node:path'
 import { dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -44,10 +45,6 @@ const DARWIN_READ_PATHS = [
   '/etc',
   '/private/var/db/dyld',
   '/dev',
-  '/private/tmp',
-  '/tmp',
-  '/var/folders',
-  '/private/var/folders',
 ] as const
 
 /** System/toolchain roots bound read-only for bash and Node in strict Linux mode. */
@@ -71,6 +68,32 @@ function strictReadRoots(policy: SandboxPolicy): readonly string[] {
   return policy.readRoots ?? []
 }
 
+/** True when a path falls under a root intentionally exposed by strict mode. */
+export function strictReadIsolationIncludesPath(
+  candidate: string,
+  policy: SandboxPolicy,
+  system: SandboxSystem = {
+    platform: platform(),
+    available: () => false,
+    exists: existsSync,
+  },
+): boolean {
+  const roots = system.platform === 'linux'
+    ? [
+      ...LINUX_READ_PATHS.filter(root => (system.exists ?? existsSync)(root)),
+      ...(policy.writableRoots ?? []),
+      ...strictReadRoots(policy),
+    ]
+    : system.platform === 'darwin'
+      ? darwinReadPaths(policy, system.execPath ?? process.execPath)
+      : []
+  const target = path.resolve(candidate)
+  return roots.some(root => {
+    const relative = path.relative(path.resolve(root), target)
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  })
+}
+
 function darwinReadPaths(policy: SandboxPolicy, execPath: string): string[] {
   return [
     ...new Set([
@@ -84,7 +107,9 @@ function darwinReadPaths(policy: SandboxPolicy, execPath: string): string[] {
 }
 
 function darwinProfile(policy: SandboxPolicy, execPath: string): string {
-  const writes = ['/private/tmp', '/tmp', '/var/folders', '/private/var/folders', ...(policy.writableRoots ?? [])]
+  const writes = policy.readIsolation
+    ? [...(policy.writableRoots ?? [])]
+    : ['/private/tmp', '/tmp', '/var/folders', '/private/var/folders', ...(policy.writableRoots ?? [])]
   const lines = [
     '(version 1)',
     '(deny default)',
@@ -124,7 +149,7 @@ function linuxStrictArgv(policy: SandboxPolicy, exists: (path: string) => boolea
     ...reads,
     '--dev', '/dev',
     '--proc', '/proc',
-    '--ro-bind', '/tmp', '/tmp',
+    '--tmpfs', '/tmp',
     ...writable,
     '--',
   ]

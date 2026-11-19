@@ -228,10 +228,24 @@ The UI is not a substitute for OS file permissions or full-disk encryption.
   (`test/credential-sentinel.test.ts:97-152`). This is best-effort: an unknown
   secret shape, a value shorter than 8 characters, or a secret never present in
   the environment can still leak (`sanitize.ts:4,38-56`).
-- **Vault boundary.** The vault exposes names only; values are injected into a
-  child environment only and are never returned to context-building callers
+- **Vault boundary.** The env vault exposes names only; values are injected into
+  a child environment only and are never returned to context-building callers
   (`src/env/vault.ts:4-12,91-93`; `local-env.ts:69-74,200-213`). `FileVault`
   writes mode `0600` (`vault.ts:63-72`).
+- **Fill-only vault.** `src/env/fill-vault.ts` reads a separate `fill` section
+  and requires group/world permission bits to be clear (typically `0600`); it
+  exposes names, kinds, field names, and a receipt,
+  never a value. `fill()` calls a trusted `FillTarget`; missing or unsafe config
+  means fill is unavailable. When a fill vault loads, the Runtime enables strict
+  worker read isolation. Worker filesystem access is limited to system/toolchain
+  roots and its workspace; broad temporary-directory access is not granted.
+  Vault files under those readable roots are rejected, including symlink targets.
+  Output redaction remains defense in depth and is not a confidentiality
+  boundary. A fill needs an owner-approved card whose exact action text matches.
+  The Runtime durably claims that approval before calling the target. A crash
+  leaves it `in_flight`; a target error leaves it `unknown`, since some fields
+  may already have been applied. Neither state permits replay; an owner must
+  issue a new approval before a retry.
 - **Worker tool scope.** Executor tools exclude `reply_user`, `decide`, and
   `receive`; only the Router can speak or terminate (`src/harness/tools.ts:299`).
 

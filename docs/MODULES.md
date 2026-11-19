@@ -148,7 +148,10 @@ shows the sections and each one's source; see `docs/PROMPTS.md`.
 transitions). `collab.ts`
 owns pause/intervene/resume plus the approval hold: a Worker records a pending
 action, Worker turns stop while it is pending, the Router may still speak, and
-the owner's decision writes guidance before the RESUME turns. `lifecycle.ts`
+the owner's decision writes guidance before the RESUME turns. A card accepts
+`approve`, `deny`, or `dismiss`; `approvalActionId` hashes the exact action text
+into a structured `act_*` id, and `decideApproval` recomputes it so a rewritten
+action needs a new request. `approval-card.ts` renders the card. `lifecycle.ts`
 is the read-model event bus:
 
 - Events: `ticket.created`, `ticket.ended`, `ticket.paused`,
@@ -414,7 +417,17 @@ owner playbooks from `skills/<id>/SKILL.md`: regular files only (symlinks are
 skipped), a 2000-character prompt index, a 16000-character body cap, and a
 `read_skill` tool that is documentation, not a capability. `sanitize.ts`
 keeps credential values out of tool output and prompts. `vault.ts` exposes
-FileVault names only. `seccomp.ts` wraps every worker bash: `sandbox-exec` on
+FileVault names only; it is the env-injection store, not the fill store.
+`fill-vault.ts` is a separate fill-only credential/payment store: it reads
+`vault.json` (`DS_AGENT_VAULT_FILE`), requires group/world bits to be clear,
+and exposes entry
+names, kinds, field names, and a receipt but no read operation. `fill()` hands a
+value to a trusted `FillTarget` (a local helper via `DS_AGENT_FILL_COMMAND`, or
+an injected adapter), never returns it, and the Runtime adds its values to the
+redaction list at any length so `bash`/`read_file` cannot replay them. Missing,
+insecure, or malformed config means no fill. The Worker tools `list_vault_entries`,
+`prepare_fill`, and `fill_credential` require an approved card whose exact action
+matches. `seccomp.ts` wraps every worker bash: `sandbox-exec` on
 macOS, `bwrap` on Linux; a missing wrapper is a hard error, never a plain-bash
 fallback. `DS_AGENT_SANDBOX` no longer changes the policy. The wrapper confines
 writes and network (denied unless the policy allows it), but not reads: macOS
@@ -440,7 +453,7 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
 `serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
-`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `routines`, `approvals`, `approve`, `deny`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
+`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `routines`, `approvals`, `approve`, `deny`, `dismiss`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
 acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the

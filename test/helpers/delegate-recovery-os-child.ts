@@ -23,8 +23,8 @@ if (!home) {
   process.exit(2)
 }
 
-const marker = path.join(home, '.delegate-os-ready')
 const mode = process.env.DS_AGENT_RECOVERY_CHILD_MODE ?? 'seed'
+const marker = path.join(home, mode === 'restart' ? '.delegate-os-recovered' : '.delegate-os-ready')
 const task = process.env.DS_AGENT_DELEGATE_TASK ?? 'delegate-task'
 
 function runningTicket(): Ticket {
@@ -99,6 +99,11 @@ async function main(): Promise<void> {
     localAgents,
   })
 
+  process.on('SIGTERM', () => {
+    localAgents.killAll()
+    void runtime.finish().then(() => process.exit(0), () => process.exit(1))
+  })
+
   if (mode === 'seed') {
     // Start once with no tickets so recoveryAttempted is set; then seed a
     // running ticket without auto-recover mutating it before delegate_agent.
@@ -140,10 +145,6 @@ async function main(): Promise<void> {
     })}\n`)
   }
 
-  process.on('SIGTERM', () => {
-    localAgents.killAll()
-    void runtime.finish().then(() => process.exit(0), () => process.exit(1))
-  })
 }
 
 main().catch(error => {

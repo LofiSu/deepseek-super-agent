@@ -8,6 +8,23 @@ export {
   type LocalAgentSpec,
   type LocalAgentRunResult,
 } from './env/local-agents.ts'
+export { APPROVAL_ANSWERS, formatApprovalCard, type ApprovalAnswer } from './core/approval-card.ts'
+export { approvalActionId, type ApprovalDecision } from './core/collab.ts'
+export {
+  CARD_FIELDS,
+  FillVault,
+  PASSWORD_FIELDS,
+  ProcessFillTarget,
+  fillAction,
+  fillTargetFromEnv,
+  fillVaultPath,
+  loadFillVault,
+  type FillEntrySummary,
+  type FillField,
+  type FillKind,
+  type FillReceipt,
+  type FillTarget,
+} from './env/fill-vault.ts'
 export { A2ARouter, type A2ADelivery, type A2AEnvelope } from './channels/a2a.ts'
 export { LocalA2ATransport, type A2ATransport } from './channels/a2a-transport.ts'
 export { LifecycleBus, type LifecycleEvent } from './core/lifecycle.ts'

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -29,6 +30,31 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
     return dir
   }
 
+  function markerPath(home: string, mode: 'seed' | 'restart'): string {
+    return path.join(home, mode === 'restart' ? '.delegate-os-recovered' : '.delegate-os-ready')
+  }
+
+  async function waitForMarker(
+    home: string,
+    mode: 'seed' | 'restart',
+    timeoutMs = 45_000,
+  ): Promise<Record<string, unknown>> {
+    const file = markerPath(home, mode)
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (fs.existsSync(file)) {
+        return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+      }
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error(`timed out waiting for ${file}`)
+  }
+
+  async function waitForExit(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return
+    await once(child, 'exit')
+  }
+
   it('SIGKILL during delegate_agent queues UNKNOWN-OUTCOME approval and skips auto recovery replay', async () => {
     const home = tempHome()
     fs.writeFileSync(
@@ -37,7 +63,8 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
         agents: [{
           id: 'ipc-hold',
           command: process.execPath,
-          args: ['test/fixtures/delegate-ipc-hold.mjs', '{task}'],
+          // Specialists run in a Worker workspace, so resolve the fixture from the repo root.
+          args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
           timeoutMs: 60_000,
         }],
       }),
@@ -59,14 +86,14 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
       },
     )
     children.push(child)
-    const marker = path.join(home, '.delegate-os-ready')
-    const deadline = Date.now() + 45_000
-    while (Date.now() < deadline) {
-      if (fs.existsSync(marker)) break
-      await new Promise(r => setTimeout(r, 25))
-    }
+    const during = await waitForMarker(home, 'seed')
+    expect(during.phase).toBe('delegating')
+    expect(during.delegateActive).toBe(1)
+    expect(during.delegateOperationPhase).toBe('started')
+    expect(during.durableStarted).toBe(true)
+
     child.kill('SIGKILL')
-    await new Promise(r => setTimeout(r, 150))
+    await waitForExit(child)
 
     const restart = spawn(
       process.execPath,
@@ -85,12 +112,12 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
       },
     )
     children.push(restart)
-    fs.unlinkSync(marker)
-    while (Date.now() < deadline) {
-      if (fs.existsSync(marker)) break
-      await new Promise(r => setTimeout(r, 25))
-    }
+    const after = await waitForMarker(home, 'restart')
+    expect(after.phase).toBe('post-recovery')
+    expect(after.recoveryOutcome).toBe('completed')
+    expect(after.unknownApprovals).toBeGreaterThanOrEqual(1)
     restart.kill('SIGTERM')
+    await waitForExit(restart)
 
     const store = new Store(home)
     try {
@@ -106,5 +133,5 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
     } finally {
       store.close()
     }
-  }, 90_000)
+  }, 120_000)
 })

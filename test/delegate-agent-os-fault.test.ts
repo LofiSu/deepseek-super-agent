@@ -17,8 +17,8 @@ function tempHome(): string {
   return dir
 }
 
-function markerPath(home: string): string {
-  return path.join(home, '.delegate-os-ready')
+function markerPath(home: string, mode: 'seed' | 'restart'): string {
+  return path.join(home, mode === 'restart' ? '.delegate-os-recovered' : '.delegate-os-ready')
 }
 
 function spawnRecoveryChild(home: string, mode: 'seed' | 'restart', task: string): ChildProcess {
@@ -42,8 +42,12 @@ function spawnRecoveryChild(home: string, mode: 'seed' | 'restart', task: string
   return child
 }
 
-async function waitForMarker(home: string, timeoutMs = 45_000): Promise<Record<string, unknown>> {
-  const file = markerPath(home)
+async function waitForMarker(
+  home: string,
+  mode: 'seed' | 'restart',
+  timeoutMs = 45_000,
+): Promise<Record<string, unknown>> {
+  const file = markerPath(home, mode)
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (fs.existsSync(file)) {
@@ -93,7 +97,7 @@ describe('delegate_agent OS fault boundary', () => {
     )
     const task = 'delegate-crash-probe-task'
     const first = spawnRecoveryChild(home, 'seed', task)
-    const during = await waitForMarker(home)
+    const during = await waitForMarker(home, 'seed')
     expect(during.phase).toBe('delegating')
     expect(during.delegateActive).toBe(1)
     expect(during.delegateOperationPhase).toBe('started')
@@ -113,9 +117,8 @@ describe('delegate_agent OS fault boundary', () => {
       store.close()
     }
 
-    fs.unlinkSync(markerPath(home))
     const second = spawnRecoveryChild(home, 'restart', task)
-    const after = await waitForMarker(home)
+    const after = await waitForMarker(home, 'restart')
     expect(after.phase).toBe('post-recovery')
     expect(after.recoveryOutcome).toBe('completed')
     expect(after.assignmentCount).toBe(1)
@@ -123,7 +126,8 @@ describe('delegate_agent OS fault boundary', () => {
     expect(after.recoveredInputs).toBe(0)
     expect(after.unknownApprovals).toBeGreaterThanOrEqual(1)
     second.kill('SIGTERM')
-  }, 90_000)
+    await waitForExit(second)
+  }, 120_000)
 
   it('killAll on LocalAgentRegistry ends a slow specialist without duplicate stdout replay', async () => {
     const slow: LocalAgentSpec = {

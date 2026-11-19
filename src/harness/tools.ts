@@ -1,9 +1,19 @@
+import { APPROVAL_ANSWERS } from '../core/approval-card.ts'
+import { approvalActionId } from '../core/collab.ts'
 import {
   activeAssignmentId,
   beginDelegateOperation,
   finishDelegateOperation,
 } from '../core/external-effects.ts'
 import { ticketStage } from '../core/stage.ts'
+import {
+  fillAction,
+  sanitizeFillLabel,
+  type FillField,
+  type FillKind,
+  type FillTarget,
+  type FillVault,
+} from '../env/fill-vault.ts'
 import { redactUnknown } from '../env/sanitize.ts'
 import type { LocalAgentRegistry } from '../env/local-agents.ts'
 import type { SkillRegistry } from '../env/skills.ts'
@@ -11,7 +21,7 @@ import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
-import type { Disposition, Role, Ticket } from '../shared/types.ts'
+import type { ApprovalRequest, Disposition, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import type { McpToolSourceLike } from './mcp.ts'
@@ -53,6 +63,11 @@ export interface ToolDeps {
   localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks. Absent means read_skill is unavailable. */
   skills?: SkillRegistry
+  /**
+   * Fill-only vault and form adapter. Absent means the vault tools do not
+   * exist; a vault without a target can list entries but cannot fill.
+   */
+  fill?: { vault: FillVault; target?: FillTarget }
 }
 
 interface ToolDef extends ToolSpec {
@@ -95,6 +110,7 @@ export class ToolRegistry {
         scheduleJob: deps.scheduleJob,
         routerTurn: deps.routerTurn,
         teams: deps.teams,
+        fill: deps.fill,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
       ...(deps.localAgents ? localAgentTools(deps.localAgents, store, log) : []),
@@ -328,6 +344,140 @@ interface WorkerToolDeps {
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
   teams?: TeamRegistry
+  fill?: { vault: FillVault; target?: FillTarget }
+}
+
+type FillTools = NonNullable<WorkerToolDeps['fill']>
+
+const ALL_FILL_FIELDS: readonly FillField[] = ['username', 'password', 'number', 'expiry', 'cvc', 'holder']
+
+function parseFillFields(raw: unknown, available: readonly FillField[]): FillField[] {
+  let values: unknown[]
+  if (raw == null || raw === '') values = []
+  else if (Array.isArray(raw)) values = raw
+  else {
+    const text = String(raw).trim()
+    if (text.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(text) as unknown
+        if (!Array.isArray(parsed)) throw new Error('not an array')
+        values = parsed
+      } catch {
+        throw new UserError('fields must be a JSON array or comma-separated names')
+      }
+    } else {
+      values = text.split(',').map(item => item.trim()).filter(Boolean)
+    }
+  }
+  const fields: FillField[] = []
+  for (const value of values) {
+    const field = String(value).trim() as FillField
+    if (!ALL_FILL_FIELDS.includes(field)) throw new UserError(`unknown fill field ${field}`)
+    if (!available.includes(field)) throw new UserError(`this entry has no ${field} field`)
+    if (!fields.includes(field)) fields.push(field)
+  }
+  return fields.length ? fields : [...available]
+}
+
+function ticketForWorker(store: Store, ctx: ToolContext & { role: 'worker' }): Ticket {
+  if (!ctx.ticketId) throw new UserError('this tool needs a ticket')
+  const ticket = store.getDoc<Ticket>('ticket', ctx.ticketId)
+  if (!ticket) throw new UserError(`unknown ticket ${ctx.ticketId}`)
+  if (ticket.ended) throw new UserError(`ticket ${ctx.ticketId} has ended (${ticket.ended.outcome})`)
+  return ticket
+}
+
+/**
+ * A fill only runs against the exact action the owner approved. The Worker
+ * cannot name an approval it did not request, and a decision bound to another
+ * action text does not match.
+ */
+function requireApprovedFillAction(
+  ticket: Ticket,
+  approvalId: string,
+  action: string,
+): ApprovalRequest {
+  if (!approvalId.trim()) throw new UserError('fill needs the id of an approved request')
+  const approval = ticket.collab?.approvals?.find(item => item.id === approvalId)
+  if (!approval) throw new UserError(`unknown approval ${approvalId} on ticket ${ticket.id}`)
+  if (approval.status !== 'approved') {
+    throw new UserError(`approval ${approvalId} is ${approval.status}; owner approval is required before a fill`)
+  }
+  if (approval.usedAt || approval.fillState === 'completed') {
+    throw new UserError(`approval ${approvalId} was already used for a fill; request a new approval`)
+  }
+  if (approval.fillState === 'in_flight' || approval.fillState === 'unknown') {
+    throw new UserError(`approval ${approvalId} has a ${approval.fillState} fill outcome; request a new owner approval before retrying`)
+  }
+  const storedActionId = approval.actionId || approvalActionId(approval.action)
+  if (approval.action !== action || storedActionId !== approvalActionId(action)) {
+    throw new UserError(`approval ${approvalId} does not match this fill; request approval for the exact action`)
+  }
+  return approval
+}
+
+/** Atomically consume an approved fill before any external field write starts. */
+function claimApprovedFill(
+  store: Store,
+  ticketId: string,
+  approvalId: string,
+  action: string,
+): ApprovalRequest {
+  return store.atomic(() => {
+    const fresh = store.getDoc<Ticket>('ticket', ticketId)
+    if (!fresh || fresh.ended) throw new UserError(`ticket ${ticketId} is unavailable for a fill`)
+    const approval = requireApprovedFillAction(fresh, approvalId, action)
+    approval.fillState = 'in_flight'
+    approval.fillClaimedAt = new Date().toISOString()
+    store.putDoc('ticket', fresh.id, fresh)
+    return approval
+  })
+}
+
+function persistFillOutcome(
+  store: Store,
+  ticketId: string,
+  approvalId: string,
+  state: 'unknown' | 'completed',
+): void {
+  store.atomic(() => {
+    const fresh = store.getDoc<Ticket>('ticket', ticketId)
+    const current = fresh?.collab?.approvals?.find(item => item.id === approvalId)
+    if (!fresh || !current || current.fillState !== 'in_flight') {
+      throw new UserError(`fill claim ${approvalId} could not be finalized`)
+    }
+    current.fillState = state
+    if (state === 'completed') current.usedAt = new Date().toISOString()
+    store.putDoc('ticket', fresh.id, fresh)
+  })
+}
+
+function fillEntryOf(fill: FillTools, entry: string): { kind: FillKind; fields: FillField[] } {
+  const found = fill.vault.summary().find(item => item.name === entry)
+  if (!found) throw new UserError(`unknown vault entry ${entry}`)
+  return found
+}
+
+function requireFillTarget(fill: FillTools): FillTarget {
+  if (!fill.target) throw new UserError('no fill target is configured; the runtime cannot type into a form')
+  return fill.target
+}
+
+/** Plan a fill without touching a secret. Safe for a tool result. */
+function plannedFill(fill: FillTools, entry: string, fields: readonly FillField[]): {
+  kind: FillKind
+  target: string
+  fields: FillField[]
+  action: string
+  actionId: string
+} {
+  const target = requireFillTarget(fill)
+  const label = sanitizeFillLabel(target.label)
+  if (!label) throw new UserError('fill target needs a label')
+  const { kind, fields: available } = fillEntryOf(fill, entry)
+  const chosen = fields.length ? [...fields] : [...available]
+  const action = fillAction({ entry, kind, target: label, fields: chosen })
+  return { kind, target: label, fields: chosen, action, actionId: approvalActionId(action) }
 }
 
 /** Executor tools close over ExecutorPorts. reply, decide, and receive are not in this scope. */
@@ -446,9 +596,11 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
           'APPROVAL',
           `ticketId=${ctx.ticketId}`,
           `approvalId=${result.approvalId}`,
+          `actionId=${result.actionId}`,
           `action=${action}`,
           ...(reason ? [`reason=${reason}`] : []),
-          'The Worker stopped. Tell the owner the exact action in one short message and wait. You cannot approve it yourself; the owner decides with ds-agent approve or ds-agent deny.',
+          `answers=${APPROVAL_ANSWERS.join(',')}`,
+          'The Worker stopped. Tell the owner the exact action and action id in one short message and wait. The card is bound to that exact action text; if it changes, a new approval is required. You cannot answer the card yourself; the owner runs ds-agent approve, deny, or dismiss.',
         ].join('\n')
         try {
           await deps.routerTurn(prompt)
@@ -463,11 +615,13 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         }
         return {
           approvalId: result.approvalId,
+          actionId: result.actionId,
           status: result.status,
           note: 'The ticket is waiting for the owner. Do not perform the action; stop this turn.',
         }
       }),
     },
+    ...(deps.fill ? fillTools(deps.fill, store, log) : []),
     {
       name: 'subscribe_thread',
       description: 'Subscribe this ticket to another thread. contextOnly means read but do not wake.',
@@ -577,6 +731,86 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const jobId = String(args.jobId ?? '')
         if (jobId) store.completeJob(jobId, 'stopped')
         return { status: 'stopped', jobId }
+      }),
+    },
+  ]
+}
+
+/**
+ * Fill-only vault tools. They expose names, kinds, field names, and a receipt.
+ * There is intentionally no read, export, or reveal tool. A fill requires an
+ * owner-approved card whose exact action text matches the planned action.
+ */
+function fillTools(
+  fill: NonNullable<WorkerToolDeps['fill']>,
+  store: Store,
+  log: (line: string) => void,
+): ToolDef[] {
+  return [
+    {
+      name: 'list_vault_entries',
+      description: 'List fill-only vault entry names, kinds, and usable field names. Never returns values.',
+      parameters: schema(),
+      roles: ['worker'],
+      run: guard('worker', 'list_vault_entries', async () => ({
+        entries: fill.vault.summary(),
+        target: fill.target?.label ?? null,
+      })),
+    },
+    {
+      name: 'prepare_fill',
+      description: 'Plan one credential or card fill without touching a secret. Returns the exact action text to pass to request_approval.',
+      parameters: schema({
+        entry: { type: 'string', description: 'Vault entry name from list_vault_entries.' },
+        fields: { type: 'string', description: 'Optional JSON array or comma-separated field names.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'prepare_fill', async args => {
+        const entry = String(args.entry ?? '').trim()
+        if (!entry) throw new UserError('prepare_fill needs an entry')
+        const { fields: available } = fillEntryOf(fill, entry)
+        const fields = parseFillFields(args.fields, available)
+        const plan = plannedFill(fill, entry, fields)
+        log(`[fill] prepared entry=${entry} kind=${plan.kind} fields=${plan.fields.join(',')} target=${plan.target}`)
+        return { entry, ...plan }
+      }),
+    },
+    {
+      name: 'fill_credential',
+      description: 'Fill one approved vault entry into the configured form. Values are never returned. Requires an approved request for the exact action.',
+      parameters: schema({
+        entry: { type: 'string' },
+        fields: { type: 'string', description: 'Optional JSON array or comma-separated field names.' },
+        approvalId: { type: 'string', description: 'Approval id that the owner approved for this exact action.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'fill_credential', async (args, ctx) => {
+        const ticket = ticketForWorker(store, ctx)
+        const entry = String(args.entry ?? '').trim()
+        if (!entry) throw new UserError('fill_credential needs an entry')
+        const { fields: available } = fillEntryOf(fill, entry)
+        const fields = parseFillFields(args.fields, available)
+        const plan = plannedFill(fill, entry, fields)
+        const approvalId = String(args.approvalId ?? '')
+        // Claim durably before calling a target that may apply a field and then
+        // lose its response. A crash leaves in_flight, which remains consumed.
+        const approval = claimApprovedFill(store, ticket.id, approvalId, plan.action)
+        const target = requireFillTarget(fill)
+        let receipt
+        try {
+          receipt = await fill.vault.fill({ entry, fields: plan.fields, target })
+        } catch (error) {
+          // The target may have applied some fields before failing. Mark the
+          // result unknown and never make this approval replayable.
+          persistFillOutcome(store, ticket.id, approval.id, 'unknown')
+          throw error
+        }
+        persistFillOutcome(store, ticket.id, approval.id, 'completed')
+        log(
+          `[fill] filled entry=${receipt.entry} kind=${receipt.kind} fields=${receipt.fields.join(',')}`
+          + ` target=${receipt.target} approvalId=${approval.id}`,
+        )
+        return { ...receipt, approvalId: approval.id, actionId: plan.actionId }
       }),
     },
   ]

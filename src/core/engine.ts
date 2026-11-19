@@ -5,6 +5,7 @@ import { Assignments, type Recovery, type ReportResult } from './assignments.ts'
 import { blocksRestartRecovery, isUnknownOutcomeApproval, releaseUnknownOutcomeEffects } from './external-effects.ts'
 import {
   Collaborations,
+  type ApprovalDecision,
   type CollaborationView,
   type DecideApprovalInput,
   type DecideApprovalOutcome,
@@ -160,7 +161,7 @@ export class Engine {
   decideApproval(
     ticketId: string,
     approvalId: string,
-    decision: 'approved' | 'denied',
+    decision: ApprovalDecision,
     input: DecideApprovalInput = {},
   ): DecideApprovalOutcome {
     return this.host.repo.atomic(() => {
