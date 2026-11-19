@@ -179,6 +179,14 @@ export class FeishuClient {
     return items.filter(item => !item.deleted)
   }
 
+  /** Chat mode distinguishes p2p/group; chat_type is only group visibility. */
+  async getChatMode(chatId: string): Promise<string | undefined> {
+    const data = await this.request<{ chat_mode?: unknown }>(
+      `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`,
+    )
+    return typeof data.chat_mode === 'string' ? data.chat_mode : undefined
+  }
+
   async sendText(chatId: string, text: string): Promise<{ message_id: string }> {
     return this.request<{ message_id: string }>('/open-apis/im/v1/messages', {
       method: 'POST',
@@ -311,6 +319,7 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
 /** Polling Source over a real Feishu chat. Repeated pulls are safe (Trigger ids dedupe). */
 export class FeishuSource {
   private cursorMsValue: number
+  private readonly chatTypeCache = new Map<string, 'p2p' | 'group'>()
 
   constructor(
     private readonly client: FeishuClient,
@@ -327,6 +336,24 @@ export class FeishuSource {
   private readonly pageSize?: number
   private readonly config?: FeishuConfig
 
+  private async verifiedChatType(chatId: string): Promise<'p2p' | 'group' | undefined> {
+    const cached = this.chatTypeCache.get(chatId)
+    if (cached) return cached
+    try {
+      const mode = await this.client.getChatMode(chatId)
+      const chatType = mode === 'p2p'
+        ? 'p2p'
+        : mode === 'group' || mode === 'topic'
+          ? 'group'
+          : undefined
+      if (chatType) this.chatTypeCache.set(chatId, chatType)
+      return chatType
+    } catch {
+      // Metadata is advisory for polling; failure keeps conservative group admission.
+      return undefined
+    }
+  }
+
   /**
    * Highest message `create_time` (ms) observed so far, or the seed when none
    * was seen. A polling loop persists this as its durable cursor.
@@ -342,9 +369,15 @@ export class FeishuSource {
       pageSize: this.pageSize,
     })
     const triggers: Trigger[] = []
+    const resolvedTypes = new Map<string, 'p2p' | 'group' | undefined>()
     for (const item of items) {
       if (this.threadId && item.thread_id !== this.threadId) continue
-      triggers.push(feishuTriggerFromMessage(item, this.config))
+      if (!resolvedTypes.has(item.chat_id)) {
+        resolvedTypes.set(item.chat_id, await this.verifiedChatType(item.chat_id))
+      }
+      const chatType = resolvedTypes.get(item.chat_id)
+      const mappedItem = chatType ? { ...item, chat_type: chatType } : item
+      triggers.push(feishuTriggerFromMessage(mappedItem, this.config))
       const at = Number(item.create_time)
       if (Number.isFinite(at) && at > this.cursorMsValue) this.cursorMsValue = at
     }
