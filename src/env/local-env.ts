@@ -1,10 +1,17 @@
-import { spawn } from 'node:child_process'
+import { execSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { EnvPort, EnvRunOptions } from '../shared/ports.ts'
 import { UserError } from '../shared/errors.ts'
 import { allowlistedEnv, ENV_ALLOWLIST, redactSecrets, secretValues } from './sanitize.ts'
 import type { Vault } from './vault.ts'
+import { assertDevShellCommandAllowed } from './bash-policy.ts'
+import { parseBashAllowNetwork } from './bash-allow-network.ts'
+import {
+  defaultCredentialHidePaths,
+  hidePathsForWorkspace,
+  seedWorkspaceCheckout,
+} from './git-workspace.ts'
 import { readIsolationFromEnv, sandboxEnabledFromEnv, wrapBashCommand, type SandboxPolicy } from './seccomp.ts'
 
 export interface LocalEnvOptions {
@@ -26,6 +33,10 @@ export interface LocalEnvOptions {
   readIsolation?: boolean
   /** Extra absolute host paths allowed read-only in strict mode. */
   readRoots?: readonly string[]
+  /** `git clone --no-hardlinks` source when a worker workspace directory is empty. */
+  sourceRepo?: string
+  /** Credential paths to tmpfs-hide in Linux bwrap; defaults to well-known host paths. */
+  credentialHidePaths?: readonly string[]
 }
 
 /**
@@ -45,6 +56,8 @@ export class LocalEnv implements EnvPort {
   private readonly vault?: Vault
   private readonly vaultNames: readonly string[]
   private readonly sandbox: SandboxPolicy
+  private readonly sourceRepo?: string
+  private readonly credentialHidePaths: readonly string[]
 
   constructor(private readonly root: string, timeoutOrOptions: number | LocalEnvOptions = {}) {
     fs.mkdirSync(root, { recursive: true })
@@ -60,7 +73,17 @@ export class LocalEnv implements EnvPort {
     // Parse the env value even when an explicit flag is present so a garbage
     // value fails closed instead of being silently shadowed.
     const envReadIsolation = readIsolationFromEnv(env)
-    const sandbox: SandboxPolicy = options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }
+    const allowNetwork = sandboxEnabledFromEnv(env)
+      ? (options.sandbox?.allowNetwork ?? parseBashAllowNetwork(env))
+      : options.sandbox?.allowNetwork
+    const sandbox: SandboxPolicy = {
+      ...(options.sandbox ?? { enabled: sandboxEnabledFromEnv(env) }),
+      allowNetwork,
+    }
+    this.sourceRepo = options.sourceRepo?.trim() || undefined
+    this.credentialHidePaths = options.credentialHidePaths
+      ? [...options.credentialHidePaths]
+      : defaultCredentialHidePaths()
     this.sandbox = {
       ...sandbox,
       readIsolation: options.readIsolation ?? sandbox.readIsolation ?? envReadIsolation,
@@ -83,6 +106,7 @@ export class LocalEnv implements EnvPort {
   workspace(workerId: string): string {
     const dir = path.join(this.root, workerId)
     fs.mkdirSync(dir, { recursive: true })
+    if (this.sourceRepo) seedWorkspaceCheckout(dir, this.sourceRepo)
     return dir
   }
 
@@ -111,14 +135,20 @@ export class LocalEnv implements EnvPort {
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     const isolated = opts?.isolated === true
     if (!command.trim()) throw new UserError('empty command')
+    const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
+    if (!isolated) {
+      const headBranch = resolveHeadBranch(cwd)
+      assertDevShellCommandAllowed(command, headBranch ? { headBranch } : undefined)
+    }
     if (isolated && leavesWorkdir(command)) {
       throw new UserError('speculative command leaves the isolated workdir')
     }
-    const cwd = isolated ? this.isolatedWorkspace(workerId) : this.workspace(workerId)
+    const hidePaths = hidePathsForWorkspace(this.credentialHidePaths, [cwd])
     const wrapped = wrapBashCommand(command, {
       ...this.sandbox,
       writableRoots: [cwd],
       allowNetwork: isolated ? false : this.sandbox.allowNetwork,
+      hidePaths,
     })
     const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
       const [bin, ...args] = wrapped.argv
@@ -227,7 +257,7 @@ export class LocalEnv implements EnvPort {
     }
   }
 
-  private shellEnv(cwd: string, isolated: boolean): NodeJS.ProcessEnv {
+  private shellEnv(cwd: string, _isolated: boolean): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...this.childEnv }
     // Startup files can leak host state into a sandboxed shell and pollute stderr.
     delete env.BASH_ENV
@@ -235,9 +265,17 @@ export class LocalEnv implements EnvPort {
     if (this.vault && this.vaultNames.length > 0) {
       Object.assign(env, this.vault.resolveForChild(this.vaultNames))
     }
-    if (isolated) {
+    {
+      const tmp = path.join(cwd, 'tmp')
+      fs.mkdirSync(tmp, { recursive: true, mode: 0o700 })
       env.HOME = cwd
-      env.TMPDIR = cwd
+      env.TMPDIR = tmp
+      env.TMP = tmp
+      env.TEMP = tmp
+      env.XDG_CONFIG_HOME = path.join(cwd, '.config')
+      env.GH_CONFIG_DIR = path.join(cwd, '.config', 'gh')
+      fs.mkdirSync(env.XDG_CONFIG_HOME, { recursive: true, mode: 0o700 })
+      env.GIT_SSH_COMMAND = buildGitSshCommand(cwd)
     }
     return env
   }
@@ -328,6 +366,33 @@ export class LocalEnv implements EnvPort {
 }
 
 const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
+
+const WORKSPACE_SSH_KEY_NAMES = ['id_ed25519', 'id_rsa', 'id_ecdsa'] as const
+
+function resolveHeadBranch(cwd: string): string | undefined {
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    return branch && branch !== 'HEAD' ? branch : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function buildGitSshCommand(cwd: string): string {
+  const opts = ['-F', '/dev/null', '-o', 'IdentitiesOnly=yes', '-o', 'AddKeysToAgent=no']
+  const sshDir = path.join(cwd, '.ssh')
+  for (const name of WORKSPACE_SSH_KEY_NAMES) {
+    const keyPath = path.join(sshDir, name)
+    if (fs.existsSync(keyPath)) {
+      opts.push('-o', `IdentityFile=${keyPath}`)
+    }
+  }
+  return `ssh ${opts.map(o => (o.includes(' ') ? JSON.stringify(o) : o)).join(' ')}`
+}
 
 function symlinkEscape(): UserError {
   return new UserError('path escapes workspace: symlinks are not allowed')

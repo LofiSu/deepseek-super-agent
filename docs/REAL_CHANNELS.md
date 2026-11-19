@@ -37,6 +37,20 @@ real GitHub issue + comments API ─────┴─► Source adapter ─► 
 exist for unit tests, but they are not used by `pnpm demo` or by the acceptance
 checks.
 
+## GitHub issue dispatch (owner queue)
+
+Separate from the demo Router outbox: production **issue dispatch** polls issues
+and comments via `gh api`, admits only owner slash commands on real issues, and
+enqueues fix work on a shared queue with bounded RSI jobs. See `docs/DISPATCH.md`.
+
+- Trigger: `/ds-agent fix|status|cancel` (command name, not the public `ds-agent` GitHub user).
+- Default authorized actor: **LofiSu** (authenticated `gh` login).
+- **No auto issue comments** for status, cancel, or progress; PR-only publish via
+  `FeaturePrPublisher`.
+- Config: `<DS_AGENT_HOME>/github-dispatch.json`; cursor seeds to now on first start.
+- Optional **`github.auth`** for GitHub App tokens (default: owner `gh`). See `docs/DISPATCH.md` for keys, fail-closed behavior, mention honesty, and the **Pull requests: write includes merge** warning.
+- Started from `serve` when enabled (optional `--github-dispatch`); **webhook ingress is not deployed**.
+
 ## GitHub Source + Outbox
 
 The GitHub adapter uses the authenticated `gh` CLI:

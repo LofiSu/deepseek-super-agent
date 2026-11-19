@@ -6,6 +6,7 @@ import {
 import { ticketStage } from '../core/stage.ts'
 import { redactUnknown } from '../env/sanitize.ts'
 import type { LocalAgentRegistry } from '../env/local-agents.ts'
+import type { FeaturePrPublisher } from '../env/git-publish.ts'
 import type { SkillRegistry } from '../env/skills.ts'
 import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
@@ -53,6 +54,8 @@ export interface ToolDeps {
   localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks. Absent means read_skill is unavailable. */
   skills?: SkillRegistry
+  /** Host-side peanut/ PR publisher; absent means publish_feature_pr is unavailable. */
+  publishFeaturePr?: FeaturePrPublisher
 }
 
 interface ToolDef extends ToolSpec {
@@ -95,6 +98,7 @@ export class ToolRegistry {
         scheduleJob: deps.scheduleJob,
         routerTurn: deps.routerTurn,
         teams: deps.teams,
+        publishFeaturePr: deps.publishFeaturePr,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
       ...(deps.localAgents ? localAgentTools(deps.localAgents, store, log) : []),
@@ -328,6 +332,7 @@ interface WorkerToolDeps {
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
   teams?: TeamRegistry
+  publishFeaturePr?: FeaturePrPublisher
 }
 
 /** Executor tools close over ExecutorPorts. reply, decide, and receive are not in this scope. */
@@ -577,6 +582,38 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const jobId = String(args.jobId ?? '')
         if (jobId) store.completeJob(jobId, 'stopped')
         return { status: 'stopped', jobId }
+      }),
+    },
+    {
+      name: 'publish_feature_pr',
+      description:
+        'Publish the worker workspace to the configured GitHub repo on a peanut/ branch and open or update a PR targeting main. '
+        + 'Does not merge, force-push, or push tags.',
+      parameters: schema({
+        title: { type: 'string' },
+        body: { type: 'string' },
+        branch: { type: 'string', description: 'Optional slug under peanut/; omit when already on a peanut/ branch.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'publish_feature_pr', async (args, ctx) => {
+        if (!deps.publishFeaturePr) {
+          throw new UserError('publish_feature_pr is not configured on this runtime')
+        }
+        const ticket = ticketOf(store, ctx)
+        if (ticket?.speculative) {
+          throw new UserError('publish_feature_pr is not available in isolated/speculative mode')
+        }
+        const title = String(args.title ?? '')
+        const body = args.body == null ? undefined : String(args.body)
+        const branch = args.branch == null ? undefined : String(args.branch)
+        const result = await deps.publishFeaturePr.publish({
+          workerId: ctx.sessionId,
+          title,
+          body,
+          branch,
+        })
+        log(`[publish] session=${ctx.sessionId} branch=${result.branch} pr=${result.number}`)
+        return result
       }),
     },
   ]

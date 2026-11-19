@@ -1,6 +1,6 @@
 import { platform } from 'node:os'
 import { dirname } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { UserError } from '../shared/errors.ts'
 
@@ -17,6 +17,11 @@ export interface SandboxPolicy {
   readIsolation?: boolean
   /** Extra host paths exposed read-only in strict mode (absolute paths). */
   readRoots?: readonly string[]
+  /**
+   * Linux non-strict mode: overlay these paths with tmpfs after `--ro-bind / /`
+   * so host credentials are not readable at their absolute paths.
+   */
+  hidePaths?: readonly string[]
 }
 
 export interface SandboxSystem {
@@ -109,6 +114,24 @@ function darwinProfile(policy: SandboxPolicy, execPath: string): string {
   return `${lines.join('\n')}\n`
 }
 
+/** Directory: `--tmpfs`; file: hide with `--ro-bind /dev/null`. */
+export function bwrapHidePathArgs(
+  hidePaths: readonly string[],
+  exists: (path: string) => boolean,
+  lstatIsDirectory: (path: string) => boolean,
+): string[] {
+  const out: string[] = []
+  for (const p of hidePaths) {
+    if (!exists(p)) continue
+    if (lstatIsDirectory(p)) {
+      out.push('--tmpfs', p)
+    } else {
+      out.push('--ro-bind', '/dev/null', p)
+    }
+  }
+  return out
+}
+
 function linuxStrictArgv(policy: SandboxPolicy, exists: (path: string) => boolean): string[] {
   strictReadRoots(policy)
   const writable = (policy.writableRoots ?? []).flatMap(root => ['--bind', root, root])
@@ -171,12 +194,25 @@ export function wrapBashCommand(
     if (!system.available('bwrap')) {
       throw new UserError('worker bash requires bubblewrap (bwrap) on Linux')
     }
+    const exists = system.exists ?? existsSync
+    const hideArgs = bwrapHidePathArgs(
+      policy.hidePaths ?? [],
+      exists,
+      p => {
+        try {
+          return lstatSync(p).isDirectory()
+        } catch {
+          return false
+        }
+      },
+    )
     const argv = policy.readIsolation
-      ? linuxStrictArgv(policy, system.exists ?? existsSync)
+      ? linuxStrictArgv(policy, exists)
       : [
         'bwrap',
         ...(policy.allowNetwork ? [] : ['--unshare-net']),
         '--ro-bind', '/', '/',
+        ...hideArgs,
         '--dev', '/dev',
         '--proc', '/proc',
         ...(policy.writableRoots ?? []).flatMap(root => ['--bind', root, root]),

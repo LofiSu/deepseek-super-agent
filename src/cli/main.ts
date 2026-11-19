@@ -31,6 +31,10 @@ import { defaultHome, runDemo } from './demo.ts'
 import { runGatewayCommand } from './gateway.ts'
 import { runImessageCommand } from './imessage.ts'
 import { resolveServeChannelConfigs, runChannelsCheck, startServeChannels } from './channels.ts'
+import { dispatchLoadRequested, startDispatchLoopIfConfigured } from './dispatch-integration.ts'
+import { loadDispatchOwnerConfig } from '../dispatch/config.ts'
+import { ghRunForDispatchHost } from '../dispatch/github-app-auth.ts'
+import { formatDispatchStatus, runDispatchCancel } from '../dispatch/cli.ts'
 import { backupUsage, runBackupCli } from './backup.ts'
 import { runUi } from './ui.ts'
 import { runProfileCommand, runWireCommand } from './wiring.ts'
@@ -149,7 +153,9 @@ function help(): void {
   pnpm ds-agent retry <ticketId> # new Assignment on the same Ticket
   pnpm ds-agent status
   pnpm ds-agent health
-  pnpm ds-agent serve [--imessage] [--feishu] [--handle <id>] [--chat <id>]
+  pnpm ds-agent dispatch status
+  pnpm ds-agent dispatch cancel <jobId>   # local queue only; no GitHub comments
+  pnpm ds-agent serve [--imessage] [--feishu] [--github-dispatch] [--handle <id>] [--chat <id>]
                             [--allow-any] [--allow-groups] [--interval <ms>]
                             [--since <epoch-ms>] [--once]
                             # daemon timer over persisted state; optional inbound iMessage
@@ -348,15 +354,34 @@ async function serve(home: string): Promise<void> {
   // leave every permissioned resource untouched.
   const configs = resolveServeChannelConfigs()
 
+  let dispatchConfig: Awaited<ReturnType<typeof loadDispatchOwnerConfig>> | undefined
+  let featurePrPublisher: import('../runtime.ts').RuntimeOptions['featurePrPublisher'] | undefined
+  if (dispatchLoadRequested()) {
+    dispatchConfig = await loadDispatchOwnerConfig(home, { verifyMentions: true })
+    if (dispatchConfig?.githubAuthHost) {
+      const gh = await ghRunForDispatchHost(dispatchConfig.githubAuthHost)
+      const appGit = dispatchConfig.githubAuthHost.app
+        ? dispatchConfig.githubAuthHost.app.createAuthenticatedGitRun()
+        : undefined
+      featurePrPublisher = {
+        repo: dispatchConfig.github.repo,
+        gh,
+        ...(appGit ? { git: appGit } : {}),
+      }
+    }
+  }
+
   const runtime = Runtime.create({
     home,
     jobDelayMs: 20,
     watchdogIntervalMs: 60_000,
+    ...(featurePrPublisher ? { featurePrPublisher } : {}),
   })
   const canAssess = runtime.model.name !== 'MockModel'
   // Independent loops: each channel owns its AbortController and Outbox, but
   // both run over this one Runtime and SQLite store.
   let channels: ReturnType<typeof startServeChannels> | undefined
+  let dispatchLoop: Awaited<ReturnType<typeof startDispatchLoopIfConfigured>> | undefined
   let stopping = false
   const shutdown = (signal: NodeJS.Signals): void => {
     if (stopping) {
@@ -365,6 +390,7 @@ async function serve(home: string): Promise<void> {
     }
     stopping = true
     // Stop polling first so no new Trigger is ingested while finish() drains.
+    dispatchLoop?.abort()
     channels?.abort()
     runtime.log.info(`[serve] shutdown signal=${signal}; draining (send again to force exit)`)
     void (async () => {
@@ -374,6 +400,7 @@ async function serve(home: string): Promise<void> {
         await channels.wait()
         channels.close()
       }
+      if (dispatchLoop) await dispatchLoop.wait()
       await runtime.finish()
     })()
       .then(() => {
@@ -435,6 +462,22 @@ async function serve(home: string): Promise<void> {
     } catch (error) {
       channels?.abort()
       channels?.close()
+      await runtime.finish().catch(() => undefined)
+      throw error
+    }
+    try {
+      dispatchLoop = await startDispatchLoopIfConfigured(home, runtime, {
+        verifyGh: true,
+        ...(dispatchConfig ? { config: dispatchConfig } : {}),
+      })
+      if (dispatchLoop) {
+        runtime.log.info('[dispatch] github issue poll + shared job queue started (no issue comments)')
+      }
+    } catch (error) {
+      channels?.abort()
+      channels?.close()
+      dispatchLoop?.abort()
+      await dispatchLoop?.wait()
       await runtime.finish().catch(() => undefined)
       throw error
     }
@@ -524,6 +567,24 @@ async function main(): Promise<void> {
     for (const line of report.lines) console.log(line)
     process.exitCode = report.code
     return
+  }
+  if (cmd === 'dispatch') {
+    const store = new Store(home)
+    try {
+      if (sub === 'status' || !sub) {
+        console.log(formatDispatchStatus(store))
+        return
+      }
+      if (sub === 'cancel') {
+        const jobId = bare(3)[0]
+        if (!jobId) throw new Error('usage: ds-agent dispatch cancel <jobId>')
+        console.log(runDispatchCancel(store, jobId))
+        return
+      }
+      throw new Error('usage: ds-agent dispatch status | dispatch cancel <jobId>')
+    } finally {
+      store.close()
+    }
   }
   if (cmd === 'serve') {
     await serve(home)
