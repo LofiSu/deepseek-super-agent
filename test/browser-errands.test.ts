@@ -19,8 +19,11 @@ import {
 } from '../src/env/browser-errands.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import type { Completion, Model } from '../src/harness/model.ts'
+import { runTurn } from '../src/harness/loop.ts'
+import { SessionJournal } from '../src/harness/session.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import { ruleClassify } from '../src/ingress/filter.ts'
+import { isSecretEnvName } from '../src/env/sanitize.ts'
 import { Runtime } from '../src/runtime.ts'
 import type { Ticket, Trigger } from '../src/shared/types.ts'
 import { shutdown, tempHome } from './fixtures.ts'
@@ -643,6 +646,76 @@ describe('browser errand tools', () => {
       { id: 'b6', name: 'browser_read', args: {} },
       { sessionId: 'router', role: 'router', ticketId: 'ticket_1' },
     )).rejects.toThrow(/not available to router/)
+  })
+
+  it('redacts an echoed HTTP token from the Worker model and journal', async () => {
+    const sentinel = 'browser-sentinel-7f3a'
+    const tokenEnv = 'BROWSER_HANDLE'
+    expect(isSecretEnvName(tokenEnv)).toBe(false)
+    let authorization: unknown
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      authorization = new Headers(init?.headers).get('authorization')
+      return new Response(JSON.stringify({ ok: false, error: `driver rejected ${sentinel}` }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    try {
+      const runtime = Runtime.create({
+        home: tempHome(),
+        model: scriptedModel,
+        env: { [tokenEnv]: sentinel },
+        jobDelayMs: 0,
+        watchdogIntervalMs: 60_000,
+        browserErrands: enabled({
+          enabled: true,
+          driver: { kind: 'http', url: 'https://browser.invalid/errand', tokenEnv },
+          allowedHosts: ['example.com'],
+        }),
+      })
+      runtimes.push(runtime)
+      putTicket(runtime, 'ticket_redact')
+      const observedToolMessages: string[] = []
+      let modelCalls = 0
+      const model: Model = {
+        ...scriptedModel,
+        async complete(request): Promise<Completion> {
+          modelCalls += 1
+          if (modelCalls === 1) {
+            return { toolCalls: [{ id: 'read_echo', name: 'browser_read', args: {} }] }
+          }
+          observedToolMessages.push(...request.messages
+            .filter(message => message.role === 'tool')
+            .map(message => message.content))
+          return { text: 'done' }
+        },
+      }
+      const tools = toolsFor(runtime, runtime.browserErrands!)
+      const redact = (runtime as unknown as { redact: (text: string) => string }).redact
+      const journal = new SessionJournal(path.join(runtime.home, 'sessions'), runtime.store, () => {})
+      const session = { id: 'worker_ticket_redact', role: 'worker' as const, ticketId: 'ticket_redact' }
+      await runTurn({
+        model,
+        tools,
+        journal,
+        log: () => {},
+        metrics: runtime.metrics,
+        redact,
+        session,
+        prompt: 'Read the page.',
+      })
+
+      const toolMessage = journal.history(session.id).find(entry => entry.role === 'tool')?.content ?? ''
+      expect(authorization).toBe(`Bearer ${sentinel}`)
+      expect(observedToolMessages).toHaveLength(1)
+      expect(observedToolMessages[0]).toContain('[redacted]')
+      expect(toolMessage).toContain('[redacted]')
+      expect(observedToolMessages.join('\n')).not.toContain(sentinel)
+      expect(toolMessage).not.toContain(sentinel)
+      expect(fs.readFileSync(path.join(runtime.home, 'sessions', `${session.id}.jsonl`), 'utf8')).not.toContain(sentinel)
+    } finally {
+      fetchMock.mockRestore()
+    }
   })
 })
 

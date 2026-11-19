@@ -26,11 +26,12 @@ import type { Host } from './core/host.ts'
 import { LocalEnv } from './env/local-env.ts'
 import {
   BrowserErrands,
+  browserDriverSecretValues,
   createBrowserDriver,
   loadBrowserErrands,
   type BrowserErrandConfig,
 } from './env/browser-errands.ts'
-import { redactSecrets, secretValues } from './env/sanitize.ts'
+import { redactLiteralSecrets, redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { loadRoutines, normalizeRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
@@ -532,13 +533,17 @@ export class Runtime {
   static create(opts: RuntimeOptions): Runtime {
     const baseEnv = opts.env ?? process.env
     const mcpConfig = mcpServersFromConfig(opts.mcpServers, baseEnv)
-    // A server's own env is where its credentials live, so its secret-named
-    // values join the redaction list before anything logs or persists.
+    const browserConfig = opts.browserErrands === false
+      ? undefined
+      : opts.browserErrands ?? loadBrowserErrands(opts.home, baseEnv)
+    const browserSecrets = browserDriverSecretValues(browserConfig, baseEnv)
+    // Configured driver credentials join secret-named environment values before
+    // anything logs, reaches a model, or persists to a journal.
     const secrets = [...new Set([
       ...secretValues(baseEnv),
       ...mcpConfig.configs.flatMap(config => secretValues(config.env)),
     ])].sort((a, b) => b.length - a.length)
-    const redact = (text: string) => redactSecrets(text, secrets)
+    const redact = (text: string) => redactSecrets(redactLiteralSecrets(text, browserSecrets), secrets)
     const log = new RedactingLogger(redact)
     if (mcpConfig.error) log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${mcpConfig.error}`)
     const model = opts.model ?? createModelFromEnv(baseEnv)
@@ -564,9 +569,6 @@ export class Runtime {
     }
     // Owner-gated and off by default. A malformed file, an unusable command, or
     // a missing token env fails startup instead of leaving a half-working tool.
-    const browserConfig = opts.browserErrands === false
-      ? undefined
-      : opts.browserErrands ?? loadBrowserErrands(opts.home, baseEnv)
     const browserErrands = browserConfig
       ? new BrowserErrands(
         createBrowserDriver(browserConfig, { env: baseEnv }),

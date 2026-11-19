@@ -75,6 +75,18 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
   return redactCredentialPatterns(out)
 }
 
+/** Redact explicitly identified credentials even when they are short. */
+export function redactLiteralSecrets(text: string, secrets: readonly string[]): string {
+  const ordered = [...new Set(secrets)]
+    .filter(secret => secret.length > 0)
+    .sort((a, b) => b.length - a.length)
+  let out = text
+  for (const secret of ordered) {
+    if (out.includes(secret)) out = out.split(secret).join('[redacted]')
+  }
+  return out
+}
+
 export function allowlistedEnv(
   env: NodeJS.ProcessEnv,
   allow: readonly string[] = ENV_ALLOWLIST,

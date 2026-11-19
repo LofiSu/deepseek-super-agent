@@ -276,6 +276,15 @@ function normalizeAllowedHosts(raw: unknown): string[] {
   })
 }
 
+/** Resolve the configured HTTP bearer token for inclusion in Runtime redaction. */
+export function browserDriverSecretValues(
+  config: BrowserErrandConfig | undefined,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  if (!config || config.driver.kind !== 'http' || !config.driver.tokenEnv) return []
+  return [resolveHttpToken(config.driver, env)]
+}
+
 /** Build the driver, resolving the executable before any errand can run. */
 export function createBrowserDriver(
   config: BrowserErrandConfig,
@@ -285,9 +294,6 @@ export function createBrowserDriver(
   if (config.driver.kind === 'command') {
     const command = resolveExecutable(config.driver.command, env)
     return new CommandBrowserDriver({ ...config.driver, command }, { env })
-  }
-  if (config.driver.tokenEnv && !env[config.driver.tokenEnv]?.trim()) {
-    throw new UserError(`browser driver token env ${config.driver.tokenEnv} is not set`)
   }
   return new HttpBrowserDriver(config.driver, { env })
 }
@@ -610,6 +616,14 @@ class CommandBrowserDriver implements BrowserDriver {
   }
 }
 
+function resolveHttpToken(config: HttpBrowserDriverConfig, env: NodeJS.ProcessEnv): string {
+  const value = config.tokenEnv ? env[config.tokenEnv]?.trim() : undefined
+  if (!config.tokenEnv || !value) {
+    throw new UserError(`browser driver token env ${config.tokenEnv ?? ''} is not set`)
+  }
+  return value
+}
+
 class HttpBrowserDriver implements BrowserDriver {
   readonly kind = 'http' as const
   private readonly token?: string
@@ -620,11 +634,7 @@ class HttpBrowserDriver implements BrowserDriver {
     private readonly config: HttpBrowserDriverConfig,
     options: { env: NodeJS.ProcessEnv },
   ) {
-    if (config.tokenEnv) {
-      const value = options.env[config.tokenEnv]?.trim()
-      if (!value) throw new UserError(`browser driver token env ${config.tokenEnv} is not set`)
-      this.token = value
-    }
+    if (config.tokenEnv) this.token = resolveHttpToken(config, options.env)
   }
 
   killAll(): void {
