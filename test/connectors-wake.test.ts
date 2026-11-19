@@ -7,12 +7,16 @@ import type { Host } from '../src/core/host.ts'
 import { routerPromptFor } from '../src/harness/loop.ts'
 import { Metrics } from '../src/metrics/metrics.ts'
 import { normalizeProactiveConfig } from '../src/harness/proactive.ts'
-import { feishuTriggerFromMessage } from '../src/channels/feishu.ts'
+import { FeishuClient, FeishuSource, feishuTriggerFromMessage } from '../src/channels/feishu.ts'
+import { filterTrigger, ruleClassify } from '../src/ingress/filter.ts'
+import { admissionRulesFromEnv } from '../src/runtime.ts'
 import {
   CONNECTOR_TRIGGER_PREFIX,
   ConnectorWakeScheduler,
+  connectorTrigger,
   isConnectorWakeTicket,
   loadConnectorWakeState,
+  type ConnectorPendingWake,
 } from '../src/connectors/wake.ts'
 import { normalizeConnectorConfig } from '../src/connectors/config.ts'
 import { ConnectorIndex } from '../src/connectors/index-store.ts'
@@ -79,6 +83,15 @@ function draft(overrides: Partial<ConnectorDraft> = {}): ConnectorDraft {
   }
 }
 
+function pendingWake(index: ConnectorIndex, at: number, suffix: string): ConnectorPendingWake {
+  const record = index.upsert([draft({ externalId: `pending-${suffix}` })]).records[0]!
+  const trigger = connectorTrigger(record, {
+    channel: { source: 'cli', thread: 'local' },
+    actor: { source: 'cli', id: 'you' },
+  }, at)
+  return { at, trigger, recordId: record.id, service: record.service }
+}
+
 function scheduler(input: {
   store: Store
   index: ConnectorIndex
@@ -87,6 +100,7 @@ function scheduler(input: {
   admission?: { actors?: string[]; dropSelf?: string[]; groups?: string[] }
   quiet?: { quietStart: string; quietEnd: string; timezone: string }
   now?: () => number
+  env?: NodeJS.ProcessEnv
 }): { runner: ConnectorWakeScheduler; fired: Trigger[]; lines: string[] } {
   const fired: Trigger[] = []
   const lines: string[] = []
@@ -121,6 +135,7 @@ function scheduler(input: {
       ...(input.quiet ?? {}),
     }),
     ...(input.admission ? { admission: input.admission } : {}),
+    ...(input.env ? { env: input.env } : {}),
     fire: trigger => {
       fired.push(trigger)
       input.store.putDoc('trigger', trigger.id, trigger)
@@ -133,6 +148,77 @@ function scheduler(input: {
     log: line => { lines.push(line) },
   })
   return { runner, fired, lines }
+}
+
+async function seedFeishuPollTrigger(
+  store: Store,
+  chatMode: string | undefined,
+  options: {
+    visibility?: string
+    lookupError?: boolean
+    actor?: string
+    allowedActor?: string
+    allowedGroup?: string
+  } = {},
+): Promise<{ trigger: Trigger; admitted: boolean; denial?: string }> {
+  const config = {
+    appId: 'app',
+    appSecret: 'secret',
+    baseUrl: 'https://open.feishu.cn',
+    chatId: 'oc_owner',
+  }
+  const fetchImpl = async (url: string): Promise<Response> => {
+    let body: unknown
+    if (url.includes('tenant_access_token')) {
+      body = { code: 0, tenant_access_token: 'test-token', expire: 7200 }
+    } else if (url.includes('/im/v1/chats/')) {
+      body = options.lookupError
+        ? { code: 230002, msg: 'permission denied' }
+        : { code: 0, data: {
+          ...(chatMode === undefined ? {} : { chat_mode: chatMode }),
+          ...(options.visibility === undefined ? {} : { chat_type: options.visibility }),
+        } }
+    } else {
+      body = {
+        code: 0,
+        data: {
+          has_more: false,
+          items: [{
+            message_id: 'om_polled_owner',
+            chat_id: 'oc_owner',
+            msg_type: 'text',
+            body: { content: JSON.stringify({ text: '@ds-agent please investigate this issue' }) },
+            create_time: String(T0 - 60 * MIN),
+            sender: { id: options.actor ?? 'ou_owner', sender_type: 'user' },
+          }],
+        },
+      }
+    }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  const source = new FeishuSource(new FeishuClient(config, fetchImpl), 'oc_owner', {
+    sinceMs: T0 - 60 * MIN,
+    config,
+  })
+  const [trigger] = await source.pull()
+  if (!trigger) throw new Error('expected a Feishu poll trigger')
+  const rules = admissionRulesFromEnv({
+    DS_AGENT_GROUP_ALLOWLIST: options.allowedGroup ?? 'oc_owner',
+    DS_AGENT_ACTOR_ALLOWLIST: options.allowedActor ?? 'ou_owner',
+  })
+  const verdict = filterTrigger(trigger, { name: 'test-rules', classify: ruleClassify }, rules)
+  store.putDoc('trigger', trigger.id, trigger)
+  store.putDoc('disposition', trigger.id, {
+    at: trigger.at,
+    fanout: [],
+    context: [],
+    ...(verdict.action === 'drop' ? { filtered: `${verdict.layer}:${verdict.reason}` } : {}),
+  } satisfies Disposition)
+  return {
+    trigger,
+    admitted: verdict.action === 'pass',
+    ...(verdict.action === 'drop' ? { denial: `${verdict.layer}:${verdict.reason}` } : {}),
+  }
 }
 
 function fakeApi(records: readonly ConnectorDraft[], failures: readonly string[] = []): GoogleWorkspaceApi {
@@ -384,10 +470,12 @@ describe('connector wake scheduler', () => {
         create_time: String(Date.parse(at)),
         sender: { id: 'ou_owner', sender_type: 'user' },
       })
-      if (chatType === undefined) {
-        expect(trigger.channel?.address).not.toHaveProperty('chat_type')
+      if (chatType === 'p2p') {
+        expect(trigger.channel?.address?.chat_type).toBe('p2p')
+      } else if (chatType === 'group') {
+        expect(trigger.channel?.address?.chat_type).toBe('group')
       } else {
-        expect(trigger.channel?.address?.chat_type).toBe(chatType)
+        expect(trigger.channel?.address).not.toHaveProperty('chat_type')
       }
       store.putDoc('trigger', trigger.id, trigger)
       store.putDoc('disposition', trigger.id, { at, fanout: [], context: [] } satisfies Disposition)
@@ -418,6 +506,95 @@ describe('connector wake scheduler', () => {
         expect(fired).toHaveLength(0)
       }
     }
+  })
+
+  it('polls trusted Feishu chat_mode through admission and wake without direct-flag coupling', async () => {
+    for (const directMode of [false, true]) {
+      const { store, index } = setup()
+      const polled = await seedFeishuPollTrigger(store, 'p2p', { visibility: 'private' })
+      expect(polled.admitted).toBe(true)
+      expect(polled.trigger.channel?.address).toMatchObject({
+        provider: 'feishu',
+        chat_id: 'oc_owner',
+        chat_type: 'p2p',
+        group: 'oc_owner',
+      })
+      expect(polled.trigger.addressed).toBe('mention')
+
+      const event = draft({ externalId: `poll-p2p-${directMode}` })
+      const { runner, fired } = scheduler({
+        store,
+        index,
+        api: fakeApi([event]),
+        env: directMode ? { DS_AGENT_FEISHU_P2P_DIRECT: '1' } : {},
+        config: {
+          google: { services: ['gmail'] },
+          wake: {
+            enabled: true,
+            services: ['gmail'],
+            source: 'im',
+            thread: 'feishu:oc_owner',
+            chatId: 'oc_owner',
+          },
+        },
+      })
+      expect((await runner.poll(T0)).action).toBe('backfill')
+      event.updatedAt = new Date(T0 + MIN).toISOString()
+      expect((await runner.poll(T0 + 16 * MIN)).action).toBe('wake')
+      expect(fired).toHaveLength(1)
+    }
+
+    const noPrivateWake = async (
+      mode: string | undefined,
+      options: Parameters<typeof seedFeishuPollTrigger>[2] = {},
+    ) => {
+      const { store, index } = setup()
+      const polled = await seedFeishuPollTrigger(store, mode, options)
+      const event = draft({ externalId: `poll-${mode ?? 'missing'}-${options.actor ?? 'owner'}` })
+      const { runner, fired } = scheduler({
+        store,
+        index,
+        api: fakeApi([event]),
+        config: {
+          google: { services: ['gmail'] },
+          wake: {
+            enabled: true,
+            services: ['gmail'],
+            source: 'im',
+            thread: 'feishu:oc_owner',
+            chatId: 'oc_owner',
+          },
+        },
+      })
+      expect((await runner.poll(T0)).action).toBe('backfill')
+      event.updatedAt = new Date(T0 + MIN).toISOString()
+      expect((await runner.poll(T0 + 16 * MIN)).action).toBe('no-target')
+      expect(fired).toHaveLength(0)
+      return polled
+    }
+
+    const group = await noPrivateWake('group', { visibility: 'private' })
+    expect(group.admitted).toBe(true)
+    expect(group.trigger.channel?.address?.chat_type).toBe('group')
+    expect(group.trigger.channel?.address?.group).toBe('oc_owner')
+
+    const visibilityOnly = await noPrivateWake(undefined, { visibility: 'private' })
+    expect(visibilityOnly.admitted).toBe(true)
+    expect(visibilityOnly.trigger.channel?.address).not.toHaveProperty('chat_type')
+
+    const unknown = await noPrivateWake('future-mode', { visibility: 'public' })
+    expect(unknown.trigger.channel?.address).not.toHaveProperty('chat_type')
+
+    const failedLookup = await noPrivateWake('p2p', { lookupError: true })
+    expect(failedLookup.trigger.channel?.address).not.toHaveProperty('chat_type')
+
+    const actorDenied = await noPrivateWake('p2p', { actor: 'ou_denied' })
+    expect(actorDenied.admitted).toBe(false)
+    expect(actorDenied.denial).toContain('actor-not-allowlisted')
+
+    const groupDenied = await noPrivateWake('p2p', { allowedGroup: 'oc_other' })
+    expect(groupDenied.admitted).toBe(false)
+    expect(groupDenied.denial).toContain('group-not-allowlisted')
   })
 
   it('never invents a recipient when no admitted private thread exists', async () => {
@@ -492,6 +669,8 @@ describe('connector wake scheduler', () => {
     })
     expect((await runner.poll(T0)).action).toBe('backfill')
     expect(loadConnectorWakeState(store).backfillPending).toBe(true)
+    expect((await runner.poll(T0 + MIN)).action).toBe('not-due')
+    expect(queries).toHaveLength(1)
     expect((await runner.poll(T0 + 16 * MIN)).action).toBe('backfill')
     expect(queries[1]).toEqual(queries[0])
     expect(loadConnectorWakeState(store).backfillPending).toBeUndefined()
@@ -524,6 +703,174 @@ describe('connector wake scheduler', () => {
     expect(loadConnectorWakeState(store).notified).toHaveLength(0)
 
     ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = originalFire
+  })
+
+  it('holds incomplete pending wakes when authorization is revoked, but finishes durable ingress bookkeeping', async () => {
+    const cases: {
+      name: string
+      wake: Record<string, unknown>
+      quiet?: { quietStart: string; quietEnd: string; timezone: string }
+    }[] = [
+      { name: 'disabled', wake: { enabled: false } },
+      {
+        name: 'quiet-hours',
+        wake: {},
+        quiet: { quietStart: '10:00', quietEnd: '11:00', timezone: 'UTC' },
+      },
+      { name: 'changed-target', wake: { source: 'cli', thread: 'other' } },
+    ]
+    for (const entry of cases) {
+      const { store, index } = setup()
+      seedOwnerThread(store)
+      const pending = pendingWake(index, T0, entry.name)
+      store.putDoc('connector_wake', 'state', {
+        lastCheckAt: T0,
+        cursors: { gmail: new Date(T0).toISOString() },
+        pending: [pending],
+        wakes: [],
+        notified: [],
+      })
+      const { runner } = scheduler({
+        store,
+        index,
+        api: fakeApi([]),
+        config: {
+          google: { services: ['gmail'] },
+          wake: { enabled: true, services: ['gmail'], source: 'cli', thread: 'local', ...entry.wake },
+        },
+        ...(entry.quiet ? { quiet: entry.quiet } : {}),
+      })
+      let fires = 0
+      ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = () => { fires += 1 }
+      const result = await runner.poll(T0 + 16 * MIN)
+      expect(result.action).toBe('wake')
+      expect(fires).toBe(0)
+      expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+      expect(loadConnectorWakeState(store).wakes).toHaveLength(0)
+      expect(loadConnectorWakeState(store).notified).toHaveLength(0)
+    }
+
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    const pending = pendingWake(index, T0, 'already-complete')
+    const completedAt = new Date(T0 + 17 * MIN).toISOString()
+    store.putDoc('trigger', pending.trigger.id, pending.trigger)
+    store.putDoc('disposition', pending.trigger.id, {
+      at: completedAt,
+      fanout: [],
+      context: [],
+    } satisfies Disposition)
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { gmail: new Date(T0).toISOString() },
+      pending: [pending],
+      wakes: [],
+      notified: [],
+    })
+    const { runner } = scheduler({
+      store,
+      index,
+      api: fakeApi([]),
+      config: {
+        google: { services: ['gmail'] },
+        wake: { enabled: false, services: ['gmail'], source: 'cli', thread: 'local' },
+      },
+    })
+    await runner.poll(T0 + 16 * MIN)
+    const state = loadConnectorWakeState(store)
+    expect(state.pending ?? []).toHaveLength(0)
+    expect(state.lastWakeAt).toBe(Date.parse(completedAt))
+    expect(state.wakes[0]?.at).toBe(Date.parse(completedAt))
+    expect(state.notified[0]?.at).toBe(Date.parse(completedAt))
+  })
+
+  it('uses ingress completion time for caps and min-interval after cross-day replay', async () => {
+    const monday = Date.parse('2026-11-09T10:00:00.000Z')
+    const tuesday = Date.parse('2026-11-10T10:00:00.000Z')
+    for (const { wakeConfig, expected } of [
+      { wakeConfig: { maxPerDay: 1, minIntervalMinutes: 15 }, expected: 'daily-cap' },
+      { wakeConfig: { maxPerDay: 3, minIntervalMinutes: 60 }, expected: 'min-interval' },
+    ]) {
+      const { store, index } = setup()
+      seedOwnerThread(store)
+      const pending = pendingWake(index, monday, `cross-day-${expected}`)
+      store.putDoc('trigger', pending.trigger.id, pending.trigger)
+      store.putDoc('disposition', pending.trigger.id, {
+        at: new Date(tuesday).toISOString(),
+        fanout: [],
+        context: [],
+      } satisfies Disposition)
+      store.putDoc('connector_wake', 'state', {
+        lastCheckAt: tuesday - 20 * MIN,
+        cursors: { gmail: new Date(tuesday - 20 * MIN).toISOString() },
+        pending: [pending],
+        wakes: [],
+        notified: [],
+      })
+      const candidate = draft({
+        externalId: `tuesday-candidate-${expected}`,
+        occurredAt: new Date(tuesday).toISOString(),
+        updatedAt: new Date(tuesday + MIN).toISOString(),
+      })
+      const { runner, fired } = scheduler({
+        store,
+        index,
+        api: fakeApi([candidate]),
+        now: () => tuesday + 20 * MIN,
+        config: {
+          google: { services: ['gmail'] },
+          wake: {
+            enabled: true,
+            services: ['gmail'],
+            source: 'cli',
+            thread: 'local',
+            ...wakeConfig,
+          },
+        },
+      })
+      expect((await runner.poll(tuesday + 20 * MIN)).action).toBe(expected)
+      expect(fired).toHaveLength(0)
+      const state = loadConnectorWakeState(store)
+      expect(state.lastWakeAt).toBe(tuesday)
+      expect(state.wakes[0]?.at).toBe(tuesday)
+      expect(state.notified[0]?.at).toBe(tuesday)
+    }
+  })
+
+  it('continues provider indexing and checkpoints while pending fire keeps failing', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    const pending = pendingWake(index, T0, 'stuck-index')
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { gmail: new Date(T0).toISOString() },
+      pending: [pending],
+      wakes: [],
+      notified: [],
+    })
+    const page = draft({ wake: false, wakeReason: undefined, externalId: 'indexed-while-pending' })
+    const { runner } = scheduler({
+      store,
+      index,
+      api: fakeApi([page]),
+      config: {
+        google: { services: ['gmail'] },
+        wake: { enabled: true, services: ['gmail'] },
+      },
+    })
+    let fires = 0
+    ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = () => {
+      fires += 1
+      throw new Error('ingress still unavailable')
+    }
+    expect((await runner.poll(T0 + 16 * MIN)).action).toBe('wake')
+    expect(index.query({ limit: 20 }).some(record => record.externalId === 'indexed-while-pending')).toBe(true)
+    expect(loadConnectorWakeState(store).cursors?.gmail).toBe(new Date(T0 + 16 * MIN).toISOString())
+    expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+    expect((await runner.poll(T0 + 32 * MIN)).action).toBe('wake')
+    expect(fires).toBe(2)
+    expect(loadConnectorWakeState(store).cursors?.gmail).toBe(new Date(T0 + 32 * MIN).toISOString())
+    expect(loadConnectorWakeState(store).pending).toHaveLength(1)
   })
 
   it('resumes a persisted page token within the record bound without advancing the time cursor', async () => {
@@ -573,7 +920,7 @@ describe('connector wake scheduler', () => {
     }
     store.putDoc('connector_wake', 'state', {
       lastCheckAt: T0,
-      cursors: { docs: new Date(T0 - MIN).toISOString() },
+      cursors: { docs: new Date(T0 - 3 * MIN).toISOString() },
       pageTokens: { docs: 'expired-page-token' },
       pageQueries: { docs: originalQuery },
       wakes: [],
@@ -584,8 +931,12 @@ describe('connector wake scheduler', () => {
       async fetch() { return [] },
       async fetchPage(_service, query) {
         queries.push({ pageToken: query.pageToken, since: query.since, until: query.until })
-        if (query.pageToken) throw new GoogleInvalidPageTokenError('/drive/v3/files')
-        return { drafts: [] }
+        if (query.pageToken === 'expired-page-token') throw new GoogleInvalidPageTokenError('/drive/v3/files')
+        if (!query.pageToken) return {
+          drafts: [draft({ externalId: 'restart-data', updatedAt: originalQuery.until })],
+          nextPageToken: 'fresh-page-token',
+        }
+        return { drafts: [draft({ externalId: 'fresh-continuation-data', updatedAt: originalQuery.until })] }
       },
     }
     const config = {
@@ -601,8 +952,56 @@ describe('connector wake scheduler', () => {
     const restarted = scheduler({ store, index, api, config })
     await restarted.runner.poll(T0 + 32 * MIN)
     expect(queries[1]).toEqual({ ...originalQuery })
+    expect(index.query({ limit: 20 }).some(record => record.externalId === 'restart-data')).toBe(true)
+    expect(loadConnectorWakeState(store).pageTokens?.docs).toBe('fresh-page-token')
+    expect(loadConnectorWakeState(store).cursors?.docs).toBe(new Date(T0 - 3 * MIN).toISOString())
+
+    await restarted.runner.poll(T0 + 48 * MIN)
+    expect(queries[2]).toEqual({ pageToken: 'fresh-page-token', ...originalQuery })
+    expect(index.query({ limit: 20 }).some(record => record.externalId === 'fresh-continuation-data')).toBe(true)
     expect(loadConnectorWakeState(store).pageTokens?.docs).toBeUndefined()
     expect(loadConnectorWakeState(store).cursors?.docs).toBe(originalQuery.until)
+  })
+
+  it('backs off repeated rejection of the same provider continuation token', async () => {
+    const { store, index } = setup()
+    const bounds = {
+      since: new Date(T0 - 2 * 60 * MIN).toISOString(),
+      until: new Date(T0 - MIN).toISOString(),
+    }
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { docs: bounds.until },
+      pageTokens: { docs: 'bad-token' },
+      pageQueries: { docs: bounds },
+      wakes: [],
+      notified: [],
+    })
+    let calls = 0
+    const api: GoogleWorkspaceApi = {
+      async fetch() { return [] },
+      async fetchPage(_service, query) {
+        calls += 1
+        if (query.pageToken === 'bad-token') throw new GoogleInvalidPageTokenError('/drive/v3/files')
+        return { drafts: [], nextPageToken: 'bad-token' }
+      },
+    }
+    const { runner, lines } = scheduler({
+      store,
+      index,
+      api,
+      config: { google: { services: ['docs'] }, wake: { enabled: false, services: ['docs'] } },
+    })
+    await runner.poll(T0 + 16 * MIN)
+    await runner.poll(T0 + 32 * MIN)
+    await runner.poll(T0 + 48 * MIN)
+    const state = loadConnectorWakeState(store)
+    expect(state.invalidPageTokens?.docs).toBe('bad-token')
+    expect(state.invalidTokenRetries?.docs).toBe(2)
+    expect(state.invalidTokenRetryAfter?.docs).toBeGreaterThan(T0 + 64 * MIN)
+    expect((await runner.poll(T0 + 64 * MIN)).action).toBe('polled')
+    expect(calls).toBe(3)
+    expect(lines.some(line => line.includes('page-token retry deferred service=docs'))).toBe(true)
   })
 
   it('retains provider page tokens after transient errors', async () => {

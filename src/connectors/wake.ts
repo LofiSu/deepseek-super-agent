@@ -69,6 +69,9 @@ export interface ConnectorWakeState {
   cursors?: Partial<Record<GoogleService, string>>
   pageTokens?: Partial<Record<GoogleService, string>>
   pageQueries?: Partial<Record<GoogleService, { since: string; until: string }>>
+  invalidPageTokens?: Partial<Record<GoogleService, string>>
+  invalidTokenRetries?: Partial<Record<GoogleService, number>>
+  invalidTokenRetryAfter?: Partial<Record<GoogleService, number>>
   pending?: ConnectorPendingWake[]
   wakes: ConnectorWakeRow[]
   notified: ConnectorNotifiedRow[]
@@ -151,21 +154,18 @@ export class ConnectorWakeScheduler {
 
   private async runPoll(at: number): Promise<ConnectorWakeResult> {
     const config = this.opts.config
-    if (!config.enabled) return { action: 'disabled' }
     const api = this.opts.api
-    if (!api) return { action: 'disabled', reason: 'no-api' }
-
     let state = this.loadState()
-    state = this.reconcilePending(state)
-    if (state.pending?.length) {
-      const pending = state.pending[0]!
-      return { action: 'wake', recordId: pending.recordId, trigger: pending.trigger }
-    }
+    const replayAt = Math.max(at, this.opts.now())
+    state = this.reconcilePending(state, replayAt, config.enabled && Boolean(api))
+    if (!config.enabled) return { action: 'disabled' }
+    if (!api) return { action: 'disabled', reason: 'no-api' }
     const initialBackfillServices = new Set(
       config.google.services.filter(service => state.cursors?.[service] === undefined),
     )
     const first = state.lastCheckAt === undefined
-      || (config.google.services.length > 0 && initialBackfillServices.size === config.google.services.length)
+    const allServicesBackfilling = config.google.services.length > 0
+      && initialBackfillServices.size === config.google.services.length
     if (!first) {
       if (typeof state.lastCheckAt !== 'number' || !Number.isFinite(state.lastCheckAt)) {
         this.saveState({ ...state, lastCheckAt: at })
@@ -192,9 +192,16 @@ export class ConnectorWakeScheduler {
     const cursors: Partial<Record<GoogleService, string>> = { ...(state.cursors ?? {}) }
     const pageTokens: Partial<Record<GoogleService, string>> = { ...(state.pageTokens ?? {}) }
     const pageQueries: Partial<Record<GoogleService, { since: string; until: string }>> = { ...(state.pageQueries ?? {}) }
+    const invalidPageTokens: Partial<Record<GoogleService, string>> = { ...(state.invalidPageTokens ?? {}) }
+    const invalidTokenRetries: Partial<Record<GoogleService, number>> = { ...(state.invalidTokenRetries ?? {}) }
+    const invalidTokenRetryAfter: Partial<Record<GoogleService, number>> = { ...(state.invalidTokenRetryAfter ?? {}) }
     const drafts: ConnectorDraft[] = []
     const serviceErrors: string[] = []
     for (const service of config.google.services) {
+      if ((invalidTokenRetryAfter[service] ?? 0) > at) {
+        this.log(`[connector] page-token retry deferred service=${service} until=${new Date(invalidTokenRetryAfter[service]!).toISOString()}`)
+        continue
+      }
       const previous = cursors[service]
       const previousMs = previous === undefined ? Number.NaN : Date.parse(previous)
       const since = Number.isFinite(previousMs)
@@ -216,9 +223,17 @@ export class ConnectorWakeScheduler {
         if (page.nextPageToken) {
           pageTokens[service] = page.nextPageToken
           pageQueries[service] = { since: query.since, until: query.until }
+          if (page.nextPageToken !== invalidPageTokens[service]) {
+            delete invalidPageTokens[service]
+            delete invalidTokenRetries[service]
+            delete invalidTokenRetryAfter[service]
+          }
         } else {
           delete pageTokens[service]
           delete pageQueries[service]
+          delete invalidPageTokens[service]
+          delete invalidTokenRetries[service]
+          delete invalidTokenRetryAfter[service]
           // Advance the time cursor only after the provider reports the page is
           // complete. Continuations retain the original provider query bounds.
           cursors[service] = query.until
@@ -229,6 +244,19 @@ export class ConnectorWakeScheduler {
         if (error instanceof GoogleInvalidPageTokenError) {
           delete pageTokens[service]
           pageQueries[service] = { since: query.since, until: query.until }
+          if (query.pageToken) {
+            const retries = (invalidPageTokens[service] === query.pageToken
+              ? invalidTokenRetries[service] ?? 0
+              : 0) + 1
+            invalidPageTokens[service] = query.pageToken
+            invalidTokenRetries[service] = retries
+            const backoffMs = Math.min(
+              24 * 60 * 60_000,
+              config.poll.intervalMinutes * 60_000 * 2 ** Math.min(retries - 1, 8),
+            )
+            invalidTokenRetryAfter[service] = at + backoffMs
+            this.log(`[connector] rejected page token service=${service} retries=${retries} retry-after=${new Date(at + backoffMs).toISOString()}`)
+          }
         } else if (cursors[service] === undefined) {
           pageQueries[service] = { since: query.since, until: query.until }
         }
@@ -265,6 +293,9 @@ export class ConnectorWakeScheduler {
       cursors,
       pageTokens: Object.keys(pageTokens).length ? pageTokens : undefined,
       pageQueries: Object.keys(pageQueries).length ? pageQueries : undefined,
+      invalidPageTokens: Object.keys(invalidPageTokens).length ? invalidPageTokens : undefined,
+      invalidTokenRetries: Object.keys(invalidTokenRetries).length ? invalidTokenRetries : undefined,
+      invalidTokenRetryAfter: Object.keys(invalidTokenRetryAfter).length ? invalidTokenRetryAfter : undefined,
       backfillPending: config.google.services.some(service => cursors[service] === undefined)
         || Object.keys(pageTokens).length > 0,
     })
@@ -287,13 +318,19 @@ export class ConnectorWakeScheduler {
 
     // The first round only establishes the index and cursors. Waking from a
     // historical batch would be a burst, not a useful event.
-    if (first) {
+    if (first || allServicesBackfilling) {
       this.saveState(committed())
       this.log(
         `[connector] backfill indexed=${upsert.records.length} inserted=${upsert.inserted} `
         + `services=${config.google.services.join(',')}`,
       )
       return { action: 'backfill', ...counts }
+    }
+    if (base.pending?.length) {
+      this.saveState(committed())
+      const pending = base.pending[0]!
+      this.log(`[connector] wake selection suppressed pending triggerId=${pending.trigger.id}`)
+      return { action: 'wake', recordId: pending.recordId, trigger: pending.trigger, ...counts }
     }
     if (!config.wake.enabled) {
       this.saveState(committed())
@@ -409,9 +446,14 @@ export class ConnectorWakeScheduler {
     return undefined
   }
 
-  private reconcilePending(state: ConnectorWakeState): ConnectorWakeState {
+  private reconcilePending(state: ConnectorWakeState, decisionAt: number, enabled: boolean): ConnectorWakeState {
     for (const pending of state.pending ?? []) {
       if (!this.ingressComplete(pending.trigger.id)) {
+        const reason = this.pendingAuthorizationReason(pending, decisionAt, enabled)
+        if (reason) {
+          this.log(`[connector] pending wake held triggerId=${pending.trigger.id} reason=${reason}`)
+          break
+        }
         try {
           // Runtime ingress recognizes a persisted trigger without a disposition
           // as an interrupted commit and resumes it idempotently.
@@ -427,6 +469,21 @@ export class ConnectorWakeScheduler {
     return state
   }
 
+  private pendingAuthorizationReason(
+    pending: ConnectorPendingWake,
+    at: number,
+    connectorEnabled: boolean,
+  ): string | undefined {
+    const wake = this.opts.config.wake
+    if (!connectorEnabled) return 'connector-disabled'
+    if (!wake.enabled) return 'wake-disabled'
+    if (withinQuietHours(at, this.opts.proactive)) return 'quiet-hours'
+    if (!wake.services.includes(pending.service)) return 'service-disabled'
+    const currentTarget = this.findWakeTarget(wake)
+    if (!currentTarget) return 'no-current-private-target'
+    return sameWakeTarget(currentTarget, pending.trigger) ? undefined : 'private-target-changed'
+  }
+
   private ingressComplete(triggerId: string): boolean {
     return Boolean(
       this.opts.store.getDoc<Trigger>('trigger', triggerId)
@@ -435,19 +492,24 @@ export class ConnectorWakeScheduler {
   }
 
   private finishPending(state: ConnectorWakeState, pending: ConnectorPendingWake): ConnectorWakeState {
+    const disposition = this.opts.store.getDoc<Disposition>('disposition', pending.trigger.id)
+    const dispositionAt = typeof disposition?.at === 'string' ? Date.parse(disposition.at) : Number.NaN
+    const completedAt = Number.isFinite(dispositionAt) ? dispositionAt : this.opts.now()
+    const nonDelivery = disposition?.filtered !== undefined
     const next: ConnectorWakeState = {
       ...state,
-      lastWakeAt: pending.at,
+      ...(!nonDelivery ? { lastWakeAt: completedAt } : {}),
       pending: (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id),
-      wakes: [...state.wakes, {
-        at: pending.at,
+      wakes: nonDelivery ? state.wakes : [...state.wakes, {
+        at: completedAt,
         triggerId: pending.trigger.id,
         recordId: pending.recordId,
         service: pending.service,
       }].slice(-MAX_WAKE_ROWS),
-      notified: [...state.notified, { at: pending.at, triggerId: pending.trigger.id }].slice(-MAX_NOTIFIED_ROWS),
+      notified: [...state.notified, { at: completedAt, triggerId: pending.trigger.id }].slice(-MAX_NOTIFIED_ROWS),
     }
     this.saveState(next)
+    if (nonDelivery) this.log(`[connector] pending ingress completed without delivery triggerId=${pending.trigger.id}`)
     return next
   }
 
@@ -458,6 +520,22 @@ export class ConnectorWakeScheduler {
   private saveState(state: ConnectorWakeState): void {
     this.opts.store.putDoc(CONNECTOR_WAKE_STATE_KIND, CONNECTOR_WAKE_STATE_ID, state)
   }
+}
+
+function sameWakeTarget(target: WakeTarget, trigger: Trigger): boolean {
+  const channel = trigger.channel
+  if (
+    !channel
+    || target.channel.source !== channel.source
+    || target.channel.thread !== channel.thread
+    || target.actor.source !== trigger.actor.source
+    || target.actor.id !== trigger.actor.id
+  ) return false
+  const currentAddress = target.channel.address ?? {}
+  const pendingAddress = channel.address ?? {}
+  return ['provider', 'chat_id', 'chat_type', 'group', 'handle'].every(key =>
+    currentAddress[key] === pendingAddress[key],
+  )
 }
 
 /** Read the persisted wake window for CLI status and tests. */
@@ -507,6 +585,28 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
       ) pageQueries[service as GoogleService] = { since: query.since, until: query.until }
     }
   }
+  const invalidPageTokens: Partial<Record<GoogleService, string>> = {}
+  if (raw.invalidPageTokens && typeof raw.invalidPageTokens === 'object' && !Array.isArray(raw.invalidPageTokens)) {
+    for (const [service, value] of Object.entries(raw.invalidPageTokens)) {
+      if (typeof value === 'string' && value.length > 0) invalidPageTokens[service as GoogleService] = value
+    }
+  }
+  const invalidTokenRetries: Partial<Record<GoogleService, number>> = {}
+  if (raw.invalidTokenRetries && typeof raw.invalidTokenRetries === 'object' && !Array.isArray(raw.invalidTokenRetries)) {
+    for (const [service, value] of Object.entries(raw.invalidTokenRetries)) {
+      if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+        invalidTokenRetries[service as GoogleService] = value
+      }
+    }
+  }
+  const invalidTokenRetryAfter: Partial<Record<GoogleService, number>> = {}
+  if (raw.invalidTokenRetryAfter && typeof raw.invalidTokenRetryAfter === 'object' && !Array.isArray(raw.invalidTokenRetryAfter)) {
+    for (const [service, value] of Object.entries(raw.invalidTokenRetryAfter)) {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        invalidTokenRetryAfter[service as GoogleService] = value
+      }
+    }
+  }
   const pending = Array.isArray(raw.pending)
     ? raw.pending.filter((row): row is ConnectorPendingWake => {
       if (!row || typeof row !== 'object') return false
@@ -529,6 +629,9 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
     ...(Object.keys(cursors).length ? { cursors } : {}),
     ...(Object.keys(pageTokens).length ? { pageTokens } : {}),
     ...(Object.keys(pageQueries).length ? { pageQueries } : {}),
+    ...(Object.keys(invalidPageTokens).length ? { invalidPageTokens } : {}),
+    ...(Object.keys(invalidTokenRetries).length ? { invalidTokenRetries } : {}),
+    ...(Object.keys(invalidTokenRetryAfter).length ? { invalidTokenRetryAfter } : {}),
     ...(pending.length ? { pending } : {}),
     wakes,
     notified,

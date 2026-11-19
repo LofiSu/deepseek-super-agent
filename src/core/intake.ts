@@ -24,6 +24,10 @@ export class Intake {
    * because any adapter could set them.
    */
   receive(trigger: Trigger, trust: TriggerTrust = {}): ReceiveResult {
+    return this.host.repo.atomic(() => this.receiveAtomic(trigger, trust))
+  }
+
+  private receiveAtomic(trigger: Trigger, trust: TriggerTrust): ReceiveResult {
     if (!trigger.threads.length) throw new UserError('A trigger must belong to at least one thread')
     const existing = this.host.repo.getDoc<Trigger>('trigger', trigger.id)
     if (existing && this.host.repo.getDoc<Disposition>('disposition', trigger.id)) return 'duplicate'
@@ -55,6 +59,36 @@ export class Intake {
     }
 
     this.host.repo.putDoc('trigger', trigger.id, owned)
+    if (existing) {
+      const routedTickets = this.host.repo.listDocs<Ticket>('ticket')
+        .filter(ticket => ticket.inputs.some(input => input.triggerId === trigger.id))
+      const alreadyQueued = trigger.threads.some(ref =>
+        this.host.repo.getDoc<Thread>('thread', threadKey(ref))?.pending.includes(trigger.id) === true,
+      )
+      if (routedTickets.length > 0 || alreadyQueued) {
+        const fanout = routedTickets.flatMap(ticket =>
+          ticket.inputs.some(input => input.triggerId === trigger.id && input.kind === 'trigger') ? [ticket.id] : [],
+        )
+        const context = routedTickets.flatMap(ticket =>
+          ticket.inputs.some(input => input.triggerId === trigger.id && input.kind === 'context') ? [ticket.id] : [],
+        )
+        const disposition: Disposition = {
+          fanout,
+          context,
+          ...(trust.shards?.length ? { shards: trust.shards } : {}),
+          at,
+        }
+        this.host.repo.putDoc('disposition', trigger.id, disposition)
+        this.host.repo.addEvent('trigger.received', {
+          triggerId: trigger.id,
+          result: 'stored',
+          fanout,
+          context,
+          ...(trust.shards?.length ? { shards: trust.shards } : {}),
+        })
+        return 'stored'
+      }
+    }
     const keys = trigger.threads.map(threadKey)
     let primary: Thread | undefined
     const fanout: string[] = []

@@ -16,7 +16,9 @@ import type { OutboundAdapter } from './outbox-adapter.ts'
  *   FEISHU_VERIFICATION_TOKEN, FEISHU_ENCRYPT_KEY, FEISHU_BOT_OPEN_ID
  *
  * Bot permissions: im:message, im:message.send_as_bot, im:message:readonly (or
- * the corresponding granular scopes). The bot must be a member of the chat.
+ * the corresponding granular scopes). Polling chat classification also needs
+ * im:chat:readonly (or im:chat:read / im:chat), even when direct mode is off.
+ * The bot must be a member of the chat.
  */
 
 export interface FeishuConfig {
@@ -201,12 +203,12 @@ export class FeishuClient {
     return data.items?.[0]
   }
 
-  async getChatType(chatId: string): Promise<string | undefined> {
-    const data = await this.request<{ chat_type?: unknown }>(
+  async getChatMode(chatId: string): Promise<string | undefined> {
+    const data = await this.request<{ chat_mode?: unknown }>(
       `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`,
     )
-    return typeof data.chat_type === 'string' && data.chat_type.length > 0
-      ? data.chat_type
+    return typeof data.chat_mode === 'string' && data.chat_mode.length > 0
+      ? data.chat_mode
       : undefined
   }
 }
@@ -262,6 +264,12 @@ export function feishuThread(chatId: string, threadId?: string): string {
   return threadId ? `feishu:${chatId}:${threadId}` : `feishu:${chatId}`
 }
 
+export function normalizeFeishuChatMode(mode: unknown): 'p2p' | 'group' | undefined {
+  if (mode === 'p2p') return 'p2p'
+  if (mode === 'group' || mode === 'topic') return 'group'
+  return undefined
+}
+
 function mentionsBot(message: FeishuMessage, config?: FeishuConfig): boolean {
   const text = flattenFeishuMessage(message)
   if (/@ds-agent\b/i.test(text)) return true
@@ -276,6 +284,7 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
   const thread = feishuThread(message.chat_id, message.thread_id)
   const addressed = mentionsBot(message, config) ? 'mention' as const : undefined
   const senderType = message.sender?.sender_type
+  const chatType = normalizeFeishuChatMode(message.chat_type)
   return {
     id: `feishu_${message.message_id}`,
     source: 'im',
@@ -291,8 +300,8 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
       address: {
         provider: 'feishu',
         chat_id: message.chat_id,
-        ...(message.chat_type !== undefined ? { chat_type: message.chat_type } : {}),
-        // Group admission uses the chat id; private wake targets also require chat_type=p2p.
+        ...(chatType ? { chat_type: chatType } : {}),
+        // Group admission remains independent of trusted chat-mode classification.
         group: message.chat_id,
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
@@ -318,17 +327,25 @@ export class FeishuSource {
   constructor(
     private readonly client: FeishuClient,
     private readonly chatId: string,
-    options: { sinceMs?: number; threadId?: string; pageSize?: number; config?: FeishuConfig } = {},
+    options: {
+      sinceMs?: number
+      threadId?: string
+      pageSize?: number
+      config?: FeishuConfig
+      log?: (line: string) => void
+    } = {},
   ) {
     this.cursorMsValue = options.sinceMs ?? Date.now() - 5 * 60_000
     this.threadId = options.threadId
     this.pageSize = options.pageSize
     this.config = options.config
+    this.log = options.log ?? (() => undefined)
   }
 
   private readonly threadId?: string
   private readonly pageSize?: number
   private readonly config?: FeishuConfig
+  private readonly log: (line: string) => void
 
   /**
    * Highest message `create_time` (ms) observed so far, or the seed when none
@@ -344,20 +361,26 @@ export class FeishuSource {
       startTimeSec,
       pageSize: this.pageSize,
     })
-    let chatType: string | undefined
-    if (items.some(item => item.chat_type === undefined)) {
+    let chatType: 'p2p' | 'group' | undefined
+    if (items.length > 0) {
       try {
-        chatType = await this.client.getChatType(this.chatId)
-      } catch {
-        // Missing chat metadata stays missing; it must never imply a private chat.
+        const mode = await this.client.getChatMode(this.chatId)
+        chatType = normalizeFeishuChatMode(mode)
+        if (!chatType) {
+          this.log(`[feishu] unrecognized chat_mode chat=${this.chatId} mode=${mode ?? '(missing)'}`)
+        }
+      } catch (error) {
+        this.log(`[feishu] chat metadata lookup failed chat=${this.chatId}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     const triggers: Trigger[] = []
     for (const item of items) {
       if (this.threadId && item.thread_id !== this.threadId) continue
-      const message = item.chat_type === undefined && chatType !== undefined
-        ? { ...item, chat_type: chatType }
-        : item
+      const message: FeishuMessage = {
+        ...item,
+        // List-message chat_type is visibility metadata, not a private/group discriminator.
+        ...(chatType ? { chat_type: chatType } : { chat_type: undefined }),
+      }
       triggers.push(feishuTriggerFromMessage(message, this.config))
       const at = Number(item.create_time)
       if (Number.isFinite(at) && at > this.cursorMsValue) this.cursorMsValue = at

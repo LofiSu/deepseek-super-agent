@@ -4,7 +4,7 @@ import { bindRolePorts } from '../src/core/role-ports.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import type { Runtime } from '../src/runtime.ts'
-import type { Decision, Disposition, Ticket, Trigger } from '../src/shared/types.ts'
+import { threadKey, type Decision, type Disposition, type Thread, type Ticket, type Trigger } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 import { field, lastPrompt, ScriptedModel, silentModel } from './scripted-model.ts'
 
@@ -107,6 +107,100 @@ describe('Runtime service integration', () => {
     expect(resumed?.inputs.filter(input => input.triggerId === trigger.id)).toHaveLength(originalInputs)
     expect(runtime.ingest(trigger)).toBe('duplicate')
     expect(runtime.store.listDocs<Trigger>('trigger').filter(row => row.id === trigger.id)).toHaveLength(1)
+  })
+
+  it('does not reroute a partially fanned-out trigger after tickets or subscriptions change', () => {
+    for (const scenario of [
+      { name: 'ended original', endOriginal: true, keepOriginalSubscription: true },
+      { name: 'changed subscription', endOriginal: false, keepOriginalSubscription: false },
+    ]) {
+      const runtime = start()
+      const threadId = `recovery/${scenario.name.replaceAll(' ', '-')}`
+      const seed = imTrigger({
+        id: `trg_seed_${threadId}`,
+        thread: threadId,
+        text: '@ds-agent please fix the login timeout',
+      })
+      runtime.engine.receive(seed)
+      const decision = runtime.engine.evaluateDue()[0]
+      expect(decision?.ticketId).toBeDefined()
+      const original = runtime.store.getDoc<Ticket>('ticket', decision!.ticketId!)!
+      const follow = imTrigger({
+        id: `trg_partial_${threadId}`,
+        thread: threadId,
+        text: 'the timeout still affects another request',
+        actor: 'alex',
+      })
+      original.inputs.push({
+        id: `input_partial_${threadId}`,
+        kind: 'trigger',
+        triggerId: follow.id,
+        text: follow.text,
+        at: follow.at,
+        human: true,
+      })
+      if (scenario.endOriginal) {
+        original.ended = { at: new Date().toISOString(), outcome: 'ready', by: 'router' }
+      }
+      runtime.store.putDoc('ticket', original.id, original)
+
+      const { ended: _ended, ...originalBase } = original
+      const replacement: Ticket = {
+        ...originalBase,
+        id: `ticket_replacement_${threadId}`,
+        title: 'Replacement subscriber',
+        originTriggerId: `trg_replacement_${threadId}`,
+        createdAt: new Date().toISOString(),
+        inputs: [],
+      }
+      runtime.store.putDoc('ticket', replacement.id, replacement)
+      const key = threadKey(follow.threads[0]!)
+      const thread = runtime.store.getDoc<Thread>('thread', key)!
+      thread.subscriptions = scenario.keepOriginalSubscription
+        ? [original.id, replacement.id]
+        : [replacement.id]
+      runtime.store.putDoc('thread', key, thread)
+      runtime.store.putDoc('trigger', follow.id, follow)
+
+      expect(runtime.ingest(follow)).toBe('stored')
+      const resumedOriginal = runtime.store.getDoc<Ticket>('ticket', original.id)!
+      const resumedReplacement = runtime.store.getDoc<Ticket>('ticket', replacement.id)!
+      expect(resumedOriginal.inputs.filter(input => input.triggerId === follow.id)).toHaveLength(1)
+      expect(resumedReplacement.inputs.filter(input => input.triggerId === follow.id)).toHaveLength(0)
+      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)?.fanout).toEqual([original.id])
+      expect(runtime.store.getDoc<Thread>('thread', key)?.pending).not.toContain(follow.id)
+      expect(runtime.ingest(follow)).toBe('duplicate')
+    }
+  })
+
+  it('rolls back Intake routing and disposition together on a mid-receive failure', () => {
+    const runtime = start()
+    const threadId = 'recovery/atomic'
+    const seed = imTrigger({
+      id: 'trg_atomic_seed',
+      thread: threadId,
+      text: '@ds-agent please fix the login timeout',
+    })
+    runtime.engine.receive(seed)
+    const decision = runtime.engine.evaluateDue()[0]
+    const ticket = runtime.store.getDoc<Ticket>('ticket', decision!.ticketId!)!
+    const trigger = imTrigger({
+      id: 'trg_atomic_intake',
+      thread: threadId,
+      text: 'the login timeout is still present',
+      actor: 'alex',
+    })
+    const originalAddEvent = runtime.store.addEvent.bind(runtime.store)
+    runtime.store.addEvent = (() => { throw new Error('injected Intake write failure') }) as typeof runtime.store.addEvent
+    expect(() => runtime.engine.receive(trigger)).toThrow(/injected Intake write failure/)
+    runtime.store.addEvent = originalAddEvent
+    expect(runtime.store.getDoc<Trigger>('trigger', trigger.id)).toBeUndefined()
+    expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)).toBeUndefined()
+    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.some(input => input.triggerId === trigger.id)).toBe(false)
+
+    expect(runtime.engine.receive(trigger)).toBe('stored')
+    expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)?.fanout).toEqual([ticket.id])
+    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.filter(input => input.triggerId === trigger.id)).toHaveLength(1)
   })
 
   it('routes a trigger to a shard, runs that router session, and places the worker on the mesh', async () => {

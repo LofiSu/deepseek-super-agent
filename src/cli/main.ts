@@ -236,7 +236,9 @@ before SQLite is opened, and stores its cursor in SQLite as
 one start; otherwise the stored cursor for that chat seeds the poll, otherwise
 the source starts at now-5min. Feishu triggers keep the chat id in
 channel.address.group, so DS_AGENT_GROUP_ALLOWLIST admits by chat; only a real
-bot mention sets addressed=mention, and group messages are never marked direct.
+bot mention sets addressed=mention, and group messages are never marked direct. Connector wake polling also
+requires im:chat:readonly to resolve trusted chat_mode (im:chat:read or im:chat
+also satisfy this scope), regardless of whether direct mode is enabled.
 --imessage and --feishu may be combined: both configurations are resolved before
 Runtime.create, one Runtime/SQLite store is shared, and each loop keeps its own
 AbortController, cursor, and outbox. If either configuration is absent or
@@ -260,7 +262,8 @@ SQLite. For iMessage it opens chat.db read-only, checks the required columns,
 prints count/latest ROWID (never message text), reports admission and osascript
 presence, and prints the exact manual Automation command without running it. For
 Feishu it reports paired credentials, chat id, base URL, and scopes without
-printing secrets; --network adds one real tenant_access_token call and still
+printing secrets; connector wake polling requires im:chat:readonly for chat_mode
+lookup (im:chat:read or im:chat also work), even with direct mode off. --network adds one real tenant_access_token call and still
 sends no message. Exit 0 means every selected channel is ready. A safe no-send
 smoke is: run channels check (optionally --network), run the printed iMessage
 Automation command manually, then stop; the first real Router reply is the first
@@ -270,8 +273,10 @@ terminal to control Messages under System Settings > Privacy & Security >
 Automation.
 
 Feishu setup: create a custom app with the Bot capability, add scopes im:message,
-im:message:send_as_bot, im:message:readonly, and im:message.group_msg (for group
-history), publish an app version, add the bot to exactly one target chat, copy
+im:message:send_as_bot, im:message:readonly, im:message.group_msg (for group
+history), and im:chat:readonly (required for connector wake chat_mode lookup even
+when direct mode is off; im:chat:read or im:chat also work). Publish an app
+version, add the bot to exactly one target chat, copy
 its oc_... chat id, then set FEISHU_APP_ID, FEISHU_APP_SECRET, and
 FEISHU_CHAT_ID (or pass --chat). Inbound CLI delivery is one-chat polling only;
 webhook servers and long-connection/WebSocket delivery are not implemented.

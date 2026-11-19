@@ -142,13 +142,17 @@ describe('Feishu message mapping', () => {
     expect(new Date(trigger.at).toISOString()).toBe('2025-11-01T01:00:00.000Z')
   })
 
-  it('copies only supplied chat types and leaves missing types fail-closed', () => {
+  it('normalizes supplied chat modes and ignores visibility-only or unknown values', () => {
     const p2p = feishuTriggerFromMessage(message({ chat_type: 'p2p' }), config)
+    const group = feishuTriggerFromMessage(message({ chat_type: 'topic' }), config)
+    const visibility = feishuTriggerFromMessage(message({ chat_type: 'private' }), config)
     const unknown = feishuTriggerFromMessage(message({ chat_type: 'future-chat-kind' }), config)
     const missing = feishuTriggerFromMessage(message(), config)
     expect(p2p.channel?.address?.chat_type).toBe('p2p')
-    expect(unknown.channel?.address?.chat_type).toBe('future-chat-kind')
-    expect(missing.channel?.address).not.toHaveProperty('chat_type')
+    expect(group.channel?.address?.chat_type).toBe('group')
+    for (const trigger of [visibility, unknown, missing]) {
+      expect(trigger.channel?.address).not.toHaveProperty('chat_type')
+    }
   })
 
   it('admits a real chat message by its chat id and denies a different group', () => {
@@ -236,11 +240,13 @@ describe('Feishu webhook parser', () => {
       },
     }, config).trigger
     const group = parse('group')
+    const visibility = parse('private')
     const missing = parse()
     const unknown = parse('future-chat-kind')
     expect(group?.channel?.address?.chat_type).toBe('group')
-    expect(missing?.channel?.address).not.toHaveProperty('chat_type')
-    expect(unknown?.channel?.address?.chat_type).not.toBe('p2p')
+    for (const trigger of [visibility, missing, unknown]) {
+      expect(trigger?.channel?.address).not.toHaveProperty('chat_type')
+    }
   })
 
   it('decrypts an encrypted envelope', () => {
@@ -319,7 +325,7 @@ describe('Feishu client and outbox', () => {
     const { fn } = fakeFetch((url, init) => {
       if (url.includes('tenant_access_token')) return tokenHandler(url, init)
       if (url.includes('/im/v1/chats/')) {
-        return { body: { code: 0, data: { chat_type: 'p2p' } } }
+        return { body: { code: 0, data: { chat_mode: 'p2p', chat_type: 'private' } } }
       }
       return {
         body: {
@@ -340,6 +346,52 @@ describe('Feishu client and outbox', () => {
     expect(triggers.map(trigger => trigger.id)).toEqual(['feishu_om_a', 'feishu_om_b'])
     expect(triggers[0]?.channel?.address?.chat_type).toBe('p2p')
     expect(triggers[1]!.text).toBe('second')
+  })
+
+  it('uses only chat_mode for poll classification and logs missing, unknown, or failed metadata', async () => {
+    const cases: {
+      mode?: string
+      visibility?: string
+      fail?: boolean
+      expected?: string
+      log?: RegExp
+    }[] = [
+      { mode: 'p2p', visibility: 'private', expected: 'p2p' },
+      { mode: 'group', visibility: 'private', expected: 'group' },
+      { mode: 'topic', visibility: 'public', expected: 'group' },
+      { visibility: 'private', log: /unrecognized chat_mode.*\(missing\)/ },
+      { mode: 'future-mode', visibility: 'public', log: /unrecognized chat_mode.*future-mode/ },
+      { fail: true, log: /chat metadata lookup failed.*230002/ },
+    ]
+    for (const [index, entry] of cases.entries()) {
+      const { fn } = fakeFetch(url => {
+        if (url.includes('tenant_access_token')) return tokenHandler(url)
+        if (url.includes('/im/v1/chats/')) {
+          return entry.fail
+            ? { body: { code: 230002, msg: 'permission denied' } }
+            : { body: { code: 0, data: { ...(entry.mode ? { chat_mode: entry.mode } : {}), ...(entry.visibility ? { chat_type: entry.visibility } : {}) } } }
+        }
+        return {
+          body: {
+            code: 0,
+            data: {
+              has_more: false,
+              items: [message({ message_id: `om_mode_${index}` })],
+            },
+          },
+        }
+      })
+      const logs: string[] = []
+      const source = new FeishuSource(new FeishuClient(config, fn), 'oc_chat', {
+        sinceMs: 1761958000000,
+        config,
+        log: line => logs.push(line),
+      })
+      const [trigger] = await source.pull()
+      if (entry.expected) expect(trigger?.channel?.address?.chat_type).toBe(entry.expected)
+      else expect(trigger?.channel?.address).not.toHaveProperty('chat_type')
+      if (entry.log) expect(logs.some(line => entry.log!.test(line))).toBe(true)
+    }
   })
 
   it('surfaces a Feishu API error instead of dropping it', async () => {
