@@ -154,7 +154,7 @@ describe('connectors config', () => {
     expect(() => parseGoogleCredentials(JSON.stringify({
       ...credentials,
       extra: 'nope',
-    }), 'test')).toThrow(/unknown key extra/)
+    }), 'test')).toThrow(/unknown key/)
   })
 
   it('never includes a credential value in its error message', () => {
@@ -166,6 +166,19 @@ describe('connectors config', () => {
       const message = error instanceof Error ? error.message : String(error)
       expect(message).not.toContain(secret)
       expect(message).toContain('refreshToken')
+    }
+  })
+
+  it('does not quote malformed credential JSON or unknown field names', () => {
+    const secret = 'synthetic-oauth-secret-sentinel'
+    for (const invalid of [secret, JSON.stringify({ [secret]: 'value' })]) {
+      try {
+        parseGoogleCredentials(invalid, 'test')
+        throw new Error('expected parse to fail')
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        expect(message).not.toContain(secret)
+      }
     }
   })
 })

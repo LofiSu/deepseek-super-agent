@@ -12,9 +12,13 @@ export class Replies {
     // canned "Acknowledged" before the Router decides would be exactly the
     // noise these features must not send, so the Router's one turn is the only
     // possible output.
+    const connectorOnly = ticket.inputs.length === 1
+      && ticket.inputs[0]?.triggerId === ticket.originTriggerId
+      && ticket.channels.length > 0
+      && ticket.channels.every(channel => channel.address?.connector === '1')
     const wakeMarker = ticket.channels.map(channel => channel.address?.proactive === '1'
       ? 'proactive'
-      : channel.address?.connector === '1'
+      : connectorOnly && channel.address?.connector === '1'
         ? 'connector'
         : undefined).find(Boolean)
     if (wakeMarker) {

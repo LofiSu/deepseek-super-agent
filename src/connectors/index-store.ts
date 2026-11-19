@@ -53,17 +53,22 @@ interface Scored {
 
 export class ConnectorIndex {
   private readonly redact: (text: string) => string
+  private readonly writesEnabled: boolean
   private readonly now: () => Date
 
   constructor(
     private readonly store: Store,
     options: ConnectorIndexOptions = {},
   ) {
+    this.writesEnabled = typeof options.redact === 'function'
     this.redact = options.redact ?? (text => text)
     this.now = options.now ?? (() => new Date())
   }
 
   upsert(drafts: readonly ConnectorDraft[]): ConnectorUpsert {
+    if (!this.writesEnabled) {
+      throw new UserError('connector index writes require an explicit redaction function')
+    }
     let inserted = 0
     let updated = 0
     let unchanged = 0

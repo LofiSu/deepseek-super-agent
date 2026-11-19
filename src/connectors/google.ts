@@ -89,24 +89,38 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
 
   private async calendar(query: GoogleFetchQuery): Promise<GoogleFetchPage> {
     const queryAt = Date.parse(query.until)
-    const now = Number.isFinite(queryAt) ? queryAt : this.now()
-    // Index a useful window, but only treat an event as wake-worthy inside the
-    // configured lookahead. Past events are still searchable for a day.
+    const indexedAt = Number.isFinite(queryAt) ? queryAt : this.now()
+    const now = Math.max(indexedAt, this.now())
+    // The paged index query retains its original bounds. A separate bounded
+    // query prioritizes imminent events so older results cannot hide them on a
+    // later page until after their start time.
     const indexWindowMinutes = Math.max(query.lookaheadMinutes, 7 * 24 * 60)
-    const timeMin = new Date(now - 24 * 60 * 60_000).toISOString()
-    const timeMax = new Date(now + indexWindowMinutes * 60_000).toISOString()
     const data = await this.get('/calendar/v3/calendars/primary/events', {
-      timeMin,
-      timeMax,
+      timeMin: new Date(indexedAt - 24 * 60 * 60_000).toISOString(),
+      timeMax: new Date(indexedAt + indexWindowMinutes * 60_000).toISOString(),
       singleEvents: 'true',
       orderBy: 'startTime',
       maxResults: String(query.limit),
       showDeleted: 'false',
       pageToken: query.pageToken,
     }, query.signal)
-    const items = arrayOf(data, 'items')
+    const urgent = await this.get('/calendar/v3/calendars/primary/events', {
+      timeMin: new Date(now - 15 * 60_000).toISOString(),
+      timeMax: new Date(now + query.lookaheadMinutes * 60_000).toISOString(),
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '2500',
+      showDeleted: 'false',
+    }, query.signal)
+    const unique = new Map<string, unknown>()
+    for (const item of [...arrayOf(urgent, 'items'), ...arrayOf(data, 'items')]) {
+      const event = record(item)
+      const start = dateTimeOf(event.start) ?? str(record(event.start).date)
+      const id = str(event.id) ?? start ?? JSON.stringify(item)
+      if (!unique.has(id)) unique.set(id, item)
+    }
     const drafts: ConnectorDraft[] = []
-    for (const item of items.slice(0, query.limit)) {
+    for (const item of [...unique.values()].slice(0, query.limit)) {
       const event = record(item)
       const start = dateTimeOf(event.start) ?? str(record(event.start).date)
       const end = dateTimeOf(event.end) ?? str(record(event.end).date)
@@ -237,7 +251,8 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
   private async tasks(query: GoogleFetchQuery): Promise<GoogleFetchPage> {
     const now = this.now()
     const data = await this.get('/tasks/v1/lists/@default/tasks', {
-      updatedMin: query.since,
+      // Due dates are independent of update time; keep active tasks visible as
+      // they approach their deadlines even when the task itself is unchanged.
       showCompleted: 'false',
       showHidden: 'false',
       maxResults: String(query.limit),
@@ -251,8 +266,10 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       const due = str(task.due)
       const updatedAt = str(task.updated) ?? due ?? query.until
       const dueMs = due ? Date.parse(due) : Number.NaN
+      const dateOnly = due !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(due)
+      const dueEndMs = dateOnly ? dueMs + 86_400_000 - 1 : dueMs
       const soon = Number.isFinite(dueMs)
-        && dueMs >= now - 60_000
+        && dueEndMs >= now - 60_000
         && dueMs <= now + query.lookaheadMinutes * 60_000
       const status = str(task.status) ?? 'needsAction'
       const wanted = soon && status !== 'completed'
@@ -302,9 +319,9 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
   }
 
   private async request(url: URL, signal: AbortSignal | undefined, allowRefresh: boolean): Promise<Response> {
-    const token = await this.tokenProvider.accessToken(signal)
     const timeout = AbortSignal.timeout(this.requestTimeoutMs)
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+    const token = await this.tokenProvider.accessToken(combined)
     const response = await this.fetchImpl(url, {
       headers: {
         authorization: `Bearer ${token}`,

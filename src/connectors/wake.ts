@@ -8,7 +8,6 @@ import type { GoogleWorkspaceApi } from './google.ts'
 import {
   connectorRecordId,
   oneLine,
-  stableHash,
   type ConnectorDraft,
   type ConnectorRecord,
   type GoogleService,
@@ -162,7 +161,11 @@ export class ConnectorWakeScheduler {
       const pending = state.pending[0]!
       return { action: 'wake', recordId: pending.recordId, trigger: pending.trigger }
     }
-    const first = state.lastCheckAt === undefined || state.backfillPending === true
+    const initialBackfillServices = new Set(
+      config.google.services.filter(service => state.cursors?.[service] === undefined),
+    )
+    const first = state.lastCheckAt === undefined
+      || (config.google.services.length > 0 && initialBackfillServices.size === config.google.services.length)
     if (!first) {
       if (typeof state.lastCheckAt !== 'number' || !Number.isFinite(state.lastCheckAt)) {
         this.saveState({ ...state, lastCheckAt: at })
@@ -198,14 +201,14 @@ export class ConnectorWakeScheduler {
         ? new Date(previousMs - CURSOR_OVERLAP_MS).toISOString()
         : new Date(at - lookbackMs).toISOString()
       const pageQuery = pageQueries[service]
+      const query = {
+        since: pageQuery?.since ?? since,
+        until: pageQuery?.until ?? until,
+        limit: config.poll.maxRecordsPerPoll,
+        lookaheadMinutes: config.wake.calendarLookaheadMinutes,
+        ...(pageTokens[service] ? { pageToken: pageTokens[service] } : {}),
+      }
       try {
-        const query = {
-          since: pageQuery?.since ?? since,
-          until: pageQuery?.until ?? until,
-          limit: config.poll.maxRecordsPerPoll,
-          lookaheadMinutes: config.wake.calendarLookaheadMinutes,
-          ...(pageTokens[service] ? { pageToken: pageTokens[service] } : {}),
-        }
         const page = api.fetchPage
           ? await api.fetchPage(service, query)
           : { drafts: await api.fetch(service, query) }
@@ -223,24 +226,26 @@ export class ConnectorWakeScheduler {
       } catch (error) {
         serviceErrors.push(`${service}: ${messageOf(error)}`)
         this.log(`[connector] poll failed service=${service}: ${messageOf(error)}`)
+        if (cursors[service] === undefined) pageQueries[service] = { since: query.since, until: query.until }
       }
     }
 
+    const decisionAt = Math.max(at, this.opts.now())
     const upsert = this.opts.index.upsert(drafts)
     const pruned = this.opts.index.prune(config.index)
     const base: ConnectorWakeState = {
       ...state,
-      lastCheckAt: at,
+      lastCheckAt: decisionAt,
       // Keep the previously committed checkpoints until the new page state is
       // saved; a wake page is saved together with its durable outbox row.
       cursors: state.cursors,
       pageTokens: state.pageTokens,
       pageQueries: state.pageQueries,
       wakes: state.wakes
-        .filter(row => at - row.at <= WAKE_RETENTION_MS)
+        .filter(row => decisionAt - row.at <= WAKE_RETENTION_MS)
         .slice(-MAX_WAKE_ROWS),
       notified: state.notified
-        .filter(row => at - row.at <= NOTIFIED_RETENTION_MS)
+        .filter(row => decisionAt - row.at <= NOTIFIED_RETENTION_MS)
         .slice(-MAX_NOTIFIED_ROWS),
     }
     const counts = {
@@ -255,9 +260,25 @@ export class ConnectorWakeScheduler {
       cursors,
       pageTokens: Object.keys(pageTokens).length ? pageTokens : undefined,
       pageQueries: Object.keys(pageQueries).length ? pageQueries : undefined,
-      backfillPending: first && Object.keys(pageTokens).length > 0,
+      backfillPending: config.google.services.some(service => cursors[service] === undefined)
+        || Object.keys(pageTokens).length > 0,
     })
     if (pruned > 0) this.log(`[connector] index pruned=${pruned}`)
+
+    // Establish each service's initial index before treating its historic rows
+    // as new wake candidates. A failed service does not block other services.
+    const known = new Set(base.notified.map(row => row.triggerId))
+    for (const record of upsert.records) {
+      if (!initialBackfillServices.has(record.service)
+        || !record.wake
+        || !config.wake.services.includes(record.service)) continue
+      const triggerId = connectorRevisionTriggerId(record)
+      if (!known.has(triggerId)) {
+        base.notified.push({ at: decisionAt, triggerId })
+        known.add(triggerId)
+      }
+    }
+    base.notified = base.notified.slice(-MAX_NOTIFIED_ROWS)
 
     // The first round only establishes the index and cursors. Waking from a
     // historical batch would be a burst, not a useful event.
@@ -274,22 +295,22 @@ export class ConnectorWakeScheduler {
       this.log(`[connector] index-only indexed=${upsert.records.length} inserted=${upsert.inserted}`)
       return { action: 'polled', ...counts }
     }
-    if (withinQuietHours(at, this.opts.proactive)) {
+    if (withinQuietHours(decisionAt, this.opts.proactive)) {
       this.saveState(committed())
-      this.log(`[connector] quiet-hours now=${localTime(at, this.opts.proactive.timezone)}`)
+      this.log(`[connector] quiet-hours now=${localTime(decisionAt, this.opts.proactive.timezone)}`)
       return { action: 'quiet-hours', ...counts }
     }
 
     const wakeConfig = config.wake
     if (
       base.lastWakeAt !== undefined
-      && at - base.lastWakeAt < wakeConfig.minIntervalMinutes * 60_000
+      && decisionAt - base.lastWakeAt < wakeConfig.minIntervalMinutes * 60_000
     ) {
       this.saveState(committed())
       this.log(`[connector] min-interval lastWakeAt=${new Date(base.lastWakeAt).toISOString()}`)
       return { action: 'min-interval', ...counts }
     }
-    const today = dayKey(at, this.opts.proactive.timezone)
+    const today = dayKey(decisionAt, this.opts.proactive.timezone)
     const todayWakes = base.wakes.filter(row => dayKey(row.at, this.opts.proactive.timezone) === today)
     if (todayWakes.length >= wakeConfig.maxPerDay) {
       this.saveState(committed())
@@ -316,12 +337,12 @@ export class ConnectorWakeScheduler {
 
     let denied: string | undefined
     for (const record of candidates) {
-      const trigger = connectorTrigger(record, target, at)
+      const trigger = connectorTrigger(record, target, decisionAt)
       if (base.notified.some(row => row.triggerId === trigger.id)) continue
       // A previously persisted trigger is already decided. Do not spend a
       // second wake on the same source revision.
       if (this.opts.store.getDoc<Trigger>('trigger', trigger.id)) {
-        base.notified = [...base.notified, { at, triggerId: trigger.id }].slice(-MAX_NOTIFIED_ROWS)
+        base.notified = [...base.notified, { at: decisionAt, triggerId: trigger.id }].slice(-MAX_NOTIFIED_ROWS)
         continue
       }
       const reason = admissionDenial(trigger, this.opts.admission)
@@ -330,7 +351,7 @@ export class ConnectorWakeScheduler {
         this.log(`[connector] wake suppressed triggerId=${trigger.id} reason=${reason}`)
         continue
       }
-      const pending: ConnectorPendingWake = { at, trigger, recordId: record.id, service: record.service }
+      const pending: ConnectorPendingWake = { at: decisionAt, trigger, recordId: record.id, service: record.service }
       this.saveState({ ...committed(), pending: [...(base.pending ?? []), pending] })
       try {
         this.opts.fire(trigger)
@@ -533,6 +554,10 @@ function isPrivateTarget(
  * The only Trigger a connector round may produce. It targets the exact private
  * thread that already admitted a human message; the recipient never changes.
  */
+function connectorRevisionTriggerId(record: ConnectorRecord): string {
+  return `${CONNECTOR_TRIGGER_PREFIX}${record.id}_${record.updatedAt}`
+}
+
 export function connectorTrigger(
   record: ConnectorRecord,
   target: WakeTarget,
@@ -561,7 +586,7 @@ export function connectorTrigger(
     'If the event is not genuinely useful, stay silent and stop this ticket.',
   ].join('\n')
   return {
-    id: `${CONNECTOR_TRIGGER_PREFIX}${record.service}_${stableHash(record.externalId)}_${stableHash(record.updatedAt)}`,
+    id: connectorRevisionTriggerId(record),
     source: target.channel.source,
     threads: [{ source: target.channel.source, id: target.channel.thread }],
     actor: { source: target.actor.source, id: target.actor.id },
@@ -578,9 +603,12 @@ export function connectorTrigger(
   }
 }
 
-/** A connector wake is a messaging envelope: the Harness must never start a Worker. */
+/** A connector-only ticket is a messaging envelope: the Harness must never start a Worker. */
 export function isConnectorWakeTicket(ticket: Ticket): boolean {
-  return ticket.channels.some(channel => channel.address?.[CONNECTOR_CHANNEL_MARKER] === '1')
+  return ticket.inputs.length === 1
+    && ticket.inputs[0]?.triggerId === ticket.originTriggerId
+    && ticket.channels.length > 0
+    && ticket.channels.every(channel => channel.address?.[CONNECTOR_CHANNEL_MARKER] === '1')
 }
 
 function localTime(at: number, timezone: string): string {

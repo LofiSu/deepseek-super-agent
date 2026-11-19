@@ -26,6 +26,26 @@ const fixedToken: GoogleTokenProvider = {
 }
 
 describe('Google OAuth token provider', () => {
+  it('includes token resolution within the API request deadline', async () => {
+    let tokenSignal: AbortSignal | undefined
+    const tokenProvider: GoogleTokenProvider = {
+      accessToken: signal => {
+        tokenSignal = signal
+        return new Promise<string>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      },
+      invalidate: () => undefined,
+    }
+    const api = new HttpGoogleWorkspaceApi(tokenProvider, {
+      fetch: async () => { throw new Error('API fetch must not run before token acquisition') },
+      apiBase: 'https://example.test',
+      requestTimeoutMs: 5,
+    })
+    await expect(api.fetch('gmail', query())).rejects.toThrow()
+    expect(tokenSignal?.aborted).toBe(true)
+  })
+
   it('exchanges the refresh token once, caches the access token, and refreshes after expiry', async () => {
     let now = T0
     const calls: { url: string; init?: RequestInit }[] = []
@@ -88,8 +108,39 @@ describe('Google Workspace mapping', () => {
       const first = await api.fetchPage(service, query())
       expect(first.nextPageToken).toBe('next-page')
       await api.fetchPage(service, query({ pageToken: first.nextPageToken }))
-      expect(new URL(seen[1]!).searchParams.get('pageToken')).toBe('next-page')
+      expect(seen.map(url => new URL(url).searchParams.get('pageToken'))).toContain('next-page')
     }
+  })
+
+  it('prioritizes imminent calendar events even when the index has more pages', async () => {
+    const imminent = {
+      id: 'imminent-event',
+      summary: 'Synthetic imminent event',
+      start: { dateTime: new Date(T0 + 30 * 60_000).toISOString() },
+      end: { dateTime: new Date(T0 + 60 * 60_000).toISOString() },
+    }
+    const olderPageEvent = {
+      id: 'later-page-event',
+      summary: 'Synthetic later event',
+      start: { dateTime: new Date(T0 + 6 * 24 * 60 * 60_000).toISOString() },
+      end: { dateTime: new Date(T0 + 6 * 24 * 60 * 60_000 + 60 * 60_000).toISOString() },
+    }
+    const fetchImpl: FetchLike = async input => {
+      const url = new URL(String(input))
+      if (url.searchParams.get('maxResults') === '2500') {
+        return new Response(JSON.stringify({ items: [imminent] }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ items: [olderPageEvent], nextPageToken: 'later-page' }), { status: 200 })
+    }
+    const api = new HttpGoogleWorkspaceApi(fixedToken, {
+      fetch: fetchImpl,
+      now: () => T0,
+      apiBase: 'https://example.test',
+    })
+    const page = await api.fetchPage('calendar', query({ limit: 1 }))
+    expect(page.drafts).toHaveLength(1)
+    expect(page.drafts[0]).toMatchObject({ externalId: 'imminent-event', wake: true })
+    expect(page.nextPageToken).toBe('later-page')
   })
 
   it('maps Gmail messages and marks unread important mail', async () => {
@@ -241,5 +292,29 @@ describe('Google Workspace mapping', () => {
       wake: true,
       wakeReason: 'task due soon',
     })
+  })
+
+  it('rechecks unchanged tasks and treats a date-only due value as a whole day', async () => {
+    let requested: URL | undefined
+    const fetchImpl: FetchLike = async input => {
+      requested = new URL(String(input))
+      return new Response(JSON.stringify({
+        items: [{
+          id: 'unchanged-task',
+          title: 'Synthetic due-today task',
+          due: '2026-11-05',
+          status: 'needsAction',
+          updated: '2026-10-01T00:00:00.000Z',
+        }],
+      }), { status: 200 })
+    }
+    const api = new HttpGoogleWorkspaceApi(fixedToken, {
+      fetch: fetchImpl,
+      now: () => T0,
+      apiBase: 'https://example.test',
+    })
+    const [task] = await api.fetch('tasks', query())
+    expect(requested?.searchParams.has('updatedMin')).toBe(false)
+    expect(task).toMatchObject({ externalId: 'unchanged-task', wake: true })
   })
 })

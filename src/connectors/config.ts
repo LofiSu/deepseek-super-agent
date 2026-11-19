@@ -333,11 +333,12 @@ export function parseGoogleCredentials(content: string, source: string): GoogleC
   let raw: unknown
   try {
     raw = JSON.parse(content)
-  } catch (error) {
-    throw new UserError(`${source} is not valid JSON: ${messageOf(error)}`)
+  } catch {
+    // Parser diagnostics may quote the malformed input, which can contain OAuth secrets.
+    throw new UserError(`${source} is not valid JSON`)
   }
   const value = object(raw, source)
-  rejectUnknown(value, CREDENTIAL_KEYS, source)
+  rejectUnknown(value, CREDENTIAL_KEYS, source, false)
   const clientId = requiredLine(value.clientId, source, 'clientId')
   const clientSecret = requiredLine(value.clientSecret, source, 'clientSecret')
   const refreshToken = requiredLine(value.refreshToken, source, 'refreshToken')
@@ -352,9 +353,16 @@ function object(raw: unknown, label: string): Record<string, unknown> {
   return raw as Record<string, unknown>
 }
 
-function rejectUnknown(value: Record<string, unknown>, keys: Set<string>, label: string): void {
+function rejectUnknown(
+  value: Record<string, unknown>,
+  keys: Set<string>,
+  label: string,
+  revealKey = true,
+): void {
   for (const key of Object.keys(value)) {
-    if (!keys.has(key)) throw new UserError(`${label} has unknown key ${key}`)
+    if (!keys.has(key)) {
+      throw new UserError(revealKey ? `${label} has unknown key ${key}` : `${label} has an unknown key`)
+    }
   }
 }
 

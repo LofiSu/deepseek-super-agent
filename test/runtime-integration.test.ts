@@ -98,6 +98,13 @@ describe('Runtime service integration', () => {
 
     expect(runtime.ingest(trigger)).toBe('stored')
     expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)).toBeDefined()
+    const ticket = runtime.store.listDocs<Ticket>('ticket').find(row => row.originTriggerId === trigger.id)
+    expect(ticket).toBeDefined()
+    const originalInputs = ticket!.inputs.filter(input => input.triggerId === trigger.id).length
+    runtime.store.deleteDoc('disposition', trigger.id)
+    expect(runtime.ingest(trigger)).toBe('stored')
+    const resumed = runtime.store.getDoc<Ticket>('ticket', ticket!.id)
+    expect(resumed?.inputs.filter(input => input.triggerId === trigger.id)).toHaveLength(originalInputs)
     expect(runtime.ingest(trigger)).toBe('duplicate')
     expect(runtime.store.listDocs<Trigger>('trigger').filter(row => row.id === trigger.id)).toHaveLength(1)
   })

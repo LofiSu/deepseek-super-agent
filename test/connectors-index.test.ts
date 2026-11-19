@@ -19,7 +19,10 @@ function setup(options: { redact?: (text: string) => string; now?: () => Date } 
   homes.push(home)
   const store = new Store(home)
   stores.push(store)
-  return { store, index: new ConnectorIndex(store, options) }
+  return {
+    store,
+    index: new ConnectorIndex(store, { redact: text => text, ...options }),
+  }
 }
 
 afterEach(() => {
@@ -93,6 +96,11 @@ describe('connector index', () => {
     expect(index.upsert([updated])).toMatchObject({ unchanged: 1 })
   })
 
+  it('refuses index writes without an explicit redactor', () => {
+    const { store } = setup()
+    expect(() => new ConnectorIndex(store).upsert([draft()])).toThrow(/explicit redaction function/)
+  })
+
   it('redacts title and body before storage and query', () => {
     const { index } = setup({
       now: () => new Date(T0),
@@ -125,6 +133,17 @@ describe('connector index', () => {
     expect(index.query().map(record => record.externalId)).toEqual(['new'])
     // Zero disables a dimension.
     expect(index.prune({ maxRecords: 0, maxAgeDays: 0 })).toBe(0)
+  })
+
+  it('keeps distinct provider ids distinct even when punctuation normalizes alike', () => {
+    const { store, index } = setup({ now: () => new Date(T0) })
+    const result = index.upsert([
+      draft({ externalId: 'a/b' }),
+      draft({ externalId: 'a_b' }),
+    ])
+    expect(result.inserted).toBe(2)
+    expect(new Set(result.records.map(record => record.id)).size).toBe(2)
+    expect(store.listDocs('connector')).toHaveLength(2)
   })
 
   it('keeps ids stable and skips invalid drafts', () => {

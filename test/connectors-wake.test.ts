@@ -32,7 +32,11 @@ function setup(): { home: string; store: Store; index: ConnectorIndex } {
   homes.push(home)
   const store = new Store(home)
   stores.push(store)
-  return { home, store, index: new ConnectorIndex(store, { now: () => new Date(T0) }) }
+  return {
+    home,
+    store,
+    index: new ConnectorIndex(store, { redact: text => text, now: () => new Date(T0) }),
+  }
 }
 
 afterEach(() => {
@@ -81,6 +85,7 @@ function scheduler(input: {
   config?: Record<string, unknown>
   admission?: { actors?: string[]; dropSelf?: string[]; groups?: string[] }
   quiet?: { quietStart: string; quietEnd: string; timezone: string }
+  now?: () => number
 }): { runner: ConnectorWakeScheduler; fired: Trigger[]; lines: string[] } {
   const fired: Trigger[] = []
   const lines: string[] = []
@@ -103,7 +108,7 @@ function scheduler(input: {
     },
   })
   const runner = new ConnectorWakeScheduler({
-    now: () => T0,
+    now: input.now ?? (() => T0),
     store: input.store,
     config,
     index: input.index,
@@ -142,13 +147,15 @@ describe('connector wake scheduler', () => {
   it('backfills the index first, then wakes once for a useful record', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
-    const { runner, fired, lines } = scheduler({ store, index, api: fakeApi([draft()]) })
+    const records = [draft()]
+    const { runner, fired, lines } = scheduler({ store, index, api: fakeApi(records) })
 
     const backfill = await runner.poll(T0)
     expect(backfill.action).toBe('backfill')
     expect(backfill.indexed).toBe(1)
     expect(fired).toHaveLength(0)
     expect(index.stats().count).toBe(1)
+    records[0]!.updatedAt = new Date(T0 + MIN).toISOString()
 
     const first = await runner.poll(T0 + 16 * MIN)
     expect(first.action).toBe('wake')
@@ -172,7 +179,7 @@ describe('connector wake scheduler', () => {
     expect(fired).toHaveLength(1)
     const state = loadConnectorWakeState(store)
     expect(state.wakes).toHaveLength(1)
-    expect(state.notified).toHaveLength(1)
+    expect(state.notified).toHaveLength(2)
   })
 
   it('indexes without waking when wake is disabled', async () => {
@@ -215,6 +222,27 @@ describe('connector wake scheduler', () => {
     expect(fired).toHaveLength(0)
   })
 
+  it('rechecks quiet hours after a slow provider fetch', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { gmail: new Date(T0).toISOString() },
+      wakes: [],
+      notified: [],
+    })
+    let now = T0 + 16 * MIN
+    const api: GoogleWorkspaceApi = {
+      async fetch() {
+        now = Date.parse('2026-11-05T23:30:00.000Z')
+        return [draft({ updatedAt: new Date(now).toISOString() })]
+      },
+    }
+    const { runner, fired } = scheduler({ store, index, api, now: () => now })
+    expect((await runner.poll(T0 + 16 * MIN)).action).toBe('quiet-hours')
+    expect(fired).toHaveLength(0)
+  })
+
   it('enforces min-interval and daily caps before firing', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
@@ -226,6 +254,7 @@ describe('connector wake scheduler', () => {
       config: { wake: { minIntervalMinutes: 60 } },
     })
     expect((await runner.poll(T0)).action).toBe('backfill')
+    records[0]!.updatedAt = new Date(T0 + MIN).toISOString()
     expect((await runner.poll(T0 + 16 * MIN)).action).toBe('wake')
     records.push(draft({
       externalId: 'message-2',
@@ -249,37 +278,43 @@ describe('connector wake scheduler', () => {
   it('respects DROP_SELF and actor allowlists before ingesting', async () => {
     const byActor = setup()
     seedOwnerThread(byActor.store)
+    const actorDraft = draft()
     const deniedByActor = scheduler({
       store: byActor.store,
       index: byActor.index,
-      api: fakeApi([draft()]),
+      api: fakeApi([actorDraft]),
       admission: { actors: ['someone-else'] },
     })
     expect((await deniedByActor.runner.poll(T0)).action).toBe('backfill')
+    actorDraft.updatedAt = new Date(T0 + MIN).toISOString()
     expect((await deniedByActor.runner.poll(T0 + 16 * MIN)).action).toBe('admission-denied')
     expect(deniedByActor.fired).toHaveLength(0)
 
     const bySelf = setup()
     seedOwnerThread(bySelf.store)
+    const selfDraft = draft({ externalId: 'message-self' })
     const deniedBySelf = scheduler({
       store: bySelf.store,
       index: bySelf.index,
-      api: fakeApi([draft({ externalId: 'message-self' })]),
+      api: fakeApi([selfDraft]),
       admission: { dropSelf: ['you'] },
     })
     expect((await deniedBySelf.runner.poll(T0)).action).toBe('backfill')
+    selfDraft.updatedAt = new Date(T0 + MIN).toISOString()
     expect((await deniedBySelf.runner.poll(T0 + 16 * MIN)).action).toBe('admission-denied')
     expect(deniedBySelf.fired).toHaveLength(0)
 
     const byGroup = setup()
     seedOwnerThread(byGroup.store)
+    const groupDraft = draft({ externalId: 'message-group' })
     const deniedByGroup = scheduler({
       store: byGroup.store,
       index: byGroup.index,
-      api: fakeApi([draft({ externalId: 'message-group' })]),
+      api: fakeApi([groupDraft]),
       admission: { groups: ['oc_owner'] },
     })
     expect((await deniedByGroup.runner.poll(T0)).action).toBe('backfill')
+    groupDraft.updatedAt = new Date(T0 + MIN).toISOString()
     expect((await deniedByGroup.runner.poll(T0 + 16 * MIN)).action).toBe('admission-denied')
     expect(deniedByGroup.fired).toHaveLength(0)
   })
@@ -306,10 +341,11 @@ describe('connector wake scheduler', () => {
       }
       store.putDoc('trigger', trigger.id, trigger)
       store.putDoc('disposition', trigger.id, { at, fanout: [], context: [] } satisfies Disposition)
+      const connectorDraft = draft({ externalId: `feishu-${chatType}` })
       const { runner, fired } = scheduler({
         store,
         index,
-        api: fakeApi([draft({ externalId: `feishu-${chatType}` })]),
+        api: fakeApi([connectorDraft]),
         config: {
           google: { services: ['gmail'] },
           wake: {
@@ -322,6 +358,7 @@ describe('connector wake scheduler', () => {
         },
       })
       expect((await runner.poll(T0)).action).toBe('backfill')
+      connectorDraft.updatedAt = new Date(T0 + MIN).toISOString()
       const result = await runner.poll(T0 + 16 * MIN)
       if (chatType === 'group') {
         expect(result.action).toBe('no-target')
@@ -345,18 +382,16 @@ describe('connector wake scheduler', () => {
   it('wakes for a docs event when docs is in the wake set', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
-    const { runner, fired } = scheduler({
-      store,
-      index,
-      api: fakeApi([draft({
-        service: 'docs',
-        kind: 'document',
-        externalId: 'doc-1',
-        title: 'Shared roadmap',
-        wakeReason: 'shared document changed by another person',
-      })]),
+    const documentDraft = draft({
+      service: 'docs',
+      kind: 'document',
+      externalId: 'doc-1',
+      title: 'Shared roadmap',
+      wakeReason: 'shared document changed by another person',
     })
+    const { runner, fired } = scheduler({ store, index, api: fakeApi([documentDraft]) })
     expect((await runner.poll(T0)).action).toBe('backfill')
+    documentDraft.updatedAt = new Date(T0 + MIN).toISOString()
     expect((await runner.poll(T0 + 16 * MIN)).action).toBe('wake')
     expect(fired[0]?.text).toContain('service=docs')
   })
@@ -380,8 +415,39 @@ describe('connector wake scheduler', () => {
     expect(backfill.action).toBe('backfill')
     expect(backfill.serviceErrors).toHaveLength(1)
     expect(index.stats().count).toBe(1)
+    calendar.updatedAt = new Date(T0 + MIN).toISOString()
     expect((await runner.poll(T0 + 16 * MIN)).action).toBe('wake')
     expect(fired[0]?.text).toContain('service=calendar')
+  })
+
+  it('keeps failed initial backfill bounds and suppresses historical wake candidates', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    const queries: { since: string; until: string }[] = []
+    let calls = 0
+    const api: GoogleWorkspaceApi = {
+      async fetch() { return [] },
+      async fetchPage(_service, query) {
+        queries.push({ since: query.since, until: query.until })
+        calls += 1
+        if (calls === 1) throw new Error('synthetic initial provider failure')
+        return { drafts: [draft()] }
+      },
+    }
+    const { runner, fired } = scheduler({
+      store,
+      index,
+      api,
+      config: { google: { services: ['gmail'] }, wake: { services: ['gmail'] } },
+    })
+    expect((await runner.poll(T0)).action).toBe('backfill')
+    expect(loadConnectorWakeState(store).backfillPending).toBe(true)
+    expect((await runner.poll(T0 + 16 * MIN)).action).toBe('backfill')
+    expect(queries[1]).toEqual(queries[0])
+    expect(loadConnectorWakeState(store).backfillPending).toBeUndefined()
+    expect((await runner.poll(T0 + 32 * MIN)).action).toBe('silent')
+    expect(fired).toHaveLength(0)
+    expect(loadConnectorWakeState(store).notified).toHaveLength(1)
   })
 
   it('keeps an ingress failure in the durable pending wake outbox', async () => {
@@ -389,6 +455,11 @@ describe('connector wake scheduler', () => {
     seedOwnerThread(store)
     store.putDoc('connector_wake', 'state', {
       lastCheckAt: T0,
+      cursors: {
+        gmail: new Date(T0).toISOString(),
+        calendar: new Date(T0).toISOString(),
+        docs: new Date(T0).toISOString(),
+      },
       wakes: [],
       notified: [],
     })
@@ -447,7 +518,16 @@ describe('connector wake scheduler', () => {
   it('replays an outbox wake after restart when the crash precedes ingress persistence', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
-    store.putDoc('connector_wake', 'state', { lastCheckAt: T0, wakes: [], notified: [] })
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: {
+        gmail: new Date(T0).toISOString(),
+        calendar: new Date(T0).toISOString(),
+        docs: new Date(T0).toISOString(),
+      },
+      wakes: [],
+      notified: [],
+    })
     const first = scheduler({ store, index, api: fakeApi([draft()]) })
     ;(first.runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = () => {
       throw new Error('simulated crash before ingress commit')
@@ -470,7 +550,16 @@ describe('connector wake scheduler', () => {
   it('keeps a trigger-only ingress pending and resumes until disposition is durable', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
-    store.putDoc('connector_wake', 'state', { lastCheckAt: T0, wakes: [], notified: [] })
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: {
+        gmail: new Date(T0).toISOString(),
+        calendar: new Date(T0).toISOString(),
+        docs: new Date(T0).toISOString(),
+      },
+      wakes: [],
+      notified: [],
+    })
     const first = scheduler({ store, index, api: fakeApi([draft()]) })
     let attempts = 0
     ;(first.runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = trigger => {
@@ -510,6 +599,8 @@ describe('connector wake scheduler', () => {
   it('marks connector wakes as messaging envelopes', () => {
     const ticket = {
       id: 'ticket_1',
+      originTriggerId: 'trg_connector_1',
+      inputs: [{ id: 'input_1', kind: 'trigger', triggerId: 'trg_connector_1' }],
       channels: [{
         source: 'cli',
         thread: 'local',
@@ -517,6 +608,17 @@ describe('connector wake scheduler', () => {
       }],
     } as unknown as Parameters<typeof isConnectorWakeTicket>[0]
     expect(isConnectorWakeTicket(ticket)).toBe(true)
+    expect(isConnectorWakeTicket({
+      ...ticket,
+      inputs: [
+        ...ticket.inputs,
+        { id: 'input_2', kind: 'trigger', triggerId: 'trg_ordinary', at: new Date(T0).toISOString() },
+      ],
+      channels: [
+        ...ticket.channels,
+        { source: 'cli', thread: 'other' },
+      ],
+    })).toBe(false)
     expect(isConnectorWakeTicket({
       ...ticket,
       channels: [{ source: 'cli', thread: 'local' }],
@@ -539,11 +641,27 @@ describe('connector wake scheduler', () => {
       brief: 'CONNECTOR_EVENT\nservice=gmail',
       originTriggerId: 'trg_connector_gmail_x_y',
       speculative: false,
+      inputs: [{ id: 'input_1', kind: 'trigger', triggerId: 'trg_connector_gmail_x_y' }],
       channels: [{ source: 'cli', thread: 'local', address: { connector: '1' } }],
     } as unknown as Ticket
     new Replies(host).acknowledge(ticket)
     expect(store.listReplies()).toEqual([])
     expect(lines.some(line => line.includes('ack-suppressed') && line.includes('channel=connector'))).toBe(true)
+
+    const mixed = {
+      ...ticket,
+      inputs: [
+        ...ticket.inputs,
+        { id: 'input_2', kind: 'trigger', triggerId: 'trg_ordinary', at: new Date(T0).toISOString() },
+      ],
+      channels: [
+        ...ticket.channels,
+        { source: 'im', thread: 'topic/ordinary' },
+      ],
+    } as Ticket
+    expect(isConnectorWakeTicket(mixed)).toBe(false)
+    new Replies(host).acknowledge(mixed)
+    expect(store.listReplies()).toHaveLength(1)
 
     const prompt = routerPromptFor(ticket)
     expect(prompt).toContain('connector=true')

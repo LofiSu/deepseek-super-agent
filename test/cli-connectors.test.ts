@@ -66,7 +66,7 @@ describe('ds-agent connectors', () => {
   it('queries the connector index without a model or network call', () => {
     const home = tempHome()
     const store = new Store(home)
-    new ConnectorIndex(store).upsert([{
+    new ConnectorIndex(store, { redact: text => text }).upsert([{
       service: 'gmail',
       kind: 'message',
       externalId: 'm1',

@@ -83,9 +83,12 @@ export interface ConnectorQuery {
   limit?: number
 }
 
-/** Deterministic index id. Never used as a capability or filesystem path. */
+/** Collision-free deterministic index id. Never used as a capability or filesystem path. */
 export function connectorRecordId(service: GoogleService, externalId: string): string {
-  return `conn_${service}_${externalId.replace(/[^A-Za-z0-9_.:@-]/g, '_').slice(0, 160)}`
+  const encoded = Array.from(externalId, character =>
+    character.codePointAt(0)!.toString(16).padStart(6, '0'),
+  ).join('')
+  return `conn_${service}_${encoded}`
 }
 
 /** Bound a provider value before it becomes log or prompt text. */
