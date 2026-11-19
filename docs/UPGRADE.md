@@ -10,15 +10,18 @@ applied step.
 
 ## Supported versions
 
-| State | Schema version | This build (0.1.x, `LATEST_SCHEMA_VERSION=3`) |
+| State | Schema version | This build (0.1.x, `LATEST_SCHEMA_VERSION=5`) |
 |---|---|---|
-| Fresh or current | 3 | Opens with no migration. |
-| Version 1 (original tables) | 1 | Migrates 1 -> 2 -> 3 in one transaction. |
-| Version 2 (outbox columns) | 2 | Migrates 2 -> 3 in one transaction. |
+| Fresh or current | 5 | Opens with no migration. |
+| Version 1 (original tables) | 1 | Migrates 1 -> 2 -> 3 -> 4 -> 5 in one transaction. |
+| Version 2 (outbox columns) | 2 | Migrates 2 -> 3 -> 4 -> 5 in one transaction. |
+| Version 3 (lifecycle log) | 3 | Migrates 3 -> 4 -> 5 in one transaction. |
+| Version 4 (spill refs) | 4 | Migrates 4 -> 5 in one transaction. |
 | Legacy file with no `schema_migrations` ledger | 0 | Runs every migration with `CREATE TABLE IF NOT EXISTS`; existing rows are kept. |
-| Any file recorded above 3 | > 3 | **Refused before any write.** Upgrade the binary first. |
+| Any file recorded above 5 | > 5 | **Refused before any write.** Upgrade the binary first. |
 
-Node.js 22 or newer is required (`node:sqlite`). A newer Node is fine. A
+Node.js 22 or newer is required (`node:sqlite`). The receipt command's
+application-data read-only SQLite opener requires Node.js 22.12 or newer. A
 different SQLite build is not relevant: the migration ledger, not the SQLite
 library version, is what this build checks.
 
@@ -42,6 +45,8 @@ The steps are additive:
 | 1 | Original tables: `documents`, `spills`, `spill_grants`, `jobs`, `sessions`, `messages`, `replies`, `outbox`, `subscriptions`, `artifacts`, `events`, `id_seq`. |
 | 2 | Adds `outbox.idempotency_key`, `outbox.attempts`, and `outbox.next_attempt_at` if missing. |
 | 3 | Adds `lifecycle_events` for restart replay. |
+| 4 | Adds `spills.refs` for Chain of Recall. |
+| 5 | Adds lookup indexes on `replies.ticket_id` and `outbox.ticket_id` for receipt queries. |
 
 A crash or a failed step rolls the whole migration transaction back, so the
 database stays at its previous recorded version. Re-running the same binary is
@@ -207,7 +212,7 @@ sqlite3 "$DB" 'SELECT version, applied_at FROM schema_migrations ORDER BY versio
 sqlite3 "$DB" 'PRAGMA integrity_check;'
 sqlite3 "$DB" 'PRAGMA quick_check;'
 
-# Basic row counts (table names match schema version 3)
+# Basic row counts (table names match schema version 5)
 sqlite3 "$DB" <<'SQL'
 SELECT 'documents' AS table_name, COUNT(*) AS rows FROM documents
 UNION ALL SELECT 'events', COUNT(*) FROM events
@@ -218,8 +223,8 @@ SQL
 ```
 
 Expected: `journal_mode` is `wal` for a store this build has opened;
-`integrity_check` and `quick_check` return `ok`; the ledger contains `1`, `2`,
-and `3`. A legacy backup may have an empty or missing ledger until its next
+`integrity_check` and `quick_check` return `ok`; the ledger contains versions
+`1` through `5`. A legacy backup may have an empty or missing ledger until its next
 open.
 
 ## Rollback checklist

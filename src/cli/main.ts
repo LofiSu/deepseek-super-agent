@@ -19,6 +19,7 @@ import { SKILLS_DIR, SKILL_FILE, SkillRegistry } from '../env/skills.ts'
 import { loadRoutines, ROUTINES_ENV, ROUTINES_FILE } from '../harness/routines.ts'
 import { aggregateReportOf, describeTopologyOf, type TeamRecord } from '../harness/team.ts'
 import { formatMetricsJson, Metrics } from '../metrics/metrics.ts'
+import { executionReceipt, formatExecutionReceipt } from '../core/receipt.ts'
 import type { A2AEnvelope } from '../channels/a2a.ts'
 import type { LongTermMemoryEntry } from '../memory/long-term.ts'
 import { Runtime } from '../runtime.ts'
@@ -147,6 +148,7 @@ function help(): void {
   pnpm ds-agent init
   pnpm ds-agent tasks
   pnpm ds-agent panel            # Panel · Execution (tickets, mandate, executor, outbox)
+  pnpm ds-agent receipt <ticketId> [--json] # read-only execution evidence from local state
   pnpm ds-agent retry <ticketId> # new Assignment on the same Ticket
   pnpm ds-agent status
   pnpm ds-agent health
@@ -482,6 +484,30 @@ async function main(): Promise<void> {
     const store = new Store(home)
     try {
       console.log(formatExecution(executionView(store, home)))
+    } finally {
+      store.close()
+    }
+    return
+  }
+  if (cmd === 'receipt') {
+    const refs = bare(3)
+    if (refs.length !== 1) {
+      throw new Error('usage: ds-agent receipt <ticketId> [--json]')
+    }
+    const ticketRef = refs[0]!
+    const store = Store.openReadOnly(home)
+    try {
+      const exact = store.getDoc<Ticket>('ticket', ticketRef)
+      const matches = exact ? [] : store.listDocIdsByPrefix('ticket', ticketRef)
+      if (!exact && matches.length > 1) throw new Error('ambiguous ticket id prefix')
+      const ticket = exact ?? (matches[0] ? store.getDoc<Ticket>('ticket', matches[0]) : undefined)
+      if (!ticket) throw new Error('unknown ticket id')
+      const receipt = executionReceipt(store, ticket)
+      if (process.argv.includes('--json')) {
+        console.log(JSON.stringify(receipt, null, 2))
+      } else {
+        console.log(formatExecutionReceipt(receipt))
+      }
     } finally {
       store.close()
     }

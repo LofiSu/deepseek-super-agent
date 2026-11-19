@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS events (
 `
 
 /** The schema version this build writes and understands. */
-export const LATEST_SCHEMA_VERSION = 4
+export const LATEST_SCHEMA_VERSION = 5
 
 const SCHEMA_MIGRATIONS_DDL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -118,9 +118,9 @@ function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: stri
 /**
  * Ordered schema migrations. Version 1 is the original `SCHEMA`; version 2
  * adds the outbox columns that earlier builds created with `ensureColumn`;
- * version 3 adds the durable lifecycle-event log that backs restart replay.
- * Add new steps here and bump `LATEST_SCHEMA_VERSION`; never edit an applied
- * step in place.
+ * version 3 adds the durable lifecycle-event log, version 4 adds spill refs,
+ * and version 5 indexes per-Ticket reply/outbox lookups. Add new steps here and
+ * bump `LATEST_SCHEMA_VERSION`; never edit an applied step in place.
  */
 export const MIGRATIONS: readonly StoreMigration[] = [
   {
@@ -153,6 +153,15 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
     // Chain of Recall: each spill carries typed next-hop refs. Existing rows
     // keep an empty ref list; the body and grants are untouched.
     up: db => ensureColumn(db, 'spills', 'refs', "TEXT NOT NULL DEFAULT '[]'"),
+  },
+  {
+    version: 5,
+    // Receipt queries are scoped by Ticket; these indexes keep them efficient
+    // without loading unrelated reply/outbox payloads into memory.
+    up: db => db.exec(`
+CREATE INDEX IF NOT EXISTS replies_ticket_id_idx ON replies(ticket_id);
+CREATE INDEX IF NOT EXISTS outbox_ticket_id_idx ON outbox(ticket_id);
+`),
   },
 ]
 

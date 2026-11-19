@@ -261,8 +261,8 @@ describe('store schema migrations', () => {
     }
     const sqlAfter = tableSql(home)
     for (const [table, sql] of Object.entries(legacySql)) {
-      // Version 2 adds outbox columns; version 4 adds spill refs. Both use
-      // ALTER TABLE, so only those two DDL strings change.
+      // Versions 2 and 4 add columns with ALTER TABLE; version 5 adds indexes
+      // without changing table DDL, so only those two table definitions change.
       if (table === 'outbox' || table === 'spills') continue
       expect(sqlAfter[table]).toBe(sql)
     }
