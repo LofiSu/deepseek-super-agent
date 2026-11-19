@@ -10,7 +10,8 @@ import { LocalEnv } from '../src/env/local-env.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import { Metrics } from '../src/metrics/metrics.ts'
 import type { Ticket } from '../src/shared/types.ts'
-import { Runtime } from '../src/runtime.ts'
+import { loadRuntimeFillVault, Runtime } from '../src/runtime.ts'
+import type { SandboxSystem } from '../src/env/seccomp.ts'
 import { Store } from '../src/store/sqlite.ts'
 import { tempHome } from './fixtures.ts'
 import { ScriptedModel } from './scripted-model.ts'
@@ -332,6 +333,53 @@ describe('fill vault tools', () => {
     const specs = await tools.specsFor('worker')
     expect(specs.map(spec => spec.name)).not.toContain('read_vault_entry')
     expect(specs.map(spec => spec.name)).not.toContain('get_credential')
+  })
+
+  it('Runtime disables file-backed vaults visible through workspace, system, or symlink roots', () => {
+    const home = tempHome()
+    dirs.push(home)
+    const document = JSON.stringify({ fill: { login: { kind: 'password', password: 'SYNTHETIC-GATE-SECRET' } } })
+    const writeSyntheticVault = (directory: string, name = 'vault.json') => {
+      fs.mkdirSync(directory, { recursive: true })
+      const file = path.join(directory, name)
+      fs.writeFileSync(file, document, { mode: 0o600 })
+      fs.chmodSync(file, 0o600)
+      return file
+    }
+    const system: SandboxSystem = {
+      platform: 'linux',
+      available: () => true,
+      exists: () => false,
+    }
+
+    const workspaceRoot = path.join(home, 'workspaces')
+    const workspaceVault = writeSyntheticVault(workspaceRoot)
+    const workspaceResult = loadRuntimeFillVault(workspaceVault, {
+      enabled: true,
+      readIsolation: true,
+      writableRoots: [workspaceRoot],
+    }, system)
+    expect(workspaceResult).toEqual({ reason: 'worker-readable-location' })
+
+    const exposedRoot = path.join(home, 'synthetic-system-root')
+    const exposedVault = writeSyntheticVault(exposedRoot)
+    const systemResult = loadRuntimeFillVault(exposedVault, {
+      enabled: true,
+      readIsolation: true,
+      readRoots: [exposedRoot],
+    }, system)
+    expect(systemResult).toEqual({ reason: 'worker-readable-location' })
+
+    const linkTargetRoot = path.join(home, 'synthetic-readable-root')
+    const linkTarget = writeSyntheticVault(linkTargetRoot)
+    const linkPath = path.join(home, 'vault-link.json')
+    fs.symlinkSync(linkTarget, linkPath)
+    const symlinkResult = loadRuntimeFillVault(linkPath, {
+      enabled: true,
+      readIsolation: true,
+      readRoots: [linkTargetRoot],
+    }, system)
+    expect(symlinkResult).toEqual({ reason: 'worker-readable-location' })
   })
 
   it('loads an owner-only vault file into the Runtime and never logs a value', () => {

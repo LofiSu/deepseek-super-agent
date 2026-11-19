@@ -31,9 +31,14 @@ import {
   fillVaultPath,
   loadFillVault,
   type FillTarget,
+  type FillVaultLoad,
 } from './env/fill-vault.ts'
 import { LocalEnv } from './env/local-env.ts'
-import { strictReadIsolationIncludesPath } from './env/seccomp.ts'
+import {
+  strictReadIsolationIncludesPath,
+  type SandboxPolicy,
+  type SandboxSystem,
+} from './env/seccomp.ts'
 import { redactSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
@@ -405,6 +410,21 @@ class RedactingLogger extends Logger {
   }
 }
 
+/** Load a file-backed vault only when strict worker reads can hide its source. */
+export function loadRuntimeFillVault(
+  filePath: string,
+  policy: SandboxPolicy,
+  system?: SandboxSystem,
+): FillVaultLoad {
+  let resolvedPath = filePath
+  try { resolvedPath = fs.realpathSync(filePath) } catch { /* loadFillVault reports missing/unreadable */ }
+  if (
+    strictReadIsolationIncludesPath(filePath, policy, system)
+    || strictReadIsolationIncludesPath(resolvedPath, policy, system)
+  ) return { reason: 'worker-readable-location' }
+  return loadFillVault(filePath)
+}
+
 export class Runtime {
   readonly log: Logger
   readonly store: Store
@@ -549,21 +569,11 @@ export class Runtime {
       ? { reason: 'disabled' }
       : opts.fillVault
         ? { vault: opts.fillVault }
-        : (() => {
-          const filePath = fillVaultPath(opts.home, baseEnv)
-          let resolvedPath = filePath
-          try { resolvedPath = fs.realpathSync(filePath) } catch { /* loadFillVault reports missing/unreadable */ }
-          const strictPolicy = {
-            enabled: true,
-            readIsolation: true,
-            writableRoots: [path.join(opts.home, 'workspaces')],
-          }
-          if (
-            strictReadIsolationIncludesPath(filePath, strictPolicy)
-            || strictReadIsolationIncludesPath(resolvedPath, strictPolicy)
-          ) return { reason: 'worker-readable-location' }
-          return loadFillVault(filePath)
-        })()
+        : loadRuntimeFillVault(fillVaultPath(opts.home, baseEnv), {
+          enabled: true,
+          readIsolation: true,
+          writableRoots: [path.join(opts.home, 'workspaces')],
+        })
     const fillVault = fillLoad.vault
     let fillTarget: FillTarget | undefined
     let fillTargetReason: string | undefined

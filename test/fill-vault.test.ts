@@ -196,6 +196,23 @@ describe('fill-only vault', () => {
     expect(message).not.toContain('stdin-only-value')
   })
 
+  it('redacts raw synthetic values from shell output as defense in depth', async () => {
+    const dir = home()
+    const file = writeVault(dir, {
+      fill: { card: { kind: 'card', number: '4111111111111111', cvc: '987' } },
+    })
+    const { vault } = loadFillVault(file)
+    const env = new LocalEnv(path.join(dir, 'workspaces'), {
+      env: { PATH: process.env.PATH },
+      sandbox: { enabled: false },
+      redactValues: vault!.redactionValues(),
+    })
+    const result = await env.bash('w1', `cat ${file}`)
+    expect(result.stdout).not.toContain('4111111111111111')
+    expect(result.stdout).not.toContain('987')
+    expect(result.stdout).toContain('[redacted]')
+  })
+
   it.skipIf(process.platform !== 'linux' || spawnSync('which', ['bwrap'], { stdio: 'ignore' }).status !== 0)(
     'denies shell reads and transformed output for a synthetic vault outside the workspace',
     async () => {
