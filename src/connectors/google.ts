@@ -30,6 +30,13 @@ export interface GoogleFetchPage {
   nextPageToken?: string
 }
 
+export class GoogleInvalidPageTokenError extends Error {
+  constructor(readonly path: string) {
+    super(`google api ${path} rejected page token`)
+    this.name = 'GoogleInvalidPageTokenError'
+  }
+}
+
 export interface GoogleWorkspaceApi {
   fetch(service: GoogleService, query: GoogleFetchQuery): Promise<ConnectorDraft[]>
   fetchPage?(service: GoogleService, query: GoogleFetchQuery): Promise<GoogleFetchPage>
@@ -91,9 +98,11 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
     const queryAt = Date.parse(query.until)
     const indexedAt = Number.isFinite(queryAt) ? queryAt : this.now()
     const now = Math.max(indexedAt, this.now())
+    const replay = unwrapCalendarReplayToken(query.pageToken)
     // The paged index query retains its original bounds. A separate bounded
     // query prioritizes imminent events so older results cannot hide them on a
-    // later page until after their start time.
+    // later page until after their start time. If urgent results displace index
+    // records, replay that index page without the urgent query on the next poll.
     const indexWindowMinutes = Math.max(query.lookaheadMinutes, 7 * 24 * 60)
     const data = await this.get('/calendar/v3/calendars/primary/events', {
       timeMin: new Date(indexedAt - 24 * 60 * 60_000).toISOString(),
@@ -102,9 +111,9 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       orderBy: 'startTime',
       maxResults: String(query.limit),
       showDeleted: 'false',
-      pageToken: query.pageToken,
+      pageToken: replay.pageToken,
     }, query.signal)
-    const urgent = await this.get('/calendar/v3/calendars/primary/events', {
+    const urgent = replay.replay ? { items: [] } : await this.get('/calendar/v3/calendars/primary/events', {
       timeMin: new Date(now - 15 * 60_000).toISOString(),
       timeMax: new Date(now + query.lookaheadMinutes * 60_000).toISOString(),
       singleEvents: 'true',
@@ -113,14 +122,26 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       showDeleted: 'false',
     }, query.signal)
     const unique = new Map<string, unknown>()
-    for (const item of [...arrayOf(urgent, 'items'), ...arrayOf(data, 'items')]) {
+    const indexIds = new Set<string>()
+    const eventKey = (item: unknown): string => {
       const event = record(item)
       const start = dateTimeOf(event.start) ?? str(record(event.start).date)
-      const id = str(event.id) ?? start ?? JSON.stringify(item)
+      return str(event.id) ?? start ?? JSON.stringify(item)
+    }
+    for (const item of arrayOf(urgent, 'items')) {
+      const id = eventKey(item)
       if (!unique.has(id)) unique.set(id, item)
     }
+    for (const item of arrayOf(data, 'items')) {
+      const id = eventKey(item)
+      indexIds.add(id)
+      if (!unique.has(id)) unique.set(id, item)
+    }
+    const selected = [...unique.entries()].slice(0, query.limit)
+    const selectedIds = new Set(selected.map(([id]) => id))
+    const omittedIndexRecord = [...indexIds].some(id => !selectedIds.has(id))
     const drafts: ConnectorDraft[] = []
-    for (const item of [...unique.values()].slice(0, query.limit)) {
+    for (const [, item] of selected) {
       const event = record(item)
       const start = dateTimeOf(event.start) ?? str(record(event.start).date)
       const end = dateTimeOf(event.end) ?? str(record(event.end).date)
@@ -153,7 +174,10 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
         ...(status !== 'cancelled' && imminent ? { wakeReason: 'calendar event starting soon' } : {}),
       })
     }
-    return { drafts, ...(str(record(data).nextPageToken) ? { nextPageToken: str(record(data).nextPageToken)! } : {}) }
+    const nextPageToken = omittedIndexRecord
+      ? calendarReplayToken(replay.pageToken)
+      : str(record(data).nextPageToken)
+    return { drafts, ...(nextPageToken ? { nextPageToken } : {}) }
   }
 
   private async gmail(query: GoogleFetchQuery): Promise<GoogleFetchPage> {
@@ -266,8 +290,11 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       const due = str(task.due)
       const updatedAt = str(task.updated) ?? due ?? query.until
       const dueMs = due ? Date.parse(due) : Number.NaN
-      const dateOnly = due !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(due)
-      const dueEndMs = dateOnly ? dueMs + 86_400_000 - 1 : dueMs
+      const wholeUtcDate = due !== undefined && (
+        /^\d{4}-\d{2}-\d{2}$/.test(due)
+        || /^\d{4}-\d{2}-\d{2}T00:00:00(?:\.0+)?(?:Z|\+00:00|\+0000)$/i.test(due)
+      )
+      const dueEndMs = wholeUtcDate ? dueMs + 86_400_000 - 1 : dueMs
       const soon = Number.isFinite(dueMs)
         && dueEndMs >= now - 60_000
         && dueMs <= now + query.lookaheadMinutes * 60_000
@@ -313,9 +340,9 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
       // A cached token can expire between checks. Retry once with a fresh one.
       this.tokenProvider.invalidate()
       const retried = await this.request(url, signal, false)
-      return parseJson(retried, path)
+      return parseJson(retried, path, Boolean(params.pageToken))
     }
-    return parseJson(response, path)
+    return parseJson(response, path, Boolean(params.pageToken))
   }
 
   private async request(url: URL, signal: AbortSignal | undefined, allowRefresh: boolean): Promise<Response> {
@@ -334,11 +361,32 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
   }
 }
 
-async function parseJson(response: Response, path: string): Promise<unknown> {
+async function parseJson(response: Response, path: string, hasPageToken = false): Promise<unknown> {
   if (!response.ok) {
+    const body = await response.text()
+    const invalidToken = response.status === 400 && hasPageToken && (
+      (/page[\s_-]?token/i.test(body) && /(invalid|expired|unknown|not valid|unsupported)/i.test(body))
+      || /invalid value/i.test(body)
+    )
+    if (invalidToken) throw new GoogleInvalidPageTokenError(path)
     throw new Error(`google api ${path} failed status=${response.status}`)
   }
   return await response.json()
+}
+
+const CALENDAR_REPLAY_PREFIX = 'dsh-calendar-index-replay:'
+
+function calendarReplayToken(pageToken?: string): string {
+  return `${CALENDAR_REPLAY_PREFIX}${encodeURIComponent(pageToken ?? '')}`
+}
+
+function unwrapCalendarReplayToken(pageToken?: string): { replay: boolean; pageToken?: string } {
+  if (!pageToken?.startsWith(CALENDAR_REPLAY_PREFIX)) {
+    return { replay: false, ...(pageToken ? { pageToken } : {}) }
+  }
+  const encoded = pageToken.slice(CALENDAR_REPLAY_PREFIX.length)
+  const replayToken = decodeURIComponent(encoded)
+  return { replay: true, ...(replayToken ? { pageToken: replayToken } : {}) }
 }
 
 function record(value: unknown): Record<string, unknown> {

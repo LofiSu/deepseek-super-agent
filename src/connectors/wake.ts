@@ -4,7 +4,7 @@ import type { Disposition, Ticket, Trigger } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 import type { ConnectorConfig, ConnectorWakeConfig } from './config.ts'
 import { ConnectorIndex } from './index-store.ts'
-import type { GoogleWorkspaceApi } from './google.ts'
+import { GoogleInvalidPageTokenError, type GoogleWorkspaceApi } from './google.ts'
 import {
   connectorRecordId,
   oneLine,
@@ -226,7 +226,12 @@ export class ConnectorWakeScheduler {
       } catch (error) {
         serviceErrors.push(`${service}: ${messageOf(error)}`)
         this.log(`[connector] poll failed service=${service}: ${messageOf(error)}`)
-        if (cursors[service] === undefined) pageQueries[service] = { since: query.since, until: query.until }
+        if (error instanceof GoogleInvalidPageTokenError) {
+          delete pageTokens[service]
+          pageQueries[service] = { since: query.since, until: query.until }
+        } else if (cursors[service] === undefined) {
+          pageQueries[service] = { since: query.since, until: query.until }
+        }
       }
     }
 

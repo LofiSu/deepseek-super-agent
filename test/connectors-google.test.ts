@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HttpGoogleWorkspaceApi, type GoogleFetchQuery } from '../src/connectors/google.ts'
+import { GoogleInvalidPageTokenError, HttpGoogleWorkspaceApi, type GoogleFetchQuery } from '../src/connectors/google.ts'
 import { RefreshTokenProvider, type FetchLike, type GoogleTokenProvider } from '../src/connectors/oauth.ts'
 import type { GoogleCredentials } from '../src/connectors/config.ts'
 
@@ -112,7 +112,7 @@ describe('Google Workspace mapping', () => {
     }
   })
 
-  it('prioritizes imminent calendar events even when the index has more pages', async () => {
+  it('replays index records displaced by urgent calendar events before advancing pages', async () => {
     const imminent = {
       id: 'imminent-event',
       summary: 'Synthetic imminent event',
@@ -125,9 +125,11 @@ describe('Google Workspace mapping', () => {
       start: { dateTime: new Date(T0 + 6 * 24 * 60 * 60_000).toISOString() },
       end: { dateTime: new Date(T0 + 6 * 24 * 60 * 60_000 + 60 * 60_000).toISOString() },
     }
+    let urgentCalls = 0
     const fetchImpl: FetchLike = async input => {
       const url = new URL(String(input))
       if (url.searchParams.get('maxResults') === '2500') {
+        urgentCalls += 1
         return new Response(JSON.stringify({ items: [imminent] }), { status: 200 })
       }
       return new Response(JSON.stringify({ items: [olderPageEvent], nextPageToken: 'later-page' }), { status: 200 })
@@ -140,7 +142,14 @@ describe('Google Workspace mapping', () => {
     const page = await api.fetchPage('calendar', query({ limit: 1 }))
     expect(page.drafts).toHaveLength(1)
     expect(page.drafts[0]).toMatchObject({ externalId: 'imminent-event', wake: true })
-    expect(page.nextPageToken).toBe('later-page')
+    expect(page.nextPageToken).toBeDefined()
+    expect(page.nextPageToken).not.toBe('later-page')
+
+    const replay = await api.fetchPage('calendar', query({ limit: 1, pageToken: page.nextPageToken }))
+    expect(replay.drafts).toHaveLength(1)
+    expect(replay.drafts[0]).toMatchObject({ externalId: 'later-page-event', wake: false })
+    expect(replay.nextPageToken).toBe('later-page')
+    expect(urgentCalls).toBe(1)
   })
 
   it('maps Gmail messages and marks unread important mail', async () => {
@@ -294,7 +303,7 @@ describe('Google Workspace mapping', () => {
     })
   })
 
-  it('rechecks unchanged tasks and treats a date-only due value as a whole day', async () => {
+  it('rechecks unchanged tasks and treats provider midnight-Z due dates as a whole day', async () => {
     let requested: URL | undefined
     const fetchImpl: FetchLike = async input => {
       requested = new URL(String(input))
@@ -302,7 +311,7 @@ describe('Google Workspace mapping', () => {
         items: [{
           id: 'unchanged-task',
           title: 'Synthetic due-today task',
-          due: '2026-11-05',
+          due: '2026-11-05T00:00:00.000Z',
           status: 'needsAction',
           updated: '2026-10-01T00:00:00.000Z',
         }],
@@ -316,5 +325,37 @@ describe('Google Workspace mapping', () => {
     const [task] = await api.fetch('tasks', query())
     expect(requested?.searchParams.has('updatedMin')).toBe(false)
     expect(task).toMatchObject({ externalId: 'unchanged-task', wake: true })
+  })
+
+  it('keeps non-midnight RFC 3339 due times as instants', async () => {
+    const fetchImpl: FetchLike = async () => new Response(JSON.stringify({
+      items: [{
+        id: 'timed-task',
+        title: 'Synthetic overdue timed task',
+        due: '2026-11-05T00:30:00.000Z',
+        status: 'needsAction',
+      }],
+    }), { status: 200 })
+    const api = new HttpGoogleWorkspaceApi(fixedToken, {
+      fetch: fetchImpl,
+      now: () => T0,
+      apiBase: 'https://example.test',
+    })
+    const [task] = await api.fetch('tasks', query())
+    expect(task).toMatchObject({ externalId: 'timed-task', wake: false })
+  })
+
+  it('signals rejected Drive-family continuation tokens distinctly', async () => {
+    const services = ['drive', 'docs', 'sheets', 'slides'] as const
+    for (const service of services) {
+      const api = new HttpGoogleWorkspaceApi(fixedToken, {
+        fetch: async () => new Response(JSON.stringify({
+          error: { code: 400, message: 'Invalid Value' },
+        }), { status: 400 }),
+        apiBase: 'https://example.test',
+      })
+      await expect(api.fetchPage(service, query({ pageToken: 'expired-token' })))
+        .rejects.toBeInstanceOf(GoogleInvalidPageTokenError)
+    }
   })
 })

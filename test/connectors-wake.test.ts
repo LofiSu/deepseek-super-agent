@@ -7,6 +7,7 @@ import type { Host } from '../src/core/host.ts'
 import { routerPromptFor } from '../src/harness/loop.ts'
 import { Metrics } from '../src/metrics/metrics.ts'
 import { normalizeProactiveConfig } from '../src/harness/proactive.ts'
+import { feishuTriggerFromMessage } from '../src/channels/feishu.ts'
 import {
   CONNECTOR_TRIGGER_PREFIX,
   ConnectorWakeScheduler,
@@ -15,7 +16,7 @@ import {
 } from '../src/connectors/wake.ts'
 import { normalizeConnectorConfig } from '../src/connectors/config.ts'
 import { ConnectorIndex } from '../src/connectors/index-store.ts'
-import type { GoogleWorkspaceApi } from '../src/connectors/google.ts'
+import { GoogleInvalidPageTokenError, type GoogleWorkspaceApi } from '../src/connectors/google.ts'
 import type { ConnectorDraft } from '../src/connectors/types.ts'
 import type { Disposition, Ticket, Trigger } from '../src/shared/types.ts'
 import { Store } from '../src/store/sqlite.ts'
@@ -370,6 +371,55 @@ describe('connector wake scheduler', () => {
     }
   })
 
+  it('fires only for adapter-built Feishu p2p triggers and rejects adapter-built groups', async () => {
+    for (const chatType of ['p2p', 'group', undefined, 'future-chat-kind'] as const) {
+      const { store, index } = setup()
+      const at = new Date(T0 - 60 * MIN).toISOString()
+      const trigger = feishuTriggerFromMessage({
+        message_id: `om_adapter_${chatType ?? 'missing'}`,
+        chat_id: 'oc_owner',
+        ...(chatType === undefined ? {} : { chat_type: chatType }),
+        msg_type: 'text',
+        content: JSON.stringify({ text: 'hello from Feishu' }),
+        create_time: String(Date.parse(at)),
+        sender: { id: 'ou_owner', sender_type: 'user' },
+      })
+      if (chatType === undefined) {
+        expect(trigger.channel?.address).not.toHaveProperty('chat_type')
+      } else {
+        expect(trigger.channel?.address?.chat_type).toBe(chatType)
+      }
+      store.putDoc('trigger', trigger.id, trigger)
+      store.putDoc('disposition', trigger.id, { at, fanout: [], context: [] } satisfies Disposition)
+      const connectorDraft = draft({ externalId: `adapter-feishu-${chatType}` })
+      const { runner, fired } = scheduler({
+        store,
+        index,
+        api: fakeApi([connectorDraft]),
+        config: {
+          google: { services: ['gmail'] },
+          wake: {
+            enabled: true,
+            services: ['gmail'],
+            source: 'im',
+            thread: 'feishu:oc_owner',
+            chatId: 'oc_owner',
+          },
+        },
+      })
+      expect((await runner.poll(T0)).action).toBe('backfill')
+      connectorDraft.updatedAt = new Date(T0 + MIN).toISOString()
+      const result = await runner.poll(T0 + 16 * MIN)
+      if (chatType === 'p2p') {
+        expect(result.action).toBe('wake')
+        expect(fired).toHaveLength(1)
+      } else {
+        expect(result.action).toBe('no-target')
+        expect(fired).toHaveLength(0)
+      }
+    }
+  })
+
   it('never invents a recipient when no admitted private thread exists', async () => {
     const { store, index } = setup()
     const { runner, fired, lines } = scheduler({ store, index, api: fakeApi([draft()]) })
@@ -513,6 +563,78 @@ describe('connector wake scheduler', () => {
     expect(loadConnectorWakeState(store).cursors?.gmail).toBe(new Date(T0).toISOString())
     expect(loadConnectorWakeState(store).pageTokens?.gmail).toBeUndefined()
     expect(index.query({ limit: 10 }).map(record => record.externalId).sort()).toEqual(['old-1', 'old-2'])
+  })
+
+  it('clears invalid provider page tokens durably and retries the saved query after restart', async () => {
+    const { store, index } = setup()
+    const originalQuery = {
+      since: new Date(T0 - 2 * 60 * MIN).toISOString(),
+      until: new Date(T0 - MIN).toISOString(),
+    }
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { docs: new Date(T0 - MIN).toISOString() },
+      pageTokens: { docs: 'expired-page-token' },
+      pageQueries: { docs: originalQuery },
+      wakes: [],
+      notified: [],
+    })
+    const queries: { pageToken?: string; since: string; until: string }[] = []
+    const api: GoogleWorkspaceApi = {
+      async fetch() { return [] },
+      async fetchPage(_service, query) {
+        queries.push({ pageToken: query.pageToken, since: query.since, until: query.until })
+        if (query.pageToken) throw new GoogleInvalidPageTokenError('/drive/v3/files')
+        return { drafts: [] }
+      },
+    }
+    const config = {
+      google: { services: ['docs'] },
+      wake: { enabled: false, services: ['docs'] },
+    }
+    const first = scheduler({ store, index, api, config })
+    await first.runner.poll(T0 + 16 * MIN)
+    expect(queries[0]).toEqual({ pageToken: 'expired-page-token', ...originalQuery })
+    expect(loadConnectorWakeState(store).pageTokens?.docs).toBeUndefined()
+    expect(loadConnectorWakeState(store).pageQueries?.docs).toEqual(originalQuery)
+
+    const restarted = scheduler({ store, index, api, config })
+    await restarted.runner.poll(T0 + 32 * MIN)
+    expect(queries[1]).toEqual({ ...originalQuery })
+    expect(loadConnectorWakeState(store).pageTokens?.docs).toBeUndefined()
+    expect(loadConnectorWakeState(store).cursors?.docs).toBe(originalQuery.until)
+  })
+
+  it('retains provider page tokens after transient errors', async () => {
+    const { store, index } = setup()
+    const bounds = {
+      since: new Date(T0 - 2 * 60 * MIN).toISOString(),
+      until: new Date(T0 - MIN).toISOString(),
+    }
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { docs: bounds.until },
+      pageTokens: { docs: 'retry-after-network-error' },
+      pageQueries: { docs: bounds },
+      wakes: [],
+      notified: [],
+    })
+    const api: GoogleWorkspaceApi = {
+      async fetch() { return [] },
+      async fetchPage() { throw new Error('network timeout') },
+    }
+    const { runner } = scheduler({
+      store,
+      index,
+      api,
+      config: {
+        google: { services: ['docs'] },
+        wake: { enabled: false, services: ['docs'] },
+      },
+    })
+    await runner.poll(T0 + 16 * MIN)
+    expect(loadConnectorWakeState(store).pageTokens?.docs).toBe('retry-after-network-error')
+    expect(loadConnectorWakeState(store).pageQueries?.docs).toEqual(bounds)
   })
 
   it('replays an outbox wake after restart when the crash precedes ingress persistence', async () => {

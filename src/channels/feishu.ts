@@ -70,6 +70,7 @@ export interface FeishuMention {
 export interface FeishuMessage {
   message_id: string
   chat_id: string
+  chat_type?: string
   msg_type: string
   body?: { content?: string }
   content?: string
@@ -199,6 +200,15 @@ export class FeishuClient {
     )
     return data.items?.[0]
   }
+
+  async getChatType(chatId: string): Promise<string | undefined> {
+    const data = await this.request<{ chat_type?: unknown }>(
+      `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`,
+    )
+    return typeof data.chat_type === 'string' && data.chat_type.length > 0
+      ? data.chat_type
+      : undefined
+  }
 }
 
 /** Flatten the text-bearing parts of a Feishu message (`text`, `post`, cards). */
@@ -281,7 +291,8 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
       address: {
         provider: 'feishu',
         chat_id: message.chat_id,
-        // Group admission reads only `address.group`; a Feishu chat is the group.
+        ...(message.chat_type !== undefined ? { chat_type: message.chat_type } : {}),
+        // Group admission uses the chat id; private wake targets also require chat_type=p2p.
         group: message.chat_id,
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
@@ -333,10 +344,21 @@ export class FeishuSource {
       startTimeSec,
       pageSize: this.pageSize,
     })
+    let chatType: string | undefined
+    if (items.some(item => item.chat_type === undefined)) {
+      try {
+        chatType = await this.client.getChatType(this.chatId)
+      } catch {
+        // Missing chat metadata stays missing; it must never imply a private chat.
+      }
+    }
     const triggers: Trigger[] = []
     for (const item of items) {
       if (this.threadId && item.thread_id !== this.threadId) continue
-      triggers.push(feishuTriggerFromMessage(item, this.config))
+      const message = item.chat_type === undefined && chatType !== undefined
+        ? { ...item, chat_type: chatType }
+        : item
+      triggers.push(feishuTriggerFromMessage(message, this.config))
       const at = Number(item.create_time)
       if (Number.isFinite(at) && at > this.cursorMsValue) this.cursorMsValue = at
     }
