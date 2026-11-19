@@ -290,7 +290,7 @@ describe('finalize loading failure aborts the one-shot claim', () => {
       .toEqual(['ft-no-alpha', 'ft-alpha-discard'])
   })
 
-  it('rejects a malformed finaltest commitment before spending the claim', async () => {
+  it('rejects a malformed finaltest commitment before creating an experiment', async () => {
     const datasetRoot = tempDir('evo-finaltest-bad-commitment-ds-')
     datasets.push(datasetRoot)
     writeFinalTestRegressionDataset(datasetRoot)
@@ -301,21 +301,20 @@ describe('finalize loading failure aborts the one-shot claim', () => {
     const home = tempDir('evo-finaltest-bad-commitment-home-')
     homes.push(home)
 
-    const report = await runEvolution({
+    // The low-level search parser remains useful for tests that intentionally
+    // inspect search-only loading, while production admission rejects the
+    // missing sealed commitment before creating or mutating experiment state.
+    expect(loadSearchDatasetOnly(datasetRoot).finaltestCommitment).toBeUndefined()
+    await expect(runEvolution({
       home,
       datasetRoot,
       injectCandidates: [regressionStrategy()],
       budget: { maxCandidates: 1, maxEvals: 10, evalTimeoutMs: 20_000, reserveEvals: 2 },
-    })
-    const candidate = report.candidates.find(item => item.status === 'evaluated')
-    expect(candidate).toBeDefined()
-    freezeCandidate({ home, candidateId: candidate!.candidateId, runId: report.runId })
+    })).rejects.toThrow(/preregistered commitment must be a SHA-256 digest/)
 
-    await expect(runFinalTestOnce({ home, datasetRoot, candidateId: candidate!.candidateId }))
-      .rejects.toThrow(/preregistered commitment must be a SHA-256 digest/)
-    const after = loadExperiment(home)!
-    expect(after.phase).toBe('frozen')
-    expect(after.finalTestClaim).toBeNull()
+    expect(loadExperiment(home)).toBeNull()
+    expect(fs.existsSync(claimConsumedPath(home))).toBe(false)
+    expect(fs.existsSync(claimLockPath(home))).toBe(false)
   })
 
   it('rejects manifest and finaltest mutation after registration without spending the claim', async () => {

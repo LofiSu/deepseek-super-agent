@@ -110,10 +110,10 @@ export async function runFinalTestOnce(input: {
         finaltest,
         experiment.budget,
       )
+      if (result.launched) recordFinalTestChildEvalLaunch(input.home, 1)
       if (result.timedOut || !result.ok || !result.score) {
         abortFinalTestClaim(input.home, lockToken, result.error ?? 'finaltest_eval_failed')
       }
-      recordFinalTestChildEvalLaunch(input.home, 1)
       score = result.score.split === 'finaltest'
         ? result.score
         : { ...result.score, split: 'finaltest' }

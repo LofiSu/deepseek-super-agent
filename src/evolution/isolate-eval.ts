@@ -13,6 +13,8 @@ const tsxCli = path.join(repoRoot, 'node_modules/tsx/dist/cli.mjs')
 
 export interface IsolatedEvalResult {
   ok: boolean
+  /** True only after the evaluator child emitted Node's successful spawn event. */
+  launched: boolean
   score?: SplitScore
   error?: string
   timedOut?: boolean
@@ -99,14 +101,16 @@ export async function isolatedEvaluateSplit(
     })
     let stdout = ''
     let stderr = ''
+    let launched = false
     let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    const settle = (result: IsolatedEvalResult): void => {
+    const settle = (result: Omit<IsolatedEvalResult, 'launched'>): void => {
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
-      resolve(result)
+      resolve({ ...result, launched })
     }
+    child.once('spawn', () => { launched = true })
     // Cap each stream independently: a noisy or replaced child must not grow
     // parent memory without bound, and truncated output is never a score.
     const append = (stream: 'stdout' | 'stderr', current: string, chunk: unknown): string => {

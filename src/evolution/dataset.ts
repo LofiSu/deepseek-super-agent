@@ -472,10 +472,10 @@ export function loadCommittedFinaltestSplit(search: LoadedSearchDataset): Evolut
 /** Finalization validates this before claiming its one-shot final-test lock. */
 export function assertPreregisteredFinaltestCommitment(search: LoadedSearchDataset): string {
   const digest = search.finaltestCommitment
-  if (typeof digest !== 'string') {
+  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/i.test(digest)) {
     throw new Error('finaltest preregistered commitment must be a SHA-256 digest')
   }
-  return digest
+  return digest.toLowerCase()
 }
 
 /** Finalization only: loads sealed split C after claim. */

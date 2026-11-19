@@ -9,7 +9,11 @@ import {
   evolutionArchiveRoot,
   evolutionRunsDir,
 } from './archive.ts'
-import { defaultBaselineStrategy, loadSearchDatasetOnly } from './dataset.ts'
+import {
+  assertPreregisteredFinaltestCommitment,
+  defaultBaselineStrategy,
+  loadSearchDatasetOnly,
+} from './dataset.ts'
 import { stableJsonDigest } from './digest.ts'
 import { isolatedEvaluateSplit } from './isolate-eval.ts'
 import { parseDeliverGateStrategy } from './strategy-gate.ts'
@@ -99,7 +103,7 @@ async function evaluateCandidateSearch(
     ['validation', validation],
   ] as const) {
     const result = await isolatedEvaluateSplit(workDir, strategy, split, cases, budget)
-    if (result.ok && result.score) recordChildEvalLaunch(home, 1)
+    if (result.launched) recordChildEvalLaunch(home, 1)
     if (result.timedOut) {
       onTimeout()
       return { status: 'rejected_timeout', scores: [], reason: 'eval_timeout', reward: 'skip' }
@@ -138,7 +142,10 @@ export async function runEvolution(input: EvolveRunInput): Promise<EvolutionRunR
   const budget = input.budget ?? DEFAULT_EVOLUTION_BUDGET
   assertValidEvolutionBudget(budget)
   // Read-only dataset/evaluator work stays outside the exclusive search lock.
+  // Require the same sealed holdout commitment finalization requires before an
+  // experiment can be created or mutated by this search request.
   const dataset = loadSearchDatasetOnly(input.datasetRoot)
+  assertPreregisteredFinaltestCommitment(dataset)
   const evaluatorDigest = computeEvaluatorDigest()
 
   // Take the search lock before any experiment.json read-create-write. A failed
