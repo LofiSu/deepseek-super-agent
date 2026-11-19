@@ -4,7 +4,7 @@ import { bindRolePorts } from '../src/core/role-ports.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import type { Runtime } from '../src/runtime.ts'
-import type { Decision, Disposition, Ticket } from '../src/shared/types.ts'
+import type { Decision, Disposition, Ticket, Trigger } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 import { field, lastPrompt, ScriptedModel, silentModel } from './scripted-model.ts'
 
@@ -91,6 +91,17 @@ function reportingModel(prompts: string[] = []): ScriptedModel {
 }
 
 describe('Runtime service integration', () => {
+  it('resumes a trigger-only interrupted ingress and leaves completed retries duplicate', () => {
+    const runtime = start()
+    const trigger = imTrigger({ id: 'trg_interrupted_ingress', thread: 'recovery/topic', text: 'synthetic event' })
+    runtime.store.putDoc('trigger', trigger.id, trigger)
+
+    expect(runtime.ingest(trigger)).toBe('stored')
+    expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)).toBeDefined()
+    expect(runtime.ingest(trigger)).toBe('duplicate')
+    expect(runtime.store.listDocs<Trigger>('trigger').filter(row => row.id === trigger.id)).toHaveLength(1)
+  })
+
   it('routes a trigger to a shard, runs that router session, and places the worker on the mesh', async () => {
     const runtime = start({
       env: isolatedEnv({

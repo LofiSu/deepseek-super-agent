@@ -118,6 +118,11 @@ function scheduler(input: {
     fire: trigger => {
       fired.push(trigger)
       input.store.putDoc('trigger', trigger.id, trigger)
+      input.store.putDoc('disposition', trigger.id, {
+        at: trigger.at,
+        fanout: [],
+        context: [],
+      } satisfies Disposition)
     },
     log: line => { lines.push(line) },
   })
@@ -279,6 +284,55 @@ describe('connector wake scheduler', () => {
     expect(deniedByGroup.fired).toHaveLength(0)
   })
 
+  it('requires trusted Feishu p2p chat metadata before using a configured chat', async () => {
+    for (const chatType of ['group', 'p2p']) {
+      const { store, index } = setup()
+      const at = new Date(T0 - 60 * MIN).toISOString()
+      const trigger: Trigger = {
+        id: `trg_feishu_${chatType}`,
+        source: 'im',
+        threads: [{ source: 'im', id: 'feishu:oc_owner' }],
+        actor: { source: 'im', id: 'ou_owner' },
+        human: true,
+        addressed: 'mention',
+        at,
+        text: 'synthetic admitted Feishu message',
+        channel: {
+          source: 'im',
+          thread: 'feishu:oc_owner',
+          address: { provider: 'feishu', chat_id: 'oc_owner', chat_type: chatType, group: 'oc_owner' },
+        },
+        meta: {},
+      }
+      store.putDoc('trigger', trigger.id, trigger)
+      store.putDoc('disposition', trigger.id, { at, fanout: [], context: [] } satisfies Disposition)
+      const { runner, fired } = scheduler({
+        store,
+        index,
+        api: fakeApi([draft({ externalId: `feishu-${chatType}` })]),
+        config: {
+          google: { services: ['gmail'] },
+          wake: {
+            enabled: true,
+            services: ['gmail'],
+            source: 'im',
+            thread: 'feishu:oc_owner',
+            chatId: 'oc_owner',
+          },
+        },
+      })
+      expect((await runner.poll(T0)).action).toBe('backfill')
+      const result = await runner.poll(T0 + 16 * MIN)
+      if (chatType === 'group') {
+        expect(result.action).toBe('no-target')
+        expect(fired).toHaveLength(0)
+      } else {
+        expect(result.action).toBe('wake')
+        expect(fired).toHaveLength(1)
+      }
+    }
+  })
+
   it('never invents a recipient when no admitted private thread exists', async () => {
     const { store, index } = setup()
     const { runner, fired, lines } = scheduler({ store, index, api: fakeApi([draft()]) })
@@ -413,24 +467,44 @@ describe('connector wake scheduler', () => {
     expect(store.listDocs<Trigger>('trigger').filter(trigger => trigger.id.startsWith(CONNECTOR_TRIGGER_PREFIX))).toHaveLength(1)
   })
 
-  it('recognizes ingress accepted before a crash and does not replay the Trigger', async () => {
+  it('keeps a trigger-only ingress pending and resumes until disposition is durable', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
     store.putDoc('connector_wake', 'state', { lastCheckAt: T0, wakes: [], notified: [] })
     const first = scheduler({ store, index, api: fakeApi([draft()]) })
+    let attempts = 0
     ;(first.runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = trigger => {
+      attempts += 1
       store.putDoc('trigger', trigger.id, trigger)
-      throw new Error('simulated crash after ingress commit')
+      if (attempts === 1) throw new Error('simulated crash after trigger row only')
+      store.putDoc('disposition', trigger.id, {
+        at: trigger.at,
+        fanout: [],
+        context: [],
+      } satisfies Disposition)
     }
     await first.runner.poll(T0 + 16 * MIN)
     expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+    const firstTrigger = store.listDocs<Trigger>('trigger')
+      .find(trigger => trigger.id.startsWith(CONNECTOR_TRIGGER_PREFIX))!
+    expect(store.getDoc<Disposition>('disposition', firstTrigger.id)).toBeUndefined()
 
     const restarted = scheduler({ store, index, api: fakeApi([draft()]) })
+    ;(restarted.runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = trigger => {
+      attempts += 1
+      store.putDoc('trigger', trigger.id, trigger)
+      store.putDoc('disposition', trigger.id, {
+        at: trigger.at,
+        fanout: [],
+        context: [],
+      } satisfies Disposition)
+    }
     await restarted.runner.poll(T0 + 32 * MIN)
-    expect(restarted.fired).toHaveLength(0)
+    expect(attempts).toBe(2)
     expect(loadConnectorWakeState(store).pending ?? []).toHaveLength(0)
     expect(loadConnectorWakeState(store).notified).toHaveLength(1)
     expect(store.listDocs<Trigger>('trigger').filter(trigger => trigger.id.startsWith(CONNECTOR_TRIGGER_PREFIX))).toHaveLength(1)
+    expect(store.getDoc<Disposition>('disposition', firstTrigger.id)).toBeDefined()
   })
 
   it('marks connector wakes as messaging envelopes', () => {

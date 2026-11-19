@@ -25,7 +25,8 @@ export class Intake {
    */
   receive(trigger: Trigger, trust: TriggerTrust = {}): ReceiveResult {
     if (!trigger.threads.length) throw new UserError('A trigger must belong to at least one thread')
-    if (this.host.repo.getDoc<Trigger>('trigger', trigger.id)) return 'duplicate'
+    const existing = this.host.repo.getDoc<Trigger>('trigger', trigger.id)
+    if (existing && this.host.repo.getDoc<Disposition>('disposition', trigger.id)) return 'duplicate'
     const at = this.host.now()
     // The Runtime's async ingress already filtered this trigger (including an
     // opt-in model policy) and passes that verdict in the ingress-owned trust
@@ -101,7 +102,7 @@ export class Intake {
     // Human follow-ups that reached an actionable subscriber do not need Eval.
     // Bot/CI events and context-only subscriptions still become new-work candidates.
     const needsEval = command != null || trigger.human === false || fanout.length === 0
-    if (needsEval && primary) {
+    if (needsEval && primary && !primary.pending.includes(trigger.id)) {
       primary.pending = [...primary.pending, trigger.id]
       this.host.repo.putDoc('thread', primary.key, primary)
       this.host.onQueued?.(primary.key, trigger.id, primary.pending)
@@ -185,6 +186,7 @@ function addInput(
   kind: 'trigger' | 'context',
   at: string,
 ): void {
+  if (ticket.inputs.some(input => input.triggerId === trigger.id)) return
   ticket.inputs.push({
     id: host.repo.nextId('input'),
     kind,

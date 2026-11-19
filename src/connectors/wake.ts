@@ -338,9 +338,8 @@ export class ConnectorWakeScheduler {
         this.log(`[connector] fire deferred triggerId=${trigger.id}: ${messageOf(error)}`)
         return { action: 'wake', recordId: record.id, trigger, ...counts }
       }
-      const accepted = this.opts.store.getDoc<Trigger>('trigger', trigger.id)
-      if (!accepted) {
-        this.log(`[connector] ingress did not persist triggerId=${trigger.id}; wake remains pending`)
+      if (!this.ingressComplete(trigger.id)) {
+        this.log(`[connector] ingress did not complete triggerId=${trigger.id}; wake remains pending`)
         return { action: 'wake', recordId: record.id, trigger, ...counts }
       }
       this.finishPending(this.loadState(), pending)
@@ -386,18 +385,27 @@ export class ConnectorWakeScheduler {
 
   private reconcilePending(state: ConnectorWakeState): ConnectorWakeState {
     for (const pending of state.pending ?? []) {
-      if (!this.opts.store.getDoc<Trigger>('trigger', pending.trigger.id)) {
+      if (!this.ingressComplete(pending.trigger.id)) {
         try {
+          // Runtime ingress recognizes a persisted trigger without a disposition
+          // as an interrupted commit and resumes it idempotently.
           this.opts.fire(pending.trigger)
         } catch (error) {
           this.log(`[connector] pending wake retry failed triggerId=${pending.trigger.id}: ${messageOf(error)}`)
           break
         }
       }
-      if (!this.opts.store.getDoc<Trigger>('trigger', pending.trigger.id)) break
+      if (!this.ingressComplete(pending.trigger.id)) break
       state = this.finishPending(state, pending)
     }
     return state
+  }
+
+  private ingressComplete(triggerId: string): boolean {
+    return Boolean(
+      this.opts.store.getDoc<Trigger>('trigger', triggerId)
+      && this.opts.store.getDoc<Disposition>('disposition', triggerId),
+    )
   }
 
   private finishPending(state: ConnectorWakeState, pending: ConnectorPendingWake): ConnectorWakeState {
@@ -512,7 +520,9 @@ function isPrivateTarget(
   if (channel.source === 'im') {
     if (address.provider === 'feishu') {
       const chatId = wake.chatId ?? env.FEISHU_CHAT_ID?.trim()
-      return Boolean(chatId) && address.chat_id === chatId
+      return Boolean(chatId)
+        && address.chat_id === chatId
+        && address.chat_type === 'p2p'
     }
     return !address.group
   }
