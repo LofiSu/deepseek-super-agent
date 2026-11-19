@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { RUNTIME_ASSETS } from './copy-assets.ts'
 
 export interface ReleaseCheckOptions {
   /** Repository root. Defaults to the parent of this script. */
@@ -54,6 +55,15 @@ export const RULES_ASSET_CANDIDATES = [
   'dist/channels/rules.json',
   'dist/watchdog/rules.json',
 ] as const
+
+/**
+ * Host-side fixtures the sandbox probe loads from beside the compiled module.
+ * Without them `DS_AGENT_SANDBOX_REQUIRED=network|process` can never pass in an
+ * installed package, so the tarball must ship them.
+ */
+export const SANDBOX_PROBE_ASSETS: readonly string[] = RUNTIME_ASSETS
+  .filter(asset => asset.startsWith('env/fixtures/'))
+  .map(asset => `dist/${asset}`)
 
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
 
@@ -223,6 +233,17 @@ export function checkRelease(options: ReleaseCheckOptions = {}): ReleaseCheckRes
       ),
   )
 
+  const missingProbeAssets = SANDBOX_PROBE_ASSETS.filter(candidate => !isFile(path.join(root, candidate)))
+  checks.push(
+    missingProbeAssets.length === 0
+      ? passed('dist-probe-assets', `sandbox probe fixtures exist (${SANDBOX_PROBE_ASSETS.join(', ')})`)
+      : failed(
+        'dist-probe-assets',
+        'sandbox probe fixtures missing; the build must emit them under dist/env/fixtures/',
+        missingProbeAssets.join(', '),
+      ),
+  )
+
   const runPack = options.pack ?? (repoRoot => {
     // The check already requires a built tree, so skip prepack's second build.
     const result = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
@@ -276,6 +297,17 @@ export function checkRelease(options: ReleaseCheckOptions = {}): ReleaseCheckRes
           : failed(
             'pack-entry',
             `tarball is missing ${CLI_ENTRY}; run "pnpm build" before packing`,
+          ),
+      )
+
+      const packedProbeAssets = SANDBOX_PROBE_ASSETS.filter(candidate => files.includes(candidate))
+      checks.push(
+        packedProbeAssets.length === SANDBOX_PROBE_ASSETS.length
+          ? passed('pack-probe-assets', `tarball includes ${packedProbeAssets.join(', ')}`)
+          : failed(
+            'pack-probe-assets',
+            'tarball is missing sandbox probe fixtures; run "pnpm build" before packing',
+            SANDBOX_PROBE_ASSETS.filter(candidate => !files.includes(candidate)).join(', '),
           ),
       )
 

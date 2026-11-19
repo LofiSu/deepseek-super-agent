@@ -327,6 +327,15 @@ export class FeishuSource {
     return this.cursorMsValue
   }
 
+  /**
+   * Reset the in-memory cursor, e.g. to the value it had before a pull whose
+   * triggers were not all ingested. The next `pull` then re-reads the window;
+   * repeated Trigger ids are deduped by `Runtime.ingest`.
+   */
+  restoreCursor(cursorMs: number): void {
+    this.cursorMsValue = cursorMs
+  }
+
   async pull(): Promise<Trigger[]> {
     const startTimeSec = Math.max(0, Math.floor((this.cursorMsValue - 1_000) / 1_000))
     const items = await this.client.listMessages(this.chatId, {

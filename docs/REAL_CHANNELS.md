@@ -175,8 +175,10 @@ successful pull and ingest, and only when it advances. On restart the stored
 value is passed back to `FeishuSource`, so the previous window is not replayed.
 `FeishuSource` queries one second before the cursor to catch messages sharing a
 boundary second; any overlap is deduped by Trigger id (`feishu_<message_id>`) in
-`Runtime.ingest`, so a message already processed is never processed twice. A
-stored cursor whose `chatId` differs from the current chat is ignored.
+`Runtime.ingest`, so a message already processed is never processed twice. If
+the cursor write fails, the source cursor is restored to the beginning of that
+pull and the full window is retried. A stored cursor whose `chatId` differs from
+the current chat is ignored.
 
 **Admission semantics.** The loop calls `runtime.ingest(trigger)` with the
 Trigger returned by `feishuTriggerFromMessage`; it does not mark anything
@@ -193,8 +195,10 @@ become a Ticket.
 both in-flight polls and their drains (jobs, outbox flush), closes the iMessage
 API, and only then runs `Runtime.finish()` to stop the daemon and close SQLite.
 The loops never close the Runtime or the clients; `serve` owns them. A failed
-pull is logged and retried with bounded exponential backoff (cap 30s);
-stream/ingest errors are logged and skipped like the iMessage loop. A TCC/Full
+pull is logged and retried with bounded exponential backoff (cap 30s). An
+ingest error restores the source cursor to the beginning of that pull, so the
+next poll replays the window and durable trigger-id dedupe handles any earlier
+successful items. A TCC/Full
 Disk Access denial is terminal for the iMessage loop (not retried forever), names
 the exact System Settings path, and leaves a combined Feishu loop and the daemon
 running.

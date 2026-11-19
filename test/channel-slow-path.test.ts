@@ -160,6 +160,7 @@ function feishuSource(
         return triggers
       },
       get cursorMs() { return cursorMs },
+      restoreCursor() {},
     },
   }
 }

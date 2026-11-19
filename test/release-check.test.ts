@@ -34,6 +34,8 @@ function fixture(options: FixtureFiles = {}): string {
   const files = options.files ?? {
     'dist/cli/main.js': 'console.log("cli")\n',
     'dist/channels/rules.json': '{}\n',
+    'dist/env/fixtures/sandbox-loopback-server.mjs': '// loopback\n',
+    'dist/env/fixtures/sandbox-external-pid-fixture.mjs': '// external pid\n',
   }
   for (const [file, content] of Object.entries(files)) {
     const absolute = path.join(root, file)
@@ -61,6 +63,8 @@ function check(root: string, paths: readonly string[] = [
   'package.json',
   'dist/cli/main.js',
   'dist/channels/rules.json',
+  'dist/env/fixtures/sandbox-loopback-server.mjs',
+  'dist/env/fixtures/sandbox-external-pid-fixture.mjs',
 ]): ReleaseCheckResult {
   return checkRelease({ root, pack: packOf(paths) })
 }
@@ -89,9 +93,11 @@ describe('release check', () => {
       'files',
       'dist-entry',
       'dist-rules',
+      'dist-probe-assets',
       'pack',
       'pack-dist',
       'pack-entry',
+      'pack-probe-assets',
       'pack-rules',
     ])
     expect(formatReleaseCheck(result)).toContain('check(s) passed')
@@ -102,13 +108,20 @@ describe('release check', () => {
       files: {
         'dist/cli/main.js': 'console.log("cli")\n',
         'dist/watchdog/rules.json': '{}\n',
+        'dist/env/fixtures/sandbox-loopback-server.mjs': '// loopback\n',
+        'dist/env/fixtures/sandbox-external-pid-fixture.mjs': '// external pid\n',
       },
     })
     const result = checkRelease({
       root,
       pack: packOf(
-        ['dist/cli/main.js', 'dist/watchdog/rules.json'],
-        { prefix: 'copied 1 asset(s) to dist\n' },
+        [
+          'dist/cli/main.js',
+          'dist/watchdog/rules.json',
+          'dist/env/fixtures/sandbox-loopback-server.mjs',
+          'dist/env/fixtures/sandbox-external-pid-fixture.mjs',
+        ],
+        { prefix: 'copied 3 asset(s) to dist\n' },
       ),
     })
     expect(result.ok).toBe(true)
@@ -180,6 +193,19 @@ describe('release check', () => {
     const result = check(root, ['package.json', 'README.md'])
     expect(failed(result, 'pack-dist')).toBe(true)
     expect(result.errors.join('\n')).toMatch(/no dist\/ entries/)
+  })
+
+  it('reports missing sandbox probe fixtures in dist and in the tarball', () => {
+    const root = fixture({
+      files: {
+        'dist/cli/main.js': 'console.log("cli")\n',
+        'dist/channels/rules.json': '{}\n',
+      },
+    })
+    const result = check(root, ['package.json', 'dist/cli/main.js', 'dist/channels/rules.json'])
+    expect(failed(result, 'dist-probe-assets')).toBe(true)
+    expect(failed(result, 'pack-probe-assets')).toBe(true)
+    expect(result.errors.join('\n')).toMatch(/sandbox probe fixtures/)
   })
 
   it('reports a tarball missing the CLI entry or rules asset', () => {

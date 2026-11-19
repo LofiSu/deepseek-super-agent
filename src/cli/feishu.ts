@@ -15,6 +15,10 @@ import {
   type FeishuConfig,
 } from '../channels/feishu.ts'
 import { Outbox, type OutboundAdapter } from '../channels/outbox-adapter.ts'
+import {
+  ingestResidentTrigger,
+  residentIngressLimitFromEnv,
+} from './channel-resident-gate.ts'
 import type { Runtime } from '../runtime.ts'
 import type { Trigger } from '../shared/types.ts'
 
@@ -101,6 +105,8 @@ export interface FeishuLoopSource {
   pull(): Promise<readonly Trigger[]>
   /** Highest `create_time` (ms) observed so far, or the seed when none was seen. */
   readonly cursorMs: number
+  /** Reset the pull cursor after a blocked ingress window so the next pull replays it. */
+  restoreCursor(cursorMs: number): void
 }
 
 export interface FeishuLoopOptions {
@@ -131,6 +137,8 @@ export interface FeishuLoopOptions {
   signal?: AbortSignal
   /** Upper bound for the exponential retry delay after a failed poll. */
   maxBackoffMs?: number
+  /** Max wait when ingress is saturated before rejecting (default 60s). */
+  saturateWaitMs?: number
 }
 
 export type FeishuLoopStopReason = 'once' | 'aborted'
@@ -174,9 +182,11 @@ function storedCursor(runtime: Runtime, chatId: string): number | undefined {
  * catch same-second messages; any overlap is deduped by Trigger id in
  * `Runtime.ingest`, so an already-processed message is never processed twice.
  *
- * Pull failures are logged and retried with bounded exponential backoff. Ingest
- * failures are logged and skipped. The loop never closes the client or finishes
- * the Runtime: the caller owns those resources.
+ * Pull failures are logged and retried with bounded exponential backoff. An
+ * ingest or cursor-persistence failure restores the source cursor to the start
+ * of that pull, so a retry cannot advance past an uncommitted Trigger. The
+ * loop never closes the client or finishes the Runtime: the caller owns those
+ * resources.
  */
 export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuLoopStopReason> {
   const { runtime, chatId, client, createSource } = options
@@ -192,6 +202,7 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
   outbox.start(400)
 
   const aborted = (): boolean => options.signal?.aborted === true
+  const ingressLimit = residentIngressLimitFromEnv(process.env)
   const explicitSince = typeof options.since === 'number'
     && Number.isFinite(options.since)
     && options.since > 0
@@ -211,31 +222,58 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
     for (;;) {
       if (aborted()) break
       try {
+        // Remember where this pull started. `FeishuSource.pull` advances its
+        // in-memory cursor while walking the batch, before the loop ingests
+        // anything; a blocked trigger must not be skipped on the next poll.
+        const cursorBeforePull = source.cursorMs
         const triggers = await source.pull()
+        let cursorBlockedByIngress = false
         for (const trigger of triggers) {
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[feishu] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)
           try {
-            // The opt-in model Slow Path lives behind ingestAsync; rules mode
-            // stays exactly the sync path, so this is a no-op by default.
-            await runtime.ingestAsync(trigger)
+            await ingestResidentTrigger(runtime, trigger, {
+              limit: ingressLimit,
+              signal: options.signal,
+              log,
+              channel: 'feishu',
+              ...(options.saturateWaitMs === undefined ? {} : { saturateWaitMs: options.saturateWaitMs }),
+            })
           } catch (error) {
             log(`[feishu] ingest failed ${messageOf(error)}`)
+            cursorBlockedByIngress = true
+            break
           }
         }
         // Persist only after the pulled triggers were ingested, matching the
         // iMessage loop: a crashed ingest window is retried on the next pull.
-        const advanced = source.cursorMs
-        if (
-          Number.isFinite(advanced)
-          && advanced > 0
-          && (cursor === undefined || advanced > cursor)
-        ) {
-          cursor = advanced
-          runtime.store.putDoc(CURSOR_KIND, CURSOR_ID, {
-            chatId,
-            lastCreateTimeMs: cursor,
-          } satisfies FeishuCursorDoc)
+        // On a blocked window also roll the source back to where this pull
+        // started, so the next pull re-reads the whole uningested span rather
+        // than only the source's one-second overlap. Already-ingested ids are
+        // deduped by `Runtime.ingest`, so replaying them is safe.
+        if (cursorBlockedByIngress) {
+          source.restoreCursor(cursorBeforePull)
+        } else {
+          const advanced = source.cursorMs
+          if (
+            Number.isFinite(advanced)
+            && advanced > 0
+            && (cursor === undefined || advanced > cursor)
+          ) {
+            // Keep both cursor representations unchanged until the durable
+            // write succeeds. If persistence fails, the next pull must replay
+            // this entire window: keeping either cursor advanced would skip it.
+            try {
+              runtime.store.putDoc(CURSOR_KIND, CURSOR_ID, {
+                chatId,
+                lastCreateTimeMs: advanced,
+              } satisfies FeishuCursorDoc)
+              cursor = advanced
+            } catch (error) {
+              source.restoreCursor(cursorBeforePull)
+              throw error
+            }
+          }
         }
         await runtime.jobsSettled().catch(error => {
           log(`[feishu] settle error ${messageOf(error)}`)
