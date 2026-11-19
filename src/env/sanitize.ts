@@ -75,6 +75,55 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
   return redactCredentialPatterns(out)
 }
 
+/** Redact explicitly identified credentials even when they are short. */
+export function redactLiteralSecrets(text: string, secrets: readonly string[]): string {
+  const ordered = [...new Set(secrets)]
+    .filter(secret => secret.length > 0)
+    .sort((a, b) => b.length - a.length)
+  let out = text
+  for (const secret of ordered) {
+    if (out.includes(secret)) out = out.split(secret).join('[redacted]')
+  }
+  return out
+}
+
+/** Match explicit and discovered secrets against the same original text. */
+export function redactKnownSecrets(
+  text: string,
+  explicitSecrets: readonly string[],
+  discoveredSecrets: readonly string[],
+): string {
+  const candidates = [
+    ...new Set([
+      ...explicitSecrets.filter(secret => secret.length > 0),
+      ...discoveredSecrets.filter(secret => secret.length >= MIN_SECRET_LENGTH),
+    ]),
+  ]
+  const matches: { start: number; end: number }[] = []
+  for (const secret of candidates) {
+    let start = text.indexOf(secret)
+    while (start !== -1) {
+      matches.push({ start, end: start + secret.length })
+      start = text.indexOf(secret, start + 1)
+    }
+  }
+  matches.sort((left, right) => left.start - right.start || right.end - left.end)
+  let out = ''
+  let cursor = 0
+  let index = 0
+  while (index < matches.length) {
+    let { start, end } = matches[index++]!
+    while (index < matches.length && matches[index]!.start <= end) {
+      end = Math.max(end, matches[index]!.end)
+      index += 1
+    }
+    out += text.slice(cursor, start) + '[redacted]'
+    cursor = end
+  }
+  out += text.slice(cursor)
+  return redactCredentialPatterns(out)
+}
+
 export function allowlistedEnv(
   env: NodeJS.ProcessEnv,
   allow: readonly string[] = ENV_ALLOWLIST,
