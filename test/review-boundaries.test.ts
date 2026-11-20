@@ -211,6 +211,8 @@ describe('independent boundary probes',()=>{
     await runner.poll(T0+30*MIN)
     expect(fired).toHaveLength(0)
     expect(loadConnectorWakeState(store).wakes).toHaveLength(0)
+    expect(loadConnectorWakeState(store).uncertain?.[0]?.pending.trigger.id).toBe(trigger.id)
+    expect(loadConnectorWakeState(store).notified).toHaveLength(0)
   })
   it('uses the provider 15-minute Calendar grace for new pending rows at the exact boundary',async()=>{
     for (const offset of [15 * MIN, 15 * MIN + 1]) {
@@ -222,7 +224,7 @@ describe('independent boundary probes',()=>{
       expect(page.drafts[0]?.wake).toBe(shouldWake)
       const record=index.upsert([draft({service:'calendar',kind:'event',externalId:`new-${offset}`,occurredAt:new Date(T0).toISOString(),wake:shouldWake,wakeReason:shouldWake?'calendar event starting soon':undefined})]).records[0]!
       const trigger=connectorTrigger(record,{channel:{source:'cli',thread:'local'},actor:{source:'cli',id:'you'}},nowAt)
-      store.putDoc('connector_wake','state',{lastCheckAt:T0,cursors:{calendar:new Date(T0).toISOString()},...(shouldWake?{pending:[{at:T0,trigger,recordId:record.id,service:'calendar' as const,eligibilityDeadline:T0+120*MIN}]}:{}),wakes:[],notified:[]})
+      store.putDoc('connector_wake','state',{lastCheckAt:T0,cursors:{calendar:new Date(T0).toISOString()},...(shouldWake?{pending:[{at:T0,trigger,recordId:record.id,service:'calendar' as const,calendarProvenance:{version:1 as const,occurredAt:record.occurredAt,updatedAt:record.updatedAt,kind:'event' as const,wakeReason:record.wakeReason}}]}:{}),wakes:[],notified:[]})
       const {runner,fired}=scheduler({store,index,api:fakeApi([]),now:()=>nowAt,config:{google:{services:['calendar']},wake:{services:['calendar'],calendarLookaheadMinutes:120}}})
       await runner.poll(nowAt)
       expect(fired.some(item=>item.id===trigger.id)).toBe(shouldWake)
@@ -238,7 +240,7 @@ describe('independent boundary probes',()=>{
     const {runner,fired}=scheduler({store,index,api,now:()=>providerNow,config:{google:{services:['calendar']},wake:{services:['calendar'],calendarLookaheadMinutes:120}}})
     ;(runner as unknown as {opts:{fire:(trigger:Trigger)=>void}}).opts.fire=trigger=>{fired.push(trigger);throw new Error('transient ingress failure')}
     await runner.poll(T0)
-    expect(loadConnectorWakeState(store).pending?.[0]?.eligibilityDeadline).toBe(T0+15*MIN)
+    expect(loadConnectorWakeState(store).pending?.[0]?.calendarProvenance).toEqual({version:1,occurredAt:new Date(startsAt).toISOString(),updatedAt:new Date(startsAt).toISOString(),kind:'event',wakeReason:'calendar event starting soon'})
     providerNow=T0+15*MIN
     await runner.poll(providerNow)
     expect(fired).toHaveLength(2)
@@ -261,7 +263,7 @@ describe('independent boundary probes',()=>{
     const {store,index}=setup();seedOwnerThread(store)
     const record=index.upsert([draft({service:'calendar',kind:'event',externalId:'calendar-update',occurredAt:new Date(T0-240*MIN).toISOString(),wakeReason:'calendar event updated'})]).records[0]!
     const trigger=connectorTrigger(record,{channel:{source:'cli',thread:'local'},actor:{source:'cli',id:'you'}},T0)
-    store.putDoc('connector_wake','state',{lastCheckAt:T0,cursors:{calendar:new Date(T0).toISOString()},pending:[{at:T0,trigger,recordId:record.id,service:'calendar'}],wakes:[],notified:[]})
+    store.putDoc('connector_wake','state',{lastCheckAt:T0,cursors:{calendar:new Date(T0).toISOString()},pending:[{at:T0,trigger,recordId:record.id,service:'calendar',calendarProvenance:{version:1,occurredAt:record.occurredAt,updatedAt:record.updatedAt,kind:'event',wakeReason:record.wakeReason}}],wakes:[],notified:[]})
     const {runner,fired}=scheduler({store,index,api:fakeApi([]),config:{google:{services:['calendar']},wake:{services:['calendar']}}})
     await runner.poll(T0+16*MIN)
     expect(fired.some(item=>item.id===trigger.id)).toBe(true)

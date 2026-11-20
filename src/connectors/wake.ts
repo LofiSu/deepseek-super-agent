@@ -57,11 +57,23 @@ export interface ConnectorNotifiedRow {
 
 export interface ConnectorPendingWake {
   at: number
-  /** Calendar provider eligibility cutoff; absent for other wake reasons. */
-  eligibilityDeadline?: number
+  /** Immutable provider facts captured when this exact source revision was selected. */
+  calendarProvenance?: {
+    version: 1
+    occurredAt: string
+    updatedAt: string
+    kind: 'event'
+    wakeReason?: string
+  }
   trigger: Trigger
   recordId: string
   service: GoogleService
+}
+
+export interface ConnectorUncertainWake {
+  pending: ConnectorPendingWake
+  reason: 'calendar-provenance-unavailable'
+  isolatedAt: number
 }
 
 export interface ConnectorIncompleteWake {
@@ -83,6 +95,7 @@ export interface ConnectorWakeState {
   pending?: ConnectorPendingWake[]
   /** Diagnosed incomplete ingress retained outside the active FIFO until repaired. */
   incomplete?: ConnectorIncompleteWake[]
+  uncertain?: ConnectorUncertainWake[]
   wakes: ConnectorWakeRow[]
   notified: ConnectorNotifiedRow[]
 }
@@ -433,8 +446,16 @@ export class ConnectorWakeScheduler {
       }
       const pending: ConnectorPendingWake = {
         at: decisionAt,
-        ...(record.service === 'calendar' && record.kind === 'event' && record.wakeReason === 'calendar event starting soon'
-          ? { eligibilityDeadline: Date.parse(record.occurredAt) + 15 * 60_000 }
+        ...(record.service === 'calendar' && record.kind === 'event'
+          ? {
+            calendarProvenance: {
+              version: 1 as const,
+              occurredAt: record.occurredAt,
+              updatedAt: record.updatedAt,
+              kind: 'event' as const,
+              ...(record.wakeReason === undefined ? {} : { wakeReason: record.wakeReason }),
+            },
+          }
           : {}),
         trigger,
         recordId: record.id,
@@ -492,16 +513,25 @@ export class ConnectorWakeScheduler {
     return undefined
   }
 
+  private hasTrustedCalendarProvenance(pending: ConnectorPendingWake): boolean {
+    const provenance = pending.calendarProvenance
+    return pending.service === 'calendar'
+      && provenance?.version === 1
+      && provenance.kind === 'event'
+      && typeof provenance.occurredAt === 'string'
+      && Number.isFinite(Date.parse(provenance.occurredAt))
+      && typeof provenance.updatedAt === 'string'
+      && Number.isFinite(Date.parse(provenance.updatedAt))
+      && pending.trigger.id === `${CONNECTOR_TRIGGER_PREFIX}${pending.recordId}_${provenance.updatedAt}`
+  }
+
   private calendarPendingDeadline(pending: ConnectorPendingWake): number | undefined {
-    if (pending.service !== 'calendar') return undefined
-    const indexed = this.opts.index.get(pending.recordId)
-    if (indexed?.service === 'calendar' && indexed.kind === 'event'
-      && indexed.wakeReason === 'calendar event starting soon') {
-      return calendarEventWakeDeadline(Date.parse(indexed.occurredAt))
-    }
-    // Old serialized connector triggers do not carry a typed reason. If their
-    // record is no longer indexed, do not infer provenance from trigger text.
-    return undefined
+    const provenance = pending.calendarProvenance
+    if (pending.service !== 'calendar' || provenance?.version !== 1
+      || provenance.kind !== 'event' || provenance.wakeReason !== 'calendar event starting soon') return undefined
+    const occurredAt = Date.parse(provenance.occurredAt)
+    if (!Number.isFinite(occurredAt)) return undefined
+    return calendarEventWakeDeadline(occurredAt)
   }
 
   private reconcilePending(state: ConnectorWakeState, decisionAt: number, enabled: boolean): ConnectorWakeState {
@@ -528,6 +558,19 @@ export class ConnectorWakeScheduler {
     if (stillIncomplete.length !== (state.incomplete ?? []).length) changed = true
     state.incomplete = stillIncomplete.length ? stillIncomplete : undefined
 
+    const stillUncertain: ConnectorUncertainWake[] = []
+    for (const item of state.uncertain ?? []) {
+      if (!this.hasTrustedCalendarProvenance(item.pending)) {
+        stillUncertain.push(item)
+        continue
+      }
+      state.pending = [...(state.pending ?? []), item.pending]
+      changed = true
+      this.log(`[connector] uncertain Calendar wake released after provenance repair triggerId=${item.pending.trigger.id}`)
+    }
+    if (stillUncertain.length !== (state.uncertain ?? []).length) changed = true
+    state.uncertain = stillUncertain.length ? stillUncertain : undefined
+
     for (const pending of [...(state.pending ?? [])]) {
       if (this.ingressComplete(pending.trigger.id)) {
         state = this.finishPending(state, pending)
@@ -542,8 +585,18 @@ export class ConnectorWakeScheduler {
         changed = true
         continue
       }
-      // Recompute from typed index provenance. Older persisted deadlines used
-      // start + lookahead and cannot be trusted as a grace period.
+      if (pending.service === 'calendar' && !this.hasTrustedCalendarProvenance(pending)) {
+        state.pending = (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id)
+        state.uncertain = [...(state.uncertain ?? []), {
+          pending,
+          reason: 'calendar-provenance-unavailable',
+          isolatedAt: decisionAt,
+        }]
+        this.log(`[connector] Calendar wake isolated triggerId=${pending.trigger.id} reason=calendar-provenance-unavailable`)
+        changed = true
+        continue
+      }
+      // Use only the immutable typed facts captured for this source revision.
       const eligibilityDeadline = this.calendarPendingDeadline(pending)
       if (!this.ingressComplete(pending.trigger.id)
         && eligibilityDeadline !== undefined
@@ -765,12 +818,21 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
     ? raw.pending.filter((row): row is ConnectorPendingWake => {
       if (!row || typeof row !== 'object') return false
       const candidate = row as ConnectorPendingWake
+      const provenance = candidate.calendarProvenance
       return Number.isFinite(candidate.at)
-        && (candidate.eligibilityDeadline === undefined || Number.isFinite(candidate.eligibilityDeadline))
         && typeof candidate.recordId === 'string'
         && typeof candidate.service === 'string'
         && candidate.trigger != null
         && typeof candidate.trigger.id === 'string'
+        && (provenance === undefined || (
+          provenance.version === 1
+          && provenance.kind === 'event'
+          && typeof provenance.occurredAt === 'string'
+          && Number.isFinite(Date.parse(provenance.occurredAt))
+          && typeof provenance.updatedAt === 'string'
+          && Number.isFinite(Date.parse(provenance.updatedAt))
+          && (provenance.wakeReason === undefined || typeof provenance.wakeReason === 'string')
+        ))
     })
     : []
   const incomplete = Array.isArray(raw.incomplete)
@@ -785,6 +847,19 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
         && typeof item.recordId === 'string'
         && typeof item.service === 'string'
         && typeof item.trigger?.id === 'string'
+    })
+    : []
+  const uncertain = Array.isArray(raw.uncertain)
+    ? raw.uncertain.filter((row): row is ConnectorUncertainWake => {
+      if (!row || typeof row !== 'object') return false
+      const candidate = row as ConnectorUncertainWake
+      return candidate.reason === 'calendar-provenance-unavailable'
+        && Number.isFinite(candidate.isolatedAt)
+        && candidate.pending != null
+        && Number.isFinite(candidate.pending.at)
+        && candidate.pending.service === 'calendar'
+        && typeof candidate.pending.recordId === 'string'
+        && typeof candidate.pending.trigger?.id === 'string'
     })
     : []
   return {
@@ -803,6 +878,7 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
     ...(Object.keys(invalidTokenRetryAfter).length ? { invalidTokenRetryAfter } : {}),
     ...(pending.length ? { pending } : {}),
     ...(incomplete.length ? { incomplete } : {}),
+    ...(uncertain.length ? { uncertain } : {}),
     wakes,
     notified,
   }

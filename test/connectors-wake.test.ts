@@ -694,7 +694,19 @@ describe('connector wake scheduler', () => {
       channel: { source: 'cli', thread: 'local' },
       actor: { source: 'cli', id: 'you' },
     }, T0)
-    const pending: ConnectorPendingWake = { at: T0, trigger, recordId: record.id, service: 'calendar' }
+    const pending: ConnectorPendingWake = {
+      at: T0,
+      calendarProvenance: {
+        version: 1,
+        occurredAt: record.occurredAt,
+        updatedAt: record.updatedAt,
+        kind: 'event',
+        wakeReason: record.wakeReason,
+      },
+      trigger,
+      recordId: record.id,
+      service: 'calendar',
+    }
     store.putDoc('connector_wake', 'state', {
       lastCheckAt: T0,
       cursors: { calendar: new Date(T0).toISOString() },
@@ -736,7 +748,19 @@ describe('connector wake scheduler', () => {
     store.putDoc('connector_wake', 'state', {
       lastCheckAt: T0,
       cursors: { calendar: new Date(T0).toISOString() },
-      pending: [{ at: T0, trigger, recordId: record.id, service: 'calendar' }],
+      pending: [{
+        at: T0,
+        calendarProvenance: {
+          version: 1,
+          occurredAt: record.occurredAt,
+          updatedAt: record.updatedAt,
+          kind: 'event',
+          wakeReason: record.wakeReason,
+        },
+        trigger,
+        recordId: record.id,
+        service: 'calendar',
+      }],
       wakes: [],
       notified: [],
     })
@@ -1056,6 +1080,119 @@ describe('connector wake scheduler', () => {
       expect(state.lastWakeAt).toBe(tuesday)
       expect(state.wakes[0]?.at).toBe(tuesday)
       expect(state.notified[0]?.at).toBe(tuesday)
+    }
+  })
+
+  it('isolates legacy Calendar pending wakes when their source provenance was evicted', async () => {
+    const { home, store: firstStore, index: firstIndex } = setup()
+    seedOwnerThread(firstStore)
+    const record = firstIndex.upsert([draft({
+      service: 'calendar',
+      kind: 'event',
+      externalId: 'evicted-calendar-source',
+      occurredAt: new Date(T0 - 30 * MIN).toISOString(),
+      wakeReason: 'calendar event starting soon',
+    })]).records[0]!
+    const trigger = connectorTrigger(record, {
+      channel: { source: 'cli', thread: 'local' },
+      actor: { source: 'cli', id: 'you' },
+    }, T0)
+    const legacyPending: ConnectorPendingWake = {
+      at: T0,
+      trigger,
+      recordId: record.id,
+      service: 'calendar',
+    }
+    firstStore.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { calendar: new Date(T0).toISOString() },
+      pending: [legacyPending],
+      wakes: [],
+      notified: [],
+    })
+    firstIndex.prune({ maxRecords: 0, maxAgeDays: 0 })
+    firstStore.close()
+    const store = new Store(home)
+    stores.push(store)
+    const index = new ConnectorIndex(store, { redact: text => text, now: () => new Date(T0) })
+    const { runner, fired } = scheduler({
+      store, index, api: fakeApi([]),
+      config: {
+        google: { services: ['calendar'] },
+        wake: { enabled: true, services: ['calendar'], calendarLookaheadMinutes: 60 },
+      },
+    })
+
+    await runner.poll(T0 + 2 * 60 * MIN)
+    const raw = store.getDoc<Record<string, unknown>>('connector_wake', 'state')
+    expect(fired).toHaveLength(0)
+    expect(raw?.uncertain).toHaveLength(1)
+    expect(raw?.pending).toHaveLength(0)
+    expect(raw?.notified).toHaveLength(0)
+    expect(raw?.wakes).toHaveLength(0)
+  })
+
+  it('uses immutable Calendar pending provenance across index mutation and the inclusive grace boundary', async () => {
+    for (const [label, replayOffset, shouldFire] of [
+      ['inclusive boundary', 15 * MIN, true],
+      ['just after boundary', 15 * MIN + 1, false],
+    ] as const) {
+      const { store, index } = setup()
+      seedOwnerThread(store)
+      const record = index.upsert([draft({
+        service: 'calendar',
+        kind: 'event',
+        externalId: `calendar-${label}`,
+        occurredAt: new Date(T0).toISOString(),
+        wakeReason: 'calendar event starting soon',
+      })]).records[0]!
+      const trigger = connectorTrigger(record, {
+        channel: { source: 'cli', thread: 'local' },
+        actor: { source: 'cli', id: 'you' },
+      }, T0)
+      const pending: ConnectorPendingWake = {
+        at: T0,
+        calendarProvenance: {
+          version: 1,
+          occurredAt: new Date(T0).toISOString(),
+          updatedAt: new Date(T0 - 5 * MIN).toISOString(),
+          kind: 'event',
+          wakeReason: 'calendar event starting soon',
+        },
+        trigger,
+        recordId: record.id,
+        service: 'calendar',
+      }
+      store.putDoc('connector_wake', 'state', {
+        lastCheckAt: T0,
+        cursors: { calendar: new Date(T0).toISOString() },
+        pending: [pending],
+        wakes: [],
+        notified: [],
+      })
+      index.upsert([draft({
+        service: 'calendar',
+        kind: 'event',
+        externalId: `calendar-${label}`,
+        occurredAt: new Date(T0 + 90 * MIN).toISOString(),
+        updatedAt: new Date(T0 + 90 * MIN).toISOString(),
+        wakeReason: 'calendar event starting soon',
+      })])
+      const { runner, fired } = scheduler({
+        store, index, api: fakeApi([]),
+        config: {
+          google: { services: ['calendar'] },
+          wake: { enabled: true, services: ['calendar'], calendarLookaheadMinutes: 120 },
+        },
+      })
+
+      await runner.poll(T0 + replayOffset)
+      expect(fired).toHaveLength(shouldFire ? 1 : 0)
+      if (!shouldFire) {
+        const raw = store.getDoc<Record<string, unknown>>('connector_wake', 'state')
+        expect(raw?.pending).toHaveLength(0)
+        expect(raw?.wakes).toHaveLength(0)
+      }
     }
   })
 
