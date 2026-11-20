@@ -207,6 +207,34 @@ osFaultDescribe('delegate_agent OS fault boundary', () => {
     expect(report.cleanup_error).toBeNull()
   }, 90_000)
 
+  it('kills and reaps a spawned child when owner-file publication fails', async () => {
+    const home = tempHome()
+    const pidAudit = path.join(home, 'spawned-child.pid')
+    const registry = new LocalAgentRegistry([{
+      id: 'ipc-hold',
+      command: process.execPath,
+      args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
+      timeoutMs: 60_000,
+    }], {
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: process.env.HOME ?? '',
+        DS_AGENT_TEST_DELEGATE_OWNER_FILE: path.join(home, 'missing', 'owner.json'),
+        DS_AGENT_TEST_DELEGATE_OWNER_ACK: path.join(home, 'owner.ack'),
+        DS_AGENT_TEST_DELEGATE_OWNER_PID_AUDIT: pidAudit,
+      },
+      workspace: () => path.join(home, 'workspace'),
+    })
+
+    await expect(registry.run('ipc-hold', 'publication failure', 'worker_owner_io'))
+      .rejects.toThrow(/could not initialize local agent/)
+    expect(registry.activeCount).toBe(0)
+    const spawnedPid = Number(fs.readFileSync(pidAudit, 'utf8').trim())
+    expect(spawnedPid).toBeGreaterThan(1)
+    expect(() => process.kill(spawnedPid, 0)).toThrow()
+    registry.killAll()
+  })
+
   it('killAll on LocalAgentRegistry ends a slow specialist without duplicate stdout replay', async () => {
     const slow: LocalAgentSpec = {
       id: 'slow',

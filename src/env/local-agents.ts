@@ -281,6 +281,8 @@ export class LocalAgentRegistry {
           const ownerFile = this.env.DS_AGENT_TEST_DELEGATE_OWNER_FILE
           const ownerAck = this.env.DS_AGENT_TEST_DELEGATE_OWNER_ACK
           if (ownerFile && ownerAck && child.pid !== undefined) {
+            const pidAuditFile = this.env.DS_AGENT_TEST_DELEGATE_OWNER_PID_AUDIT
+            if (pidAuditFile) fs.writeFileSync(pidAuditFile, `${child.pid}\n`, { flag: 'wx' })
             const temp = `${ownerFile}.${process.pid}.tmp`
             fs.writeFileSync(temp, `${JSON.stringify({ pid: child.pid, helperPid: process.pid })}\n`, { flag: 'wx' })
             fs.renameSync(temp, ownerFile)
@@ -349,12 +351,12 @@ function spawnAgent(input: {
       reject(new UserError(`could not start local agent ${spec.id}: ${messageOf(error)}`))
       return
     }
-    input.onSpawn?.(child)
     let stdout = ''
     let stderr = ''
     let truncated = false
     let timedOut = false
     let settled = false
+    let spawnHookError: unknown
     const append = (current: string, chunk: Buffer): string => {
       if (current.length >= maxOutputBytes) {
         truncated = true
@@ -376,7 +378,11 @@ function spawnAgent(input: {
       settled = true
       clearTimeout(timer)
       input.onDone?.(child)
-      resolve(result)
+      if (spawnHookError !== undefined) {
+        reject(new UserError(`could not initialize local agent ${spec.id}: ${messageOf(spawnHookError)}`))
+      } else {
+        resolve(result)
+      }
     }
     child.on('error', error => {
       if (settled) return
@@ -396,6 +402,12 @@ function spawnAgent(input: {
         stderr,
       })
     })
+    try {
+      input.onSpawn?.(child)
+    } catch (error) {
+      spawnHookError = error
+      killGroup(child.pid, child)
+    }
   })
 }
 

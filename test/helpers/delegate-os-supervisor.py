@@ -160,7 +160,7 @@ def wait_for_marker(marker, helper, timeout_s=45.0):
     raise TimeoutError(f'timed out waiting for a complete recovery helper readiness marker: {last_error}')
 
 
-def wait_for_owned_spawn(owner_file, owner_ack, helper, fixture, timeout_s=45.0):
+def wait_for_owned_spawn(owner_file, helper, fixture, timeout_s=45.0):
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if owner_file.is_file():
@@ -177,9 +177,7 @@ def wait_for_owned_spawn(owner_file, owner_ack, helper, fixture, timeout_s=45.0)
                     if not pinned or pinned['start_time'] != stat['start_time']:
                         os.close(pidfd)
                         raise RuntimeError('delegate identity changed during owner handoff')
-                    ack_temp = owner_ack.with_name(owner_ack.name + '.tmp')
-                    ack_temp.write_text('{}:{}\n'.format(pid, stat['start_time']))
-                    os.replace(ack_temp, owner_ack)
+                    # Return durable cleanup ownership before attempting the ack.
                     return pid, stat['start_time'], pidfd
             except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
                 pass
@@ -187,6 +185,20 @@ def wait_for_owned_spawn(owner_file, owner_ack, helper, fixture, timeout_s=45.0)
             raise RuntimeError(f'recovery helper exited before creation-time ownership transfer: {helper.returncode}')
         time.sleep(0.01)
     raise TimeoutError('timed out waiting for creation-time delegate ownership transfer')
+
+
+def publish_owner_ack(owner_ack, pid, start_time):
+    ack_temp = owner_ack.with_name(owner_ack.name + '.tmp')
+    try:
+        ack_temp.write_text('{}:{}\n'.format(pid, start_time))
+        os.replace(ack_temp, owner_ack)
+        return True
+    except OSError:
+        try:
+            ack_temp.unlink()
+        except OSError:
+            pass
+        return False
 
 
 def terminate_helper(helper):
@@ -320,6 +332,7 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         'failure_message': None,
         'cleanup_error': None,
         'creation_identity_pinned': False,
+        'owner_acknowledged': False,
         'injected_timeout_checkpoint': False,
     }
     helper = None
@@ -343,14 +356,15 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         )
         report['helper_pid'] = helper.pid
         delegate_pid, delegate_start_time, delegate_pidfd = wait_for_owned_spawn(
-            owner_file, owner_ack, helper, fixture,
+            owner_file, helper, fixture,
         )
         report['delegate_pid'] = delegate_pid
         report['delegate_pgid'] = delegate_pid
         report['creation_identity_pinned'] = True
+        report['owner_acknowledged'] = publish_owner_ack(owner_ack, delegate_pid, delegate_start_time)
         wait_for_marker(marker, helper)
-        # The child-published PID file remains startup evidence only. Ownership
-        # comes from the spawn return and acknowledged identity transfer above.
+        # The child-published PID file remains startup evidence only. Cleanup
+        # ownership was pinned from the spawn handoff before the ack was written.
         wait_for_delegate(pid_file, helper, fixture)
 
         if mode == 'fault':
@@ -375,6 +389,20 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         # Ignore another graceful interrupt while completing owned-child cleanup.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # A wrapper deadline can interrupt the polling loop immediately after
+        # the helper atomically publishes its spawn PID. Attest that durable
+        # handoff before killing the helper, even if the normal path did not
+        # reach it yet.
+        if delegate_pid is None and helper is not None and owner_file.is_file():
+            try:
+                delegate_pid, delegate_start_time, delegate_pidfd = wait_for_owned_spawn(
+                    owner_file, helper, fixture, timeout_s=1.0,
+                )
+                report['delegate_pid'] = delegate_pid
+                report['delegate_pgid'] = delegate_pid
+                report['creation_identity_pinned'] = True
+            except BaseException as error:
+                report['cleanup_error'] = f'creation-boundary attestation failed: {type(error).__name__}: {str(error)[:200]}'
         try:
             if helper is not None:
                 helper_status = terminate_helper(helper)

@@ -84,9 +84,10 @@ def rescue_owned_children():
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise RuntimeError('usage: wrapper-timeout-guard.py REPO_ROOT HOME DELAY_MS')
-    root, home, delay = map(str, sys.argv[1:])
+    if len(sys.argv) not in (4, 5):
+        raise RuntimeError('usage: wrapper-timeout-guard.py REPO_ROOT HOME DELAY_MS [GUARD_TIMEOUT_S]')
+    root, home, delay = map(str, sys.argv[1:4])
+    guard_timeout = float(sys.argv[4]) if len(sys.argv) == 5 else 20.0
     enable_subreaper()
     env = os.environ.copy()
     env['DS_AGENT_TEST_FIXTURE_START_DELAY_MS'] = delay
@@ -98,7 +99,15 @@ def main():
         command, cwd=root, env=env, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, close_fds=True,
     )
-    stdout, stderr = child.communicate(timeout=20)
+    guard_timed_out = False
+    try:
+        stdout, stderr = child.communicate(timeout=guard_timeout)
+    except subprocess.TimeoutExpired:
+        guard_timed_out = True
+        # Popen is the exact wrapper child created above. Kill and wait for only
+        # that process before rescuing descendants adopted by this subreaper.
+        child.kill()
+        stdout, stderr = child.communicate()
     try:
         result = json.loads(stdout.strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError) as error:
@@ -113,6 +122,8 @@ def main():
     report = {
         **result,
         'wrapper_exit_code': child.returncode,
+        'wrapper_guard_timed_out': guard_timed_out,
+        'wrapper_reaped': child.returncode is not None,
         'outer_guard_live_rescues': rescues,
         'outer_guard_reaped_zombies': reaped_zombies,
         'outer_guard_rescued_live_fixture': fixture_rescued,

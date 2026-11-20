@@ -19,6 +19,7 @@ export interface DelegateOsSupervisorReport {
   expected_failure: boolean
   cleanup_succeeded: boolean
   creation_identity_pinned: boolean
+  owner_acknowledged: boolean
   injected_timeout_checkpoint: boolean
 }
 
