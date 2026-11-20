@@ -119,7 +119,12 @@ Inbound paths:
   remains separate from direct-ingress admission: `address.group` is retained,
   mention-only addressing is unchanged, and actor/group allowlists still apply.
   Thread key: `im:feishu:<chat_id>[:<thread_id>]`. `serve --feishu` covers
-  **exactly one chat per process**.
+  **exactly one chat per process**. After upgrading or fixing the chat-information
+  scope, an already-ingested message is not retroactively reclassified, and an
+  overlapping poll does not rewrite its completed trigger. To qualify an existing
+  private thread, send a new message in the configured chat after metadata lookup
+  succeeds; it must pass normal ingress and admission. This needs no cursor reset
+  and does not weaken the private-target check.
 
 Outbound: `FeishuOutboxAdapter` replies in-thread with
 `/open-apis/im/v1/messages/:message_id/reply` when the source message is known,

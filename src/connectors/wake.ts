@@ -57,6 +57,8 @@ export interface ConnectorNotifiedRow {
 
 export interface ConnectorPendingWake {
   at: number
+  /** Calendar starting-soon eligibility cutoff; absent for older saved rows. */
+  eligibilityDeadline?: number
   trigger: Trigger
   recordId: string
   service: GoogleService
@@ -128,6 +130,9 @@ export interface WakeTarget {
 export class ConnectorWakeScheduler {
   private readonly log: (line: string) => void
   private inFlight?: Promise<void>
+  private stopping = false
+  private stopPromise?: Promise<void>
+  private readonly abortController = new AbortController()
 
   constructor(private readonly opts: ConnectorWakeSchedulerOptions) {
     this.log = opts.log ?? (() => undefined)
@@ -140,8 +145,27 @@ export class ConnectorWakeScheduler {
     })
   }
 
+  /** Stop admitting polls and fence an active provider request before shutdown drains. */
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
+    this.stopping = true
+    this.abortController.abort()
+    this.stopPromise = (async () => {
+      const active = this.inFlight
+      if (!active) return
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        active,
+        new Promise<void>(resolve => { timer = setTimeout(resolve, 2_000) }),
+      ])
+      if (timer) clearTimeout(timer)
+    })()
+    return this.stopPromise
+  }
+
   /** Deterministic unit-test entry point with the same guard as `tick`. */
   async poll(at = this.opts.now()): Promise<ConnectorWakeResult> {
+    if (this.stopping) return { action: 'disabled', reason: 'stopping' }
     if (this.inFlight) return { action: 'in-flight' }
     const run = this.runPoll(at)
     this.inFlight = run.then(() => undefined, () => undefined)
@@ -153,6 +177,7 @@ export class ConnectorWakeScheduler {
   }
 
   private async runPoll(at: number): Promise<ConnectorWakeResult> {
+    if (this.stopping) return { action: 'disabled', reason: 'stopping' }
     const config = this.opts.config
     const api = this.opts.api
     let state = this.loadState()
@@ -214,11 +239,14 @@ export class ConnectorWakeScheduler {
         limit: config.poll.maxRecordsPerPoll,
         lookaheadMinutes: config.wake.calendarLookaheadMinutes,
         ...(pageTokens[service] ? { pageToken: pageTokens[service] } : {}),
+        signal: this.abortController.signal,
       }
+      if (this.stopping) return { action: 'disabled', reason: 'stopping' }
       try {
         const page = api.fetchPage
           ? await api.fetchPage(service, query)
           : { drafts: await api.fetch(service, query) }
+        if (this.stopping) return { action: 'disabled', reason: 'stopping' }
         drafts.push(...page.drafts.slice(0, config.poll.maxRecordsPerPoll))
         if (page.nextPageToken) {
           pageTokens[service] = page.nextPageToken
@@ -239,6 +267,7 @@ export class ConnectorWakeScheduler {
           cursors[service] = query.until
         }
       } catch (error) {
+        if (this.stopping) return { action: 'disabled', reason: 'stopping' }
         serviceErrors.push(`${service}: ${messageOf(error)}`)
         this.log(`[connector] poll failed service=${service}: ${messageOf(error)}`)
         if (error instanceof GoogleInvalidPageTokenError) {
@@ -263,6 +292,7 @@ export class ConnectorWakeScheduler {
       }
     }
 
+    if (this.stopping) return { action: 'disabled', reason: 'stopping' }
     const decisionAt = Math.max(at, this.opts.now())
     const upsert = this.opts.index.upsert(drafts)
     const pruned = this.opts.index.prune(config.index)
@@ -393,7 +423,15 @@ export class ConnectorWakeScheduler {
         this.log(`[connector] wake suppressed triggerId=${trigger.id} reason=${reason}`)
         continue
       }
-      const pending: ConnectorPendingWake = { at: decisionAt, trigger, recordId: record.id, service: record.service }
+      const pending: ConnectorPendingWake = {
+        at: decisionAt,
+        ...(record.service === 'calendar' && record.wakeReason === 'calendar event starting soon'
+          ? { eligibilityDeadline: Date.parse(record.occurredAt) + config.wake.calendarLookaheadMinutes * 60_000 }
+          : {}),
+        trigger,
+        recordId: record.id,
+        service: record.service,
+      }
       this.saveState({ ...committed(), pending: [...(base.pending ?? []), pending] })
       try {
         this.opts.fire(trigger)
@@ -448,13 +486,21 @@ export class ConnectorWakeScheduler {
 
   private reconcilePending(state: ConnectorWakeState, decisionAt: number, enabled: boolean): ConnectorWakeState {
     for (const pending of state.pending ?? []) {
+      const eligibilityDeadline = pending.eligibilityDeadline
+        ?? calendarPendingDeadline(pending.trigger, this.opts.config.wake.calendarLookaheadMinutes)
+      if (!this.ingressComplete(pending.trigger.id)
+        && eligibilityDeadline !== undefined
+        && decisionAt > eligibilityDeadline) {
+        state = this.retirePending(state, pending, decisionAt, 'calendar-window-expired')
+        continue
+      }
       if (!this.ingressComplete(pending.trigger.id)) {
         const reason = this.pendingAuthorizationReason(state, pending, decisionAt, enabled)
         if (reason === 'private-target-changed' || reason === 'no-current-private-target') {
           // The ingress was authorized for a specific private recipient. Retire
           // it when that recipient is no longer current; never replay it to the
           // old target, and do not let its outbox row block unrelated wakes.
-          state = this.retireStaleTargetPending(state, pending, decisionAt, reason)
+          state = this.retirePending(state, pending, decisionAt, reason)
           continue
         }
         if (reason) {
@@ -501,7 +547,7 @@ export class ConnectorWakeScheduler {
     return sameWakeTarget(currentTarget, pending.trigger) ? undefined : 'private-target-changed'
   }
 
-  private retireStaleTargetPending(
+  private retirePending(
     state: ConnectorWakeState,
     pending: ConnectorPendingWake,
     at: number,
@@ -510,8 +556,8 @@ export class ConnectorWakeScheduler {
     const next: ConnectorWakeState = {
       ...state,
       pending: (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id),
-      // Do not reconsider this source revision under a later target. It was
-      // selected for a recipient whose authorization has since changed.
+      // Do not reconsider this source revision after retirement, and do not
+      // count the retirement as a delivered wake.
       notified: [...state.notified, { at, triggerId: pending.trigger.id }].slice(-MAX_NOTIFIED_ROWS),
     }
     this.saveState(next)
@@ -555,6 +601,13 @@ export class ConnectorWakeScheduler {
   private saveState(state: ConnectorWakeState): void {
     this.opts.store.putDoc(CONNECTOR_WAKE_STATE_KIND, CONNECTOR_WAKE_STATE_ID, state)
   }
+}
+
+function calendarPendingDeadline(trigger: Trigger, lookaheadMinutes: number): number | undefined {
+  if (!trigger.text.includes('service=calendar') || !trigger.text.includes('reason=calendar event starting soon')) return undefined
+  const occurredAt = /^occurredAt=(.+)$/m.exec(trigger.text)?.[1]
+  const occurredAtMs = occurredAt ? Date.parse(occurredAt) : Number.NaN
+  return Number.isFinite(occurredAtMs) ? occurredAtMs + lookaheadMinutes * 60_000 : undefined
 }
 
 function sameWakeTarget(target: WakeTarget, trigger: Trigger): boolean {
@@ -647,6 +700,7 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
       if (!row || typeof row !== 'object') return false
       const candidate = row as ConnectorPendingWake
       return Number.isFinite(candidate.at)
+        && (candidate.eligibilityDeadline === undefined || Number.isFinite(candidate.eligibilityDeadline))
         && typeof candidate.recordId === 'string'
         && typeof candidate.service === 'string'
         && candidate.trigger != null

@@ -679,6 +679,84 @@ describe('connector wake scheduler', () => {
     expect(loadConnectorWakeState(store).notified).toHaveLength(1)
   })
 
+  it('retires an expired Calendar starting-soon wake during replay, including legacy pending rows', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    const event = draft({
+      service: 'calendar',
+      kind: 'event',
+      externalId: 'expired-meeting',
+      occurredAt: new Date(T0 + 30 * MIN).toISOString(),
+      wakeReason: 'calendar event starting soon',
+    })
+    const record = index.upsert([event]).records[0]!
+    const trigger = connectorTrigger(record, {
+      channel: { source: 'cli', thread: 'local' },
+      actor: { source: 'cli', id: 'you' },
+    }, T0)
+    const pending: ConnectorPendingWake = { at: T0, trigger, recordId: record.id, service: 'calendar' }
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { calendar: new Date(T0).toISOString() },
+      pending: [pending],
+      wakes: [],
+      notified: [],
+    })
+    const { runner, fired } = scheduler({
+      store,
+      index,
+      api: fakeApi([]),
+      config: {
+        google: { services: ['calendar'] },
+        wake: { enabled: true, services: ['calendar'], calendarLookaheadMinutes: 60 },
+      },
+    })
+
+    await runner.poll(T0 + 2 * 60 * MIN)
+    const state = loadConnectorWakeState(store)
+    expect(state.pending).toBeUndefined()
+    expect(state.notified.some(row => row.triggerId === trigger.id)).toBe(true)
+    expect(state.wakes).toHaveLength(0)
+    expect(state.lastWakeAt).toBeUndefined()
+    expect(fired).toHaveLength(0)
+  })
+
+  it('replays a Calendar pending wake while its eligibility window is still open', async () => {
+    const { store, index } = setup()
+    seedOwnerThread(store)
+    const record = index.upsert([draft({
+      service: 'calendar', kind: 'event', externalId: 'still-imminent',
+      occurredAt: new Date(T0 + 30 * MIN).toISOString(),
+      wakeReason: 'calendar event starting soon',
+    })]).records[0]!
+    const trigger = connectorTrigger(record, {
+      channel: { source: 'cli', thread: 'local' },
+      actor: { source: 'cli', id: 'you' },
+    }, T0)
+    store.putDoc('connector_wake', 'state', {
+      lastCheckAt: T0,
+      cursors: { calendar: new Date(T0).toISOString() },
+      pending: [{ at: T0, trigger, recordId: record.id, service: 'calendar' }],
+      wakes: [],
+      notified: [],
+    })
+    const { runner, fired } = scheduler({
+      store, index, api: fakeApi([]),
+      config: {
+        google: { services: ['calendar'] },
+        wake: { enabled: true, services: ['calendar'], calendarLookaheadMinutes: 60 },
+      },
+    })
+    ;(runner as unknown as { opts: { fire: (trigger: Trigger) => void } }).opts.fire = next => {
+      fired.push(next)
+      throw new Error('temporary ingress failure')
+    }
+
+    await runner.poll(T0 + 45 * MIN)
+    expect(fired.map(row => row.id)).toContain(trigger.id)
+    expect(loadConnectorWakeState(store).pending).toHaveLength(1)
+  })
+
   it('keeps an ingress failure in the durable pending wake outbox', async () => {
     const { store, index } = setup()
     seedOwnerThread(store)
@@ -1077,10 +1155,10 @@ describe('connector wake scheduler', () => {
         queries.push({ pageToken: query.pageToken, since: query.since, until: query.until })
         if (query.pageToken === 'expired-page-token') throw new GoogleInvalidPageTokenError('/drive/v3/files')
         if (!query.pageToken) return {
-          drafts: [draft({ externalId: 'restart-data', updatedAt: originalQuery.until })],
+          drafts: [draft({ service: 'docs', kind: 'document', externalId: 'restart-data', updatedAt: originalQuery.until })],
           nextPageToken: 'fresh-page-token',
         }
-        return { drafts: [draft({ externalId: 'fresh-continuation-data', updatedAt: originalQuery.until })] }
+        return { drafts: [draft({ service: 'docs', kind: 'document', externalId: 'fresh-continuation-data', updatedAt: originalQuery.until })] }
       },
     }
     const config = {
@@ -1096,13 +1174,15 @@ describe('connector wake scheduler', () => {
     const restarted = scheduler({ store, index, api, config })
     await restarted.runner.poll(T0 + 32 * MIN)
     expect(queries[1]).toEqual({ ...originalQuery })
-    expect(index.query({ limit: 20 }).some(record => record.externalId === 'restart-data')).toBe(true)
+    expect(index.query({ service: 'docs', kind: 'document', limit: 20 }).some(record => record.externalId === 'restart-data')).toBe(true)
+    expect(index.query({ service: 'gmail', limit: 20 }).some(record => record.externalId === 'restart-data')).toBe(false)
     expect(loadConnectorWakeState(store).pageTokens?.docs).toBe('fresh-page-token')
     expect(loadConnectorWakeState(store).cursors?.docs).toBe(new Date(T0 - 3 * MIN).toISOString())
 
     await restarted.runner.poll(T0 + 48 * MIN)
     expect(queries[2]).toEqual({ pageToken: 'fresh-page-token', ...originalQuery })
-    expect(index.query({ limit: 20 }).some(record => record.externalId === 'fresh-continuation-data')).toBe(true)
+    expect(index.query({ service: 'docs', kind: 'document', limit: 20 }).some(record => record.externalId === 'fresh-continuation-data')).toBe(true)
+    expect(index.query({ service: 'gmail', limit: 20 }).some(record => record.externalId === 'fresh-continuation-data')).toBe(false)
     expect(loadConnectorWakeState(store).pageTokens?.docs).toBeUndefined()
     expect(loadConnectorWakeState(store).cursors?.docs).toBe(originalQuery.until)
   })

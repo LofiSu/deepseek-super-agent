@@ -98,7 +98,7 @@ export function resolveFeishuCliConfig(
 
 /** The pull surface `FeishuSource` implements; tests may inject a fake. */
 export interface FeishuLoopSource {
-  pull(): Promise<readonly Trigger[]>
+  pull(signal?: AbortSignal): Promise<readonly Trigger[]>
   /** Highest `create_time` (ms) observed so far, or the seed when none was seen. */
   readonly cursorMs: number
 }
@@ -211,7 +211,7 @@ export async function runFeishuLoop(options: FeishuLoopOptions): Promise<FeishuL
     for (;;) {
       if (aborted()) break
       try {
-        const triggers = await source.pull()
+        const triggers = await source.pull(options.signal)
         for (const trigger of triggers) {
           const preview = trigger.text.replace(/\s+/g, ' ').slice(0, 80)
           log(`[feishu] inbound id=${trigger.id} from=${trigger.actor.id} text=${preview}`)

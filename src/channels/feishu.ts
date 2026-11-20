@@ -111,12 +111,13 @@ export class FeishuClient {
     private readonly fetchImpl: FetchLike = fetch,
   ) {}
 
-  async accessToken(): Promise<string> {
+  async accessToken(signal?: AbortSignal): Promise<string> {
     if (this.token && Date.now() < this.token.expiresAt) return this.token.value
     const response = await this.fetchImpl(`${this.config.baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_id: this.config.appId, app_secret: this.config.appSecret }),
+      ...(signal ? { signal } : {}),
     })
     const json = await response.json() as {
       code?: number
@@ -132,8 +133,8 @@ export class FeishuClient {
     return this.token.value
   }
 
-  private async request<T>(path: string, init: { method?: string; body?: unknown; query?: Record<string, string | number | undefined> } = {}): Promise<T> {
-    const token = await this.accessToken()
+  private async request<T>(path: string, init: { method?: string; body?: unknown; query?: Record<string, string | number | undefined>; signal?: AbortSignal } = {}): Promise<T> {
+    const token = await this.accessToken(init.signal)
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(init.query ?? {})) {
       if (value !== undefined) params.set(key, String(value))
@@ -146,6 +147,7 @@ export class FeishuClient {
         'Content-Type': 'application/json; charset=utf-8',
       },
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      ...(init.signal ? { signal: init.signal } : {}),
     })
     const json = await response.json() as { code?: number; msg?: string; data?: T }
     if (!response.ok || json.code !== 0) {
@@ -203,13 +205,41 @@ export class FeishuClient {
     return data.items?.[0]
   }
 
-  async getChatMode(chatId: string): Promise<string | undefined> {
-    const data = await this.request<{ chat_mode?: unknown }>(
-      `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`,
-    )
-    return typeof data.chat_mode === 'string' && data.chat_mode.length > 0
-      ? data.chat_mode
-      : undefined
+  async getChatMode(chatId: string, signal?: AbortSignal): Promise<string | undefined> {
+    const controller = new AbortController()
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let removeAbortListener: (() => void) | undefined
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort()
+        reject(new Error('Feishu chat metadata lookup timed out'))
+      }, 5_000)
+      if (signal) {
+        const onAbort = (): void => {
+          controller.abort()
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+        }
+        if (signal.aborted) onAbort()
+        else {
+          signal.addEventListener('abort', onAbort, { once: true })
+          removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+        }
+      }
+    })
+    try {
+      const request = this.request<{ chat_mode?: unknown }>(
+        `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`,
+        { signal: combined },
+      )
+      const data = await Promise.race([request, deadline])
+      return typeof data.chat_mode === 'string' && data.chat_mode.length > 0
+        ? data.chat_mode
+        : undefined
+    } finally {
+      if (timer) clearTimeout(timer)
+      removeAbortListener?.()
+    }
   }
 }
 
@@ -355,7 +385,7 @@ export class FeishuSource {
     return this.cursorMsValue
   }
 
-  async pull(): Promise<Trigger[]> {
+  async pull(signal?: AbortSignal): Promise<Trigger[]> {
     const startTimeSec = Math.max(0, Math.floor((this.cursorMsValue - 1_000) / 1_000))
     const items = await this.client.listMessages(this.chatId, {
       startTimeSec,
@@ -364,15 +394,17 @@ export class FeishuSource {
     let chatType: 'p2p' | 'group' | undefined
     if (items.length > 0) {
       try {
-        const mode = await this.client.getChatMode(this.chatId)
+        const mode = await this.client.getChatMode(this.chatId, signal)
         chatType = normalizeFeishuChatMode(mode)
         if (!chatType) {
           this.log(`[feishu] unrecognized chat_mode chat=${this.chatId} mode=${mode ?? '(missing)'}`)
         }
       } catch (error) {
+        if (signal?.aborted) throw error
         this.log(`[feishu] chat metadata lookup failed chat=${this.chatId}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    if (signal?.aborted) return []
     const triggers: Trigger[] = []
     for (const item of items) {
       if (this.threadId && item.thread_id !== this.threadId) continue

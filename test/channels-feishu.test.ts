@@ -348,6 +348,43 @@ describe('Feishu client and outbox', () => {
     expect(triggers[1]!.text).toBe('second')
   })
 
+  it('bounds a hung official chat-mode lookup and honors shutdown abort', async () => {
+    let chatStarted!: () => void
+    const started = new Promise<void>(resolve => { chatStarted = resolve })
+    const never = new Promise<Response>(() => undefined)
+    let chatSignal: AbortSignal | undefined
+    const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
+      if (input.includes('tenant_access_token')) {
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: 'tok', expire: 7200 }))
+      }
+      if (input.includes('/im/v1/chats/')) {
+        chatSignal = init?.signal as AbortSignal | undefined
+        chatStarted()
+        return never
+      }
+      return new Response(JSON.stringify({ code: 0, data: { items: [message()], has_more: false } }))
+    }
+    const timedSource = new FeishuSource(new FeishuClient(config, fetchImpl), 'oc_chat', { sinceMs: 1761958000000, config })
+    const startedAt = Date.now()
+    const timedTriggers = await timedSource.pull()
+    expect(Date.now() - startedAt).toBeLessThan(6_500)
+    expect(timedTriggers[0]?.channel?.address).not.toHaveProperty('chat_type')
+    await started
+
+    chatSignal = undefined
+    const abortSource = new FeishuSource(new FeishuClient(config, fetchImpl), 'oc_chat', { sinceMs: 1761958000000, config })
+    const controller = new AbortController()
+    const pulling = abortSource.pull(controller.signal)
+    await started
+    await Promise.resolve()
+    await Promise.resolve()
+    controller.abort()
+    await expect(pulling).rejects.toThrow()
+    const observedSignal = chatSignal as unknown as AbortSignal | undefined
+    expect(observedSignal).toBeDefined()
+    expect(observedSignal?.aborted).toBe(true)
+  }, 8_000)
+
   it('uses only chat_mode for poll classification and logs missing, unknown, or failed metadata', async () => {
     const cases: {
       mode?: string

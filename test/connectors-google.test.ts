@@ -167,12 +167,14 @@ describe('Google Workspace mapping', () => {
       end: { dateTime: new Date(T0 + 6 * 24 * 60 * 60_000 + 60 * 60_000).toISOString() },
     }
     let urgentCalls = 0
+    const indexRequests: URL[] = []
     const fetchImpl: FetchLike = async input => {
       const url = new URL(String(input))
       if (url.searchParams.get('maxResults') === '2500') {
         urgentCalls += 1
         return new Response(JSON.stringify({ items: [imminent] }), { status: 200 })
       }
+      indexRequests.push(url)
       return new Response(JSON.stringify({ items: [olderPageEvent], nextPageToken: 'later-page' }), { status: 200 })
     }
     const api = new HttpGoogleWorkspaceApi(fixedToken, {
@@ -190,7 +192,15 @@ describe('Google Workspace mapping', () => {
     expect(replay.drafts).toHaveLength(1)
     expect(replay.drafts[0]).toMatchObject({ externalId: 'later-page-event', wake: false })
     expect(replay.nextPageToken).toBe('later-page')
-    expect(urgentCalls).toBe(1)
+    expect(indexRequests[0]?.searchParams.has('pageToken')).toBe(false)
+    expect(indexRequests[1]?.searchParams.has('pageToken')).toBe(false)
+
+    const laterFirstPage = await api.fetchPage('calendar', query({ limit: 1, pageToken: 'provider-page-2' }))
+    const laterReplay = await api.fetchPage('calendar', query({ limit: 1, pageToken: laterFirstPage.nextPageToken }))
+    expect(laterReplay.nextPageToken).toBe('later-page')
+    expect(indexRequests.at(-2)?.searchParams.get('pageToken')).toBe('provider-page-2')
+    expect(indexRequests.at(-1)?.searchParams.get('pageToken')).toBe('provider-page-2')
+    expect(urgentCalls).toBe(2)
   })
 
   it('maps Gmail messages and marks unread important mail', async () => {
