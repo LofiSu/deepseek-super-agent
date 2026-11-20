@@ -760,24 +760,47 @@ export class ConnectorWakeScheduler {
     connectorEnabled: boolean,
     target?: WakeTarget,
   ): FinalFireAdmission {
+    const config = this.opts.config
+    const wake = config.wake
+    if (this.stopping) return { decision: 'held', at: this.opts.now(), reason: 'connector-stopping' }
+    if (this.opts.store.getDoc('intake_recovery', pending.trigger.id)) {
+      return { decision: 'held', at: this.opts.now(), reason: 'intake-recovery-incomplete' }
+    }
+    if (this.ingressComplete(pending.trigger.id)) {
+      return { decision: 'held', at: this.opts.now(), reason: 'ingress-already-complete' }
+    }
+    if (!connectorEnabled || !config.enabled || !this.opts.api) {
+      return { decision: 'held', at: this.opts.now(), reason: 'connector-disabled' }
+    }
+    if (!wake.enabled) return { decision: 'held', at: this.opts.now(), reason: 'wake-disabled' }
+    if (!config.google.services.includes(pending.service) || !wake.services.includes(pending.service)) {
+      return { decision: 'held', at: this.opts.now(), reason: 'service-disabled' }
+    }
+    const denied = admissionDenial(pending.trigger, this.opts.admission)
+    if (denied) return { decision: 'held', at: this.opts.now(), reason: denied }
+
+    const channel = pending.trigger.channel
+    const env = this.opts.env ?? process.env
+    if (!channel) return { decision: 'held', at: this.opts.now(), reason: 'no-current-private-target' }
+    if (channel.source !== wake.source || channel.thread !== wake.thread) {
+      return { decision: 'held', at: this.opts.now(), reason: 'private-target-changed' }
+    }
+    if (!isPrivateTarget(channel, wake, env)) {
+      return { decision: 'held', at: this.opts.now(), reason: 'no-current-private-target' }
+    }
+    if (target && !sameWakeTarget(target, pending.trigger)) {
+      return { decision: 'held', at: this.opts.now(), reason: 'private-target-changed' }
+    }
+
+    // All Store and target reads are complete. Capture time after that work so
+    // synchronous scans or persistence cannot make this admission use a stale
+    // Calendar/quiet/capacity decision.
     const at = this.opts.now()
     const calendar = this.calendarAdmission(pending.service, pending.calendarProvenance, at)
     if (calendar.decision !== 'eligible-now') return { ...calendar, at }
-
-    const config = this.opts.config
-    const wake = config.wake
-    if (!connectorEnabled || !config.enabled || !this.opts.api) {
-      return { decision: 'held', at, reason: 'connector-disabled' }
-    }
-    if (!wake.enabled) return { decision: 'held', at, reason: 'wake-disabled' }
     if (withinQuietHours(at, this.opts.proactive)) {
       return { decision: 'held', at, reason: 'quiet-hours' }
     }
-    if (!wake.services.includes(pending.service)) {
-      return { decision: 'held', at, reason: 'service-disabled' }
-    }
-    const denied = admissionDenial(pending.trigger, this.opts.admission)
-    if (denied) return { decision: 'held', at, reason: denied }
     if (
       state.lastWakeAt !== undefined
       && at - state.lastWakeAt < wake.minIntervalMinutes * 60_000
@@ -786,15 +809,6 @@ export class ConnectorWakeScheduler {
     const todayWakes = state.wakes.filter(row => dayKey(row.at, this.opts.proactive.timezone) === today)
     if (todayWakes.length >= wake.maxPerDay) {
       return { decision: 'held', at, reason: 'daily-cap' }
-    }
-
-    const channel = pending.trigger.channel
-    const env = this.opts.env ?? process.env
-    if (!channel || !isPrivateTarget(channel, wake, env)) {
-      return { decision: 'held', at, reason: 'no-current-private-target' }
-    }
-    if (target && !sameWakeTarget(target, pending.trigger)) {
-      return { decision: 'held', at, reason: 'private-target-changed' }
     }
     return { decision: 'eligible-now', at }
   }
