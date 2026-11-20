@@ -276,7 +276,36 @@ export class LocalAgentRegistry {
         env: agentEnv(this.env, spec.env ?? []),
         timeoutMs,
         maxOutputBytes,
-        onSpawn: child => this.active.add(child),
+        onSpawn: child => {
+          this.active.add(child)
+          const ownerFile = this.env.DS_AGENT_TEST_DELEGATE_OWNER_FILE
+          const ownerAck = this.env.DS_AGENT_TEST_DELEGATE_OWNER_ACK
+          if (ownerFile && ownerAck && child.pid !== undefined) {
+            const temp = `${ownerFile}.${process.pid}.tmp`
+            fs.writeFileSync(temp, `${JSON.stringify({ pid: child.pid, helperPid: process.pid })}\n`, { flag: 'wx' })
+            fs.renameSync(temp, ownerFile)
+            const deadline = Date.now() + 10_000
+            let acknowledged = false
+            while (Date.now() < deadline) {
+              try {
+                acknowledged = fs.readFileSync(ownerAck, 'utf8').trim().startsWith(`${child.pid}:`)
+              } catch {
+                acknowledged = false
+              }
+              if (acknowledged) break
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+            }
+            if (!acknowledged) {
+              try {
+                process.kill(-child.pid, 'SIGKILL')
+              } catch {
+                child.kill('SIGKILL')
+              }
+              this.active.delete(child)
+              throw new Error('test process owner did not acknowledge delegate spawn')
+            }
+          }
+        },
         onDone: child => this.active.delete(child),
       })
     } finally {

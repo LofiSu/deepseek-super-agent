@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 
 export interface DelegateOsSupervisorReport {
-  mode: 'fault' | 'assertion-failure' | 'timeout-failure'
+  mode: 'fault' | 'assertion-failure' | 'timeout-failure' | 'wrapper-timeout-probe'
   subreaper: boolean
   helper_pid: number | null
   helper_exit_signal: number | null
@@ -18,6 +18,19 @@ export interface DelegateOsSupervisorReport {
   cleanup_error: string | null
   expected_failure: boolean
   cleanup_succeeded: boolean
+  creation_identity_pinned: boolean
+  injected_timeout_checkpoint: boolean
+}
+
+export class DelegateOsSupervisorError extends Error {
+  constructor(message: string, readonly report: DelegateOsSupervisorReport | null) {
+    super(message)
+    this.name = 'DelegateOsSupervisorError'
+  }
+}
+
+export function delegateOsSupervisorSupported(platform = process.platform): boolean {
+  return platform === 'linux'
 }
 
 /** Run the Linux subreaper and await it fully before a test removes its home. */
@@ -27,7 +40,7 @@ export async function runDelegateOsSupervisor(
   task = 'delegate-crash-probe-task',
   timeoutMs = 60_000,
 ): Promise<DelegateOsSupervisorReport> {
-  if (process.platform !== 'linux') {
+  if (!delegateOsSupervisorSupported()) {
     throw new Error('delegate OS-fault supervisor requires Linux subreaper support')
   }
   const script = path.resolve(process.cwd(), 'test/helpers/delegate-os-supervisor.py')
@@ -66,7 +79,10 @@ export async function runDelegateOsSupervisor(
     throw new Error(`delegate OS supervisor returned invalid output (exit=${status.code}, signal=${status.signal}): ${stderr || stdout}`)
   }
   if (timedOut || status.code !== 0 || !report.cleanup_succeeded) {
-    throw new Error(`delegate OS supervisor failed (exit=${status.code}, signal=${status.signal}): ${JSON.stringify(report)}${stderr ? `; stderr=${stderr}` : ''}`)
+    throw new DelegateOsSupervisorError(
+      `delegate OS supervisor failed (exit=${status.code}, signal=${status.signal}): ${JSON.stringify(report)}${stderr ? `; stderr=${stderr}` : ''}`,
+      report,
+    )
   }
   return report
 }

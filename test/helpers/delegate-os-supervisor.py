@@ -101,7 +101,10 @@ def wait_for_test_bootstrap_gate():
     if not gate:
         return
     gate_path = Path(gate)
-    gate_path.with_suffix('.ready').write_text(f'{os.getpid()}\n')
+    ready_path = gate_path.with_suffix('.ready')
+    ready_temp = ready_path.with_name(f'{ready_path.name}.{os.getpid()}.tmp')
+    ready_temp.write_text(f'{os.getpid()}\n')
+    os.replace(ready_temp, ready_path)
     release_path = gate_path.with_suffix('.release')
     deadline = time.monotonic() + 20.0
     while not release_path.exists():
@@ -142,13 +145,48 @@ def wait_for_delegate(pid_file, helper, fixture, timeout_s=45.0):
 
 def wait_for_marker(marker, helper, timeout_s=45.0):
     deadline = time.monotonic() + timeout_s
+    last_error = None
     while time.monotonic() < deadline:
         if marker.is_file():
-            return json.loads(marker.read_text())
+            try:
+                value = json.loads(marker.read_text())
+                if isinstance(value, dict):
+                    return value
+            except (OSError, json.JSONDecodeError) as error:
+                last_error = error
         if helper.poll() is not None:
             raise RuntimeError(f'recovery helper exited before readiness marker: {helper.returncode}')
         time.sleep(0.02)
-    raise TimeoutError('timed out waiting for the recovery helper readiness marker')
+    raise TimeoutError(f'timed out waiting for a complete recovery helper readiness marker: {last_error}')
+
+
+def wait_for_owned_spawn(owner_file, owner_ack, helper, fixture, timeout_s=45.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if owner_file.is_file():
+            try:
+                value = json.loads(owner_file.read_text())
+                pid = int(value['pid'])
+                helper_pid = int(value['helperPid'])
+                stat = proc_stat(pid)
+                argv = proc_cmdline(pid)
+                if (stat and helper_pid == helper.pid and stat['ppid'] == helper_pid
+                        and stat['pgrp'] == pid and stat['session'] == pid and fixture in argv):
+                    pidfd = os.pidfd_open(pid, 0)
+                    pinned = proc_stat(pid)
+                    if not pinned or pinned['start_time'] != stat['start_time']:
+                        os.close(pidfd)
+                        raise RuntimeError('delegate identity changed during owner handoff')
+                    ack_temp = owner_ack.with_name(owner_ack.name + '.tmp')
+                    ack_temp.write_text('{}:{}\n'.format(pid, stat['start_time']))
+                    os.replace(ack_temp, owner_ack)
+                    return pid, stat['start_time'], pidfd
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+        if helper.poll() is not None:
+            raise RuntimeError(f'recovery helper exited before creation-time ownership transfer: {helper.returncode}')
+        time.sleep(0.01)
+    raise TimeoutError('timed out waiting for creation-time delegate ownership transfer')
 
 
 def terminate_helper(helper):
@@ -236,7 +274,7 @@ def cleanup_group(pgid, initial_start_time, report, timeout_s=10.0):
 
 def run(mode, home, repo_root, task, expected_parent_pid):
     wait_for_test_bootstrap_gate()
-    if mode not in ('fault', 'assertion-failure', 'timeout-failure'):
+    if mode not in ('fault', 'assertion-failure', 'timeout-failure', 'wrapper-timeout-probe'):
         raise ValueError(f'unsupported supervisor mode: {mode}')
     if expected_parent_pid <= 1:
         raise ValueError('expected launching worker PID must be greater than 1')
@@ -250,6 +288,8 @@ def run(mode, home, repo_root, task, expected_parent_pid):
     root_path = Path(repo_root).resolve()
     marker = home_path / '.delegate-os-ready'
     pid_file = home_path / '.delegate-fixture.pid'
+    owner_file = home_path / '.delegate-owner-at-spawn.json'
+    owner_ack = home_path / '.delegate-owner-at-spawn.ack'
     fixture = str((root_path / 'test/fixtures/delegate-ipc-hold.mjs').resolve())
     helper_script = str((root_path / 'test/helpers/delegate-recovery-os-child.ts').resolve())
     helper_env = os.environ.copy()
@@ -258,6 +298,8 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         'DS_AGENT_DELEGATE_TASK': task,
         'DS_AGENT_RECOVERY_CHILD_MODE': 'seed',
         'DS_AGENT_TEST_DELEGATE_PID_FILE': str(pid_file),
+        'DS_AGENT_TEST_DELEGATE_OWNER_FILE': str(owner_file),
+        'DS_AGENT_TEST_DELEGATE_OWNER_ACK': str(owner_ack),
         'NODE_NO_WARNINGS': '1',
         'DS_AGENT_ALLOW_MOCK_FIXTURE': '1',
     })
@@ -277,10 +319,13 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         'failure_kind': None,
         'failure_message': None,
         'cleanup_error': None,
+        'creation_identity_pinned': False,
+        'injected_timeout_checkpoint': False,
     }
     helper = None
     delegate_pid = None
     delegate_start_time = None
+    delegate_pidfd = None
     failure = None
 
     try:
@@ -297,10 +342,16 @@ def run(mode, home, repo_root, task, expected_parent_pid):
             close_fds=True,
         )
         report['helper_pid'] = helper.pid
-        wait_for_marker(marker, helper)
-        delegate_pid, delegate_start_time = wait_for_delegate(pid_file, helper, fixture)
+        delegate_pid, delegate_start_time, delegate_pidfd = wait_for_owned_spawn(
+            owner_file, owner_ack, helper, fixture,
+        )
         report['delegate_pid'] = delegate_pid
         report['delegate_pgid'] = delegate_pid
+        report['creation_identity_pinned'] = True
+        wait_for_marker(marker, helper)
+        # The child-published PID file remains startup evidence only. Ownership
+        # comes from the spawn return and acknowledged identity transfer above.
+        wait_for_delegate(pid_file, helper, fixture)
 
         if mode == 'fault':
             os.kill(helper.pid, signal.SIGKILL)
@@ -312,6 +363,7 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         elif mode == 'assertion-failure':
             raise AssertionError('injected supervisor assertion failure after delegate start')
         elif mode == 'timeout-failure':
+            report['injected_timeout_checkpoint'] = True
             raise TimeoutError('injected supervisor deadline after delegate start')
 
     except BaseException as error:
@@ -329,22 +381,6 @@ def run(mode, home, repo_root, task, expected_parent_pid):
                 report['helper_waited'] = True
                 if helper_status < 0 and report['helper_exit_signal'] is None:
                     report['helper_exit_signal'] = -helper_status
-            # In timeout/error cleanup, recover the attestation if it was written
-            # just before the parent helper was killed.
-            if delegate_pid is None and pid_file.is_file() and helper is not None:
-                try:
-                    value = pid_file.read_text().strip()
-                    if value.isdecimal():
-                        candidate = int(value)
-                        stat = proc_stat(candidate)
-                        argv = proc_cmdline(candidate)
-                        if stat and candidate == stat['pgrp'] == stat['session'] and fixture in argv:
-                            delegate_pid = candidate
-                            delegate_start_time = stat['start_time']
-                            report['delegate_pid'] = candidate
-                            report['delegate_pgid'] = candidate
-                except OSError:
-                    pass
             if delegate_pid is not None:
                 child_stat = proc_stat(delegate_pid)
                 if child_stat and child_stat['start_time'] != delegate_start_time:
@@ -365,10 +401,15 @@ def run(mode, home, repo_root, task, expected_parent_pid):
                         raise RuntimeError('attested delegate exited before the supervisor could reap it')
         except BaseException as error:
             report['cleanup_error'] = f'{type(error).__name__}: {str(error)[:240]}'
+        finally:
+            if delegate_pidfd is not None:
+                os.close(delegate_pidfd)
 
     expected_failure = (
         (mode == 'assertion-failure' and isinstance(failure, AssertionError))
-        or (mode == 'timeout-failure' and isinstance(failure, TimeoutError))
+        or (mode == 'timeout-failure' and report['injected_timeout_checkpoint']
+            and isinstance(failure, TimeoutError)
+            and report['failure_message'] == 'injected supervisor deadline after delegate start')
     )
     report['expected_failure'] = expected_failure
     report['cleanup_succeeded'] = (

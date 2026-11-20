@@ -27,6 +27,12 @@ const marker = path.join(home, '.delegate-os-ready')
 const mode = process.env.DS_AGENT_RECOVERY_CHILD_MODE ?? 'seed'
 const task = process.env.DS_AGENT_DELEGATE_TASK ?? 'delegate-task'
 
+function publishMarker(value: Record<string, unknown>): void {
+  const temp = `${marker}.${process.pid}.tmp`
+  fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, { flag: 'wx' })
+  fs.renameSync(temp, marker)
+}
+
 function runningTicket(): Ticket {
   const at = new Date().toISOString()
   return {
@@ -118,18 +124,18 @@ async function main(): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     if (delegationFailure) throw delegationFailure
-    fs.writeFileSync(marker, `${JSON.stringify({
+    publishMarker({
       phase: 'delegating',
       delegateActive: localAgents.activeCount,
       delegateOperationId: operation.id,
       delegateOperationPhase: operation.phase,
       durableStarted: true,
-    })}\n`)
+    })
   } else if (mode === 'restart') {
     runtime.start({ assessPending: false })
     const boundary = runtime.store.getDoc<RecoveryBoundaryRecord>('recovery', RECOVERY_BOUNDARY_DOC_ID)
     const ticket = runtime.store.getDoc<Ticket>('ticket', 'ticket_delegate_os')
-    fs.writeFileSync(marker, `${JSON.stringify({
+    publishMarker({
       phase: 'post-recovery',
       recoveryOutcome: boundary?.outcome,
       assignmentCount: ticket?.assignments.length,
@@ -137,7 +143,7 @@ async function main(): Promise<void> {
       recoveredInputs: ticket?.inputs.filter(i => i.text?.startsWith('RECOVERED:')).length ?? 0,
       unknownApprovals: ticket?.collab?.approvals?.filter(a =>
         a.status === 'pending' && a.action.startsWith(UNKNOWN_OUTCOME_PREFIX)).length ?? 0,
-    })}\n`)
+    })
   }
 
   process.on('SIGTERM', () => {

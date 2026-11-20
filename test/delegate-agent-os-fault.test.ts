@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { LocalAgentRegistry, type LocalAgentSpec } from '../src/env/local-agents.ts'
 import { Store } from '../src/store/sqlite.ts'
 import type { Ticket } from '../src/shared/types.ts'
-import { runDelegateOsSupervisor } from './helpers/delegate-os-supervisor.ts'
+import { delegateOsSupervisorSupported, runDelegateOsSupervisor } from './helpers/delegate-os-supervisor.ts'
 
 const children: ChildProcess[] = []
 const closedChildren = new WeakSet<ChildProcess>()
@@ -70,7 +70,9 @@ afterEach(async () => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true })
 })
 
-describe('delegate_agent OS fault boundary', () => {
+const osFaultDescribe = delegateOsSupervisorSupported() ? describe : describe.skip
+
+osFaultDescribe('delegate_agent OS fault boundary', () => {
   it('SIGKILL during delegate_agent holds UNKNOWN-OUTCOME approval instead of auto RECOVERED replay', async () => {
     const home = tempHome()
     fs.writeFileSync(
@@ -195,6 +197,7 @@ describe('delegate_agent OS fault boundary', () => {
     const report = await runDelegateOsSupervisor(mode, home)
     expect(report.failure_kind).toBe(failureKind)
     expect(report.expected_failure).toBe(true)
+    if (mode === 'timeout-failure') expect(report.injected_timeout_checkpoint).toBe(true)
     expect(report.helper_waited).toBe(true)
     expect(report.group_signal_sent).toBe(true)
     expect(report.group_absent).toBe(true)

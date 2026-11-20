@@ -12,9 +12,11 @@ import {
 import { RECOVERY_BOUNDARY_DOC_ID, type RecoveryBoundaryRecord } from '../src/core/recovery-boundary.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import { Store } from '../src/store/sqlite.ts'
-import { runDelegateOsSupervisor } from './helpers/delegate-os-supervisor.ts'
+import { delegateOsSupervisorSupported, runDelegateOsSupervisor } from './helpers/delegate-os-supervisor.ts'
 
-describe('external effects unknown-outcome gate (OS fault)', () => {
+const osFaultDescribe = delegateOsSupervisorSupported() ? describe : describe.skip
+
+osFaultDescribe('external effects unknown-outcome gate (OS fault)', () => {
   const children: ChildProcess[] = []
   const closedChildren = new WeakSet<ChildProcess>()
   const homes: string[] = []
@@ -44,23 +46,83 @@ describe('external effects unknown-outcome gate (OS fault)', () => {
     return dir
   }
 
-  it('delegate hold fixture stays alive with stdin ignored', async () => {
+  it('delegate hold fixture stays alive after fixture-level readiness with stdin ignored', async () => {
+    const home = tempHome()
+    const readyFile = path.join(home, 'fixture.ready')
     const child = spawn(
       process.execPath,
       [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs')],
-      { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'ignore'] },
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, DS_AGENT_TEST_FIXTURE_READY_FILE: readyFile },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
     )
     trackChild(child)
+    let closed = false
+    child.once('close', () => { closed = true })
     await new Promise<void>((resolve, reject) => {
       child.once('spawn', () => resolve())
       child.once('error', reject)
     })
-    await new Promise(resolve => setTimeout(resolve, 100))
+    const deadline = Date.now() + 5_000
+    while (!fs.existsSync(readyFile) && Date.now() < deadline) {
+      if (closed) throw new Error('hold fixture closed before publishing fixture readiness')
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(fs.existsSync(readyFile)).toBe(true)
+    expect(closed).toBe(false)
     expect(child.exitCode).toBeNull()
     expect(child.signalCode).toBeNull()
-    const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    const closePromise = new Promise<void>(resolve => child.once('close', () => resolve()))
     child.kill('SIGKILL')
-    await closed
+    await closePromise
+  })
+
+  it('cleans and reaps a fixture when the real wrapper deadline precedes fixture PID publication', async () => {
+    const home = tempHome()
+    fs.writeFileSync(
+      path.join(home, 'local-agents.json'),
+      JSON.stringify({ agents: [{
+        id: 'ipc-hold',
+        command: process.execPath,
+        args: [path.resolve(process.cwd(), 'test/fixtures/delegate-ipc-hold.mjs'), '{task}'],
+        env: ['DS_AGENT_TEST_DELEGATE_PID_FILE', 'DS_AGENT_TEST_FIXTURE_START_DELAY_MS'],
+        timeoutMs: 60_000,
+      }] }),
+    )
+    const guard = spawn(
+      'python3',
+      [path.resolve(process.cwd(), 'test/helpers/delegate-os-wrapper-timeout-guard.py'),
+        process.cwd(), home, '5000'],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, DS_AGENT_NODE: process.execPath },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
+    trackChild(guard)
+    let stdout = ''
+    let stderr = ''
+    guard.stdout?.setEncoding('utf8')
+    guard.stderr?.setEncoding('utf8')
+    guard.stdout?.on('data', chunk => { stdout += chunk })
+    guard.stderr?.on('data', chunk => { stderr += chunk })
+    await waitForClose(guard)
+    expect(guard.exitCode, stderr || stdout).toBe(0)
+    const result = JSON.parse(stdout.trim()) as Record<string, unknown>
+    expect(result.wrapperRejected).toBe(true)
+    expect(result.errorName).toBe('DelegateOsSupervisorError')
+    expect(result.outer_guard_clean).toBe(true)
+    expect(result.outer_guard_rescued_live_fixture).toBe(false)
+    const report = result.report as Record<string, unknown>
+    expect(report.failure_kind).toBe('SupervisorInterrupted')
+    expect(report.creation_identity_pinned).toBe(true)
+    expect(report.delegate_pid).toBeGreaterThan(0)
+    expect(report.group_signal_sent).toBe(true)
+    expect(report.reaped_delegate_pid).toBe(true)
+    expect(report.cleanup_succeeded).toBe(true)
+    expect(fs.existsSync(path.join(home, '.delegate-fixture.pid'))).toBe(false)
   })
 
   it('SIGKILL during delegate_agent queues UNKNOWN-OUTCOME approval and skips auto recovery replay', async () => {

@@ -52,13 +52,19 @@ def install_subreaper():
         raise OSError(code, os.strerror(code))
 
 
-def wait_for_file(file, worker, timeout_s=10.0):
+def wait_for_complete_pid(file, timeout_s=10.0):
     deadline = time.monotonic() + timeout_s
+    last_error = None
     while time.monotonic() < deadline:
-        if file.is_file():
-            return
+        try:
+            value = file.read_text().strip()
+            if value.isdecimal():
+                return int(value)
+            last_error = ValueError('PID publication is incomplete')
+        except (FileNotFoundError, OSError) as error:
+            last_error = error
         time.sleep(0.01)
-    raise TimeoutError(f'timed out waiting for bootstrap gate {file}')
+    raise TimeoutError(f'timed out waiting for a complete PID in {file}: {last_error}')
 
 
 def waitpid_nonblocking(pid):
@@ -170,14 +176,14 @@ def run_harness(home, repo_root, supervisor_script):
             stderr=subprocess.DEVNULL,
             close_fds=True,
         )
-        wait_for_file(gate_ready, worker)
+        gate_supervisor_pid = wait_for_complete_pid(gate_ready)
         if worker.wait(timeout=5) != 0:
             raise RuntimeError('launching worker did not exit cleanly after starting supervisor')
 
-        supervisor_pid = int(gate_ready.read_text().strip())
-        if int(supervisor_pid_file.read_text().strip()) != supervisor_pid:
+        supervisor_pid = gate_supervisor_pid
+        if wait_for_complete_pid(supervisor_pid_file) != supervisor_pid:
             raise RuntimeError('bootstrap gate PID did not match the launched supervisor PID')
-        expected_worker_pid = int(worker_pid_file.read_text().strip())
+        expected_worker_pid = wait_for_complete_pid(worker_pid_file)
         supervisor_stat = proc_stat(supervisor_pid)
         if not supervisor_stat or supervisor_stat['ppid'] != os.getpid():
             raise RuntimeError('supervisor was not adopted by the test harness after worker exit')
@@ -221,9 +227,8 @@ def run_harness(home, repo_root, supervisor_script):
             raise RuntimeError(f'parent-race test observed a helper/delegate or unreaped child: {result}')
         return result
     finally:
-        # The normal path leaves no children. On a failed assertion, release and
-        # signal only the exact processes in this test's subreaper-owned tree.
-        gate_release.touch(exist_ok=True)
+        # Reap the launching worker before opening its bootstrap gate on every
+        # failure path, so teardown cannot accidentally launch the helper.
         if worker is not None and worker.poll() is None:
             worker.kill()
         if worker is not None:
@@ -232,6 +237,7 @@ def run_harness(home, repo_root, supervisor_script):
             except subprocess.TimeoutExpired:
                 worker.kill()
                 worker.wait()
+        gate_release.touch(exist_ok=True)
         if supervisor_pid is not None and not supervisor_reaped:
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
