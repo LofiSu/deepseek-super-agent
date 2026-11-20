@@ -1,6 +1,6 @@
 export type Role = 'router' | 'worker' | 'watchdog'
 
-export type ReceiveResult = 'stored' | 'duplicate' | 'filtered'
+export type ReceiveResult = 'stored' | 'duplicate' | 'filtered' | 'incomplete'
 
 export type Strength = 'explicit' | 'inferred' | 'maybe'
 

@@ -3213,6 +3213,9 @@ export class Runtime {
       failure = error
     }
     try {
+      // Stop pulse admissions and fence connector polling before any final drain.
+      this.daemon.stop()
+      await this.connectorWake.stop()
       // Local specialists and browser drivers run detached in their own
       // process group, so they would outlive this process. Kill them before
       // draining: shutdown must not block on a slow child, and no child may

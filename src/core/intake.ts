@@ -15,6 +15,12 @@ import {
 } from '../shared/types.ts'
 import type { Host } from './host.ts'
 
+interface IntakeRoutingPlan {
+  fanout: string[]
+  context: string[]
+  needsEval: boolean
+}
+
 export class Intake {
   constructor(private readonly host: Host) {}
 
@@ -60,39 +66,56 @@ export class Intake {
 
     this.host.repo.putDoc('trigger', trigger.id, owned)
     if (existing) {
-      const routedTickets = this.host.repo.listDocs<Ticket>('ticket')
-        .filter(ticket => ticket.inputs.some(input => input.triggerId === trigger.id))
-      const alreadyQueued = trigger.threads.some(ref =>
-        this.host.repo.getDoc<Thread>('thread', threadKey(ref))?.pending.includes(trigger.id) === true,
-      )
-      if (routedTickets.length > 0 || alreadyQueued) {
-        const fanout = routedTickets.flatMap(ticket =>
-          ticket.inputs.some(input => input.triggerId === trigger.id && input.kind === 'trigger') ? [ticket.id] : [],
-        )
-        const context = routedTickets.flatMap(ticket =>
-          ticket.inputs.some(input => input.triggerId === trigger.id && input.kind === 'context') ? [ticket.id] : [],
-        )
-        const needsEval = commandOf(owned.text) != null || trigger.human === false || fanout.length === 0
-        if (needsEval) {
-          const primary = this.ensure(trigger.threads[0]!)
-          if (!primary.pending.includes(trigger.id)) {
-            primary.pending = [...primary.pending, trigger.id]
-            this.host.repo.putDoc('thread', primary.key, primary)
-            this.host.onQueued?.(primary.key, trigger.id, primary.pending)
-          }
+      const plan = this.host.repo.getDoc<IntakeRoutingPlan>('intake_route_plan', trigger.id)
+      if (plan && Array.isArray(plan.fanout) && Array.isArray(plan.context) && typeof plan.needsEval === 'boolean') {
+        for (const [ticketId, kind] of [
+          ...plan.fanout.map(id => [id, 'trigger'] as const),
+          ...plan.context.map(id => [id, 'context'] as const),
+        ]) {
+          const ticket = this.host.repo.getDoc<Ticket>('ticket', ticketId)
+          if (!ticket) return this.incompleteRecovery(trigger, at, 'planned-recipient-missing', [ticketId])
+          addInput(this.host, ticket, owned, kind, at)
         }
+        this.repairThreadActivity(trigger)
+        if (plan.needsEval) this.queueForEval(trigger)
         const disposition: Disposition = {
-          fanout,
-          context,
+          fanout: plan.fanout,
+          context: plan.context,
           ...(trust.shards?.length ? { shards: trust.shards } : {}),
           at,
         }
         this.host.repo.putDoc('disposition', trigger.id, disposition)
         this.host.repo.addEvent('trigger.received', {
-          triggerId: trigger.id,
-          result: 'stored',
-          fanout,
-          context,
+          triggerId: trigger.id, result: 'stored', fanout: plan.fanout, context: plan.context,
+          ...(trust.shards?.length ? { shards: trust.shards } : {}),
+        })
+        return 'stored'
+      }
+      const routedTickets = this.host.repo.listDocs<Ticket>('ticket')
+        .filter(ticket => ticket.inputs.some(input => input.triggerId === trigger.id))
+      const alreadyQueued = trigger.threads.some(ref =>
+        this.host.repo.getDoc<Thread>('thread', threadKey(ref))?.pending.includes(trigger.id) === true,
+      )
+      if (routedTickets.length > 0) {
+        this.repairThreadActivity(trigger)
+        return this.incompleteRecovery(
+          trigger,
+          at,
+          'legacy-routing-plan-unavailable',
+          routedTickets.map(ticket => ticket.id),
+        )
+      }
+      if (alreadyQueued) {
+        this.repairThreadActivity(trigger)
+        const disposition: Disposition = {
+          fanout: [],
+          context: [],
+          ...(trust.shards?.length ? { shards: trust.shards } : {}),
+          at,
+        }
+        this.host.repo.putDoc('disposition', trigger.id, disposition)
+        this.host.repo.addEvent('trigger.received', {
+          triggerId: trigger.id, result: 'stored', fanout: [], context: [],
           ...(trust.shards?.length ? { shards: trust.shards } : {}),
         })
         return 'stored'
@@ -107,7 +130,7 @@ export class Intake {
     for (const ref of trigger.threads) {
       const thread = this.ensure(ref)
       if (!primary) primary = thread
-      if (!thread.lastAt || trigger.at > thread.lastAt) thread.lastAt = trigger.at
+      if (timestampAfter(trigger.at, thread.lastAt)) thread.lastAt = trigger.at
       thread.correlated = [...new Set([...thread.correlated, ...keys.filter(key => key !== thread.key)])]
       // Stop / ignore / unavailable stay on the Eval queue instead of bypassing into an Executor.
       if (!command) {
@@ -139,17 +162,18 @@ export class Intake {
     for (const ticketId of fanout) {
       this.host.log(`bypass=subscription ticketId=${ticketId} thread=${primaryKey} triggerId=${trigger.id}`)
     }
-    if (fanout.length > 0) this.host.metrics.increment('bypass.fanout', fanout.length)
-    if (context.length > 0) this.host.metrics.increment('bypass.context', context.length)
+    if (fanout.length > 0 || context.length > 0) {
+      this.host.repo.afterCommit(() => {
+        if (fanout.length > 0) this.host.metrics.increment('bypass.fanout', fanout.length)
+        if (context.length > 0) this.host.metrics.increment('bypass.context', context.length)
+      })
+    }
 
     // Human follow-ups that reached an actionable subscriber do not need Eval.
     // Bot/CI events and context-only subscriptions still become new-work candidates.
     const needsEval = command != null || trigger.human === false || fanout.length === 0
-    if (needsEval && primary && !primary.pending.includes(trigger.id)) {
-      primary.pending = [...primary.pending, trigger.id]
-      this.host.repo.putDoc('thread', primary.key, primary)
-      this.host.onQueued?.(primary.key, trigger.id, primary.pending)
-    }
+    if (needsEval) this.queueForEval(trigger)
+    this.host.repo.putDoc('intake_route_plan', trigger.id, { fanout, context, needsEval } satisfies IntakeRoutingPlan)
     const disposition: Disposition = {
       fanout,
       context,
@@ -165,6 +189,43 @@ export class Intake {
       ...(trust.shards?.length ? { shards: trust.shards } : {}),
     })
     return 'stored'
+  }
+
+  private queueForEval(trigger: Trigger): void {
+    const primary = this.ensure(trigger.threads[0]!)
+    if (!primary.pending.includes(trigger.id)) {
+      primary.pending = [...primary.pending, trigger.id]
+      this.host.repo.putDoc('thread', primary.key, primary)
+      const pending = primary.pending
+      this.host.repo.afterCommit(() => this.host.onQueued?.(primary.key, trigger.id, pending))
+    }
+  }
+
+  private incompleteRecovery(
+    trigger: Trigger,
+    at: string,
+    reason: string,
+    observedRecipients: string[],
+  ): 'incomplete' {
+    const recovery = this.host.repo.getDoc<{ triggerId: string }>('intake_recovery', trigger.id)
+    if (!recovery) {
+      this.host.repo.putDoc('intake_recovery', trigger.id, { triggerId: trigger.id, at, reason, observedRecipients })
+      this.host.repo.addEvent('trigger.received', {
+        triggerId: trigger.id, result: 'incomplete', reason, observedRecipients,
+      })
+    }
+    this.host.log(`intake recovery incomplete triggerId=${trigger.id} reason=${reason}`)
+    return 'incomplete'
+  }
+
+  private repairThreadActivity(trigger: Trigger): void {
+    const keys = trigger.threads.map(threadKey)
+    for (const ref of trigger.threads) {
+      const thread = this.ensure(ref)
+      if (timestampAfter(trigger.at, thread.lastAt)) thread.lastAt = trigger.at
+      thread.correlated = [...new Set([...thread.correlated, ...keys.filter(key => key !== thread.key)])]
+      this.host.repo.putDoc('thread', thread.key, thread)
+    }
   }
 
   private ensure(ref: ThreadRef): Thread {
@@ -216,6 +277,14 @@ export function subscriptionEligible(ticket: Ticket): boolean {
 
 export function isContextOnly(thread: Thread, ticketId: string): boolean {
   return (thread.contextOnly ?? []).includes(ticketId)
+}
+
+function timestampAfter(candidate: string, current?: string): boolean {
+  if (!current) return true
+  const candidateMs = Date.parse(candidate)
+  const currentMs = Date.parse(current)
+  if (Number.isFinite(candidateMs) && Number.isFinite(currentMs)) return candidateMs > currentMs
+  return candidate > current
 }
 
 function spillOf(trigger: Trigger): string | undefined {

@@ -7,6 +7,7 @@ import type { Runtime } from '../src/runtime.ts'
 import { threadKey, type Decision, type Disposition, type Thread, type Ticket, type Trigger } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 import { field, lastPrompt, ScriptedModel, silentModel } from './scripted-model.ts'
+import { normalizeConnectorConfig } from '../src/connectors/config.ts'
 
 const runtimes: Runtime[] = []
 
@@ -131,6 +132,8 @@ describe('Runtime service integration', () => {
         text: 'the timeout still affects another request',
         actor: 'alex',
       })
+      const secondaryRef = { source: 'im', id: `${threadId}/secondary` }
+      follow.threads = [...follow.threads, secondaryRef]
       original.inputs.push({
         id: `input_partial_${threadId}`,
         kind: 'trigger',
@@ -155,6 +158,18 @@ describe('Runtime service integration', () => {
       }
       runtime.store.putDoc('ticket', replacement.id, replacement)
       const key = threadKey(follow.threads[0]!)
+      const secondaryKey = threadKey(secondaryRef)
+      const laterAt = new Date(Date.parse(follow.at) + 60_000).toISOString()
+      runtime.store.putDoc('thread', secondaryKey, {
+        key: secondaryKey,
+        ref: secondaryRef,
+        createdAt: follow.at,
+        lastAt: laterAt,
+        subscriptions: [],
+        correlated: ['im:preexisting-correlation'],
+        pending: [],
+        meta: {},
+      } satisfies Thread)
       const thread = runtime.store.getDoc<Thread>('thread', key)!
       thread.subscriptions = scenario.keepOriginalSubscription
         ? [original.id, replacement.id]
@@ -162,15 +177,49 @@ describe('Runtime service integration', () => {
       runtime.store.putDoc('thread', key, thread)
       runtime.store.putDoc('trigger', follow.id, follow)
 
-      expect(runtime.ingest(follow)).toBe('stored')
+      expect(runtime.ingest(follow)).toBe('incomplete')
       const resumedOriginal = runtime.store.getDoc<Ticket>('ticket', original.id)!
       const resumedReplacement = runtime.store.getDoc<Ticket>('ticket', replacement.id)!
       expect(resumedOriginal.inputs.filter(input => input.triggerId === follow.id)).toHaveLength(1)
       expect(resumedReplacement.inputs.filter(input => input.triggerId === follow.id)).toHaveLength(0)
-      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)?.fanout).toEqual([original.id])
+      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toBeUndefined()
+      expect(runtime.store.getDoc('intake_recovery', follow.id)).toMatchObject({ triggerId: follow.id })
       expect(runtime.store.getDoc<Thread>('thread', key)?.pending).not.toContain(follow.id)
-      expect(runtime.ingest(follow)).toBe('duplicate')
+      const repairedPrimary = runtime.store.getDoc<Thread>('thread', key)!
+      const repairedSecondary = runtime.store.getDoc<Thread>('thread', secondaryKey)!
+      expect(repairedPrimary.lastAt).toBe(follow.at)
+      expect(repairedPrimary.correlated).toContain(secondaryKey)
+      expect(repairedSecondary.lastAt).toBe(laterAt)
+      expect(repairedSecondary.correlated).toEqual(['im:preexisting-correlation', key])
+      expect(runtime.ingest(follow)).toBe('incomplete')
     }
+  })
+
+  it('keeps ambiguous legacy A/B partial fanout incomplete without rerouting', () => {
+    const runtime = start()
+    const threadId = 'recovery/legacy-partial-a-b'
+    const seed = imTrigger({ id: 'trg_legacy_ab_seed', thread: threadId, text: '@ds-agent fix this timeout' })
+    runtime.engine.receive(seed)
+    const evaluated = runtime.engine.evaluateDue()[0]!
+    const ticketA = runtime.store.getDoc<Ticket>('ticket', evaluated.ticketId!)!
+    const ticketB: Ticket = { ...ticketA, id: 'ticket_legacy_B', inputs: [], channels: [...ticketA.channels] }
+    runtime.store.putDoc('ticket', ticketB.id, ticketB)
+    const key = threadKey(seed.threads[0]!)
+    const thread = runtime.store.getDoc<Thread>('thread', key)!
+    thread.subscriptions = [ticketA.id, ticketB.id]
+    runtime.store.putDoc('thread', key, thread)
+    const follow = imTrigger({ id: 'trg_legacy_ab_follow', thread: threadId, text: 'still failing' })
+    ticketA.inputs.push({
+      id: 'input_legacy_ab_A', kind: 'trigger', triggerId: follow.id,
+      text: follow.text, at: follow.at, human: true,
+    })
+    runtime.store.putDoc('ticket', ticketA.id, ticketA)
+    runtime.store.putDoc('trigger', follow.id, follow)
+
+    expect(runtime.ingest(follow)).toBe('incomplete')
+    expect(runtime.store.getDoc<Ticket>('ticket', ticketB.id)?.inputs).toHaveLength(0)
+    expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toBeUndefined()
+    expect(runtime.store.getDoc('intake_recovery', follow.id)).toBeDefined()
   })
 
   it('restores pending Eval for legacy partial bot and context-only routing', () => {
@@ -212,16 +261,13 @@ describe('Runtime service integration', () => {
       thread.pending = thread.pending.filter(triggerId => triggerId !== follow.id)
       runtime.store.putDoc('thread', key, thread)
 
-      expect(runtime.ingest(follow)).toBe('stored')
-      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toMatchObject({
-        fanout: [],
-        context: [ticket.id],
-      })
+      expect(runtime.ingest(follow)).toBe('incomplete')
+      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toBeUndefined()
+      expect(runtime.store.getDoc('intake_recovery', follow.id)).toBeDefined()
       expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.filter(input => input.triggerId === follow.id))
         .toHaveLength(1)
-      const evalQueued = runtime.store.getDoc<Thread>('thread', key)?.pending.includes(follow.id)
-        || runtime.store.listDocs<Ticket>('ticket').some(row => row.originTriggerId === follow.id)
-      expect(evalQueued).toBe(true)
+      expect(runtime.store.getDoc<Thread>('thread', key)?.pending).not.toContain(follow.id)
+      expect(runtime.store.listDocs<Ticket>('ticket').some(row => row.originTriggerId === follow.id)).toBe(false)
     }
   })
 
@@ -243,8 +289,10 @@ describe('Runtime service integration', () => {
       actor: 'alex',
     })
     const originalAddEvent = runtime.store.addEvent.bind(runtime.store)
+    const bypassBefore = runtime.metrics.snapshot().counters['bypass.fanout']
     runtime.store.addEvent = (() => { throw new Error('injected Intake write failure') }) as typeof runtime.store.addEvent
     expect(() => runtime.engine.receive(trigger)).toThrow(/injected Intake write failure/)
+    expect(runtime.metrics.snapshot().counters['bypass.fanout']).toBe(bypassBefore)
     runtime.store.addEvent = originalAddEvent
     expect(runtime.store.getDoc<Trigger>('trigger', trigger.id)).toBeUndefined()
     expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)).toBeUndefined()
@@ -253,7 +301,41 @@ describe('Runtime service integration', () => {
     expect(runtime.engine.receive(trigger)).toBe('stored')
     expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)?.fanout).toEqual([ticket.id])
     expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.filter(input => input.triggerId === trigger.id)).toHaveLength(1)
+    expect(runtime.metrics.snapshot().counters['bypass.fanout']).toBe(bypassBefore + 1)
+    expect(runtime.engine.receive(trigger)).toBe('duplicate')
+    expect(runtime.metrics.snapshot().counters['bypass.fanout']).toBe(bypassBefore + 1)
   })
+
+  it('fences an in-flight connector poll before Runtime.finish drains and closes Store', async () => {
+    let rejectPage: ((error: Error) => void) | undefined
+    let resolveStarted!: () => void
+    const started = new Promise<void>(resolve => { resolveStarted = resolve })
+    const runtime = freshRuntime({
+      model: silentModel(),
+      env: isolatedEnv(),
+      watchdogIntervalMs: 60_000,
+      connectors: normalizeConnectorConfig({
+        enabled: true,
+        google: { services: ['gmail'] },
+        wake: { enabled: false, services: ['gmail'] },
+      }),
+      connectorApi: {
+        async fetch() { return [] },
+        fetchPage() {
+          resolveStarted()
+          return new Promise((_resolve, reject) => { rejectPage = reject })
+        },
+      },
+    })
+    runtimes.push(runtime)
+    const poll = runtime.connectorWake.poll(Date.now())
+    await started
+    await runtime.finish()
+    expect(runtime.store.isOpen).toBe(false)
+    rejectPage?.(new Error('late provider rejection after shutdown'))
+    await expect(poll).resolves.toMatchObject({ action: 'disabled', reason: 'stopping' })
+    expect(runtime.log.text()).not.toContain('late provider rejection after shutdown')
+  }, 5_000)
 
   it('routes a trigger to a shard, runs that router session, and places the worker on the mesh', async () => {
     const runtime = start({
