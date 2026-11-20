@@ -482,7 +482,7 @@ export class ConnectorWakeScheduler {
         service: record.service,
       }
       this.saveState({ ...committed(), pending: [...(base.pending ?? []), pending] })
-      const finalAdmission = this.finalFireAdmission(base, pending, config.enabled && Boolean(api), target)
+      const finalAdmission = this.finalFireAdmission(base, pending, target)
       if (finalAdmission.decision !== 'eligible-now') {
         if (finalAdmission.decision === 'expired') {
           this.retirePending(this.loadState(), pending, finalAdmission.at, 'calendar-window-expired')
@@ -576,6 +576,7 @@ export class ConnectorWakeScheduler {
     service: GoogleService,
     provenance: ConnectorPendingWake['calendarProvenance'],
     at: number,
+    calendarLookaheadMinutes = this.opts.config.wake.calendarLookaheadMinutes,
   ): CalendarAdmission {
     if (service !== 'calendar') return { decision: 'eligible-now' }
     if (provenance?.version !== 1 || provenance.kind !== 'event'
@@ -587,7 +588,7 @@ export class ConnectorWakeScheduler {
     const deadline = calendarEventWakeDeadline(start)
     if (deadline === undefined) return { decision: 'provenance-unknown' }
     if (at > deadline) return { decision: 'expired' }
-    if (start > at + this.opts.config.wake.calendarLookaheadMinutes * 60_000) {
+    if (start > at + calendarLookaheadMinutes * 60_000) {
       return { decision: 'not-yet' }
     }
     return { decision: 'eligible-now' }
@@ -694,7 +695,7 @@ export class ConnectorWakeScheduler {
           this.log(`[connector] pending wake held triggerId=${pending.trigger.id} reason=${reason}`)
           break
         }
-        const finalAdmission = this.finalFireAdmission(state, pending, enabled)
+        const finalAdmission = this.finalFireAdmission(state, pending)
         if (finalAdmission.decision === 'expired') {
           state = this.retirePending(state, pending, finalAdmission.at, 'calendar-window-expired')
           continue
@@ -757,11 +758,8 @@ export class ConnectorWakeScheduler {
   private finalFireAdmission(
     state: ConnectorWakeState,
     pending: ConnectorPendingWake,
-    connectorEnabled: boolean,
     target?: WakeTarget,
   ): FinalFireAdmission {
-    const config = this.opts.config
-    const wake = config.wake
     if (this.stopping) return { decision: 'held', at: this.opts.now(), reason: 'connector-stopping' }
     if (this.opts.store.getDoc('intake_recovery', pending.trigger.id)) {
       return { decision: 'held', at: this.opts.now(), reason: 'intake-recovery-incomplete' }
@@ -769,7 +767,14 @@ export class ConnectorWakeScheduler {
     if (this.ingressComplete(pending.trigger.id)) {
       return { decision: 'held', at: this.opts.now(), reason: 'ingress-already-complete' }
     }
-    if (!connectorEnabled || !config.enabled || !this.opts.api) {
+    // Sample time after all Store work. The injected clock may be effectful, so
+    // capture policy afterward and use no callbacks between it and fire.
+    if (this.stopping) return { decision: 'held', at: this.opts.now(), reason: 'connector-stopping' }
+    const at = this.opts.now()
+    if (this.stopping) return { decision: 'held', at, reason: 'connector-stopping' }
+    const config = this.opts.config
+    const wake = config.wake
+    if (!config.enabled || !this.opts.api) {
       return { decision: 'held', at: this.opts.now(), reason: 'connector-disabled' }
     }
     if (!wake.enabled) return { decision: 'held', at: this.opts.now(), reason: 'wake-disabled' }
@@ -792,11 +797,12 @@ export class ConnectorWakeScheduler {
       return { decision: 'held', at: this.opts.now(), reason: 'private-target-changed' }
     }
 
-    // All Store and target reads are complete. Capture time after that work so
-    // synchronous scans or persistence cannot make this admission use a stale
-    // Calendar/quiet/capacity decision.
-    const at = this.opts.now()
-    const calendar = this.calendarAdmission(pending.service, pending.calendarProvenance, at)
+    const calendar = this.calendarAdmission(
+      pending.service,
+      pending.calendarProvenance,
+      at,
+      wake.calendarLookaheadMinutes,
+    )
     if (calendar.decision !== 'eligible-now') return { ...calendar, at }
     if (withinQuietHours(at, this.opts.proactive)) {
       return { decision: 'held', at, reason: 'quiet-hours' }
