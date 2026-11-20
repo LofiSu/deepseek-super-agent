@@ -16,7 +16,9 @@ import type { OutboundAdapter } from './outbox-adapter.ts'
  *   FEISHU_VERIFICATION_TOKEN, FEISHU_ENCRYPT_KEY, FEISHU_BOT_OPEN_ID
  *
  * Bot permissions: im:message, im:message.send_as_bot, im:message:readonly (or
- * the corresponding granular scopes). The bot must be a member of the chat.
+ * the corresponding granular scopes). Polling chat classification also needs
+ * im:chat:readonly (or im:chat:read / im:chat), even when direct mode is off.
+ * The bot must be a member of the chat.
  */
 
 export interface FeishuConfig {
@@ -70,6 +72,7 @@ export interface FeishuMention {
 export interface FeishuMessage {
   message_id: string
   chat_id: string
+  chat_type?: string
   msg_type: string
   body?: { content?: string }
   content?: string
@@ -108,12 +111,13 @@ export class FeishuClient {
     private readonly fetchImpl: FetchLike = fetch,
   ) {}
 
-  async accessToken(): Promise<string> {
+  async accessToken(signal?: AbortSignal): Promise<string> {
     if (this.token && Date.now() < this.token.expiresAt) return this.token.value
     const response = await this.fetchImpl(`${this.config.baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_id: this.config.appId, app_secret: this.config.appSecret }),
+      ...(signal ? { signal } : {}),
     })
     const json = await response.json() as {
       code?: number
@@ -129,8 +133,8 @@ export class FeishuClient {
     return this.token.value
   }
 
-  private async request<T>(path: string, init: { method?: string; body?: unknown; query?: Record<string, string | number | undefined> } = {}): Promise<T> {
-    const token = await this.accessToken()
+  private async request<T>(path: string, init: { method?: string; body?: unknown; query?: Record<string, string | number | undefined>; signal?: AbortSignal } = {}): Promise<T> {
+    const token = await this.accessToken(init.signal)
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(init.query ?? {})) {
       if (value !== undefined) params.set(key, String(value))
@@ -143,6 +147,7 @@ export class FeishuClient {
         'Content-Type': 'application/json; charset=utf-8',
       },
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      ...(init.signal ? { signal: init.signal } : {}),
     })
     const json = await response.json() as { code?: number; msg?: string; data?: T }
     if (!response.ok || json.code !== 0) {
@@ -199,6 +204,43 @@ export class FeishuClient {
     )
     return data.items?.[0]
   }
+
+  async getChatMode(chatId: string, signal?: AbortSignal): Promise<string | undefined> {
+    const controller = new AbortController()
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let removeAbortListener: (() => void) | undefined
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort()
+        reject(new Error('Feishu chat metadata lookup timed out'))
+      }, 5_000)
+      if (signal) {
+        const onAbort = (): void => {
+          controller.abort()
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+        }
+        if (signal.aborted) onAbort()
+        else {
+          signal.addEventListener('abort', onAbort, { once: true })
+          removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+        }
+      }
+    })
+    try {
+      const request = this.request<{ chat_mode?: unknown }>(
+        `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`,
+        { signal: combined },
+      )
+      const data = await Promise.race([request, deadline])
+      return typeof data.chat_mode === 'string' && data.chat_mode.length > 0
+        ? data.chat_mode
+        : undefined
+    } finally {
+      if (timer) clearTimeout(timer)
+      removeAbortListener?.()
+    }
+  }
 }
 
 /** Flatten the text-bearing parts of a Feishu message (`text`, `post`, cards). */
@@ -252,6 +294,12 @@ export function feishuThread(chatId: string, threadId?: string): string {
   return threadId ? `feishu:${chatId}:${threadId}` : `feishu:${chatId}`
 }
 
+export function normalizeFeishuChatMode(mode: unknown): 'p2p' | 'group' | undefined {
+  if (mode === 'p2p') return 'p2p'
+  if (mode === 'group' || mode === 'topic') return 'group'
+  return undefined
+}
+
 function mentionsBot(message: FeishuMessage, config?: FeishuConfig): boolean {
   const text = flattenFeishuMessage(message)
   if (/@ds-agent\b/i.test(text)) return true
@@ -266,6 +314,7 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
   const thread = feishuThread(message.chat_id, message.thread_id)
   const addressed = mentionsBot(message, config) ? 'mention' as const : undefined
   const senderType = message.sender?.sender_type
+  const chatType = normalizeFeishuChatMode(message.chat_type)
   return {
     id: `feishu_${message.message_id}`,
     source: 'im',
@@ -281,7 +330,8 @@ export function feishuTriggerFromMessage(message: FeishuMessage, config?: Feishu
       address: {
         provider: 'feishu',
         chat_id: message.chat_id,
-        // Group admission reads only `address.group`; a Feishu chat is the group.
+        ...(chatType ? { chat_type: chatType } : {}),
+        // Group admission remains independent of trusted chat-mode classification.
         group: message.chat_id,
         message_id: message.message_id,
         ...(message.thread_id ? { thread_id: message.thread_id } : {}),
@@ -307,17 +357,25 @@ export class FeishuSource {
   constructor(
     private readonly client: FeishuClient,
     private readonly chatId: string,
-    options: { sinceMs?: number; threadId?: string; pageSize?: number; config?: FeishuConfig } = {},
+    options: {
+      sinceMs?: number
+      threadId?: string
+      pageSize?: number
+      config?: FeishuConfig
+      log?: (line: string) => void
+    } = {},
   ) {
     this.cursorMsValue = options.sinceMs ?? Date.now() - 5 * 60_000
     this.threadId = options.threadId
     this.pageSize = options.pageSize
     this.config = options.config
+    this.log = options.log ?? (() => undefined)
   }
 
   private readonly threadId?: string
   private readonly pageSize?: number
   private readonly config?: FeishuConfig
+  private readonly log: (line: string) => void
 
   /**
    * Highest message `create_time` (ms) observed so far, or the seed when none
@@ -327,16 +385,35 @@ export class FeishuSource {
     return this.cursorMsValue
   }
 
-  async pull(): Promise<Trigger[]> {
+  async pull(signal?: AbortSignal): Promise<Trigger[]> {
     const startTimeSec = Math.max(0, Math.floor((this.cursorMsValue - 1_000) / 1_000))
     const items = await this.client.listMessages(this.chatId, {
       startTimeSec,
       pageSize: this.pageSize,
     })
+    let chatType: 'p2p' | 'group' | undefined
+    if (items.length > 0) {
+      try {
+        const mode = await this.client.getChatMode(this.chatId, signal)
+        chatType = normalizeFeishuChatMode(mode)
+        if (!chatType) {
+          this.log(`[feishu] unrecognized chat_mode chat=${this.chatId} mode=${mode ?? '(missing)'}`)
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error
+        this.log(`[feishu] chat metadata lookup failed chat=${this.chatId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (signal?.aborted) return []
     const triggers: Trigger[] = []
     for (const item of items) {
       if (this.threadId && item.thread_id !== this.threadId) continue
-      triggers.push(feishuTriggerFromMessage(item, this.config))
+      const message: FeishuMessage = {
+        ...item,
+        // List-message chat_type is visibility metadata, not a private/group discriminator.
+        ...(chatType ? { chat_type: chatType } : { chat_type: undefined }),
+      }
+      triggers.push(feishuTriggerFromMessage(message, this.config))
       const at = Number(item.create_time)
       if (Number.isFinite(at) && at > this.cursorMsValue) this.cursorMsValue = at
     }

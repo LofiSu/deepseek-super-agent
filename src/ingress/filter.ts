@@ -41,7 +41,10 @@ export interface AdmissionRules {
   dropSelf?: string[]
 }
 
-function admissionDeny(trigger: Trigger, rules?: AdmissionRules): string | undefined {
+/** Sources the deterministic fast path admits. Adapters cannot invent a source. */
+export const FAST_PATH_SOURCES = ['im', 'github', 'cli', 'a2a', 'imessage'] as const
+
+export function admissionDenial(trigger: Trigger, rules?: AdmissionRules): string | undefined {
   if (!rules) return undefined
   if (rules.dropSelf?.length && rules.dropSelf.includes(trigger.actor.id)) return 'self-drop'
   if (rules.actors?.length && !rules.actors.includes(trigger.actor.id)) {
@@ -65,18 +68,12 @@ export function fastPath(
   trigger: Trigger,
   admission?: AdmissionRules,
 ): { pass: boolean; reason: string } {
-  if (
-    trigger.source !== 'im'
-    && trigger.source !== 'github'
-    && trigger.source !== 'cli'
-    && trigger.source !== 'a2a'
-    && trigger.source !== 'imessage'
-  ) {
+  if (!(FAST_PATH_SOURCES as readonly string[]).includes(trigger.source)) {
     return { pass: false, reason: 'source-not-allowlisted' }
   }
   // Deny rules precede mention/keyword so an allowlist-plus-mention still drops.
   // No meta-based admission: `meta` is data, never a filter bypass.
-  const denied = admissionDeny(trigger, admission)
+  const denied = admissionDenial(trigger, admission)
   if (denied) return { pass: false, reason: denied }
   if (addressed(trigger)) return { pass: true, reason: 'mention-or-direct' }
   if (ACTION.test(trigger.text)) return { pass: true, reason: 'keyword' }

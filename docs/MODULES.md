@@ -224,6 +224,13 @@ bypass. `tickets.ts` owns `subscribe`/`hide` and `Engine.subscribe`.
 
 ## M6 — memory
 
+`src/connectors/index-store.ts` keeps connector source records under the
+separate `connector` document kind. It is a queryable index, not long-term
+memory: indexing a Gmail message, calendar event, or document never writes an
+`ltm` row and never grants a spill. Its retention is bounded by
+`connectors.json` (`index.maxRecords`, `index.maxAgeDays`), and
+`pnpm ds-agent connectors query` reads it without a model or network call.
+
 `recall.ts` stores large bodies as spill and returns an inline summary plus a
 separate `refs` list. `graph.ts` gives every context object a stable `kind:id`
 handle and builds one-hop ref lists for Trigger, Thread, Ticket, Decision,
@@ -438,6 +445,14 @@ Daemon tick: first sight arms, a long gap fires once, and `lastRunAt` is
 persisted in `routine` documents. The trigger enters `Runtime.ingest`, so it
 passes the same admission, filter, and rules as a message.
 
+`src/connectors/wake.ts` uses that same Daemon pulse for connector/event wake.
+It owns no timer: the first round backfills the connector index, later rounds
+may hand at most one concrete event to `Runtime.ingest`, and quiet hours come
+from the existing `proactive.json` window. The target must be an already-admitted
+private thread; DROP_SELF, actor/group allowlists, min-interval, and daily caps
+are applied before fire. A connector wake is a one-turn Router envelope, never
+a Worker.
+
 `watchdog.ts` runs the timer, detects stalled assignments, repeated job
 failures, and marker-based goal drift (a running report that says it left the
 ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
@@ -447,7 +462,7 @@ ticket scope), and emits nudge/fail actions. `health.ts` is the offline probe.
 
 `src/cli/main.ts` exposes `init`, `tasks`, `status`, `health`, `channels check`,
 `serve`, `chat`, `emit`, `metrics`, `memory`, `a2a`, `pause`, `intervene`,
-`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `routines`, `approvals`, `approve`, `deny`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
+`resume`, `collab`, `team`, `teams`, `agents`, `skills`, `routines`, `connectors`, `approvals`, `approve`, `deny`, `prompt`, `ui`, `backup`, and `restore`. `src/cli/demos/run.ts` drives the
 acceptance scenarios against the
 real GitHub/Feishu channels and a live model; `src/cli/demo.ts` is the offline
 fixture baseline used by `demo:local`. `src/cli/bakeoff.ts` compares the

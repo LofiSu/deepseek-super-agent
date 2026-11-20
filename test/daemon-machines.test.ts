@@ -20,6 +20,36 @@ describe('T40 machines + watchdog idle', () => {
       else process.env.DS_AGENT_MACHINE_STALE_MS = previous
     }
   })
+  it('runs connector polling on the same daemon pulse and honors the start gate', () => {
+    let ticks = 0
+    const connectors = { tick: () => { ticks += 1 } }
+    const daemon = new Daemon(
+      { tick: () => undefined, intervalMs: 60_000 },
+      () => undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      connectors,
+    )
+    daemon.tick(1_000)
+    expect(ticks).toBe(1)
+    daemon.stop()
+
+    const gated = new Daemon(
+      { tick: () => undefined, intervalMs: 60_000 },
+      () => undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      connectors,
+    )
+    gated.start({ routines: false, proactive: false, connectors: false })
+    expect(ticks).toBe(1)
+    gated.stop()
+  })
+
   it('registers heartbeats and resumes hands without session in daemon', () => {
     const machines = new MachineRegistry()
     machines.register('mac-1', ['bash', 'fs'])

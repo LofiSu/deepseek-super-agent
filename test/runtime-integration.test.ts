@@ -4,9 +4,14 @@ import { bindRolePorts } from '../src/core/role-ports.ts'
 import { LocalEnv } from '../src/env/local-env.ts'
 import { ToolRegistry } from '../src/harness/tools.ts'
 import type { Runtime } from '../src/runtime.ts'
-import type { Decision, Disposition, Ticket } from '../src/shared/types.ts'
+import { threadKey, type Decision, type Disposition, type Thread, type Ticket, type Trigger } from '../src/shared/types.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 import { field, lastPrompt, ScriptedModel, silentModel } from './scripted-model.ts'
+import { normalizeConnectorConfig } from '../src/connectors/config.ts'
+import { connectorTrigger, ConnectorWakeScheduler, loadConnectorWakeState } from '../src/connectors/wake.ts'
+import type { ConnectorDraft } from '../src/connectors/types.ts'
+import type { GoogleWorkspaceApi } from '../src/connectors/google.ts'
+import { normalizeProactiveConfig } from '../src/harness/proactive.ts'
 
 const runtimes: Runtime[] = []
 
@@ -91,6 +96,313 @@ function reportingModel(prompts: string[] = []): ScriptedModel {
 }
 
 describe('Runtime service integration', () => {
+  it('resumes a trigger-only interrupted ingress and leaves completed retries duplicate', () => {
+    const runtime = start()
+    const trigger = imTrigger({ id: 'trg_interrupted_ingress', thread: 'recovery/topic', text: 'synthetic event' })
+
+    expect(runtime.ingest(trigger)).toBe('stored')
+    expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)).toBeDefined()
+    const ticket = runtime.store.listDocs<Ticket>('ticket').find(row => row.originTriggerId === trigger.id)
+    expect(ticket).toBeDefined()
+    const originalInputs = ticket!.inputs.filter(input => input.triggerId === trigger.id).length
+    runtime.store.deleteDoc('disposition', trigger.id)
+    expect(runtime.ingest(trigger)).toBe('stored')
+    const resumed = runtime.store.getDoc<Ticket>('ticket', ticket!.id)
+    expect(resumed?.inputs.filter(input => input.triggerId === trigger.id)).toHaveLength(originalInputs)
+    expect(runtime.ingest(trigger)).toBe('duplicate')
+    expect(runtime.store.listDocs<Trigger>('trigger').filter(row => row.id === trigger.id)).toHaveLength(1)
+  })
+
+  it('isolates Runtime-diagnosed incomplete intake while later connector ingress uses Runtime', async () => {
+    const runtime = start()
+    const at = Date.now()
+    const owner = imTrigger({
+      id: 'connector-runtime-owner',
+      thread: 'connector-runtime-owner',
+      text: '@ds-agent please keep this thread available',
+      at: new Date(at).toISOString(),
+    })
+    expect(runtime.ingest(owner)).toBe('stored')
+
+    const oldDraft: ConnectorDraft = {
+      service: 'gmail', kind: 'message', externalId: 'ambiguous-old', title: 'Old notice', text: 'old',
+      occurredAt: new Date(at - 5 * 60_000).toISOString(), updatedAt: new Date(at - 5 * 60_000).toISOString(),
+      wake: true, wakeReason: 'unread important mail',
+    }
+    const oldRecord = runtime.connectorIndex.upsert([oldDraft]).records[0]!
+    const oldTrigger = connectorTrigger(oldRecord, {
+      channel: { source: 'im', thread: owner.channel!.thread }, actor: owner.actor,
+    }, at)
+    runtime.store.putDoc('trigger', oldTrigger.id, oldTrigger)
+    expect(runtime.ingest(oldTrigger)).toBe('incomplete')
+    const oldPending = { at, trigger: oldTrigger, recordId: oldRecord.id, service: 'gmail' as const }
+    runtime.store.putDoc('connector_wake', 'state', {
+      lastCheckAt: at - 16 * 60_000,
+      cursors: { gmail: new Date(at - 16 * 60_000).toISOString() },
+      pending: [oldPending], wakes: [], notified: [],
+    })
+
+    const later: ConnectorDraft = {
+      ...oldDraft, externalId: 'later-useful', title: 'Later notice', text: 'new event',
+      occurredAt: new Date(at - 60_000).toISOString(), updatedAt: new Date(at).toISOString(),
+    }
+    const api: GoogleWorkspaceApi = {
+      async fetch() { return [later] },
+      async fetchPage() { return { drafts: [later] } },
+    }
+    const runner = new ConnectorWakeScheduler({
+      now: () => at,
+      store: runtime.store,
+      index: runtime.connectorIndex,
+      config: normalizeConnectorConfig({
+        enabled: true,
+        google: { services: ['gmail'] },
+        poll: { intervalMinutes: 15 },
+        wake: { enabled: true, services: ['gmail'], source: 'im', thread: owner.channel!.thread, minIntervalMinutes: 15, maxPerDay: 3 },
+      }),
+      api,
+      proactive: normalizeProactiveConfig({ quietStart: '23:00', quietEnd: '08:00', timezone: 'UTC' }),
+      fire: trigger => { runtime.ingest(trigger) },
+    })
+
+    await runner.poll(at)
+    const state = loadConnectorWakeState(runtime.store)
+    const laterRecord = runtime.connectorIndex.query({ limit: 20 }).find(row => row.externalId === 'later-useful')
+    expect(laterRecord).toBeDefined()
+    expect(state.incomplete).toMatchObject([{ pending: { trigger: { id: oldTrigger.id } } }])
+    expect(state.wakes.some(row => row.triggerId === oldTrigger.id)).toBe(false)
+    expect(laterRecord && runtime.store.getDoc<Disposition>('disposition', connectorTrigger(laterRecord, {
+      channel: { source: 'im', thread: owner.channel!.thread }, actor: owner.actor,
+    }, at).id)).toBeDefined()
+  })
+
+  it('does not reroute a partially fanned-out trigger after tickets or subscriptions change', () => {
+    for (const scenario of [
+      { name: 'ended original', endOriginal: true, keepOriginalSubscription: true },
+      { name: 'changed subscription', endOriginal: false, keepOriginalSubscription: false },
+    ]) {
+      const runtime = start()
+      const threadId = `recovery/${scenario.name.replaceAll(' ', '-')}`
+      const seed = imTrigger({
+        id: `trg_seed_${threadId}`,
+        thread: threadId,
+        text: '@ds-agent please fix the login timeout',
+      })
+      runtime.engine.receive(seed)
+      const decision = runtime.engine.evaluateDue()[0]
+      expect(decision?.ticketId).toBeDefined()
+      const original = runtime.store.getDoc<Ticket>('ticket', decision!.ticketId!)!
+      const follow = imTrigger({
+        id: `trg_partial_${threadId}`,
+        thread: threadId,
+        text: 'the timeout still affects another request',
+        actor: 'alex',
+      })
+      const secondaryRef = { source: 'im', id: `${threadId}/secondary` }
+      follow.threads = [...follow.threads, secondaryRef]
+      original.inputs.push({
+        id: `input_partial_${threadId}`,
+        kind: 'trigger',
+        triggerId: follow.id,
+        text: follow.text,
+        at: follow.at,
+        human: true,
+      })
+      if (scenario.endOriginal) {
+        original.ended = { at: new Date().toISOString(), outcome: 'ready', by: 'router' }
+      }
+      runtime.store.putDoc('ticket', original.id, original)
+
+      const { ended: _ended, ...originalBase } = original
+      const replacement: Ticket = {
+        ...originalBase,
+        id: `ticket_replacement_${threadId}`,
+        title: 'Replacement subscriber',
+        originTriggerId: `trg_replacement_${threadId}`,
+        createdAt: new Date().toISOString(),
+        inputs: [],
+      }
+      runtime.store.putDoc('ticket', replacement.id, replacement)
+      const key = threadKey(follow.threads[0]!)
+      const secondaryKey = threadKey(secondaryRef)
+      const laterAt = new Date(Date.parse(follow.at) + 60_000).toISOString()
+      runtime.store.putDoc('thread', secondaryKey, {
+        key: secondaryKey,
+        ref: secondaryRef,
+        createdAt: follow.at,
+        lastAt: laterAt,
+        subscriptions: [],
+        correlated: ['im:preexisting-correlation'],
+        pending: [],
+        meta: {},
+      } satisfies Thread)
+      const thread = runtime.store.getDoc<Thread>('thread', key)!
+      thread.subscriptions = scenario.keepOriginalSubscription
+        ? [original.id, replacement.id]
+        : [replacement.id]
+      runtime.store.putDoc('thread', key, thread)
+      runtime.store.putDoc('trigger', follow.id, follow)
+
+      expect(runtime.ingest(follow)).toBe('incomplete')
+      const resumedOriginal = runtime.store.getDoc<Ticket>('ticket', original.id)!
+      const resumedReplacement = runtime.store.getDoc<Ticket>('ticket', replacement.id)!
+      expect(resumedOriginal.inputs.filter(input => input.triggerId === follow.id)).toHaveLength(1)
+      expect(resumedReplacement.inputs.filter(input => input.triggerId === follow.id)).toHaveLength(0)
+      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toBeUndefined()
+      expect(runtime.store.getDoc('intake_recovery', follow.id)).toMatchObject({ triggerId: follow.id })
+      expect(runtime.store.getDoc<Thread>('thread', key)?.pending).not.toContain(follow.id)
+      const repairedPrimary = runtime.store.getDoc<Thread>('thread', key)!
+      const repairedSecondary = runtime.store.getDoc<Thread>('thread', secondaryKey)!
+      expect(repairedPrimary.lastAt).toBe(follow.at)
+      expect(repairedPrimary.correlated).toContain(secondaryKey)
+      expect(repairedSecondary.lastAt).toBe(laterAt)
+      expect(repairedSecondary.correlated).toEqual(['im:preexisting-correlation', key])
+      expect(runtime.ingest(follow)).toBe('incomplete')
+    }
+  })
+
+  it('keeps ambiguous legacy A/B partial fanout incomplete without rerouting', () => {
+    const runtime = start()
+    const threadId = 'recovery/legacy-partial-a-b'
+    const seed = imTrigger({ id: 'trg_legacy_ab_seed', thread: threadId, text: '@ds-agent fix this timeout' })
+    runtime.engine.receive(seed)
+    const evaluated = runtime.engine.evaluateDue()[0]!
+    const ticketA = runtime.store.getDoc<Ticket>('ticket', evaluated.ticketId!)!
+    const ticketB: Ticket = { ...ticketA, id: 'ticket_legacy_B', inputs: [], channels: [...ticketA.channels] }
+    runtime.store.putDoc('ticket', ticketB.id, ticketB)
+    const key = threadKey(seed.threads[0]!)
+    const thread = runtime.store.getDoc<Thread>('thread', key)!
+    thread.subscriptions = [ticketA.id, ticketB.id]
+    runtime.store.putDoc('thread', key, thread)
+    const follow = imTrigger({ id: 'trg_legacy_ab_follow', thread: threadId, text: 'still failing' })
+    ticketA.inputs.push({
+      id: 'input_legacy_ab_A', kind: 'trigger', triggerId: follow.id,
+      text: follow.text, at: follow.at, human: true,
+    })
+    runtime.store.putDoc('ticket', ticketA.id, ticketA)
+    runtime.store.putDoc('trigger', follow.id, follow)
+
+    expect(runtime.ingest(follow)).toBe('incomplete')
+    expect(runtime.store.getDoc<Ticket>('ticket', ticketB.id)?.inputs).toHaveLength(0)
+    expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toBeUndefined()
+    expect(runtime.store.getDoc('intake_recovery', follow.id)).toBeDefined()
+  })
+
+  it('restores pending Eval for legacy partial bot and context-only routing', () => {
+    for (const scenario of [
+      { name: 'bot', human: false, contextOnly: false },
+      { name: 'context-only', human: true, contextOnly: true },
+    ]) {
+      const runtime = start()
+      const threadId = `recovery/${scenario.name}-eval`
+      const seed = imTrigger({
+        id: `trg_${scenario.name}_eval_seed`,
+        thread: threadId,
+        text: '@ds-agent please fix the timeout issue',
+      })
+      runtime.engine.receive(seed)
+      const decision = runtime.engine.evaluateDue()[0]
+      const ticket = runtime.store.getDoc<Ticket>('ticket', decision!.ticketId!)!
+      const follow = {
+        ...imTrigger({
+          id: `trg_${scenario.name}_eval_partial`,
+          thread: threadId,
+          text: 'background CI timeout details need review',
+        }),
+        human: scenario.human,
+      }
+      const key = threadKey(follow.threads[0]!)
+      if (scenario.contextOnly) runtime.engine.followForContext(ticket.id, key)
+      ticket.inputs.push({
+        id: `input_${scenario.name}_eval_partial`,
+        kind: 'context',
+        triggerId: follow.id,
+        text: follow.text,
+        at: follow.at,
+        human: follow.human,
+      })
+      runtime.store.putDoc('ticket', ticket.id, ticket)
+      runtime.store.putDoc('trigger', follow.id, follow)
+      const thread = runtime.store.getDoc<Thread>('thread', key)!
+      thread.pending = thread.pending.filter(triggerId => triggerId !== follow.id)
+      runtime.store.putDoc('thread', key, thread)
+
+      expect(runtime.ingest(follow)).toBe('incomplete')
+      expect(runtime.store.getDoc<Disposition>('disposition', follow.id)).toBeUndefined()
+      expect(runtime.store.getDoc('intake_recovery', follow.id)).toBeDefined()
+      expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.filter(input => input.triggerId === follow.id))
+        .toHaveLength(1)
+      expect(runtime.store.getDoc<Thread>('thread', key)?.pending).not.toContain(follow.id)
+      expect(runtime.store.listDocs<Ticket>('ticket').some(row => row.originTriggerId === follow.id)).toBe(false)
+    }
+  })
+
+  it('rolls back Intake routing and disposition together on a mid-receive failure', () => {
+    const runtime = start()
+    const threadId = 'recovery/atomic'
+    const seed = imTrigger({
+      id: 'trg_atomic_seed',
+      thread: threadId,
+      text: '@ds-agent please fix the login timeout',
+    })
+    runtime.engine.receive(seed)
+    const decision = runtime.engine.evaluateDue()[0]
+    const ticket = runtime.store.getDoc<Ticket>('ticket', decision!.ticketId!)!
+    const trigger = imTrigger({
+      id: 'trg_atomic_intake',
+      thread: threadId,
+      text: 'the login timeout is still present',
+      actor: 'alex',
+    })
+    const originalAddEvent = runtime.store.addEvent.bind(runtime.store)
+    const bypassBefore = runtime.metrics.snapshot().counters['bypass.fanout']
+    runtime.store.addEvent = (() => { throw new Error('injected Intake write failure') }) as typeof runtime.store.addEvent
+    expect(() => runtime.engine.receive(trigger)).toThrow(/injected Intake write failure/)
+    expect(runtime.metrics.snapshot().counters['bypass.fanout']).toBe(bypassBefore)
+    runtime.store.addEvent = originalAddEvent
+    expect(runtime.store.getDoc<Trigger>('trigger', trigger.id)).toBeUndefined()
+    expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)).toBeUndefined()
+    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.some(input => input.triggerId === trigger.id)).toBe(false)
+
+    expect(runtime.engine.receive(trigger)).toBe('stored')
+    expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)?.fanout).toEqual([ticket.id])
+    expect(runtime.store.getDoc<Ticket>('ticket', ticket.id)?.inputs.filter(input => input.triggerId === trigger.id)).toHaveLength(1)
+    expect(runtime.metrics.snapshot().counters['bypass.fanout']).toBe(bypassBefore + 1)
+    expect(runtime.engine.receive(trigger)).toBe('duplicate')
+    expect(runtime.metrics.snapshot().counters['bypass.fanout']).toBe(bypassBefore + 1)
+  })
+
+  it('fences an in-flight connector poll before Runtime.finish drains and closes Store', async () => {
+    let rejectPage: ((error: Error) => void) | undefined
+    let resolveStarted!: () => void
+    const started = new Promise<void>(resolve => { resolveStarted = resolve })
+    const runtime = freshRuntime({
+      model: silentModel(),
+      env: isolatedEnv(),
+      watchdogIntervalMs: 60_000,
+      connectors: normalizeConnectorConfig({
+        enabled: true,
+        google: { services: ['gmail'] },
+        wake: { enabled: false, services: ['gmail'] },
+      }),
+      connectorApi: {
+        async fetch() { return [] },
+        fetchPage() {
+          resolveStarted()
+          return new Promise((_resolve, reject) => { rejectPage = reject })
+        },
+      },
+    })
+    runtimes.push(runtime)
+    const poll = runtime.connectorWake.poll(Date.now())
+    await started
+    await runtime.finish()
+    expect(runtime.store.isOpen).toBe(false)
+    rejectPage?.(new Error('late provider rejection after shutdown'))
+    await expect(poll).resolves.toMatchObject({ action: 'disabled', reason: 'stopping' })
+    expect(runtime.log.text()).not.toContain('late provider rejection after shutdown')
+  }, 5_000)
+
   it('routes a trigger to a shard, runs that router session, and places the worker on the mesh', async () => {
     const runtime = start({
       env: isolatedEnv({

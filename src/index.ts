@@ -2,6 +2,50 @@ export { createModelFromEnv, requireLiveModelFromEnv, HttpOpenAI, MockModel } fr
 export { PROVIDER_PRESETS, resolveLiveApi, type LiveApi, type ProviderPreset } from './harness/providers.ts'
 export { Runtime, type RuntimeOptions } from './runtime.ts'
 export {
+  CONNECTORS_FILE,
+  DEFAULT_CONNECTOR_CONFIG,
+  loadConnectorConfig,
+  normalizeConnectorConfig,
+  parseGoogleCredentials,
+  resolveGoogleCredentials,
+  type ConnectorConfig,
+  type ConnectorIndexConfig,
+  type ConnectorPollConfig,
+  type ConnectorWakeConfig,
+  type GoogleConnectorConfig,
+  type GoogleCredentials,
+} from './connectors/config.ts'
+export { ConnectorIndex, type ConnectorIndexStats, type ConnectorUpsert } from './connectors/index-store.ts'
+export {
+  HttpGoogleWorkspaceApi,
+  type GoogleWorkspaceApi,
+  type GoogleFetchPage,
+  type GoogleFetchQuery,
+} from './connectors/google.ts'
+export { RefreshTokenProvider, type GoogleTokenProvider } from './connectors/oauth.ts'
+export {
+  CONNECTOR_TRIGGER_PREFIX,
+  ConnectorWakeScheduler,
+  connectorTrigger,
+  isConnectorWakeTicket,
+  loadConnectorWakeState,
+  type ConnectorPendingWake,
+  type ConnectorWakeAction,
+  type ConnectorWakeResult,
+  type ConnectorWakeState,
+} from './connectors/wake.ts'
+export {
+  CONNECTOR_KINDS,
+  GOOGLE_SERVICES,
+  connectorRecordId,
+  isGoogleService,
+  type ConnectorDraft,
+  type ConnectorKind,
+  type ConnectorQuery,
+  type ConnectorRecord,
+  type GoogleService,
+} from './connectors/types.ts'
+export {
   LocalAgentRegistry,
   loadLocalAgents,
   normalizeLocalAgents,

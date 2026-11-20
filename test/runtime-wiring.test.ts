@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { cliTrigger } from '../src/channels/cli.ts'
 import { githubTrigger } from '../src/channels/github.ts'
 import { imTrigger } from '../src/channels/im.ts'
+import { normalizeConnectorConfig } from '../src/connectors/config.ts'
+import { MockModel } from '../src/harness/model.ts'
 import type { Runtime } from '../src/runtime.ts'
 import type { Ticket } from '../src/shared/types.ts'
 import { freshRuntime, settleWithDeadline, shutdown } from './fixtures.ts'
@@ -90,5 +92,26 @@ describe('Runtime services', () => {
     const saved = runtime.longTermMemory.put('ticket_1', 'auth token expired on login')
     expect(runtime.longTermMemory.query({ ticketId: 'ticket_2', text: 'token expired' }))
       .toEqual([saved])
+  })
+
+  it('wires the connector index and wake scheduler without touching long-term memory', async () => {
+    runtime = freshRuntime({
+      model: new MockModel(),
+      allowMockModel: true,
+      connectors: normalizeConnectorConfig({
+        enabled: true,
+        google: { services: ['gmail'] },
+        wake: { enabled: true, services: ['gmail'] },
+      }),
+      connectorApi: { fetch: async () => [] },
+    })
+    expect(runtime.connectorConfig.enabled).toBe(true)
+    expect(runtime.connectorConfig.google.services).toEqual(['gmail'])
+    expect(runtime.connectorIndex.stats().count).toBe(0)
+    expect(runtime.log.text()).toContain('[connector] enabled=true')
+    const result = await runtime.connectorWake.poll(Date.now())
+    expect(result.action).toBe('backfill')
+    expect(runtime.connectorIndex.stats().count).toBe(0)
+    expect(runtime.store.listDocs('ltm')).toEqual([])
   })
 })

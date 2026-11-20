@@ -17,18 +17,25 @@ export class Daemon {
      * to the normal ingress path.
      */
     private readonly proactive?: { tick: (now: number) => unknown },
+    /**
+     * Connector/event wake, due-checked on the same pulse. Like the idle wake
+     * it owns no timer and never starts a Worker; `tick` may hand one concrete
+     * event to the normal ingress path.
+     */
+    private readonly connectors?: { tick: (now: number) => unknown },
   ) {}
 
   /**
-   * Long-lived processes pass `routines: true`. One-shot CLI commands must
-   * leave it false: firing a routine from a short-lived `approve`/`retry`
-   * process starts owner-level work whose channel loop is not running.
+   * Long-lived processes pass `routines`, `proactive`, and `connectors` true.
+   * One-shot CLI commands must leave them false: firing owner-level work from a
+   * short-lived process starts messages whose channel loop is not running.
    */
-  start(options: { routines?: boolean; proactive?: boolean } = {}): void {
+  start(options: { routines?: boolean; proactive?: boolean; connectors?: boolean } = {}): void {
     this.log('[daemon] start')
     this.safeTick(() => this.watchdog.tick())
     if (options.routines !== false) this.safeTick(() => this.routines?.tick(Date.now()))
     if (options.proactive !== false) this.safeTick(() => this.proactive?.tick(Date.now()))
+    if (options.connectors !== false) this.safeTick(() => this.connectors?.tick(Date.now()))
     this.timer = setInterval(() => this.tick(), this.watchdog.intervalMs)
   }
 
@@ -49,6 +56,7 @@ export class Daemon {
     this.safeTick(() => this.watchdog.tick())
     this.safeTick(() => this.routines?.tick(now))
     this.safeTick(() => this.proactive?.tick(now))
+    this.safeTick(() => this.connectors?.tick(now))
   }
 
   /**

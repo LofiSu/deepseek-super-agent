@@ -51,6 +51,17 @@ import { loadPromptFiles, type PromptFiles } from './harness/prompts.ts'
 import { LocalAgentRegistry, loadLocalAgents, type LocalAgentSpec } from './env/local-agents.ts'
 import { SkillRegistry } from './env/skills.ts'
 import { ToolRegistry } from './harness/tools.ts'
+import {
+  loadConnectorConfig,
+  normalizeConnectorConfig,
+  resolveGoogleCredentials,
+  type ConnectorConfig,
+} from './connectors/config.ts'
+import { HttpGoogleWorkspaceApi, type GoogleWorkspaceApi } from './connectors/google.ts'
+import { ConnectorIndex } from './connectors/index-store.ts'
+import { RefreshTokenProvider } from './connectors/oauth.ts'
+import { ConnectorWakeScheduler } from './connectors/wake.ts'
+import { UserError } from './shared/errors.ts'
 import { filterTrigger, type AdmissionRules, type FilterVerdict } from './ingress/filter.ts'
 import {
   DEFAULT_POLICY_TIMEOUT_MS,
@@ -135,6 +146,18 @@ export interface RuntimeOptions {
    * off unless the owner sets `"enabled": true`. The model cannot edit it.
    */
   proactive?: ProactiveConfig
+  /**
+   * Owner-gated Google Workspace connectors and the connector data index.
+   * Defaults to `connectors.json` in `home`; a missing file means disabled.
+   * Invalid config fails startup, and enabled config requires credentials.
+   */
+  connectors?: ConnectorConfig
+  /**
+   * Injected read-only Google API for tests or an owner-provided transport.
+   * When set, OAuth credentials are not required. It never makes a network
+   * call by itself.
+   */
+  connectorApi?: GoogleWorkspaceApi
   /** Local A2A address and mesh node id. Defaults to `DS_AGENT_INSTANCE_ID` or `local`. */
   instanceId?: string
   /** Worker slots this process advertises. Defaults to `DS_AGENT_MESH_CAPACITY` or 4. */
@@ -414,6 +437,12 @@ export class Runtime {
   readonly routines?: RoutineScheduler
   /** Owner-gated idle self-wake, due-checked by the same daemon pulse. */
   readonly proactive: ProactiveScheduler
+  /** Owner-gated connector configuration; disabled when the file is absent. */
+  readonly connectorConfig: ConnectorConfig
+  /** Queryable connector source index. Separate from long-term memory. */
+  readonly connectorIndex: ConnectorIndex
+  /** Connector/event wake, due-checked by the same daemon pulse. */
+  readonly connectorWake: ConnectorWakeScheduler
   /** Local A2A address and Worker mesh node id. */
   readonly instanceId: string
   readonly routerShards: RouterShardRegistry
@@ -478,6 +507,9 @@ export class Runtime {
     browserErrands?: BrowserErrands
     routines?: RoutineScheduler
     proactive: ProactiveScheduler
+    connectorConfig: ConnectorConfig
+    connectorIndex: ConnectorIndex
+    connectorWake: ConnectorWakeScheduler
     instanceId: string
     routerShards: RouterShardRegistry
     workerMesh: WorkerMeshRegistry
@@ -511,6 +543,9 @@ export class Runtime {
     this.browserErrands = parts.browserErrands
     this.routines = parts.routines
     this.proactive = parts.proactive
+    this.connectorConfig = parts.connectorConfig
+    this.connectorIndex = parts.connectorIndex
+    this.connectorWake = parts.connectorWake
     this.instanceId = parts.instanceId
     this.routerShards = parts.routerShards
     this.workerMesh = parts.workerMesh
@@ -532,18 +567,34 @@ export class Runtime {
 
   static create(opts: RuntimeOptions): Runtime {
     const baseEnv = opts.env ?? process.env
+    // Owner-gated and off when `connectors.json` is absent. A malformed file
+    // fails here, before SQLite or a network client is opened. Credentials are
+    // read only after an explicit enable.
+    const connectorConfig = opts.connectors === undefined
+      ? loadConnectorConfig(opts.home, baseEnv)
+      : normalizeConnectorConfig(opts.connectors)
+    const googleCredentials = opts.connectorApi === undefined
+      ? resolveGoogleCredentials(connectorConfig, opts.home, baseEnv)
+      : undefined
     const mcpConfig = mcpServersFromConfig(opts.mcpServers, baseEnv)
     const browserConfig = opts.browserErrands === false
       ? undefined
       : opts.browserErrands ?? loadBrowserErrands(opts.home, baseEnv)
     const browserSecrets = browserDriverSecretValues(browserConfig, baseEnv)
-    // Configured driver credentials join secret-named environment values before
-    // anything logs, reaches a model, or persists to a journal.
+    // Credential material is redacted before it can reach a log or an index
+    // body. `secretValues` may not recognize every credential env name, so the
+    // resolved fields are added explicitly.
+    const connectorSecrets = googleCredentials
+      ? [googleCredentials.clientId, googleCredentials.clientSecret, googleCredentials.refreshToken]
+      : []
+    // Configured driver and connector credentials are explicit so even short
+    // values are redacted; secret-named environment values are discovered too.
+    const explicitSecrets = [...browserSecrets, ...connectorSecrets]
     const secrets = [...new Set([
       ...secretValues(baseEnv),
       ...mcpConfig.configs.flatMap(config => secretValues(config.env)),
     ])].sort((a, b) => b.length - a.length)
-    const redact = (text: string) => redactKnownSecrets(text, browserSecrets, secrets)
+    const redact = (text: string) => redactKnownSecrets(text, explicitSecrets, secrets)
     const log = new RedactingLogger(redact)
     if (mcpConfig.error) log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${mcpConfig.error}`)
     const model = opts.model ?? createModelFromEnv(baseEnv)
@@ -567,6 +618,25 @@ export class Runtime {
     const metrics = new Metrics(opts.home)
     const env = new LocalEnv(path.join(opts.home, 'workspaces'), { env: baseEnv })
     const now = opts.now ?? (() => new Date().toISOString())
+    const connectorIndex = new ConnectorIndex(store, { redact, now: () => new Date(now()) })
+    let connectorApi = opts.connectorApi
+    if (!connectorApi && connectorConfig.enabled) {
+      if (!googleCredentials) {
+        throw new UserError('connectors are enabled but Google credentials are unavailable')
+      }
+      const tokenProvider = new RefreshTokenProvider(googleCredentials, { now: () => Date.parse(now()) })
+      connectorApi = new HttpGoogleWorkspaceApi(tokenProvider, { now: () => Date.parse(now()) })
+    }
+    log.info(
+      `[connector] enabled=${connectorConfig.enabled} services=${connectorConfig.google.services.join(',')} `
+      + `pollIntervalMinutes=${connectorConfig.poll.intervalMinutes} `
+      + `indexMaxRecords=${connectorConfig.index.maxRecords} indexMaxAgeDays=${connectorConfig.index.maxAgeDays}`,
+    )
+    log.info(
+      `[connector] wake enabled=${connectorConfig.wake.enabled} services=${connectorConfig.wake.services.join(',')} `
+      + `target=${connectorConfig.wake.source}:${connectorConfig.wake.thread} `
+      + `minIntervalMinutes=${connectorConfig.wake.minIntervalMinutes} maxPerDay=${connectorConfig.wake.maxPerDay}`,
+    )
     const promptFiles = opts.prompts ?? loadPromptFiles(opts.home, baseEnv, line => log.info(line))
     const localAgentSpecs = opts.localAgents ?? loadLocalAgents(opts.home, baseEnv)
     const localAgents = localAgentSpecs.length
@@ -691,6 +761,21 @@ export class Runtime {
     const a2aRouter = new A2ARouter(store)
     // T16 admission is deterministic and runs before mention/keyword. Ids only.
     const admission = admissionRulesFromEnv(baseEnv, opts.admission)
+    // Same daemon pulse as routines and the idle wake, same ingress path. The
+    // scheduler owns no timer and only fires when a source record carries a
+    // concrete usefulness signal; the first round is an index-only backfill.
+    const connectorWake = new ConnectorWakeScheduler({
+      now: () => Date.parse(now()),
+      store,
+      config: connectorConfig,
+      index: connectorIndex,
+      ...(connectorApi ? { api: connectorApi } : {}),
+      proactive: proactiveConfig,
+      admission,
+      env: baseEnv,
+      fire: trigger => fireRoutine(trigger),
+      log: line => log.info(line),
+    })
     // T17 Slow Path: rules by default. Model mode is explicit and fail-closed.
     const slowPath = resolveSlowPath(baseEnv, opts.slowPath, model, log)
     log.info(`[runtime] instance=${instanceId} meshCapacity=${meshCapacity} meshQueue=${meshQueue} shards=${routerShards.list().length}`)
@@ -2025,6 +2110,7 @@ export class Runtime {
       undefined,
       routines,
       proactive,
+      connectorWake,
     )
     const runtime = new Runtime({
       home: opts.home,
@@ -2042,6 +2128,9 @@ export class Runtime {
       ...(browserErrands ? { browserErrands } : {}),
       ...(routines ? { routines } : {}),
       proactive,
+      connectorConfig,
+      connectorIndex,
+      connectorWake,
       instanceId,
       routerShards,
       workerMesh,
@@ -2337,12 +2426,13 @@ export class Runtime {
    * Start the daemon timer. `assessPending: false` also disables every later
    * assessment path (including `onAssessmentNeeded` from flushEvals), so a
    * MockModel process leaves Gate-deferred work queued instead of consuming it.
-   * `routines: true` / `proactive: true` are only for long-lived serving
-   * processes: a one-shot CLI command must not fire owner-level work whose
-   * channel loop is not running. The proactive scheduler is still disabled
-   * unless `proactive.json` enables it.
+   * `routines: true` / `proactive: true` / `connectors: true` are only for
+   * long-lived serving processes: a one-shot CLI command must not fire
+   * owner-level work whose channel loop is not running. The proactive scheduler
+   * is still disabled unless `proactive.json` enables it, and connector polling
+   * stays off unless `connectors.json` enables it.
    */
-  start(options: { assessPending?: boolean; routines?: boolean; proactive?: boolean } = {}): void {
+  start(options: { assessPending?: boolean; routines?: boolean; proactive?: boolean; connectors?: boolean } = {}): void {
     this.assessmentsEnabled = options.assessPending !== false
     // The Router layer is resident: every configured shard gets its Session
     // before recovery, assessment, or the first Trigger.
@@ -2351,6 +2441,7 @@ export class Runtime {
     this.daemon.start({
       routines: options.routines === true,
       proactive: options.proactive === true,
+      connectors: options.connectors === true,
     })
     if (this.assessmentsEnabled) {
       // Resume Gate-deferred work left in SQLite by a previous process.
@@ -2840,6 +2931,10 @@ export class Runtime {
   /** A persisted trigger id is a duplicate; re-receive so the Engine stays authoritative. */
   private duplicate(trigger: Trigger): ReceiveResult | undefined {
     if (!this.store.getDoc<Trigger>('trigger', trigger.id)) return undefined
+    // Engine.receive commits Intake's trigger, routing, and disposition in one
+    // Store transaction; a process crash rolls them all back. Resume a legacy or
+    // fault-injected trigger-only row; a completed row remains a duplicate.
+    if (!this.store.getDoc<Disposition>('disposition', trigger.id)) return undefined
     const result = this.engine.receive(trigger)
     this.log.info(`[engine] Intake.receive id=${trigger.id} result=${result}`)
     return result
@@ -3118,6 +3213,9 @@ export class Runtime {
       failure = error
     }
     try {
+      // Stop pulse admissions and fence connector polling before any final drain.
+      this.daemon.stop()
+      await this.connectorWake.stop()
       // Local specialists and browser drivers run detached in their own
       // process group, so they would outlive this process. Kill them before
       // draining: shutdown must not block on a slow child, and no child may
