@@ -57,6 +57,28 @@ osFaultDescribe('external effects unknown-outcome gate (OS fault)', () => {
     }
   })
 
+  it('reports missing Python before creating any probe home or fixture', async () => {
+    const previousPath = process.env.PATH
+    const previousTmpdir = process.env.TMPDIR
+    const pathWithoutPython = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-no-python-path-'))
+    const emptyTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-no-python-temp-'))
+    process.env.PATH = pathWithoutPython
+    process.env.TMPDIR = emptyTemp
+    try {
+      await expect(runDelegateCapabilityProbe('missing_open')).rejects.toThrow(
+        'Python 3 is required for Linux delegate capability probes',
+      )
+      expect(fs.readdirSync(emptyTemp)).toEqual([])
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      if (previousTmpdir === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = previousTmpdir
+      fs.rmSync(pathWithoutPython, { recursive: true, force: true })
+      fs.rmSync(emptyTemp, { recursive: true, force: true })
+    }
+  })
+
   it.each([
     'open_enosys', 'signal_enosys', 'missing_open', 'missing_signal',
     'permission_open', 'permission_signal',

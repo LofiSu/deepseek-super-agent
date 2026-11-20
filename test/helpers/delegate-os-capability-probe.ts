@@ -13,13 +13,29 @@ export interface CapabilityProbeResult {
 }
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-const python = execFileSync('which', ['python3'], { encoding: 'utf8' }).trim()
+
+function resolvePython(): string {
+  try {
+    const executable = execFileSync(
+      'python3',
+      ['-c', 'import os, sys; print(os.path.realpath(sys.executable))'],
+      { encoding: 'utf8' },
+    ).trim()
+    if (!executable) throw new Error('python3 returned an empty executable path')
+    return executable
+  } catch (error) {
+    throw new Error(
+      'Python 3 is required for Linux delegate capability probes; install python3 and ensure it is available on PATH',
+      { cause: error },
+    )
+  }
+}
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, "'\\''")}'`
 }
 
-function probeScripts(home: string): string {
+function probeScripts(home: string, python: string): string {
   const injector = path.join(home, 'inject.py')
   fs.writeFileSync(injector, String.raw`
 import errno, os, runpy, signal, sys
@@ -72,8 +88,12 @@ export async function runDelegateCapabilityProbe(
   stage: string,
   target: 'supervisor' | 'outer-guard' = 'supervisor',
 ): Promise<CapabilityProbeResult> {
+  if (process.platform !== 'linux') {
+    throw new Error('delegate capability probes require Linux')
+  }
+  const python = resolvePython()
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-capability-test-'))
-  const shim = probeScripts(home)
+  const shim = probeScripts(home, python)
   const fixture = path.join(repo, 'test/fixtures/delegate-ipc-hold.mjs')
   fs.writeFileSync(path.join(home, 'local-agents.json'), JSON.stringify({ agents: [{
     id: 'ipc-hold', command: process.execPath, args: [fixture, '{task}'],
