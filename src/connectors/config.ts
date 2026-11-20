@@ -60,7 +60,7 @@ export interface ConnectorWakeConfig {
   maxPerDay: number
   /** How far back the first backfill or a fresh service looks. */
   lookbackMinutes: number
-  /** Imminent calendar events, and tasks due inside this window, may wake. */
+  /** Current admission lookahead for imminent Calendar events and due Tasks. */
   calendarLookaheadMinutes: number
 }
 

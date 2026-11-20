@@ -43,6 +43,12 @@ const WAKE_RETENTION_MS = 7 * 86_400_000
 const NOTIFIED_RETENTION_MS = 30 * 86_400_000
 const CURSOR_OVERLAP_MS = 5 * 60_000
 
+type CalendarAdmission =
+  | { decision: 'eligible-now' }
+  | { decision: 'not-yet' }
+  | { decision: 'expired' }
+  | { decision: 'provenance-unknown' }
+
 export interface ConnectorWakeRow {
   at: number
   triggerId: string
@@ -384,11 +390,13 @@ export class ConnectorWakeScheduler {
       )
       return { action: 'backfill', ...counts }
     }
-    if (base.pending?.length) {
+    const blocksSelection = base.pending?.find(pending =>
+      this.calendarAdmission(pending.service, pending.calendarProvenance, decisionAt).decision !== 'not-yet',
+    )
+    if (blocksSelection) {
       this.saveState(committed())
-      const pending = base.pending[0]!
-      this.log(`[connector] wake selection suppressed pending triggerId=${pending.trigger.id}`)
-      return { action: 'wake', recordId: pending.recordId, trigger: pending.trigger, ...counts }
+      this.log(`[connector] wake selection suppressed pending triggerId=${blocksSelection.trigger.id}`)
+      return { action: 'wake', recordId: blocksSelection.recordId, trigger: blocksSelection.trigger, ...counts }
     }
     if (!config.wake.enabled) {
       this.saveState(committed())
@@ -535,29 +543,34 @@ export class ConnectorWakeScheduler {
   private calendarRecordEligible(record: ConnectorRecord, at: number): boolean {
     if (record.service !== 'calendar' || record.kind !== 'event'
       || record.wakeReason !== 'calendar event starting soon') return true
-    const deadline = this.calendarEligibilityDeadline('calendar', {
+    return this.calendarAdmission('calendar', {
       version: 1,
       kind: 'event',
       occurredAt: record.occurredAt,
       updatedAt: record.updatedAt,
       wakeReason: record.wakeReason,
-    })
-    return deadline !== undefined && at <= deadline
+    }, at).decision === 'eligible-now'
   }
 
-  private calendarPendingDeadline(pending: ConnectorPendingWake): number | undefined {
-    return this.calendarEligibilityDeadline(pending.service, pending.calendarProvenance)
-  }
-
-  private calendarEligibilityDeadline(
+  private calendarAdmission(
     service: GoogleService,
     provenance: ConnectorPendingWake['calendarProvenance'],
-  ): number | undefined {
-    if (service !== 'calendar' || provenance?.version !== 1
-      || provenance.kind !== 'event' || provenance.wakeReason !== 'calendar event starting soon') return undefined
-    const occurredAt = Date.parse(provenance.occurredAt)
-    if (!Number.isFinite(occurredAt)) return undefined
-    return calendarEventWakeDeadline(occurredAt)
+    at: number,
+  ): CalendarAdmission {
+    if (service !== 'calendar') return { decision: 'eligible-now' }
+    if (provenance?.version !== 1 || provenance.kind !== 'event'
+      || !Number.isFinite(Date.parse(provenance.occurredAt))) {
+      return { decision: 'provenance-unknown' }
+    }
+    if (provenance.wakeReason !== 'calendar event starting soon') return { decision: 'eligible-now' }
+    const start = Date.parse(provenance.occurredAt)
+    const deadline = calendarEventWakeDeadline(start)
+    if (deadline === undefined) return { decision: 'provenance-unknown' }
+    if (at > deadline) return { decision: 'expired' }
+    if (start > at + this.opts.config.wake.calendarLookaheadMinutes * 60_000) {
+      return { decision: 'not-yet' }
+    }
+    return { decision: 'eligible-now' }
   }
 
   private reconcilePending(state: ConnectorWakeState, decisionAt: number, enabled: boolean): ConnectorWakeState {
@@ -622,12 +635,30 @@ export class ConnectorWakeScheduler {
         changed = true
         continue
       }
-      // Use only the immutable typed facts captured for this source revision.
-      const eligibilityDeadline = this.calendarPendingDeadline(pending)
-      if (!this.ingressComplete(pending.trigger.id)
-        && eligibilityDeadline !== undefined
-        && decisionAt > eligibilityDeadline) {
+      // Use only the immutable typed facts captured for this source revision,
+      // together with the owner's current lookahead configuration.
+      const calendarAdmission = this.calendarAdmission(pending.service, pending.calendarProvenance, decisionAt)
+      if (calendarAdmission.decision === 'provenance-unknown') {
+        state.pending = (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id)
+        state.uncertain = [...(state.uncertain ?? []), {
+          pending,
+          reason: 'calendar-provenance-unavailable',
+          isolatedAt: decisionAt,
+        }]
+        changed = true
+        continue
+      }
+      if (calendarAdmission.decision === 'expired') {
         state = this.retirePending(state, pending, decisionAt, 'calendar-window-expired')
+        continue
+      }
+      if (calendarAdmission.decision === 'not-yet') {
+        const reason = this.pendingAuthorizationReason(state, pending, decisionAt, enabled)
+        if (reason === 'private-target-changed' || reason === 'no-current-private-target') {
+          state = this.retirePending(state, pending, decisionAt, reason)
+        }
+        // Future-window deferral retains the original row and does not hold up
+        // later eligible pending rows or fresh connector sources.
         continue
       }
       if (!this.ingressComplete(pending.trigger.id)) {

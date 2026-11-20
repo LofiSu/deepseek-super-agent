@@ -113,9 +113,25 @@ silent if it is not useful. The Router prompt and reply path also suppress the
 canned acknowledgement. Irreversible actions still go through the existing
 approval state machine; this feature adds no bypass.
 
-The wake state (cursors, last wake, notified revisions) is persisted under the
-`connector_wake` document kind, so a restart does not replay the same source
-revision.
+The wake state (cursors, last wake, notified revisions, and unresolved original
+pending payloads) is persisted under the `connector_wake` document kind. For an
+imminent Calendar event, `calendarLookaheadMinutes` is checked again as the
+current admission window after restart or configuration change, together with
+the inclusive 15-minute grace after the event starts. A pending event outside
+the current lookahead remains stored with its original identity and provider
+facts; each pulse rechecks it, and widening the lookahead can admit it sooner.
+The expiry policy retires it only after the 15-minute grace has passed. Such a
+future event does not block other eligible connector sources or count as a
+successful wake.
+
+Each retry also rechecks current wake/service enablement, quiet hours, actor and
+group admission, wake caps, minimum interval, and the existing private target.
+An explicitly changed or revoked private target retains the existing retirement
+behavior. Uncertain Calendar provenance and incomplete Intake recovery remain
+isolated until trusted repair; the lookahead change does not infer facts or
+routing from the mutable index or current subscriptions. Recovery is supported
+for one scheduler/runtime using the Store's durable state; concurrent
+multi-runtime writers are not covered by this contract.
 
 ## Boundaries
 
