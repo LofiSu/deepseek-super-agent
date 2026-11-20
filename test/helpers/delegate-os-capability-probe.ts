@@ -1,6 +1,8 @@
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export interface CapabilityProbeResult {
   exitCode: number | null
@@ -10,8 +12,12 @@ export interface CapabilityProbeResult {
   home: string
 }
 
-const control = '/workspace/dsh-fix-180-s3-control'
-const python = '/usr/bin/python3'
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+const python = execFileSync('which', ['python3'], { encoding: 'utf8' }).trim()
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/gu, "'\\''")}'`
+}
 
 function probeScripts(home: string): string {
   const injector = path.join(home, 'inject.py')
@@ -47,13 +53,17 @@ if target.endswith('delegate-os-supervisor.py') or target.endswith('delegate-os-
             if sig != 0: return fail(errno.ENOSYS, 'late pidfd_send_signal')(pidfd, sig, *args, **kwargs)
             return base_send(pidfd, sig, *args, **kwargs)
         signal.pidfd_send_signal = late_send
+with open(os.path.join(os.environ['HOME'], 'probe-env.json'), 'w', encoding='utf8') as audit:
+    import json
+    json.dump({'home': os.environ.get('HOME'), 'node_options': os.environ.get('NODE_OPTIONS'),
+               'api_key': os.environ.get('DS_AGENT_API_KEY')}, audit)
 sys.argv = [target, *args]
 runpy.run_path(target, run_name='__main__')
 `)
   const shim = path.join(home, 'bin')
   fs.mkdirSync(shim)
   const executable = path.join(shim, 'python3')
-  fs.writeFileSync(executable, `#!/bin/sh\nexec ${python} ${JSON.stringify(injector)} "$@"\n`)
+  fs.writeFileSync(executable, `#!/bin/sh\nexec ${shellQuote(python)} ${shellQuote(injector)} "$@"\n`)
   fs.chmodSync(executable, 0o700)
   return shim
 }
@@ -62,10 +72,9 @@ export async function runDelegateCapabilityProbe(
   stage: string,
   target: 'supervisor' | 'outer-guard' = 'supervisor',
 ): Promise<CapabilityProbeResult> {
-  const home = fs.mkdtempSync(path.join(control, 'capability-test-'))
-  const repo = process.cwd()
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-agent-capability-test-'))
   const shim = probeScripts(home)
-  const fixture = path.resolve(repo, 'test/fixtures/delegate-ipc-hold.mjs')
+  const fixture = path.join(repo, 'test/fixtures/delegate-ipc-hold.mjs')
   fs.writeFileSync(path.join(home, 'local-agents.json'), JSON.stringify({ agents: [{
     id: 'ipc-hold', command: process.execPath, args: [fixture, '{task}'],
     env: ['DS_AGENT_TEST_DELEGATE_PID_FILE'], timeoutMs: 60_000,
@@ -73,14 +82,13 @@ export async function runDelegateCapabilityProbe(
   const reportFile = path.join(home, 'supervisor-report.json')
   const helperMarker = path.join(home, 'helper-launch-attempted')
   const env = {
-    PATH: `${shim}:/usr/local/bin:/usr/bin:/bin`,
+    PATH: `${shim}:${process.env.PATH ?? ''}`,
     HOME: home,
-    TMPDIR: '/tmp',
+    TMPDIR: os.tmpdir(),
     CI: 'true',
     DS_AGENT_ALLOW_MOCK_FIXTURE: '1',
     NODE_NO_WARNINGS: '1',
     DS_AGENT_NODE: process.execPath,
-    NODE_OPTIONS: `--require=${path.join(control, 'offline-network-guard.cjs')}`,
     COREPACK_HOME: '/usr/local/share/corepack',
     COREPACK_DEFAULT_TO_LATEST: '0',
     DS_AGENT_TEST_CAPABILITY_FAILURE: stage,

@@ -18,6 +18,45 @@ import { runDelegateCapabilityProbe } from './helpers/delegate-os-capability-pro
 const osFaultDescribe = delegateOsSupervisorSupported() ? describe : describe.skip
 
 osFaultDescribe('external effects unknown-outcome gate (OS fault)', () => {
+  it('runs capability probes from an isolated random temp home and allowlisted environment', async () => {
+    const previousNodeOptions = process.env.NODE_OPTIONS
+    const previousApiKey = process.env.DS_AGENT_API_KEY
+    const previousTmpdir = process.env.TMPDIR
+    const spacedTemp = path.join(os.tmpdir(), `ds agent temp ${process.pid}-${Date.now()}`)
+    fs.mkdirSync(spacedTemp)
+    const poisonPreload = path.join(os.tmpdir(), `ds-agent-poison-${process.pid}-${Date.now()}.cjs`)
+    const poisonedMarker = `${poisonPreload}.loaded`
+    fs.writeFileSync(poisonPreload, `require('node:fs').writeFileSync(${JSON.stringify(poisonedMarker)}, 'loaded')\n`)
+    process.env.NODE_OPTIONS = `--require=${poisonPreload}`
+    process.env.DS_AGENT_API_KEY = 'must-not-be-inherited'
+    process.env.TMPDIR = spacedTemp
+    try {
+      const result = await runDelegateCapabilityProbe('missing_open')
+      try {
+        expect(result.exitCode).toBe(0)
+        expect(path.dirname(result.home)).toBe(spacedTemp)
+        expect(path.basename(result.home)).toMatch(/^ds-agent-capability-test-/u)
+        const audit = JSON.parse(fs.readFileSync(path.join(result.home, 'probe-env.json'), 'utf8')) as Record<string, unknown>
+        expect(audit.home).toBe(result.home)
+        expect(audit.node_options).toBeNull()
+        expect(audit.api_key).toBeNull()
+        expect(fs.existsSync(poisonedMarker)).toBe(false)
+      } finally {
+        fs.rmSync(result.home, { recursive: true, force: true })
+      }
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS
+      else process.env.NODE_OPTIONS = previousNodeOptions
+      if (previousApiKey === undefined) delete process.env.DS_AGENT_API_KEY
+      else process.env.DS_AGENT_API_KEY = previousApiKey
+      if (previousTmpdir === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = previousTmpdir
+      fs.rmSync(spacedTemp, { recursive: true, force: true })
+      fs.rmSync(poisonPreload, { force: true })
+      fs.rmSync(poisonedMarker, { force: true })
+    }
+  })
+
   it.each([
     'open_enosys', 'signal_enosys', 'missing_open', 'missing_signal',
     'permission_open', 'permission_signal',
