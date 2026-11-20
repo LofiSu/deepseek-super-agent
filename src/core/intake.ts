@@ -78,6 +78,7 @@ export class Intake {
         }
         this.repairThreadActivity(trigger)
         if (plan.needsEval) this.queueForEval(trigger)
+        this.host.repo.deleteDoc('intake_recovery', trigger.id)
         const disposition: Disposition = {
           fanout: plan.fanout,
           context: plan.context,
@@ -107,6 +108,7 @@ export class Intake {
       }
       if (alreadyQueued) {
         this.repairThreadActivity(trigger)
+        this.host.repo.deleteDoc('intake_recovery', trigger.id)
         const disposition: Disposition = {
           fanout: [],
           context: [],
@@ -120,6 +122,11 @@ export class Intake {
         })
         return 'stored'
       }
+      // A trigger row without its route plan is evidence of an earlier receive,
+      // even when no recipient write survived. Current subscriptions cannot
+      // establish the historical recipient set safely.
+      this.repairThreadActivity(trigger)
+      return this.incompleteRecovery(trigger, at, 'legacy-routing-plan-unavailable', [])
     }
     const keys = trigger.threads.map(threadKey)
     let primary: Thread | undefined

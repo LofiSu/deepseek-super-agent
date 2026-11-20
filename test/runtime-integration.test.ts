@@ -8,6 +8,10 @@ import { threadKey, type Decision, type Disposition, type Thread, type Ticket, t
 import { freshRuntime, shutdown } from './fixtures.ts'
 import { field, lastPrompt, ScriptedModel, silentModel } from './scripted-model.ts'
 import { normalizeConnectorConfig } from '../src/connectors/config.ts'
+import { connectorTrigger, ConnectorWakeScheduler, loadConnectorWakeState } from '../src/connectors/wake.ts'
+import type { ConnectorDraft } from '../src/connectors/types.ts'
+import type { GoogleWorkspaceApi } from '../src/connectors/google.ts'
+import { normalizeProactiveConfig } from '../src/harness/proactive.ts'
 
 const runtimes: Runtime[] = []
 
@@ -95,7 +99,6 @@ describe('Runtime service integration', () => {
   it('resumes a trigger-only interrupted ingress and leaves completed retries duplicate', () => {
     const runtime = start()
     const trigger = imTrigger({ id: 'trg_interrupted_ingress', thread: 'recovery/topic', text: 'synthetic event' })
-    runtime.store.putDoc('trigger', trigger.id, trigger)
 
     expect(runtime.ingest(trigger)).toBe('stored')
     expect(runtime.store.getDoc<Disposition>('disposition', trigger.id)).toBeDefined()
@@ -108,6 +111,69 @@ describe('Runtime service integration', () => {
     expect(resumed?.inputs.filter(input => input.triggerId === trigger.id)).toHaveLength(originalInputs)
     expect(runtime.ingest(trigger)).toBe('duplicate')
     expect(runtime.store.listDocs<Trigger>('trigger').filter(row => row.id === trigger.id)).toHaveLength(1)
+  })
+
+  it('isolates Runtime-diagnosed incomplete intake while later connector ingress uses Runtime', async () => {
+    const runtime = start()
+    const at = Date.now()
+    const owner = imTrigger({
+      id: 'connector-runtime-owner',
+      thread: 'connector-runtime-owner',
+      text: '@ds-agent please keep this thread available',
+      at: new Date(at).toISOString(),
+    })
+    expect(runtime.ingest(owner)).toBe('stored')
+
+    const oldDraft: ConnectorDraft = {
+      service: 'gmail', kind: 'message', externalId: 'ambiguous-old', title: 'Old notice', text: 'old',
+      occurredAt: new Date(at - 5 * 60_000).toISOString(), updatedAt: new Date(at - 5 * 60_000).toISOString(),
+      wake: true, wakeReason: 'unread important mail',
+    }
+    const oldRecord = runtime.connectorIndex.upsert([oldDraft]).records[0]!
+    const oldTrigger = connectorTrigger(oldRecord, {
+      channel: { source: 'im', thread: owner.channel!.thread }, actor: owner.actor,
+    }, at)
+    runtime.store.putDoc('trigger', oldTrigger.id, oldTrigger)
+    expect(runtime.ingest(oldTrigger)).toBe('incomplete')
+    const oldPending = { at, trigger: oldTrigger, recordId: oldRecord.id, service: 'gmail' as const }
+    runtime.store.putDoc('connector_wake', 'state', {
+      lastCheckAt: at - 16 * 60_000,
+      cursors: { gmail: new Date(at - 16 * 60_000).toISOString() },
+      pending: [oldPending], wakes: [], notified: [],
+    })
+
+    const later: ConnectorDraft = {
+      ...oldDraft, externalId: 'later-useful', title: 'Later notice', text: 'new event',
+      occurredAt: new Date(at - 60_000).toISOString(), updatedAt: new Date(at).toISOString(),
+    }
+    const api: GoogleWorkspaceApi = {
+      async fetch() { return [later] },
+      async fetchPage() { return { drafts: [later] } },
+    }
+    const runner = new ConnectorWakeScheduler({
+      now: () => at,
+      store: runtime.store,
+      index: runtime.connectorIndex,
+      config: normalizeConnectorConfig({
+        enabled: true,
+        google: { services: ['gmail'] },
+        poll: { intervalMinutes: 15 },
+        wake: { enabled: true, services: ['gmail'], source: 'im', thread: owner.channel!.thread, minIntervalMinutes: 15, maxPerDay: 3 },
+      }),
+      api,
+      proactive: normalizeProactiveConfig({ quietStart: '23:00', quietEnd: '08:00', timezone: 'UTC' }),
+      fire: trigger => { runtime.ingest(trigger) },
+    })
+
+    await runner.poll(at)
+    const state = loadConnectorWakeState(runtime.store)
+    const laterRecord = runtime.connectorIndex.query({ limit: 20 }).find(row => row.externalId === 'later-useful')
+    expect(laterRecord).toBeDefined()
+    expect(state.incomplete).toMatchObject([{ pending: { trigger: { id: oldTrigger.id } } }])
+    expect(state.wakes.some(row => row.triggerId === oldTrigger.id)).toBe(false)
+    expect(laterRecord && runtime.store.getDoc<Disposition>('disposition', connectorTrigger(laterRecord, {
+      channel: { source: 'im', thread: owner.channel!.thread }, actor: owner.actor,
+    }, at).id)).toBeDefined()
   })
 
   it('does not reroute a partially fanned-out trigger after tickets or subscriptions change', () => {

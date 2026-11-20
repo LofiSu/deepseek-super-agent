@@ -30,6 +30,18 @@ export interface GoogleFetchPage {
   nextPageToken?: string
 }
 
+/** Match the provider's Calendar wake contract, including its 15-minute grace. */
+export function calendarEventWakeDeadline(startMs: number): number | undefined {
+  return Number.isFinite(startMs) ? startMs + 15 * 60_000 : undefined
+}
+
+export function calendarEventWakeEligible(startMs: number, now: number, lookaheadMinutes: number): boolean {
+  const deadline = calendarEventWakeDeadline(startMs)
+  return deadline !== undefined
+    && now <= deadline
+    && startMs <= now + lookaheadMinutes * 60_000
+}
+
 export class GoogleInvalidPageTokenError extends Error {
   constructor(readonly path: string) {
     super(`google api ${path} rejected page token`)
@@ -157,9 +169,7 @@ export class HttpGoogleWorkspaceApi implements GoogleWorkspaceApi {
         .map(entry => str(record(entry).email))
         .filter((value): value is string => Boolean(value))
       const participants = [organizer, ...attendees].filter((value): value is string => Boolean(value))
-      const imminent = Number.isFinite(startMs)
-        && startMs >= now - 15 * 60_000
-        && startMs <= now + query.lookaheadMinutes * 60_000
+      const imminent = calendarEventWakeEligible(startMs, now, query.lookaheadMinutes)
       drafts.push({
         service: 'calendar',
         kind: 'event',

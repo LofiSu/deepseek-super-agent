@@ -4,7 +4,7 @@ import type { Disposition, Ticket, Trigger } from '../shared/types.ts'
 import type { Store } from '../store/sqlite.ts'
 import type { ConnectorConfig, ConnectorWakeConfig } from './config.ts'
 import { ConnectorIndex } from './index-store.ts'
-import { GoogleInvalidPageTokenError, type GoogleWorkspaceApi } from './google.ts'
+import { calendarEventWakeDeadline, GoogleInvalidPageTokenError, type GoogleWorkspaceApi } from './google.ts'
 import {
   connectorRecordId,
   oneLine,
@@ -57,11 +57,17 @@ export interface ConnectorNotifiedRow {
 
 export interface ConnectorPendingWake {
   at: number
-  /** Calendar starting-soon eligibility cutoff; absent for older saved rows. */
+  /** Calendar provider eligibility cutoff; absent for other wake reasons. */
   eligibilityDeadline?: number
   trigger: Trigger
   recordId: string
   service: GoogleService
+}
+
+export interface ConnectorIncompleteWake {
+  pending: ConnectorPendingWake
+  reason: string
+  isolatedAt: number
 }
 
 export interface ConnectorWakeState {
@@ -75,6 +81,8 @@ export interface ConnectorWakeState {
   invalidTokenRetries?: Partial<Record<GoogleService, number>>
   invalidTokenRetryAfter?: Partial<Record<GoogleService, number>>
   pending?: ConnectorPendingWake[]
+  /** Diagnosed incomplete ingress retained outside the active FIFO until repaired. */
+  incomplete?: ConnectorIncompleteWake[]
   wakes: ConnectorWakeRow[]
   notified: ConnectorNotifiedRow[]
 }
@@ -425,8 +433,8 @@ export class ConnectorWakeScheduler {
       }
       const pending: ConnectorPendingWake = {
         at: decisionAt,
-        ...(record.service === 'calendar' && record.wakeReason === 'calendar event starting soon'
-          ? { eligibilityDeadline: Date.parse(record.occurredAt) + config.wake.calendarLookaheadMinutes * 60_000 }
+        ...(record.service === 'calendar' && record.kind === 'event' && record.wakeReason === 'calendar event starting soon'
+          ? { eligibilityDeadline: Date.parse(record.occurredAt) + 15 * 60_000 }
           : {}),
         trigger,
         recordId: record.id,
@@ -484,10 +492,59 @@ export class ConnectorWakeScheduler {
     return undefined
   }
 
+  private calendarPendingDeadline(pending: ConnectorPendingWake): number | undefined {
+    if (pending.service !== 'calendar') return undefined
+    const indexed = this.opts.index.get(pending.recordId)
+    if (indexed?.service === 'calendar' && indexed.kind === 'event'
+      && indexed.wakeReason === 'calendar event starting soon') {
+      return calendarEventWakeDeadline(Date.parse(indexed.occurredAt))
+    }
+    // Old serialized connector triggers do not carry a typed reason. If their
+    // record is no longer indexed, do not infer provenance from trigger text.
+    return undefined
+  }
+
   private reconcilePending(state: ConnectorWakeState, decisionAt: number, enabled: boolean): ConnectorWakeState {
-    for (const pending of state.pending ?? []) {
-      const eligibilityDeadline = pending.eligibilityDeadline
-        ?? calendarPendingDeadline(pending.trigger, this.opts.config.wake.calendarLookaheadMinutes)
+    let changed = false
+    const incomplete = [...(state.incomplete ?? [])]
+    const stillIncomplete: ConnectorIncompleteWake[] = []
+    for (const item of incomplete) {
+      const pending = item.pending
+      if (this.ingressComplete(pending.trigger.id)) {
+        state = this.finishPending(state, pending)
+        continue
+      }
+      const recovery = this.opts.store.getDoc<{ triggerId?: string }>('intake_recovery', pending.trigger.id)
+      if (recovery) {
+        stillIncomplete.push(item)
+        continue
+      }
+      // An operator or a later durable routing plan repaired Intake. Retry the
+      // original trigger id and payload; never recreate the source revision.
+      state.pending = [...(state.pending ?? []), pending]
+      this.log(`[connector] incomplete wake released for recovery triggerId=${pending.trigger.id}`)
+      changed = true
+    }
+    if (stillIncomplete.length !== (state.incomplete ?? []).length) changed = true
+    state.incomplete = stillIncomplete.length ? stillIncomplete : undefined
+
+    for (const pending of [...(state.pending ?? [])]) {
+      if (this.ingressComplete(pending.trigger.id)) {
+        state = this.finishPending(state, pending)
+        continue
+      }
+      if (this.opts.store.getDoc('intake_recovery', pending.trigger.id)) {
+        const reason = this.opts.store.getDoc<{ reason?: string }>('intake_recovery', pending.trigger.id)?.reason
+          ?? 'intake-recovery-incomplete'
+        state.pending = (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id)
+        state.incomplete = [...(state.incomplete ?? []), { pending, reason, isolatedAt: decisionAt }]
+        this.log(`[connector] incomplete wake isolated triggerId=${pending.trigger.id} reason=${reason}`)
+        changed = true
+        continue
+      }
+      // Recompute from typed index provenance. Older persisted deadlines used
+      // start + lookahead and cannot be trusted as a grace period.
+      const eligibilityDeadline = this.calendarPendingDeadline(pending)
       if (!this.ingressComplete(pending.trigger.id)
         && eligibilityDeadline !== undefined
         && decisionAt > eligibilityDeadline) {
@@ -516,9 +573,24 @@ export class ConnectorWakeScheduler {
           break
         }
       }
-      if (!this.ingressComplete(pending.trigger.id)) break
+      if (!this.ingressComplete(pending.trigger.id)) {
+        const recovery = this.opts.store.getDoc<{ reason?: string }>('intake_recovery', pending.trigger.id)
+        if (recovery) {
+          state.pending = (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id)
+          state.incomplete = [...(state.incomplete ?? []), {
+            pending,
+            reason: recovery.reason ?? 'intake-recovery-incomplete',
+            isolatedAt: decisionAt,
+          }]
+          this.log(`[connector] incomplete wake isolated triggerId=${pending.trigger.id} reason=${recovery.reason ?? 'unknown'}`)
+          changed = true
+          continue
+        }
+        break
+      }
       state = this.finishPending(state, pending)
     }
+    if (changed) this.saveState(state)
     return state
   }
 
@@ -581,6 +653,7 @@ export class ConnectorWakeScheduler {
       ...state,
       ...(!nonDelivery ? { lastWakeAt: completedAt } : {}),
       pending: (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id),
+      incomplete: (state.incomplete ?? []).filter(row => row.pending.trigger.id !== pending.trigger.id),
       wakes: nonDelivery ? state.wakes : [...state.wakes, {
         at: completedAt,
         triggerId: pending.trigger.id,
@@ -601,13 +674,6 @@ export class ConnectorWakeScheduler {
   private saveState(state: ConnectorWakeState): void {
     this.opts.store.putDoc(CONNECTOR_WAKE_STATE_KIND, CONNECTOR_WAKE_STATE_ID, state)
   }
-}
-
-function calendarPendingDeadline(trigger: Trigger, lookaheadMinutes: number): number | undefined {
-  if (!trigger.text.includes('service=calendar') || !trigger.text.includes('reason=calendar event starting soon')) return undefined
-  const occurredAt = /^occurredAt=(.+)$/m.exec(trigger.text)?.[1]
-  const occurredAtMs = occurredAt ? Date.parse(occurredAt) : Number.NaN
-  return Number.isFinite(occurredAtMs) ? occurredAtMs + lookaheadMinutes * 60_000 : undefined
 }
 
 function sameWakeTarget(target: WakeTarget, trigger: Trigger): boolean {
@@ -707,6 +773,20 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
         && typeof candidate.trigger.id === 'string'
     })
     : []
+  const incomplete = Array.isArray(raw.incomplete)
+    ? raw.incomplete.filter((row): row is ConnectorIncompleteWake => {
+      if (!row || typeof row !== 'object') return false
+      const candidate = row as ConnectorIncompleteWake
+      const item = candidate.pending
+      return typeof candidate.reason === 'string'
+        && Number.isFinite(candidate.isolatedAt)
+        && item != null
+        && Number.isFinite(item.at)
+        && typeof item.recordId === 'string'
+        && typeof item.service === 'string'
+        && typeof item.trigger?.id === 'string'
+    })
+    : []
   return {
     ...(typeof raw.lastCheckAt === 'number' && Number.isFinite(raw.lastCheckAt)
       ? { lastCheckAt: raw.lastCheckAt }
@@ -722,6 +802,7 @@ export function loadConnectorWakeState(store: Store): ConnectorWakeState {
     ...(Object.keys(invalidTokenRetries).length ? { invalidTokenRetries } : {}),
     ...(Object.keys(invalidTokenRetryAfter).length ? { invalidTokenRetryAfter } : {}),
     ...(pending.length ? { pending } : {}),
+    ...(incomplete.length ? { incomplete } : {}),
     wakes,
     notified,
   }
