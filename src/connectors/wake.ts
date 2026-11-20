@@ -49,6 +49,11 @@ type CalendarAdmission =
   | { decision: 'expired' }
   | { decision: 'provenance-unknown' }
 
+type FinalFireAdmission =
+  | { decision: 'eligible-now'; at: number }
+  | { decision: 'not-yet' | 'expired' | 'provenance-unknown'; at: number }
+  | { decision: 'held'; at: number; reason: string }
+
 export interface ConnectorWakeRow {
   at: number
   triggerId: string
@@ -477,6 +482,21 @@ export class ConnectorWakeScheduler {
         service: record.service,
       }
       this.saveState({ ...committed(), pending: [...(base.pending ?? []), pending] })
+      const finalAdmission = this.finalFireAdmission(base, pending, config.enabled && Boolean(api), target)
+      if (finalAdmission.decision !== 'eligible-now') {
+        if (finalAdmission.decision === 'expired') {
+          this.retirePending(this.loadState(), pending, finalAdmission.at, 'calendar-window-expired')
+        } else if (finalAdmission.decision === 'held'
+          && (finalAdmission.reason === 'private-target-changed'
+            || finalAdmission.reason === 'no-current-private-target')) {
+          this.retirePending(this.loadState(), pending, finalAdmission.at, finalAdmission.reason)
+        }
+        const reason = finalAdmission.decision === 'held'
+          ? finalAdmission.reason
+          : `calendar-${finalAdmission.decision}`
+        this.log(`[connector] wake admission changed triggerId=${trigger.id} reason=${reason}`)
+        return { action: 'polled', reason, ...counts }
+      }
       try {
         this.opts.fire(trigger)
       } catch (error) {
@@ -674,6 +694,31 @@ export class ConnectorWakeScheduler {
           this.log(`[connector] pending wake held triggerId=${pending.trigger.id} reason=${reason}`)
           break
         }
+        const finalAdmission = this.finalFireAdmission(state, pending, enabled)
+        if (finalAdmission.decision === 'expired') {
+          state = this.retirePending(state, pending, finalAdmission.at, 'calendar-window-expired')
+          continue
+        }
+        if (finalAdmission.decision === 'not-yet') continue
+        if (finalAdmission.decision === 'provenance-unknown') {
+          state.pending = (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id)
+          state.uncertain = [...(state.uncertain ?? []), {
+            pending,
+            reason: 'calendar-provenance-unavailable',
+            isolatedAt: finalAdmission.at,
+          }]
+          changed = true
+          continue
+        }
+        if (finalAdmission.decision === 'held') {
+          if (finalAdmission.reason === 'private-target-changed'
+            || finalAdmission.reason === 'no-current-private-target') {
+            state = this.retirePending(state, pending, finalAdmission.at, finalAdmission.reason)
+            continue
+          }
+          this.log(`[connector] pending wake held triggerId=${pending.trigger.id} reason=${finalAdmission.reason}`)
+          break
+        }
         try {
           // Runtime ingress recognizes a persisted trigger without a disposition
           // as an interrupted commit and resumes it idempotently.
@@ -702,6 +747,56 @@ export class ConnectorWakeScheduler {
     }
     if (changed) this.saveState(state)
     return state
+  }
+
+  /**
+   * Last cancellable admission before entering Runtime ingress. All database,
+   * index, and target scans happen before this lightweight current-time/current-
+   * policy check; work after `fire` begins cannot be cancelled retroactively.
+   */
+  private finalFireAdmission(
+    state: ConnectorWakeState,
+    pending: ConnectorPendingWake,
+    connectorEnabled: boolean,
+    target?: WakeTarget,
+  ): FinalFireAdmission {
+    const at = this.opts.now()
+    const calendar = this.calendarAdmission(pending.service, pending.calendarProvenance, at)
+    if (calendar.decision !== 'eligible-now') return { ...calendar, at }
+
+    const config = this.opts.config
+    const wake = config.wake
+    if (!connectorEnabled || !config.enabled || !this.opts.api) {
+      return { decision: 'held', at, reason: 'connector-disabled' }
+    }
+    if (!wake.enabled) return { decision: 'held', at, reason: 'wake-disabled' }
+    if (withinQuietHours(at, this.opts.proactive)) {
+      return { decision: 'held', at, reason: 'quiet-hours' }
+    }
+    if (!wake.services.includes(pending.service)) {
+      return { decision: 'held', at, reason: 'service-disabled' }
+    }
+    const denied = admissionDenial(pending.trigger, this.opts.admission)
+    if (denied) return { decision: 'held', at, reason: denied }
+    if (
+      state.lastWakeAt !== undefined
+      && at - state.lastWakeAt < wake.minIntervalMinutes * 60_000
+    ) return { decision: 'held', at, reason: 'min-interval' }
+    const today = dayKey(at, this.opts.proactive.timezone)
+    const todayWakes = state.wakes.filter(row => dayKey(row.at, this.opts.proactive.timezone) === today)
+    if (todayWakes.length >= wake.maxPerDay) {
+      return { decision: 'held', at, reason: 'daily-cap' }
+    }
+
+    const channel = pending.trigger.channel
+    const env = this.opts.env ?? process.env
+    if (!channel || !isPrivateTarget(channel, wake, env)) {
+      return { decision: 'held', at, reason: 'no-current-private-target' }
+    }
+    if (target && !sameWakeTarget(target, pending.trigger)) {
+      return { decision: 'held', at, reason: 'private-target-changed' }
+    }
+    return { decision: 'eligible-now', at }
   }
 
   private pendingAuthorizationReason(
