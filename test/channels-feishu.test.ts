@@ -30,8 +30,22 @@ function message(overrides: Partial<FeishuMessage> = {}): FeishuMessage {
   return {
     message_id: 'om_1',
     chat_id: 'oc_chat',
+    chat_type: 'group',
     msg_type: 'text',
     body: { content: JSON.stringify({ text: '@ds-agent please fix the login timeout' }) },
+    create_time: '1761958800000',
+    sender: { id: 'ou_alice', sender_type: 'user' },
+    ...overrides,
+  }
+}
+
+/** API-shaped list item: unlike webhook messages, it omits chat_type. */
+function apiMessage(overrides: Partial<Omit<FeishuMessage, 'chat_type'>> = {}): Omit<FeishuMessage, 'chat_type'> {
+  return {
+    message_id: 'om_poll',
+    chat_id: 'oc_chat',
+    msg_type: 'text',
+    body: { content: JSON.stringify({ text: '你现在可以改了' }) },
     create_time: '1761958800000',
     sender: { id: 'ou_alice', sender_type: 'user' },
     ...overrides,
@@ -159,6 +173,102 @@ describe('Feishu message mapping', () => {
       ruleSemantic,
       allowed,
     )).toMatchObject({ action: 'drop', layer: 'fast', reason: 'group-not-allowlisted' })
+  })
+
+  it('maps p2p direct mode without address.group and addressed=direct', () => {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const trigger = feishuTriggerFromMessage(message({
+        chat_type: 'p2p',
+        body: { content: JSON.stringify({ text: '你好' }) },
+      }), config)
+      expect(trigger.addressed).toBe('direct')
+      expect(trigger.channel?.address?.group).toBeUndefined()
+      expect(trigger.channel?.address?.chat_type).toBe('p2p')
+      const groupScoped = admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_group_only',
+        DS_AGENT_ACTOR_ALLOWLIST: 'ou_alice',
+      })
+      expect(filterTrigger(trigger, ruleSemantic, groupScoped)).toMatchObject({ action: 'pass' })
+      expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_group_only',
+        DS_AGENT_ACTOR_ALLOWLIST: 'ou_someone_else',
+      }))).toMatchObject({ action: 'drop', reason: 'actor-not-allowlisted' })
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
+  })
+
+  it('keeps group messages grouped under the p2p direct override', () => {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const trigger = feishuTriggerFromMessage(message({
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        body: { content: JSON.stringify({ text: '你好' }) },
+      }), config)
+      expect(trigger.addressed).toBeUndefined()
+      expect(trigger.channel?.address?.group).toBe('oc_group')
+      expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_allowed',
+      }))).toMatchObject({
+        action: 'drop',
+        layer: 'fast',
+        reason: 'group-not-allowlisted',
+      })
+      expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({
+        action: 'drop',
+        layer: 'fast',
+        reason: 'noise',
+      })
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
+  })
+
+  it('honors DS_AGENT_FEISHU_P2P_DIRECT for short p2p utterances through filterTrigger', () => {
+    const prev = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    const utterances = ['你现在可以改了', '在干嘛怎么回我那么慢'] as const
+    try {
+      delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      for (const text of utterances) {
+        const trigger = feishuTriggerFromMessage(message({
+          chat_type: 'p2p',
+          body: { content: JSON.stringify({ text }) },
+        }), config)
+        expect(trigger.addressed).toBeUndefined()
+        expect(trigger.channel?.address?.group).toBe('oc_chat')
+        expect(filterTrigger(trigger, ruleSemantic))
+          .toMatchObject({ action: 'drop', layer: 'fast', reason: 'noise' })
+      }
+
+      process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+      for (const text of utterances) {
+        const trigger = feishuTriggerFromMessage(message({
+          chat_type: 'p2p',
+          body: { content: JSON.stringify({ text }) },
+        }), config)
+        expect(trigger.addressed).toBe('direct')
+        expect(trigger.channel?.address?.group).toBeUndefined()
+        expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({ action: 'pass' })
+      }
+
+      process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+      const mentioned = feishuTriggerFromMessage(message({
+        chat_type: 'p2p',
+        body: { content: JSON.stringify({ text: '@ds-agent 你现在可以改了' }) },
+        mentions: [{ id: { open_id: 'ou_bot' }, name: 'ds-agent' }],
+      }), config)
+      expect(mentioned.addressed).toBe('mention')
+      expect(mentioned.channel?.address?.group).toBeUndefined()
+    } finally {
+      if (prev === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = prev
+    }
   })
 
   it('treats an app sender as non-human and detects bot mention ids', () => {
@@ -302,6 +412,189 @@ describe('Feishu client and outbox', () => {
     const triggers = await source.pull()
     expect(triggers.map(trigger => trigger.id)).toEqual(['feishu_om_a', 'feishu_om_b'])
     expect(triggers[1]!.text).toBe('second')
+  })
+
+  it('resolves API-shaped polled messages as p2p from verified chat mode', async () => {
+    const { fn, calls } = fakeFetch(url => {
+      if (url.includes('tenant_access_token')) return tokenHandler(url)
+      if (url.includes('/open-apis/im/v1/messages?')) {
+        return { body: { code: 0, data: { has_more: false, items: [apiMessage()] } } }
+      }
+      if (url.endsWith('/open-apis/im/v1/chats/oc_chat')) {
+        return { body: { code: 0, data: { chat_mode: 'p2p', chat_type: 'private' } } }
+      }
+      return { body: { code: 999, msg: `unexpected ${url}` } }
+    })
+    const client = new FeishuClient(config, fn)
+    const source = new FeishuSource(client, 'oc_chat', { sinceMs: 1761958000000, config })
+    const previous = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const trigger = (await source.pull())[0]!
+      expect(trigger.addressed).toBe('direct')
+      expect(trigger.channel?.address?.group).toBeUndefined()
+      expect(trigger.channel?.address?.chat_type).toBe('p2p')
+      expect(filterTrigger(trigger, ruleSemantic)).toMatchObject({ action: 'pass' })
+      expect(calls.some(call => call.url.endsWith('/open-apis/im/v1/chats/oc_chat'))).toBe(true)
+
+      await source.pull()
+      expect(calls.filter(call => call.url.endsWith('/open-apis/im/v1/chats/oc_chat'))).toHaveLength(1)
+    } finally {
+      if (previous === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = previous
+    }
+  })
+
+  it('keeps API-shaped polled group messages under group admission and noise rules', async () => {
+    const { fn } = fakeFetch(url => {
+      if (url.includes('tenant_access_token')) return tokenHandler(url)
+      if (url.includes('/open-apis/im/v1/messages?')) {
+        return { body: { code: 0, data: { has_more: false, items: [apiMessage()] } } }
+      }
+      if (url.endsWith('/open-apis/im/v1/chats/oc_chat')) {
+        return { body: { code: 0, data: { chat_mode: 'group', chat_type: 'private' } } }
+      }
+      return { body: { code: 999, msg: `unexpected ${url}` } }
+    })
+    const client = new FeishuClient(config, fn)
+    const source = new FeishuSource(client, 'oc_chat', { sinceMs: 1761958000000, config })
+    const previous = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const trigger = (await source.pull())[0]!
+      expect(trigger.addressed).toBeUndefined()
+      expect(trigger.channel?.address?.group).toBe('oc_chat')
+      expect(trigger.channel?.address?.chat_type).toBeUndefined()
+      expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_chat',
+      }))).toMatchObject({ action: 'drop', layer: 'fast', reason: 'noise' })
+      expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_other',
+      }))).toMatchObject({ action: 'drop', layer: 'fast', reason: 'group-not-allowlisted' })
+    } finally {
+      if (previous === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = previous
+    }
+  })
+
+  it.each([
+    ['missing chat mode', { body: { code: 0, data: {} } }],
+    ['unknown chat mode', { body: { code: 0, data: { chat_mode: 'future-mode' } } }],
+    ['chat metadata error', { body: { code: 230002, msg: 'metadata unavailable' } }],
+  ])('keeps polled messages conservative on %s', async (_case, metadataResponse) => {
+    const { fn, calls } = fakeFetch(url => {
+      if (url.includes('tenant_access_token')) return tokenHandler(url)
+      if (url.includes('/open-apis/im/v1/messages?')) {
+        return {
+          body: {
+            code: 0,
+            data: {
+              has_more: false,
+              items: [apiMessage(), apiMessage({ message_id: 'om_poll_2', create_time: '1761958860000' })],
+            },
+          },
+        }
+      }
+      if (url.endsWith('/open-apis/im/v1/chats/oc_chat')) return metadataResponse
+      return { body: { code: 999, msg: `unexpected ${url}` } }
+    })
+    const client = new FeishuClient(config, fn)
+    const logs: string[] = []
+    const source = new FeishuSource(client, 'oc_chat', {
+      sinceMs: 1761958000000,
+      config,
+      log: line => logs.push(line),
+    })
+    const previous = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const triggers = await source.pull()
+      const trigger = triggers[0]!
+      expect(triggers).toHaveLength(2)
+      expect(logs).toHaveLength(1)
+      expect(logs[0]).toContain('chat=oc_chat')
+      expect(logs[0]).toMatch(/chat mode lookup (failed|unverified)/)
+      expect(trigger.addressed).toBeUndefined()
+      expect(trigger.channel?.address?.group).toBe('oc_chat')
+      expect(trigger.channel?.address?.chat_type).toBeUndefined()
+      expect(filterTrigger(trigger, ruleSemantic, admissionRulesFromEnv({
+        DS_AGENT_GROUP_ALLOWLIST: 'oc_chat',
+      }))).toMatchObject({ action: 'drop', layer: 'fast', reason: 'noise' })
+      await source.pull()
+      expect(logs).toHaveLength(1)
+      expect(calls.filter(call => call.url.endsWith('/open-apis/im/v1/chats/oc_chat'))).toHaveLength(2)
+      expect(logs[0]).not.toContain('future-mode')
+      expect(logs[0]).not.toContain('metadata unavailable')
+    } finally {
+      if (previous === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = previous
+    }
+  })
+
+  it('retries failed chat-mode verification across pulls, warns once, then caches verified mode', async () => {
+    let listCalls = 0
+    let metadataCalls = 0
+    const { fn, calls } = fakeFetch(url => {
+      if (url.includes('tenant_access_token')) return tokenHandler(url)
+      if (url.includes('/open-apis/im/v1/messages?')) {
+        listCalls += 1
+        return {
+          body: {
+            code: 0,
+            data: {
+              has_more: false,
+              items: [apiMessage({
+                message_id: `om_retry_${listCalls}`,
+                create_time: String(1761958800000 + listCalls * 1_000),
+              })],
+            },
+          },
+        }
+      }
+      if (url.endsWith('/open-apis/im/v1/chats/oc_chat')) {
+        metadataCalls += 1
+        if (metadataCalls === 1) {
+          return { body: { code: 230002, msg: 'private provider details should not be logged' } }
+        }
+        if (metadataCalls === 2) throw new Error('private custom-fetch details should not be logged')
+        return { body: { code: 0, data: { chat_mode: 'p2p', chat_type: 'private' } } }
+      }
+      return { body: { code: 999, msg: `unexpected ${url}` } }
+    })
+    const client = new FeishuClient(config, fn)
+    const logs: string[] = []
+    const source = new FeishuSource(client, 'oc_chat', {
+      sinceMs: 1761958000000,
+      config,
+      log: line => logs.push(line),
+    })
+    const previous = process.env.DS_AGENT_FEISHU_P2P_DIRECT
+    process.env.DS_AGENT_FEISHU_P2P_DIRECT = '1'
+    try {
+      const first = (await source.pull())[0]!
+      const second = (await source.pull())[0]!
+      expect(first.addressed).toBeUndefined()
+      expect(first.channel?.address?.group).toBe('oc_chat')
+      expect(second.addressed).toBeUndefined()
+      expect(second.channel?.address?.group).toBe('oc_chat')
+      expect(metadataCalls).toBe(2)
+      expect(logs).toHaveLength(1)
+      expect(logs[0]).toContain('code=230002')
+      expect(logs[0]).not.toContain('private provider details')
+      expect(logs[0]).not.toContain('private custom-fetch details')
+
+      const verified = (await source.pull())[0]!
+      expect(verified.addressed).toBe('direct')
+      expect(verified.channel?.address?.chat_type).toBe('p2p')
+      expect(verified.channel?.address?.group).toBeUndefined()
+      await source.pull()
+      expect(metadataCalls).toBe(3)
+      expect(calls.filter(call => call.url.endsWith('/open-apis/im/v1/chats/oc_chat'))).toHaveLength(3)
+      expect(logs).toHaveLength(1)
+    } finally {
+      if (previous === undefined) delete process.env.DS_AGENT_FEISHU_P2P_DIRECT
+      else process.env.DS_AGENT_FEISHU_P2P_DIRECT = previous
+    }
   })
 
   it('surfaces a Feishu API error instead of dropping it', async () => {

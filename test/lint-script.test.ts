@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { runLint, type Violation } from '../scripts/lint.ts'
+import { checkOsProbePortability, runLint, type Violation } from '../scripts/lint.ts'
 
 const roots: string[] = []
 
@@ -162,6 +162,23 @@ describe('lint script', () => {
       'docs/ROADMAP.md': board('| P2-5 | Coverage |  | `feat/x` | #1 | resolved | ok |'),
     })
     expect(runLint(root, ['docs/ROADMAP.md', 'src/core/gone.ts'])).toEqual([])
+  })
+
+  it('rejects machine paths and external preload dependencies in OS probe helpers', () => {
+    const root = fixture({
+      'test/helpers/delegate-os-probe.ts': [
+        "const temp = '/workspace/dsh-fix-180-s3-control';",
+        "const preload = '/home/box/offline-network-guard.cjs';",
+      ].join('\n'),
+      'test/helpers/delegate-os-safe.py': 'temp = "/tmp/probe"\n',
+    })
+    expect(messages(checkOsProbePortability(root, [
+      'test/helpers/delegate-os-probe.ts',
+      'test/helpers/delegate-os-safe.py',
+    ]))).toEqual([
+      'test/helpers/delegate-os-probe.ts:1: OS probe helper contains a machine-specific path or external preload dependency',
+      'test/helpers/delegate-os-probe.ts:2: OS probe helper contains a machine-specific path or external preload dependency',
+    ])
   })
 
   it('reports tracked repro-h9, dist, and node_modules paths', () => {

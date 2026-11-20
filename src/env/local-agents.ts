@@ -276,7 +276,47 @@ export class LocalAgentRegistry {
         env: agentEnv(this.env, spec.env ?? []),
         timeoutMs,
         maxOutputBytes,
-        onSpawn: child => this.active.add(child),
+        onSpawn: child => {
+          this.active.add(child)
+          const ownerFile = this.env.DS_AGENT_TEST_DELEGATE_OWNER_FILE
+          const ownerAck = this.env.DS_AGENT_TEST_DELEGATE_OWNER_ACK
+          if (ownerFile && ownerAck && child.pid !== undefined) {
+            const prePublishGate = this.env.DS_AGENT_TEST_DELEGATE_OWNER_PREPUBLISH_GATE
+            if (prePublishGate) {
+              fs.writeFileSync(prePublishGate, `${child.pid}\n`, { flag: 'wx' })
+              const deadline = Date.now() + 10_000
+              while (Date.now() < deadline) {
+                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+              }
+              throw new Error('timed out at test pre-publication ownership gate')
+            }
+            const pidAuditFile = this.env.DS_AGENT_TEST_DELEGATE_OWNER_PID_AUDIT
+            if (pidAuditFile) fs.writeFileSync(pidAuditFile, `${child.pid}\n`, { flag: 'wx' })
+            const temp = `${ownerFile}.${process.pid}.tmp`
+            fs.writeFileSync(temp, `${JSON.stringify({ pid: child.pid, helperPid: process.pid })}\n`, { flag: 'wx' })
+            fs.renameSync(temp, ownerFile)
+            const deadline = Date.now() + 10_000
+            let acknowledged = false
+            while (Date.now() < deadline) {
+              try {
+                acknowledged = fs.readFileSync(ownerAck, 'utf8').trim().startsWith(`${child.pid}:`)
+              } catch {
+                acknowledged = false
+              }
+              if (acknowledged) break
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+            }
+            if (!acknowledged) {
+              try {
+                process.kill(-child.pid, 'SIGKILL')
+              } catch {
+                child.kill('SIGKILL')
+              }
+              this.active.delete(child)
+              throw new Error('test process owner did not acknowledge delegate spawn')
+            }
+          }
+        },
         onDone: child => this.active.delete(child),
       })
     } finally {
@@ -320,12 +360,12 @@ function spawnAgent(input: {
       reject(new UserError(`could not start local agent ${spec.id}: ${messageOf(error)}`))
       return
     }
-    input.onSpawn?.(child)
     let stdout = ''
     let stderr = ''
     let truncated = false
     let timedOut = false
     let settled = false
+    let spawnHookError: unknown
     const append = (current: string, chunk: Buffer): string => {
       if (current.length >= maxOutputBytes) {
         truncated = true
@@ -347,7 +387,11 @@ function spawnAgent(input: {
       settled = true
       clearTimeout(timer)
       input.onDone?.(child)
-      resolve(result)
+      if (spawnHookError !== undefined) {
+        reject(new UserError(`could not initialize local agent ${spec.id}: ${messageOf(spawnHookError)}`))
+      } else {
+        resolve(result)
+      }
     }
     child.on('error', error => {
       if (settled) return
@@ -367,6 +411,12 @@ function spawnAgent(input: {
         stderr,
       })
     })
+    try {
+      input.onSpawn?.(child)
+    } catch (error) {
+      spawnHookError = error
+      killGroup(child.pid, child)
+    }
   })
 }
 

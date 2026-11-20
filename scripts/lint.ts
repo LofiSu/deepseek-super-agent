@@ -39,6 +39,8 @@ const PHASE2_RULE_CONTEXT = /inline-code citations|documenting the rule|historic
 const INLINE_CODE = /`[^`]*`/gu
 const CONSOLE_ALLOWLIST = new Set(['src/shared/log.ts'])
 const TEXT_FILE = /\.(?:ts|tsx|md|json)$/
+const OS_PROBE_HELPER = /^test\/helpers\/delegate-os[^/]*\.(?:py|ts)$/u
+const MACHINE_PATH_ARTIFACT = /(?:\/workspace\/dsh-[^\s'"`]+|\/home\/box(?:\/|\b)|offline-network-guard\.cjs)/u
 
 export function findRepoRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -198,6 +200,26 @@ export function checkPhaseNaming(root: string, tracked: readonly string[]): Viol
   return violations
 }
 
+export function checkOsProbePortability(root: string, tracked: readonly string[]): Violation[] {
+  const violations: Violation[] = []
+  for (const file of tracked) {
+    if (!OS_PROBE_HELPER.test(file)) continue
+    const absolute = path.join(root, file)
+    if (!fs.existsSync(absolute)) continue
+    const lines = fs.readFileSync(absolute, 'utf8').split('\n')
+    for (let index = 0; index < lines.length; index += 1) {
+      if (MACHINE_PATH_ARTIFACT.test(lines[index])) {
+        violations.push({
+          file,
+          line: index + 1,
+          message: 'OS probe helper contains a machine-specific path or external preload dependency',
+        })
+      }
+    }
+  }
+  return violations
+}
+
 export function checkRepoHygiene(tracked: readonly string[]): Violation[] {
   const violations: Violation[] = []
   for (const file of tracked) {
@@ -276,6 +298,7 @@ export function runLint(root: string, tracked: readonly string[] = listTrackedFi
   const violations = [
     ...checkRoadmapBoard(root),
     ...checkPhaseNaming(root, tracked),
+    ...checkOsProbePortability(root, tracked),
     ...checkRepoHygiene(tracked),
     ...checkConsoleLog(root, tracked),
   ]
