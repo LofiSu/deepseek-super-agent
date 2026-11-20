@@ -98,7 +98,12 @@ describe('Google Workspace mapping', () => {
           : service === 'drive' ? { files: [] }
             : service === 'calendar' ? { items: [] }
               : { items: [] }
-        return new Response(JSON.stringify({ ...body, nextPageToken: 'next-page' }), { status: 200 })
+        const requestsToken = service !== 'drive'
+          || url.searchParams.get('fields')?.split(',').includes('nextPageToken') === true
+        return new Response(JSON.stringify({
+          ...body,
+          ...(requestsToken ? { nextPageToken: 'next-page' } : {}),
+        }), { status: 200 })
       }
       const api = new HttpGoogleWorkspaceApi(fixedToken, {
         fetch: fetchImpl,
@@ -110,6 +115,42 @@ describe('Google Workspace mapping', () => {
       await api.fetchPage(service, query({ pageToken: first.nextPageToken }))
       expect(seen.map(url => new URL(url).searchParams.get('pageToken'))).toContain('next-page')
     }
+  })
+
+  it('requests Drive-family continuation fields and preserves page checkpoints', async () => {
+    const services = ['drive', 'docs', 'sheets', 'slides'] as const
+    const requests: URL[] = []
+    const fetchImpl: FetchLike = async input => {
+      const url = new URL(String(input))
+      requests.push(url)
+      const fields = url.searchParams.get('fields') ?? ''
+      const response = {
+        files: [],
+        // Match Google's partial response behavior: an unrequested field is
+        // absent, even when the provider has a continuation.
+        ...(fields.split(',').includes('nextPageToken') ? { nextPageToken: 'drive-page-2' } : {}),
+      }
+      return new Response(JSON.stringify(response), { status: 200 })
+    }
+    const api = new HttpGoogleWorkspaceApi(fixedToken, {
+      fetch: fetchImpl,
+      now: () => T0,
+      apiBase: 'https://example.test',
+    })
+
+    for (const service of services) {
+      const page = await api.fetchPage(service, query())
+      expect(requests.at(-1)?.searchParams.get('fields')).toContain('files(')
+      expect(requests.at(-1)?.searchParams.get('fields')?.split(',')).toContain('nextPageToken')
+      expect(page.nextPageToken).toBe('drive-page-2')
+      await api.fetchPage(service, query({ pageToken: page.nextPageToken }))
+      expect(requests.at(-1)?.searchParams.get('pageToken')).toBe('drive-page-2')
+    }
+
+    // The fixture itself omits the token when a request omits it, so reverting
+    // DRIVE_FIELDS to files(...) alone reproduces the silent end-of-window.
+    const unmasked = await fetchImpl(new URL('https://example.test/drive/v3/files?fields=files%28id%29'))
+    expect(await unmasked.json()).toEqual({ files: [] })
   })
 
   it('replays index records displaced by urgent calendar events before advancing pages', async () => {

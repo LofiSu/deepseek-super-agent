@@ -450,6 +450,13 @@ export class ConnectorWakeScheduler {
     for (const pending of state.pending ?? []) {
       if (!this.ingressComplete(pending.trigger.id)) {
         const reason = this.pendingAuthorizationReason(state, pending, decisionAt, enabled)
+        if (reason === 'private-target-changed' || reason === 'no-current-private-target') {
+          // The ingress was authorized for a specific private recipient. Retire
+          // it when that recipient is no longer current; never replay it to the
+          // old target, and do not let its outbox row block unrelated wakes.
+          state = this.retireStaleTargetPending(state, pending, decisionAt, reason)
+          continue
+        }
         if (reason) {
           this.log(`[connector] pending wake held triggerId=${pending.trigger.id} reason=${reason}`)
           break
@@ -492,6 +499,24 @@ export class ConnectorWakeScheduler {
     const currentTarget = this.findWakeTarget(wake)
     if (!currentTarget) return 'no-current-private-target'
     return sameWakeTarget(currentTarget, pending.trigger) ? undefined : 'private-target-changed'
+  }
+
+  private retireStaleTargetPending(
+    state: ConnectorWakeState,
+    pending: ConnectorPendingWake,
+    at: number,
+    reason: string,
+  ): ConnectorWakeState {
+    const next: ConnectorWakeState = {
+      ...state,
+      pending: (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id),
+      // Do not reconsider this source revision under a later target. It was
+      // selected for a recipient whose authorization has since changed.
+      notified: [...state.notified, { at, triggerId: pending.trigger.id }].slice(-MAX_NOTIFIED_ROWS),
+    }
+    this.saveState(next)
+    this.log(`[connector] pending wake retired triggerId=${pending.trigger.id} reason=${reason}`)
+    return next
   }
 
   private ingressComplete(triggerId: string): boolean {

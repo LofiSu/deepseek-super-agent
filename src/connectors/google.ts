@@ -52,6 +52,7 @@ export interface HttpGoogleWorkspaceApiOptions {
 
 const API_BASE = 'https://www.googleapis.com'
 const DRIVE_FIELDS = [
+  'nextPageToken',
   'files(id,name,description,mimeType,modifiedTime,createdTime,webViewLink,shared,trashed',
   'owners(emailAddress,displayName),lastModifyingUser(emailAddress,displayName))',
 ].join(',')

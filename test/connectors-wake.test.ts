@@ -720,7 +720,6 @@ describe('connector wake scheduler', () => {
         quiet: { quietStart: '10:00', quietEnd: '11:00', timezone: 'UTC' },
         reason: 'quiet-hours',
       },
-      { name: 'changed-target', wake: { source: 'cli', thread: 'other' }, reason: 'no-current-private-target' },
       {
         name: 'actor-revoked',
         wake: {},
@@ -799,6 +798,88 @@ describe('connector wake scheduler', () => {
     expect(state.lastWakeAt).toBe(Date.parse(completedAt))
     expect(state.wakes[0]?.at).toBe(Date.parse(completedAt))
     expect(state.notified[0]?.at).toBe(Date.parse(completedAt))
+  })
+
+  it('retires incomplete pending wakes when their private target changes or is revoked', async () => {
+    for (const targetState of ['changed', 'revoked'] as const) {
+      const { store, index } = setup()
+      seedOwnerThread(store)
+      const pending = pendingWake(index, T0, `stale-target-${targetState}`)
+      if (targetState === 'changed') {
+        const replacement: Trigger = {
+          id: 'trg_cli_replacement_owner',
+          source: 'cli',
+          threads: [{ source: 'cli', id: 'local' }],
+          actor: { source: 'cli', id: 'replacement-owner' },
+          human: true,
+          addressed: 'direct',
+          at: new Date(T0 + MIN).toISOString(),
+          text: 'replacement owner',
+          channel: { source: 'cli', thread: 'local' },
+          meta: {},
+        }
+        store.putDoc('trigger', replacement.id, replacement)
+        store.putDoc('disposition', replacement.id, {
+          at: replacement.at,
+          fanout: [],
+          context: [],
+        } satisfies Disposition)
+      }
+      store.putDoc('connector_wake', 'state', {
+        lastCheckAt: T0,
+        cursors: { gmail: new Date(T0).toISOString() },
+        pending: [pending],
+        wakes: [],
+        notified: [],
+      })
+      const candidate = draft({
+        externalId: `after-stale-target-${targetState}`,
+        occurredAt: new Date(T0 + 16 * MIN).toISOString(),
+        updatedAt: new Date(T0 + 17 * MIN).toISOString(),
+      })
+      const targetConfig = targetState === 'revoked'
+        ? { source: 'cli', thread: 'revoked-thread' }
+        : { source: 'cli', thread: 'local' }
+      const first = scheduler({
+        store,
+        index,
+        api: fakeApi([candidate]),
+        config: {
+          google: { services: ['gmail'] },
+          wake: { enabled: true, services: ['gmail'], ...targetConfig },
+        },
+      })
+      const result = await first.runner.poll(T0 + 16 * MIN)
+      expect(result.action).toBe(targetState === 'changed' ? 'wake' : 'no-target')
+      expect(first.fired.some(trigger => trigger.id === pending.trigger.id)).toBe(false)
+      let state = loadConnectorWakeState(store)
+      expect(state.pending ?? []).toHaveLength(0)
+      expect(state.notified.some(row => row.triggerId === pending.trigger.id)).toBe(true)
+      expect(state.cursors?.gmail).toBe(new Date(T0 + 16 * MIN).toISOString())
+
+      if (targetState === 'changed') {
+        expect(first.fired).toHaveLength(1)
+        expect(first.fired[0]?.id).not.toBe(pending.trigger.id)
+      } else {
+        // Once the owner target is available again, a later eligible revision
+        // can wake; the revoked pending row no longer starves the pipeline.
+        const restored = scheduler({
+          store,
+          index,
+          api: fakeApi([candidate]),
+          config: {
+            google: { services: ['gmail'] },
+            wake: { enabled: true, services: ['gmail'], source: 'cli', thread: 'local' },
+          },
+        })
+        expect((await restored.runner.poll(T0 + 32 * MIN)).action).toBe('wake')
+        expect(restored.fired).toHaveLength(1)
+        expect(restored.fired[0]?.id).not.toBe(pending.trigger.id)
+        state = loadConnectorWakeState(store)
+        expect(state.cursors?.gmail).toBe(new Date(T0 + 32 * MIN).toISOString())
+        expect(state.pending ?? []).toHaveLength(0)
+      }
+    }
   })
 
   it('rechecks min-interval and daily caps before replaying incomplete pending wakes', async () => {
