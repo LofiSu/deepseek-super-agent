@@ -631,6 +631,7 @@ describe('connector wake scheduler', () => {
       kind: 'event',
       externalId: 'event-1',
       title: 'Design review',
+      occurredAt: new Date(T0 + 16 * MIN).toISOString(),
       wakeReason: 'calendar event starting soon',
     })
     const { runner, fired } = scheduler({

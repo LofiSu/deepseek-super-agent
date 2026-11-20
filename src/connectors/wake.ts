@@ -154,6 +154,7 @@ export class ConnectorWakeScheduler {
   private stopping = false
   private stopPromise?: Promise<void>
   private readonly abortController = new AbortController()
+  private pollStateBaseline?: ConnectorWakeState
 
   constructor(private readonly opts: ConnectorWakeSchedulerOptions) {
     this.log = opts.log ?? (() => undefined)
@@ -194,6 +195,7 @@ export class ConnectorWakeScheduler {
       return await run
     } finally {
       this.inFlight = undefined
+      this.pollStateBaseline = undefined
     }
   }
 
@@ -202,6 +204,7 @@ export class ConnectorWakeScheduler {
     const config = this.opts.config
     const api = this.opts.api
     let state = this.loadState()
+    this.pollStateBaseline = structuredClone(state)
     const replayAt = Math.max(at, this.opts.now())
     state = this.reconcilePending(state, replayAt, config.enabled && Boolean(api))
     if (!config.enabled) return { action: 'disabled' }
@@ -315,6 +318,10 @@ export class ConnectorWakeScheduler {
 
     if (this.stopping) return { action: 'disabled', reason: 'stopping' }
     const decisionAt = Math.max(at, this.opts.now())
+    // A repair or completion may have been committed while the provider was
+    // awaited. Reconcile the latest durable lifecycle before selecting a new
+    // source revision or checkpointing the poll.
+    state = this.reconcilePending(this.loadState(), decisionAt, false)
     const upsert = this.opts.index.upsert(drafts)
     const pruned = this.opts.index.prune(config.index)
     const base: ConnectorWakeState = {
@@ -423,6 +430,7 @@ export class ConnectorWakeScheduler {
       .filter(draft => draft.wake === true && wakeConfig.services.includes(draft.service))
       .map(draft => recordById.get(connectorRecordId(draft.service, draft.externalId.trim())))
       .filter((record): record is ConnectorRecord => record !== undefined)
+      .filter(record => this.calendarRecordEligible(record, decisionAt))
       .sort((left, right) =>
         right.occurredAt.localeCompare(left.occurredAt)
         || right.updatedAt.localeCompare(left.updatedAt)
@@ -431,13 +439,12 @@ export class ConnectorWakeScheduler {
     let denied: string | undefined
     for (const record of candidates) {
       const trigger = connectorTrigger(record, target, decisionAt)
+      const lifecycle = wakeLifecycle(base, trigger.id)
+      if (lifecycle === 'incomplete' || lifecycle === 'uncertain') continue
       if (base.notified.some(row => row.triggerId === trigger.id)) continue
-      // A previously persisted trigger is already decided. Do not spend a
-      // second wake on the same source revision.
-      if (this.opts.store.getDoc<Trigger>('trigger', trigger.id)) {
-        base.notified = [...base.notified, { at: decisionAt, triggerId: trigger.id }].slice(-MAX_NOTIFIED_ROWS)
-        continue
-      }
+      // A persisted trigger remains an identity dedupe guard. It is not by
+      // itself evidence that this source revision reached a terminal outcome.
+      if (this.opts.store.getDoc<Trigger>('trigger', trigger.id)) continue
       const reason = admissionDenial(trigger, this.opts.admission)
       if (reason) {
         denied = reason
@@ -525,9 +532,28 @@ export class ConnectorWakeScheduler {
       && pending.trigger.id === `${CONNECTOR_TRIGGER_PREFIX}${pending.recordId}_${provenance.updatedAt}`
   }
 
+  private calendarRecordEligible(record: ConnectorRecord, at: number): boolean {
+    if (record.service !== 'calendar' || record.kind !== 'event'
+      || record.wakeReason !== 'calendar event starting soon') return true
+    const deadline = this.calendarEligibilityDeadline('calendar', {
+      version: 1,
+      kind: 'event',
+      occurredAt: record.occurredAt,
+      updatedAt: record.updatedAt,
+      wakeReason: record.wakeReason,
+    })
+    return deadline !== undefined && at <= deadline
+  }
+
   private calendarPendingDeadline(pending: ConnectorPendingWake): number | undefined {
-    const provenance = pending.calendarProvenance
-    if (pending.service !== 'calendar' || provenance?.version !== 1
+    return this.calendarEligibilityDeadline(pending.service, pending.calendarProvenance)
+  }
+
+  private calendarEligibilityDeadline(
+    service: GoogleService,
+    provenance: ConnectorPendingWake['calendarProvenance'],
+  ): number | undefined {
+    if (service !== 'calendar' || provenance?.version !== 1
       || provenance.kind !== 'event' || provenance.wakeReason !== 'calendar event starting soon') return undefined
     const occurredAt = Date.parse(provenance.occurredAt)
     if (!Number.isFinite(occurredAt)) return undefined
@@ -704,7 +730,7 @@ export class ConnectorWakeScheduler {
     const nonDelivery = disposition?.filtered !== undefined
     const next: ConnectorWakeState = {
       ...state,
-      ...(!nonDelivery ? { lastWakeAt: completedAt } : {}),
+      ...(!nonDelivery ? { lastWakeAt: Math.max(state.lastWakeAt ?? Number.NEGATIVE_INFINITY, completedAt) } : {}),
       pending: (state.pending ?? []).filter(row => row.trigger.id !== pending.trigger.id),
       incomplete: (state.incomplete ?? []).filter(row => row.pending.trigger.id !== pending.trigger.id),
       wakes: nonDelivery ? state.wakes : [...state.wakes, {
@@ -725,8 +751,77 @@ export class ConnectorWakeScheduler {
   }
 
   private saveState(state: ConnectorWakeState): void {
-    this.opts.store.putDoc(CONNECTOR_WAKE_STATE_KIND, CONNECTOR_WAKE_STATE_ID, state)
+    const baseline = this.pollStateBaseline
+    const latest = this.loadState()
+    const merged = baseline ? mergeWakeState(baseline, state, latest) : state
+    this.opts.store.putDoc(CONNECTOR_WAKE_STATE_KIND, CONNECTOR_WAKE_STATE_ID, merged)
+    this.pollStateBaseline = structuredClone(merged)
   }
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function mergeWakeRows<T>(
+  before: readonly T[] | undefined,
+  intended: readonly T[] | undefined,
+  latest: readonly T[] | undefined,
+  keyOf: (row: T) => string,
+): T[] | undefined {
+  const beforeById = new Map((before ?? []).map(row => [keyOf(row), row]))
+  const intendedById = new Map((intended ?? []).map(row => [keyOf(row), row]))
+  const latestById = new Map((latest ?? []).map(row => [keyOf(row), row]))
+  const ids = new Set([...beforeById.keys(), ...intendedById.keys(), ...latestById.keys()])
+  const rows: T[] = []
+  for (const id of ids) {
+    const previous = beforeById.get(id)
+    const next = intendedById.get(id)
+    const durable = latestById.get(id)
+    const chosen = sameValue(next, previous) ? durable
+      : sameValue(durable, previous) ? next
+        : durable
+    if (chosen !== undefined) rows.push(chosen)
+  }
+  return rows
+}
+
+function mergeWakeState(
+  before: ConnectorWakeState,
+  intended: ConnectorWakeState,
+  latest: ConnectorWakeState,
+): ConnectorWakeState {
+  const merged = { ...latest } as ConnectorWakeState
+  const rowFields: (keyof Pick<ConnectorWakeState, 'pending' | 'incomplete' | 'uncertain' | 'wakes' | 'notified'>)[] = [
+    'pending', 'incomplete', 'uncertain', 'wakes', 'notified',
+  ]
+  for (const field of Object.keys({ ...before, ...intended, ...latest }) as (keyof ConnectorWakeState)[]) {
+    if (rowFields.includes(field as typeof rowFields[number])) continue
+    const oldValue = before[field]
+    const newValue = intended[field]
+    const durableValue = latest[field]
+    if (sameValue(newValue, oldValue)) continue
+    (merged as unknown as Record<string, unknown>)[field] = sameValue(durableValue, oldValue)
+      ? newValue
+      : durableValue
+  }
+  merged.pending = mergeWakeRows(before.pending, intended.pending, latest.pending, row => row.trigger.id)
+  merged.incomplete = mergeWakeRows(before.incomplete, intended.incomplete, latest.incomplete, row => row.pending.trigger.id)
+  merged.uncertain = mergeWakeRows(before.uncertain, intended.uncertain, latest.uncertain, row => row.pending.trigger.id)
+  merged.wakes = mergeWakeRows(before.wakes, intended.wakes, latest.wakes, row => row.triggerId) ?? []
+  merged.notified = mergeWakeRows(before.notified, intended.notified, latest.notified, row => row.triggerId) ?? []
+  return merged
+}
+
+type WakeLifecycle = 'candidate' | 'pending' | 'incomplete' | 'uncertain' | 'completed' | 'retired'
+
+function wakeLifecycle(state: ConnectorWakeState, triggerId: string): WakeLifecycle {
+  if (state.incomplete?.some(row => row.pending.trigger.id === triggerId)) return 'incomplete'
+  if (state.uncertain?.some(row => row.pending.trigger.id === triggerId)) return 'uncertain'
+  if (state.pending?.some(row => row.trigger.id === triggerId)) return 'pending'
+  if (state.wakes.some(row => row.triggerId === triggerId)) return 'completed'
+  if (state.notified.some(row => row.triggerId === triggerId)) return 'retired'
+  return 'candidate'
 }
 
 function sameWakeTarget(target: WakeTarget, trigger: Trigger): boolean {
