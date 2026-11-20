@@ -169,7 +169,9 @@ osFaultDescribe('delegate_agent OS fault boundary', () => {
     const result = JSON.parse(stdout.trim()) as Record<string, unknown>
     expect(result.worker_exited_before_supervisor_setup).toBe(true)
     expect(result.supervisor_exit_code).not.toBe(0)
-    expect((result.supervisor_report as Record<string, unknown>).fatal).toContain('launching worker PID mismatch')
+    expect((result.supervisor_report as Record<string, unknown>).failure_kind).toBe('SupervisorInterrupted')
+    expect((result.supervisor_report as Record<string, unknown>).failure_message).toContain('launching worker PID mismatch')
+    expect((result.supervisor_report as Record<string, unknown>).helper_created).toBe(false)
     expect(result.helper_launch_attempted).toBe(false)
     expect(result.recovery_helper_marker_exists).toBe(false)
     expect(result.delegate_pid_file_exists).toBe(false)

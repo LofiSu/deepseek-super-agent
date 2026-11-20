@@ -204,7 +204,8 @@ def run_harness(home, repo_root, supervisor_script):
         supervisor_report = json.loads(report_file.read_text())
         if exit_code == 0:
             raise RuntimeError(f'supervisor unexpectedly succeeded after worker exit: {supervisor_report}')
-        if 'fatal' not in supervisor_report or 'launching worker PID mismatch' not in supervisor_report['fatal']:
+        if (supervisor_report.get('failure_kind') != 'SupervisorInterrupted'
+                or 'launching worker PID mismatch' not in supervisor_report.get('failure_message', '')):
             raise RuntimeError(f'supervisor failed for an unexpected reason: {supervisor_report}')
 
         helper_attempted = helper_launch_marker.exists()

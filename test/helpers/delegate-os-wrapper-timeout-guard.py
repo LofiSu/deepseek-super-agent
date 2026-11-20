@@ -39,10 +39,42 @@ def direct_children():
 
 
 def enable_subreaper():
+    try:
+        Path('/proc/self/stat').read_text()
+        Path('/proc/self/cmdline').read_bytes()
+        Path(f'/proc/self/task/{os.getpid()}/children').read_text()
+        os.listdir('/proc')
+    except OSError as error:
+        raise RuntimeError(f'unsupported capability: readable Linux procfs is required: {error}') from error
     libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
     if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         code = ctypes.get_errno()
-        raise OSError(code, os.strerror(code))
+        raise RuntimeError(f'unsupported capability: PR_SET_CHILD_SUBREAPER failed: [{code}] {os.strerror(code)}')
+    enabled = ctypes.c_int(0)
+    if libc.prctl(37, ctypes.byref(enabled), 0, 0, 0) != 0 or enabled.value != 1:
+        code = ctypes.get_errno()
+        raise RuntimeError(f'unsupported capability: PR_GET_CHILD_SUBREAPER verification failed: [{code}] {os.strerror(code)}')
+
+
+def preflight_rescue_capabilities():
+    if not hasattr(os, 'pidfd_open'):
+        raise RuntimeError('unsupported capability: Python os.pidfd_open is unavailable to the outer guard')
+    if not hasattr(signal, 'pidfd_send_signal'):
+        raise RuntimeError('unsupported capability: Python signal.pidfd_send_signal is unavailable to the outer guard')
+    pidfd = None
+    try:
+        pidfd = os.pidfd_open(os.getpid(), 0)
+        signal.pidfd_send_signal(pidfd, 0)
+    except OSError as error:
+        raise RuntimeError(
+            f'unsupported capability: outer guard pidfd acquisition and signal-0 verification failed: '
+            f'[{error.errno}] {error.strerror or str(error)}'
+        ) from error
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
 
 
 def wait_for_owned_children_cleanup(timeout_s=5.0):
@@ -113,6 +145,7 @@ def main():
     guard_timeout = float(sys.argv[4]) if len(sys.argv) >= 5 else 20.0
     ownership_ready = Path(sys.argv[5]) if len(sys.argv) == 6 else None
     enable_subreaper()
+    preflight_rescue_capabilities()
     env = os.environ.copy()
     env['DS_AGENT_TEST_FIXTURE_START_DELAY_MS'] = delay
     command = [

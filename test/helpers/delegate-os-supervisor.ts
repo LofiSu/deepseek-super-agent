@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 
 export interface DelegateOsSupervisorReport {
-  mode: 'fault' | 'assertion-failure' | 'timeout-failure' | 'wrapper-timeout-probe' | 'prepublish-kill'
+  mode: 'fault' | 'assertion-failure' | 'timeout-failure' | 'wrapper-timeout-probe' | 'prepublish-kill' | 'prepublish-timeout'
   subreaper: boolean
   helper_pid: number | null
   helper_exit_signal: number | null
@@ -21,6 +21,10 @@ export interface DelegateOsSupervisorReport {
   creation_identity_pinned: boolean
   owner_acknowledged: boolean
   injected_timeout_checkpoint: boolean
+  helper_created?: boolean
+  unsupported_capability?: string | null
+  operational_failure?: string | null
+  safe_direct_child_fallback_used?: boolean
 }
 
 export class DelegateOsSupervisorError extends Error {

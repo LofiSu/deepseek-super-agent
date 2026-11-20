@@ -11,7 +11,9 @@ if (Number.isFinite(injectedHangMs) && injectedHangMs > 0) {
 try {
   const mode = process.env.DS_AGENT_TEST_SUPERVISOR_MODE === 'prepublish-kill'
     ? 'prepublish-kill'
-    : 'wrapper-timeout-probe'
+    : process.env.DS_AGENT_TEST_SUPERVISOR_MODE === 'prepublish-timeout'
+      ? 'prepublish-timeout'
+      : 'wrapper-timeout-probe'
   const report = await runDelegateOsSupervisor(mode, home, 'pre-pid-timeout', 1_500)
   process.stdout.write(`${JSON.stringify({ wrapperRejected: false, report })}\n`)
   if (mode !== 'prepublish-kill' || !report.cleanup_succeeded) process.exitCode = 1
