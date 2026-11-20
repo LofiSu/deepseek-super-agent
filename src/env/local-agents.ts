@@ -281,6 +281,15 @@ export class LocalAgentRegistry {
           const ownerFile = this.env.DS_AGENT_TEST_DELEGATE_OWNER_FILE
           const ownerAck = this.env.DS_AGENT_TEST_DELEGATE_OWNER_ACK
           if (ownerFile && ownerAck && child.pid !== undefined) {
+            const prePublishGate = this.env.DS_AGENT_TEST_DELEGATE_OWNER_PREPUBLISH_GATE
+            if (prePublishGate) {
+              fs.writeFileSync(prePublishGate, `${child.pid}\n`, { flag: 'wx' })
+              const deadline = Date.now() + 10_000
+              while (Date.now() < deadline) {
+                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+              }
+              throw new Error('timed out at test pre-publication ownership gate')
+            }
             const pidAuditFile = this.env.DS_AGENT_TEST_DELEGATE_OWNER_PID_AUDIT
             if (pidAuditFile) fs.writeFileSync(pidAuditFile, `${child.pid}\n`, { flag: 'wx' })
             const temp = `${ownerFile}.${process.pid}.tmp`

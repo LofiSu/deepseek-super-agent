@@ -160,6 +160,27 @@ def wait_for_marker(marker, helper, timeout_s=45.0):
     raise TimeoutError(f'timed out waiting for a complete recovery helper readiness marker: {last_error}')
 
 
+def wait_for_adopted_delegate(fixture, baseline_children, timeout_s=1.0):
+    """Find only an exact fixture child adopted from this helper by our subreaper."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        for pid in sorted(direct_children(os.getpid()) - baseline_children):
+            stat = proc_stat(pid)
+            argv = proc_cmdline(pid)
+            if (stat and stat['ppid'] == os.getpid() and stat['pgrp'] == pid
+                    and stat['session'] == pid and fixture in argv):
+                pidfd = os.pidfd_open(pid, 0)
+                pinned = proc_stat(pid)
+                if (pinned and pinned['ppid'] == os.getpid()
+                        and pinned['start_time'] == stat['start_time']
+                        and pinned['pgrp'] == pid and pinned['session'] == pid
+                        and fixture in proc_cmdline(pid)):
+                    return pid, stat['start_time'], pidfd
+                os.close(pidfd)
+        time.sleep(0.01)
+    return None, None, None
+
+
 def wait_for_owned_spawn(owner_file, helper, fixture, timeout_s=45.0):
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -215,6 +236,34 @@ def terminate_helper(helper):
         raise RuntimeError('failed to kill and reap the directly owned recovery helper') from error
 
 
+def signal_attested_group_members(pgid, tracked, signaled):
+    sent = False
+    for pid, stat in proc_entries_for_group(pgid):
+        expected = tracked.get(pid)
+        if expected is not None and expected != stat['start_time']:
+            raise RuntimeError(f'process-group member PID {pid} was reused; refusing to signal it')
+        tracked[pid] = stat['start_time']
+        identity = (pid, stat['start_time'])
+        if identity in signaled:
+            continue
+        try:
+            pidfd = os.pidfd_open(pid, 0)
+        except ProcessLookupError:
+            continue
+        try:
+            current = proc_stat(pid)
+            if (current and current['start_time'] == stat['start_time']
+                    and current['pgrp'] == pgid and current['session'] == pgid):
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                signaled.add(identity)
+                sent = True
+        except ProcessLookupError:
+            pass
+        finally:
+            os.close(pidfd)
+    return sent
+
+
 def cleanup_group(pgid, initial_start_time, report, timeout_s=10.0):
     if pgid is None:
         report['group_absent'] = True
@@ -243,16 +292,17 @@ def cleanup_group(pgid, initial_start_time, report, timeout_s=10.0):
     tracked[pgid] = initial_start_time
     report['group_pids_seen'] = sorted(tracked)
 
-    # Signal only the detached process group attested from the fixture's exact
-    # PID file, command line, helper parent, session id, and start time.
-    os.killpg(pgid, signal.SIGKILL)
-    report['group_signal_sent'] = True
+    # Signal only members of the already attested detached session/group.
+    # pidfds bind each signal to the verified process identity, avoiding a
+    # numeric killpg target if the group disappears during cleanup.
+    signaled = set()
+    report['group_signal_sent'] = signal_attested_group_members(pgid, tracked, signaled)
 
     deadline = time.monotonic() + timeout_s
     reaped = set()
     while time.monotonic() < deadline:
-        for pid, stat in proc_entries_for_group(pgid):
-            tracked.setdefault(pid, stat['start_time'])
+        if signal_attested_group_members(pgid, tracked, signaled):
+            report['group_signal_sent'] = True
         children = direct_children(os.getpid())
         for pid in sorted(children & tracked.keys()):
             stat = proc_stat(pid)
@@ -286,12 +336,13 @@ def cleanup_group(pgid, initial_start_time, report, timeout_s=10.0):
 
 def run(mode, home, repo_root, task, expected_parent_pid):
     wait_for_test_bootstrap_gate()
-    if mode not in ('fault', 'assertion-failure', 'timeout-failure', 'wrapper-timeout-probe'):
+    if mode not in ('fault', 'assertion-failure', 'timeout-failure', 'wrapper-timeout-probe', 'prepublish-kill'):
         raise ValueError(f'unsupported supervisor mode: {mode}')
     if expected_parent_pid <= 1:
         raise ValueError('expected launching worker PID must be greater than 1')
 
     install_subreaper()
+    baseline_children = direct_children(os.getpid())
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGINT, interrupt)
     install_parent_death_signal(expected_parent_pid)
@@ -315,6 +366,11 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         'NODE_NO_WARNINGS': '1',
         'DS_AGENT_ALLOW_MOCK_FIXTURE': '1',
     })
+
+    if mode == 'prepublish-kill':
+        helper_env['DS_AGENT_TEST_DELEGATE_OWNER_PREPUBLISH_GATE'] = str(
+            home_path / '.delegate-owner-prepublish.gate'
+        )
 
     report = {
         'mode': mode,
@@ -355,17 +411,63 @@ def run(mode, home, repo_root, task, expected_parent_pid):
             close_fds=True,
         )
         report['helper_pid'] = helper.pid
-        delegate_pid, delegate_start_time, delegate_pidfd = wait_for_owned_spawn(
-            owner_file, helper, fixture,
-        )
-        report['delegate_pid'] = delegate_pid
-        report['delegate_pgid'] = delegate_pid
-        report['creation_identity_pinned'] = True
-        report['owner_acknowledged'] = publish_owner_ack(owner_ack, delegate_pid, delegate_start_time)
-        wait_for_marker(marker, helper)
-        # The child-published PID file remains startup evidence only. Cleanup
-        # ownership was pinned from the spawn handoff before the ack was written.
-        wait_for_delegate(pid_file, helper, fixture)
+        if mode == 'prepublish-kill':
+            gate = home_path / '.delegate-owner-prepublish.gate'
+            deadline = time.monotonic() + 45.0
+            while not gate.is_file() and time.monotonic() < deadline:
+                if helper.poll() is not None:
+                    raise RuntimeError('recovery helper exited before pre-publication gate')
+                time.sleep(0.01)
+            if not gate.is_file():
+                raise TimeoutError('timed out waiting for post-spawn pre-publication gate')
+            if owner_file.exists():
+                raise RuntimeError('owner record was published before the pre-publication gate')
+            pid_text = gate.read_text().strip()
+            if not pid_text.isdecimal():
+                raise RuntimeError('pre-publication gate did not contain a numeric fixture PID')
+            candidate = int(pid_text)
+            stat = proc_stat(candidate)
+            argv = proc_cmdline(candidate)
+            if (not stat or stat['ppid'] != helper.pid or stat['pgrp'] != candidate
+                    or stat['session'] != candidate or fixture not in argv):
+                raise RuntimeError('gate fixture is not the expected live detached helper child')
+            candidate_start_time = stat['start_time']
+            report['owner_record_absent_at_gate'] = True
+            report['fixture_alive_at_gate'] = True
+            os.kill(helper.pid, signal.SIGKILL)
+            helper_status = helper.wait(timeout=10)
+            report['helper_waited'] = True
+            report['helper_exit_signal'] = -helper_status if helper_status < 0 else None
+            if helper_status != -signal.SIGKILL:
+                raise RuntimeError('pre-publication helper was not terminated by SIGKILL')
+            delegate_pid, delegate_start_time, delegate_pidfd = wait_for_adopted_delegate(
+                fixture, baseline_children,
+            )
+            if delegate_pid != candidate or delegate_start_time != candidate_start_time:
+                raise RuntimeError('subreaper did not adopt the exact pre-publication fixture child')
+            report['delegate_pid'] = delegate_pid
+            report['delegate_pgid'] = delegate_pid
+            report['creation_identity_pinned'] = True
+            report['creation_identity_source'] = 'subreaper-adopted-child'
+        else:
+            delegate_pid, delegate_start_time, delegate_pidfd = wait_for_owned_spawn(
+                owner_file, helper, fixture,
+            )
+            report['delegate_pid'] = delegate_pid
+            report['delegate_pgid'] = delegate_pid
+            report['creation_identity_pinned'] = True
+            report['creation_identity_source'] = 'spawn-owner-record'
+            report['owner_acknowledged'] = publish_owner_ack(owner_ack, delegate_pid, delegate_start_time)
+            wait_for_marker(marker, helper)
+            # The child-published PID file remains startup evidence only. Cleanup
+            # ownership was pinned from the spawn handoff before the ack was written.
+            wait_for_delegate(pid_file, helper, fixture)
+            hang_ms = int(os.environ.get('DS_AGENT_TEST_SUPERVISOR_HANG_AFTER_OWNERSHIP_MS', '0'))
+            if hang_ms > 0:
+                ready_file = os.environ.get('DS_AGENT_TEST_SUPERVISOR_OWNERSHIP_READY_FILE')
+                if ready_file:
+                    Path(ready_file).write_text(f'{delegate_pid}\n')
+                time.sleep(hang_ms / 1000)
 
         if mode == 'fault':
             os.kill(helper.pid, signal.SIGKILL)
@@ -409,6 +511,21 @@ def run(mode, home, repo_root, task, expected_parent_pid):
                 report['helper_waited'] = True
                 if helper_status < 0 and report['helper_exit_signal'] is None:
                     report['helper_exit_signal'] = -helper_status
+            # The supervisor became a subreaper before helper launch. Any
+            # surviving descendant is now an OS-adopted direct child; pin only
+            # the exact detached fixture created in this helper's child domain.
+            if delegate_pid is None:
+                adopted_pid, adopted_start, adopted_pidfd = wait_for_adopted_delegate(
+                    fixture, baseline_children,
+                )
+                if adopted_pid is not None:
+                    delegate_pid, delegate_start_time, delegate_pidfd = (
+                        adopted_pid, adopted_start, adopted_pidfd,
+                    )
+                    report['delegate_pid'] = adopted_pid
+                    report['delegate_pgid'] = adopted_pid
+                    report['creation_identity_pinned'] = True
+                    report['creation_identity_source'] = 'subreaper-adopted-child'
             if delegate_pid is not None:
                 child_stat = proc_stat(delegate_pid)
                 if child_stat and child_stat['start_time'] != delegate_start_time:
@@ -446,7 +563,7 @@ def run(mode, home, repo_root, task, expected_parent_pid):
         and report['group_absent']
         and report['reaped_delegate_pid']
     )
-    if mode == 'fault' and failure is None and report['cleanup_succeeded']:
+    if mode in ('fault', 'prepublish-kill') and failure is None and report['cleanup_succeeded']:
         return report, 0
     if expected_failure and report['cleanup_succeeded']:
         return report, 0
@@ -460,6 +577,11 @@ def main():
     try:
         expected_parent_pid = int(sys.argv[5])
         report, status = run(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], expected_parent_pid)
+        report_file = os.environ.get('DS_AGENT_TEST_SUPERVISOR_REPORT_FILE')
+        if report_file:
+            temp = Path(report_file).with_name(Path(report_file).name + f'.{os.getpid()}.tmp')
+            temp.write_text(json.dumps(report, separators=(',', ':')))
+            os.replace(temp, report_file)
     except BaseException as error:
         report = {'fatal': f'{type(error).__name__}: {str(error)[:240]}'}
         status = 1

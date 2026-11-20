@@ -45,6 +45,29 @@ def enable_subreaper():
         raise OSError(code, os.strerror(code))
 
 
+def wait_for_owned_children_cleanup(timeout_s=5.0):
+    """Give the live Linux subreaper time to finish cleanup after wrapper death."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        children = direct_children()
+        active = False
+        for pid in sorted(children):
+            stat = proc_stat(pid)
+            if not stat or stat['ppid'] != os.getpid():
+                continue
+            if stat['state'] == 'Z':
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+            else:
+                active = True
+        if not active and not direct_children():
+            return True
+        time.sleep(0.01)
+    return not direct_children()
+
+
 def rescue_owned_children():
     rescued = []
     reaped_zombies = []
@@ -84,10 +107,11 @@ def rescue_owned_children():
 
 
 def main():
-    if len(sys.argv) not in (4, 5):
-        raise RuntimeError('usage: wrapper-timeout-guard.py REPO_ROOT HOME DELAY_MS [GUARD_TIMEOUT_S]')
+    if len(sys.argv) not in (4, 5, 6):
+        raise RuntimeError('usage: wrapper-timeout-guard.py REPO_ROOT HOME DELAY_MS [GUARD_TIMEOUT_S [OWNERSHIP_READY_FILE]]')
     root, home, delay = map(str, sys.argv[1:4])
-    guard_timeout = float(sys.argv[4]) if len(sys.argv) == 5 else 20.0
+    guard_timeout = float(sys.argv[4]) if len(sys.argv) >= 5 else 20.0
+    ownership_ready = Path(sys.argv[5]) if len(sys.argv) == 6 else None
     enable_subreaper()
     env = os.environ.copy()
     env['DS_AGENT_TEST_FIXTURE_START_DELAY_MS'] = delay
@@ -101,17 +125,28 @@ def main():
     )
     guard_timed_out = False
     try:
+        if ownership_ready is not None:
+            ready_deadline = time.monotonic() + 30.0
+            while not ownership_ready.exists() and child.poll() is None and time.monotonic() < ready_deadline:
+                time.sleep(0.01)
+            if not ownership_ready.exists():
+                guard_timed_out = True
+                raise subprocess.TimeoutExpired(command, 30.0)
         stdout, stderr = child.communicate(timeout=guard_timeout)
     except subprocess.TimeoutExpired:
         guard_timed_out = True
         # Popen is the exact wrapper child created above. Kill and wait for only
         # that process before rescuing descendants adopted by this subreaper.
-        child.kill()
+        if child.poll() is None:
+            child.kill()
         stdout, stderr = child.communicate()
     try:
         result = json.loads(stdout.strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError) as error:
         result = {'wrapperOutput': stdout, 'wrapperStderr': stderr, 'parseError': str(error)}
+    # Let the PDEATHSIG-enabled supervisor finish its own bounded cleanup first.
+    # Rescue only after that independent cleanup window has elapsed.
+    supervisor_cleanup_waited = wait_for_owned_children_cleanup()
     # Reap any descendants adopted from the exact wrapper process tree. This
     # is a leak detector and cleanup fallback; any rescue makes the probe fail.
     rescues, reaped_zombies = rescue_owned_children()
@@ -119,8 +154,17 @@ def main():
         any('delegate-ipc-hold.mjs' in arg for arg in entry['argv'])
         for entry in rescues
     )
+    supervisor_report = None
+    report_path = os.environ.get('DS_AGENT_TEST_SUPERVISOR_REPORT_FILE')
+    if report_path:
+        try:
+            supervisor_report = json.loads(Path(report_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            supervisor_report = None
     report = {
         **result,
+        'supervisor_report': supervisor_report,
+        'supervisor_cleanup_waited': supervisor_cleanup_waited,
         'wrapper_exit_code': child.returncode,
         'wrapper_guard_timed_out': guard_timed_out,
         'wrapper_reaped': child.returncode is not None,
@@ -130,7 +174,12 @@ def main():
         'outer_guard_clean': not rescues,
     }
     print(json.dumps(report, separators=(',', ':')), flush=True)
-    return 0 if child.returncode == 0 and not rescues and result.get('wrapperRejected') else 1
+    report = result.get('report') if isinstance(result, dict) else None
+    expected_success = result.get('wrapperRejected') or (
+        isinstance(report, dict) and report.get('mode') == 'prepublish-kill'
+        and report.get('cleanup_succeeded') is True
+    )
+    return 0 if child.returncode == 0 and not rescues and expected_success else 1
 
 
 if __name__ == '__main__':

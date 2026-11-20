@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 
 export interface DelegateOsSupervisorReport {
-  mode: 'fault' | 'assertion-failure' | 'timeout-failure' | 'wrapper-timeout-probe'
+  mode: 'fault' | 'assertion-failure' | 'timeout-failure' | 'wrapper-timeout-probe' | 'prepublish-kill'
   subreaper: boolean
   helper_pid: number | null
   helper_exit_signal: number | null

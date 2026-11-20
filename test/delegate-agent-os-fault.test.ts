@@ -207,6 +207,24 @@ osFaultDescribe('delegate_agent OS fault boundary', () => {
     expect(report.cleanup_error).toBeNull()
   }, 90_000)
 
+  it('rejects a local-agent spawn error without registering a live child', async () => {
+    const home = tempHome()
+    const registry = new LocalAgentRegistry([{
+      id: 'missing-agent',
+      command: path.join(home, 'does-not-exist'),
+      args: [],
+      timeoutMs: 1_000,
+    }], {
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      workspace: () => path.join(home, 'workspace'),
+    })
+
+    await expect(registry.run('missing-agent', 'spawn error', 'worker_spawn_error'))
+      .rejects.toThrow(/could not start local agent/)
+    expect(registry.activeCount).toBe(0)
+    registry.killAll()
+  })
+
   it('kills and reaps a spawned child when owner-file publication fails', async () => {
     const home = tempHome()
     const pidAudit = path.join(home, 'spawned-child.pid')
