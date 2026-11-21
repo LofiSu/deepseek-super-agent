@@ -7,12 +7,13 @@ import { ticketStage } from '../core/stage.ts'
 import { normalizeBrowserFields, type BrowserErrands } from '../env/browser-errands.ts'
 import { redactUnknown } from '../env/sanitize.ts'
 import type { LocalAgentRegistry } from '../env/local-agents.ts'
+import type { FeaturePrPublisher } from '../env/git-publish.ts'
 import type { SkillRegistry } from '../env/skills.ts'
 import { readObjectFor } from '../memory/acl.ts'
 import type { Metrics } from '../metrics/metrics.ts'
 import { UserError } from '../shared/errors.ts'
 import type { EnvPort, EnvRunOptions, RolePortFor, RolePorts } from '../shared/ports.ts'
-import type { Disposition, Role, Ticket } from '../shared/types.ts'
+import type { Disposition, PublishApprovalBinding, Role, Ticket } from '../shared/types.ts'
 import { settleSpeculation, visibleTickets } from '../speculate/index.ts'
 import type { ToolCall, ToolSpec } from './model.ts'
 import type { McpToolSourceLike } from './mcp.ts'
@@ -54,6 +55,8 @@ export interface ToolDeps {
   localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks. Absent means read_skill is unavailable. */
   skills?: SkillRegistry
+  /** Host-side peanut/ PR publisher; absent means publish_feature_pr is unavailable. */
+  publishFeaturePr?: FeaturePrPublisher
   /** Owner-configured browser errands. Absent means the browser tools are off. */
   browserErrands?: BrowserErrands
 }
@@ -98,6 +101,7 @@ export class ToolRegistry {
         scheduleJob: deps.scheduleJob,
         routerTurn: deps.routerTurn,
         teams: deps.teams,
+        publishFeaturePr: deps.publishFeaturePr,
       }),
       ...watchdogTools(deps.ports.watchdog, { env: deps.env, log, metrics, nudge: deps.nudge }),
       ...(deps.localAgents ? localAgentTools(deps.localAgents, store, log) : []),
@@ -332,6 +336,7 @@ interface WorkerToolDeps {
   scheduleJob: (job: { id: string; sessionId: string; ticketId: string }) => void
   routerTurn: (prompt: string) => Promise<void>
   teams?: TeamRegistry
+  publishFeaturePr?: FeaturePrPublisher
 }
 
 /** Executor tools close over ExecutorPorts. reply, decide, and receive are not in this scope. */
@@ -430,21 +435,37 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
     },
     {
       name: 'request_approval',
-      description: 'Ask the owner to approve one exact outward, destructive, or expensive action. Stops this ticket until the owner decides.',
+      description: 'Ask the owner to approve one exact outward, destructive, or expensive action. For PR publication, pass publish with title/body/branch; the host binds approval to the configured repo and current commit. Stops this ticket until the owner decides.',
       parameters: schema({
         action: { type: 'string', description: 'The exact action you will perform if approved, one line.' },
         reason: { type: 'string', description: 'Why it needs the owner, one short line.' },
+        publish: { type: 'object', description: 'Optional exact PR publish intent; the host binds the approval to the current commit and configured repository.' },
       }),
       roles: ['worker'],
       run: guard('worker', 'request_approval', async (args, ctx) => {
         if (!ctx.ticketId) throw new UserError('request_approval needs a ticket')
         const oneLine = (value: string): string => value.replace(/\s+/g, ' ').trim()
-        const action = oneLine(String(args.action ?? ''))
-        if (!action) throw new UserError('request_approval needs the exact action')
+        let publish: PublishApprovalBinding | undefined
+        let action: string
+        if (args.publish != null) {
+          if (!deps.publishFeaturePr) throw new UserError('publish approval needs a configured publisher')
+          const intent = args.publish as Record<string, unknown>
+          publish = await deps.publishFeaturePr.prepare({
+            workerId: ctx.sessionId,
+            title: String(intent.title ?? ''),
+            body: intent.body == null ? undefined : String(intent.body),
+            branch: intent.branch == null ? undefined : String(intent.branch),
+          })
+          action = `publish_feature_pr ${JSON.stringify(publish)}`
+        } else {
+          action = oneLine(String(args.action ?? ''))
+          if (!action) throw new UserError('request_approval needs the exact action')
+        }
         const reason = args.reason == null ? undefined : oneLine(String(args.reason)).slice(0, 300)
         const result = ctx.ports.requestApproval(ctx.ticketId, {
           action,
           ...(reason ? { reason } : {}),
+          ...(publish ? { publish } : {}),
         })
         const prompt = [
           'APPROVAL',
@@ -581,6 +602,94 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         const jobId = String(args.jobId ?? '')
         if (jobId) store.completeJob(jobId, 'stopped')
         return { status: 'stopped', jobId }
+      }),
+    },
+    {
+      name: 'publish_feature_pr',
+      description:
+        'Publish only with a matching owner-approved approvalId for the exact commit and PR metadata, to the configured GitHub repo on a peanut/ branch targeting main. '
+        + 'Does not merge, force-push, or push tags.',
+      parameters: schema({
+        approvalId: { type: 'string', description: 'Owner-approved publish request id for this exact repository, commit, branch, and PR metadata.' },
+        title: { type: 'string' },
+        body: { type: 'string' },
+        branch: { type: 'string', description: 'Optional slug under peanut/; omit when already on a peanut/ branch.' },
+      }),
+      roles: ['worker'],
+      run: guard('worker', 'publish_feature_pr', async (args, ctx) => {
+        if (!deps.publishFeaturePr) {
+          throw new UserError('publish_feature_pr is not configured on this runtime')
+        }
+        const assertTicketCanPublish = (): Ticket => {
+          const current = ticketOf(store, ctx)
+          if (!current) throw new UserError('publish_feature_pr needs an active ticket')
+          if (current.ended) {
+            throw new UserError(`ticket ${current.id} has ended (${current.ended.outcome}); cannot publish`)
+          }
+          return current
+        }
+        const ticket = ticketOf(store, ctx)
+        if (ticket?.ended) {
+          throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome}); cannot publish`)
+        }
+        if (ticket?.speculative) {
+          throw new UserError('publish_feature_pr is not available in isolated/speculative mode')
+        }
+        const title = String(args.title ?? '')
+        const body = args.body == null ? undefined : String(args.body)
+        const branch = args.branch == null ? undefined : String(args.branch)
+        const approvalId = String(args.approvalId ?? '')
+        if (!approvalId) throw new UserError('publish_feature_pr needs an owner approval id')
+        const approval = ticket?.collab?.approvals?.find(item => item.id === approvalId)
+        if (!approval || approval.status !== 'approved' || approval.decidedBy !== 'human' || !approval.publish) {
+          throw new UserError('publish_feature_pr needs a matching owner-approved publish request')
+        }
+        const requested = await deps.publishFeaturePr.prepare({
+          workerId: ctx.sessionId,
+          title,
+          body,
+          branch,
+        })
+        if (JSON.stringify(requested) !== JSON.stringify(approval.publish)) {
+          throw new UserError('publish_feature_pr approval does not match this repository, commit, branch, or PR metadata')
+        }
+        const currentTicket = assertTicketCanPublish()
+        if (!store.admitPublishApprovalOnce({
+          ticketId: currentTicket.id,
+          approvalId: approval.id,
+          binding: approval.publish,
+        })) {
+          throw new UserError('publish_feature_pr approval has already been used')
+        }
+        // Commit the publisher boundary before calling out. A crash before this
+        // marker is known not to have entered the publisher; after it, outcome
+        // stays unknown until a successful return is durably recorded.
+        store.markPublishAttemptStarted(currentTicket.id, approval.id)
+        let result
+        try {
+          result = await deps.publishFeaturePr.publish({
+            workerId: ctx.sessionId,
+            title,
+            body,
+            branch,
+          }, approval.publish, assertTicketCanPublish)
+        } catch (error) {
+          // Keep only the fact of an exception. Its text cannot establish that
+          // Git or GitHub had no effect and may contain provider-sensitive data.
+          try {
+            store.recordPublishUnconfirmed(currentTicket.id, approval.id)
+          } catch {
+            // attempt_started remains the durable, honest uncertainty marker.
+          }
+          throw error
+        }
+        store.recordPublishReturned(currentTicket.id, approval.id, {
+          number: result.number,
+          branch: result.branch,
+          remote: result.remote,
+        })
+        log(`[publish] session=${ctx.sessionId} branch=${result.branch} pr=${result.number}`)
+        return result
       }),
     },
   ]

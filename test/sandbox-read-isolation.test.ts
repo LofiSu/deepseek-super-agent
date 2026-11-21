@@ -113,8 +113,11 @@ describe.skipIf(!REAL_DARWIN_SANDBOX)('strict read isolation smoke (macOS)', () 
     expect(allowed.stdout).toContain('shell-ok')
     expect(allowed.stdout).toContain('hosts-ok')
 
-    // The home directory is deliberately outside the strict allowlist.
-    const denied = await env.bash('smoke', 'ls "$HOME"')
+    // $HOME is the worker workspace; the real host home stays outside the allowlist.
+    const hostHome = os.homedir()
+    const ws = env.workspace('smoke')
+    if (hostHome === ws) return
+    const denied = await env.bash('smoke', `ls ${JSON.stringify(hostHome)}`)
     expect(denied.code).not.toBe(0)
     expect(denied.stderr).toMatch(/Operation not permitted|Permission denied/)
   })
