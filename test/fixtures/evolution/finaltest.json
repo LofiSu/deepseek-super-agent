@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "id": "ho-001",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Valuable fix for checkout; resolved timeout." },
+      "expected": "deliver"
+    },
+    {
+      "id": "ho-002",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Fixed the flake; could not reproduce after patch." },
+      "expected": "deliver"
+    },
+    {
+      "id": "ho-003",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Nothing to do here." },
+      "expected": "discard"
+    },
+    {
+      "id": "ho-004",
+      "speculative": true,
+      "report": { "kind": "ready", "text": "Cannot complete without credentials." },
+      "expected": "discard"
+    }
+  ]
+}

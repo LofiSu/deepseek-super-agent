@@ -28,7 +28,14 @@ import { parseBashAllowNetwork } from './env/bash-allow-network.ts'
 import { parseBashTimeoutMs } from './env/bash-timeout.ts'
 import { FeaturePrPublisher } from './env/git-publish.ts'
 import { LocalEnv } from './env/local-env.ts'
-import { redactSecrets, secretValues } from './env/sanitize.ts'
+import {
+  BrowserErrands,
+  browserDriverSecretValues,
+  createBrowserDriver,
+  loadBrowserErrands,
+  type BrowserErrandConfig,
+} from './env/browser-errands.ts'
+import { redactKnownSecrets, secretValues } from './env/sanitize.ts'
 import { Daemon } from './harness/daemon.ts'
 import { Harness, normalizeQueueLimit } from './harness/loop.ts'
 import { loadRoutines, normalizeRoutines, RoutineScheduler, type RoutineSpec } from './harness/routines.ts'
@@ -115,6 +122,13 @@ export interface RuntimeOptions {
   localAgents?: LocalAgentSpec[]
   /** Owner-authored playbooks. Defaults to `skills/<id>/SKILL.md` in `home`. */
   skills?: SkillRegistry
+  /**
+   * Owner-configured browser errands. Defaults to `browser-errands.json` in
+   * `home`, then `DS_AGENT_BROWSER_ERRANDS`. Missing config leaves the browser
+   * tools off; `false` disables them explicitly. Malformed config or a missing
+   * driver executable throws at startup.
+   */
+  browserErrands?: BrowserErrandConfig | false
   /**
    * Owner-defined recurring routines. Defaults to `routines.json` in `home`,
    * then `DS_AGENT_ROUTINES`.
@@ -398,6 +412,8 @@ export class Runtime {
   readonly localAgents?: LocalAgentRegistry
   /** Owner-authored playbooks; also used by the read_skill tool. */
   readonly skills?: SkillRegistry
+  /** Owner-configured browser errands; absent means the browser tools are off. */
+  readonly browserErrands?: BrowserErrands
   /** Owner-defined routines, due-checked by the daemon tick. */
   readonly routines?: RoutineScheduler
   /** Owner-gated idle self-wake, due-checked by the same daemon pulse. */
@@ -463,6 +479,7 @@ export class Runtime {
     teams: TeamRegistry
     localAgents?: LocalAgentRegistry
     skills?: SkillRegistry
+    browserErrands?: BrowserErrands
     routines?: RoutineScheduler
     proactive: ProactiveScheduler
     instanceId: string
@@ -495,6 +512,7 @@ export class Runtime {
     this.teams = parts.teams
     this.localAgents = parts.localAgents
     this.skills = parts.skills
+    this.browserErrands = parts.browserErrands
     this.routines = parts.routines
     this.proactive = parts.proactive
     this.instanceId = parts.instanceId
@@ -519,17 +537,36 @@ export class Runtime {
   static create(opts: RuntimeOptions): Runtime {
     const baseEnv = opts.env ?? process.env
     const mcpConfig = mcpServersFromConfig(opts.mcpServers, baseEnv)
-    // A server's own env is where its credentials live, so its secret-named
-    // values join the redaction list before anything logs or persists.
+    const browserConfig = opts.browserErrands === false
+      ? undefined
+      : opts.browserErrands ?? loadBrowserErrands(opts.home, baseEnv)
+    const browserSecrets = browserDriverSecretValues(browserConfig, baseEnv)
+    // Configured driver credentials join secret-named environment values before
+    // anything logs, reaches a model, or persists to a journal.
     const secrets = [...new Set([
       ...secretValues(baseEnv),
       ...mcpConfig.configs.flatMap(config => secretValues(config.env)),
     ])].sort((a, b) => b.length - a.length)
-    const redact = (text: string) => redactSecrets(text, secrets)
+    const redact = (text: string) => redactKnownSecrets(text, browserSecrets, secrets)
     const log = new RedactingLogger(redact)
     if (mcpConfig.error) log.info(`[mcp] DS_AGENT_MCP_SERVERS ignored: ${mcpConfig.error}`)
     const model = opts.model ?? createModelFromEnv(baseEnv)
     const models = { ...roleModelsFromEnv(baseEnv, model), ...(opts.models ?? {}) }
+    // Validate and build the owner-gated adapter before opening SQLite so a
+    // malformed endpoint or unusable executable cannot leak a Store handle.
+    const browserErrands = browserConfig
+      ? new BrowserErrands(
+        createBrowserDriver(browserConfig, { env: baseEnv }),
+        browserConfig,
+        { log: line => log.info(line) },
+      )
+      : undefined
+    if (browserErrands) {
+      log.info(
+        `[browser] enabled driver=${browserErrands.driverKind}`
+        + ` hosts=${browserErrands.allowedHosts.join(',')}`,
+      )
+    }
     const store = new Store(opts.home)
     const metrics = new Metrics(opts.home)
     const workspaceSource = baseEnv.DS_AGENT_WORKSPACE_SOURCE_REPO?.trim() || process.cwd()
@@ -560,7 +597,6 @@ export class Runtime {
     if (skills.size) {
       log.info(`[skill] configured skills=${skills.list().map(skill => skill.id).join(',')}`)
     }
-
     // The scheduler is built before the Runtime exists; the closure forwards
     // into Runtime.ingest once construction finishes, so routines take the
     // normal filter, spill, dedupe, and Engine path.
@@ -1658,6 +1694,7 @@ export class Runtime {
       localAgents,
       ...(skills.size ? { skills } : {}),
       publishFeaturePr,
+      ...(browserErrands ? { browserErrands } : {}),
     })
     const harness = new Harness({
       model,
@@ -1665,6 +1702,7 @@ export class Runtime {
       tools,
       store,
       assignmentStarted: (ticketId, assignmentId, sessionId) => {
+        browserErrands?.beginAssignment(sessionId, assignmentId)
         engine.assignmentStarted(ticketId, assignmentId, sessionId)
       },
       assignmentPlaced: (ticketId, assignmentId, node) => {
@@ -2017,6 +2055,7 @@ export class Runtime {
       teams,
       ...(localAgents ? { localAgents } : {}),
       skills,
+      ...(browserErrands ? { browserErrands } : {}),
       ...(routines ? { routines } : {}),
       proactive,
       instanceId,
@@ -3095,10 +3134,12 @@ export class Runtime {
       failure = error
     }
     try {
-      // Local specialists run detached in their own process group, so they
-      // would outlive this process. Kill them before draining: shutdown must
-      // not block on a slow agent, and no child may survive finish().
+      // Local specialists and browser drivers run detached in their own
+      // process group, so they would outlive this process. Kill them before
+      // draining: shutdown must not block on a slow child, and no child may
+      // survive finish().
       this.localAgents?.killAll()
+      this.browserErrands?.killAll()
       await this.assessmentsSettled()
       this.flushEvals()
       await this.harness.jobsSettled()
