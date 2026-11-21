@@ -24,7 +24,7 @@ import type { LongTermMemoryEntry } from '../memory/long-term.ts'
 import { Runtime } from '../runtime.ts'
 import { visibleTickets } from '../speculate/index.ts'
 import type { JobRow, Role, SessionRow, Ticket } from '../shared/types.ts'
-import { Store } from '../store/sqlite.ts'
+import { readPublishAdmissionsReadOnly, Store } from '../store/sqlite.ts'
 import { healthProbe } from '../watchdog/health.ts'
 import { startEmbeddedGateway } from '../gateway/embedded.ts'
 import { defaultHome, runDemo } from './demo.ts'
@@ -675,20 +675,19 @@ async function main(): Promise<void> {
   if (cmd === 'publish-outcome') {
     const [ticketId] = bare(3)
     if (!ticketId) throw new Error('usage: ds-agent publish-outcome <ticketId> [--json]')
-    const store = new Store(home)
-    let admissions: ReturnType<Store['listPublishAdmissions']>
-    try {
-      // Resolve directly against the immutable ledger key. Do not derive identity
-      // or binding from a mutable current Ticket document.
-      admissions = store.listPublishAdmissions(ticketId)
-    } finally {
-      store.close()
-    }
+    // Resolve directly against the immutable ledger key using SQLite read-only
+    // open semantics. Do not construct Store, migrate, or derive identity from Ticket.
+    const { admissions, admissionLedgerAvailable } = readPublishAdmissionsReadOnly(home, ticketId)
     const guidance = {
       safeNextStep: 'Inspect the recorded repository, branch, commit, and PR details remotely. If uncertain, do not retry this approval; after resolving the remote state, request a fresh explicit owner approval with a new approval id.',
       remoteInspectionPerformed: false,
       retryPerformed: false,
       approvalChanged: false,
+      ...(!admissionLedgerAvailable || admissions.length === 0
+        ? { historicalEvidenceNote: admissionLedgerAvailable
+          ? 'No admission row is recorded; this does not establish whether older publication activity occurred.'
+          : 'The admission ledger is unavailable; historical publication activity cannot be determined from this state.' }
+        : {}),
     }
     const diagnosis = { ticketId, admissions, guidance }
     if (process.argv.includes('--json')) {
@@ -696,7 +695,8 @@ async function main(): Promise<void> {
       return
     }
     if (admissions.length === 0) {
-      console.log(`no publication admission recorded for ticket ${ticketId}; this does not establish whether older publication activity occurred`)
+      console.log(`no publication admission recorded for ticket ${ticketId}`)
+      console.log(guidance.historicalEvidenceNote)
     }
     for (const item of admissions) {
       console.log(`${item.approvalId}  state=${item.observationState}  admitted=${item.admittedAt}`)

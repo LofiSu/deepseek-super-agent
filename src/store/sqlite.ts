@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { LifecycleEvent } from '../core/lifecycle.ts'
 import type { DomainEventName } from '../shared/events.ts'
 import type { JobRow, ObjectRef, OutboxRow, PublishApprovalBinding, ReplyRow, SessionRow } from '../shared/types.ts'
-import { migrate } from './schema.ts'
+import { LATEST_SCHEMA_VERSION, migrate } from './schema.ts'
 
 export type PublishObservationState =
   | 'admitted'
@@ -21,6 +21,89 @@ export interface PublishAdmissionRecord {
   observationState: PublishObservationState
   result?: { number: number; branch: string; remote: string }
   observedAt?: string
+}
+
+export interface ReadonlyPublishAdmissions {
+  admissions: PublishAdmissionRecord[]
+  admissionLedgerAvailable: boolean
+}
+
+/**
+ * Read publisher evidence without entering the writable Store lifecycle.
+ * SQLite opens the existing file with SQLITE_OPEN_READONLY; no migration,
+ * journal-mode change, or checkpoint is run here.
+ */
+export function readPublishAdmissionsReadOnly(home: string, ticketId: string): ReadonlyPublishAdmissions {
+  const dbPath = path.join(home, 'ds-agent.db')
+  try {
+    fs.statSync(dbPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { admissions: [], admissionLedgerAvailable: false }
+    }
+    throw error
+  }
+
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    const admissionTable = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'publish_approval_admissions'`,
+    ).get()
+    if (!admissionTable) return { admissions: [], admissionLedgerAvailable: false }
+
+    const migrationTable = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`,
+    ).get()
+    const schemaVersion = migrationTable
+      ? Number((db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null }).version ?? 0)
+      : 0
+    if (schemaVersion > LATEST_SCHEMA_VERSION) {
+      throw new Error(`database schema version ${schemaVersion} is newer than this build supports (${LATEST_SCHEMA_VERSION})`)
+    }
+
+    const columns = new Set((db.prepare('PRAGMA table_info(publish_approval_admissions)').all() as { name: string }[])
+      .map(column => column.name))
+    for (const required of ['ticket_id', 'approval_id', 'admitted_at']) {
+      if (!columns.has(required)) throw new Error(`publish admission ledger is missing required column ${required}`)
+    }
+    const hasObservationColumns = ['binding_json', 'observation_state', 'result_json', 'observed_at']
+      .every(column => columns.has(column))
+    if (schemaVersion >= LATEST_SCHEMA_VERSION && !hasObservationColumns) {
+      throw new Error('publish admission ledger does not match the recorded schema version')
+    }
+
+    const rows = hasObservationColumns
+      ? db.prepare(`SELECT ticket_id, approval_id, admitted_at, binding_json, observation_state, result_json, observed_at
+                    FROM publish_approval_admissions WHERE ticket_id = ? ORDER BY admitted_at, approval_id`).all(ticketId)
+      : db.prepare(`SELECT ticket_id, approval_id, admitted_at
+                    FROM publish_approval_admissions WHERE ticket_id = ? ORDER BY admitted_at, approval_id`).all(ticketId)
+    return {
+      admissionLedgerAvailable: true,
+      admissions: (rows as {
+        ticket_id: string
+        approval_id: string
+        admitted_at: string
+        binding_json?: string | null
+        observation_state?: string
+        result_json?: string | null
+        observed_at?: string | null
+      }[]).map(row => ({
+        ticketId: row.ticket_id,
+        approvalId: row.approval_id,
+        admittedAt: row.admitted_at,
+        ...(row.binding_json ? { binding: JSON.parse(row.binding_json) as PublishApprovalBinding } : {}),
+        observationState: hasObservationColumns
+          ? row.observation_state as PublishObservationState
+          : 'legacy_unrecorded',
+        ...(row.result_json ? {
+          result: JSON.parse(row.result_json) as PublishAdmissionRecord['result'],
+        } : {}),
+        ...(row.observed_at ? { observedAt: row.observed_at } : {}),
+      })),
+    }
+  } finally {
+    db.close()
+  }
 }
 
 export class Store {
