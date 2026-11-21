@@ -132,6 +132,73 @@ describe('publish_feature_pr tool', () => {
     expect(pub.publish).not.toHaveBeenCalled()
   })
 
+  it('refuses an approved publish after its ticket has ended', async () => {
+    runtime = freshRuntime({ allowMockModel: true })
+    seedTicket(runtime, 'ticket-ended')
+    const request = runtime.engine.requestApproval('ticket-ended', {
+      action: `publish_feature_pr ${JSON.stringify(binding)}`,
+      requestedBy: 'w1',
+      publish: binding,
+    })
+    runtime.engine.decideApproval('ticket-ended', request.approval.id, 'approved')
+    const ticket = runtime.store.getDoc<{ ended?: { at: string; outcome: string; by: 'human' } }>('ticket', 'ticket-ended')!
+    ticket.ended = { at: new Date().toISOString(), outcome: 'stopped', by: 'human' }
+    runtime.store.putDoc('ticket', 'ticket-ended', ticket)
+    const pub = {
+      prepare: vi.fn(async () => binding),
+      publish: vi.fn(async () => ({ url: 'x', number: 1, branch: binding.branch, remote: binding.repo })),
+    } as unknown as FeaturePrPublisher
+    const tools = registry(runtime, pub)
+
+    await expect(tools.invoke(
+      { id: 'c1', name: 'publish_feature_pr', args: {
+        approvalId: request.approval.id,
+        title: binding.title,
+        body: binding.body,
+        branch: binding.branch,
+      } },
+      { sessionId: 'w1', role: 'worker', ticketId: 'ticket-ended' },
+    )).rejects.toThrow(/ticket .* has ended/)
+    expect(pub.prepare).not.toHaveBeenCalled()
+    expect(pub.publish).not.toHaveBeenCalled()
+  })
+
+  it('rechecks ticket lifecycle after asynchronous approval preparation', async () => {
+    runtime = freshRuntime({ allowMockModel: true })
+    seedTicket(runtime, 'ticket-ending-during-prepare')
+    const request = runtime.engine.requestApproval('ticket-ending-during-prepare', {
+      action: `publish_feature_pr ${JSON.stringify(binding)}`,
+      requestedBy: 'w1',
+      publish: binding,
+    })
+    runtime.engine.decideApproval('ticket-ending-during-prepare', request.approval.id, 'approved')
+    const pub = {
+      prepare: vi.fn(async () => {
+        const current = runtime!.store.getDoc<{ ended?: { at: string; outcome: string; by: 'human' } }>(
+          'ticket',
+          'ticket-ending-during-prepare',
+        )!
+        current.ended = { at: new Date().toISOString(), outcome: 'stopped', by: 'human' }
+        runtime!.store.putDoc('ticket', 'ticket-ending-during-prepare', current)
+        return binding
+      }),
+      publish: vi.fn(async () => ({ url: 'x', number: 1, branch: binding.branch, remote: binding.repo })),
+    } as unknown as FeaturePrPublisher
+    const tools = registry(runtime, pub)
+
+    await expect(tools.invoke(
+      { id: 'c1', name: 'publish_feature_pr', args: {
+        approvalId: request.approval.id,
+        title: binding.title,
+        body: binding.body,
+        branch: binding.branch,
+      } },
+      { sessionId: 'w1', role: 'worker', ticketId: 'ticket-ending-during-prepare' },
+    )).rejects.toThrow(/ticket .* has ended/)
+    expect(pub.prepare).toHaveBeenCalledOnce()
+    expect(pub.publish).not.toHaveBeenCalled()
+  })
+
   it('refuses an approved request bound to different metadata', async () => {
     runtime = freshRuntime({ allowMockModel: true })
     seedTicket(runtime, 'ticket-approval')

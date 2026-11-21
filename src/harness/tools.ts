@@ -616,7 +616,18 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         if (!deps.publishFeaturePr) {
           throw new UserError('publish_feature_pr is not configured on this runtime')
         }
+        const assertTicketCanPublish = (): Ticket => {
+          const current = ticketOf(store, ctx)
+          if (!current) throw new UserError('publish_feature_pr needs an active ticket')
+          if (current.ended) {
+            throw new UserError(`ticket ${current.id} has ended (${current.ended.outcome}); cannot publish`)
+          }
+          return current
+        }
         const ticket = ticketOf(store, ctx)
+        if (ticket?.ended) {
+          throw new UserError(`ticket ${ticket.id} has ended (${ticket.ended.outcome}); cannot publish`)
+        }
         if (ticket?.speculative) {
           throw new UserError('publish_feature_pr is not available in isolated/speculative mode')
         }
@@ -638,12 +649,13 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         if (JSON.stringify(requested) !== JSON.stringify(approval.publish)) {
           throw new UserError('publish_feature_pr approval does not match this repository, commit, branch, or PR metadata')
         }
+        assertTicketCanPublish()
         const result = await deps.publishFeaturePr.publish({
           workerId: ctx.sessionId,
           title,
           body,
           branch,
-        }, approval.publish)
+        }, approval.publish, assertTicketCanPublish)
         log(`[publish] session=${ctx.sessionId} branch=${result.branch} pr=${result.number}`)
         return result
       }),

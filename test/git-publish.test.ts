@@ -73,6 +73,34 @@ describe('FeaturePrPublisher', () => {
     expect(gh).not.toHaveBeenCalledWith(expect.arrayContaining(['merge']))
   })
 
+  it('checks current authorization after object transfer and before the push', async () => {
+    const root = tempHome()
+    const bare = bareFixture(root)
+    const ws = path.join(root, 'ending-during-transfer')
+    fs.mkdirSync(ws)
+    initWorkspace(ws, 'peanut/ending', bare)
+    let live = true
+    const calls: string[][] = []
+    const git: GitRun = async (args, opts) => {
+      calls.push(args)
+      const result = await runGit(args, opts)
+      if (args[0] === 'fetch') live = false
+      return result
+    }
+    const gh = mockGh()
+    const pub = publisher(ws, { pushRemote: bare, git, gh })
+    const approval = await pub.prepare(input)
+
+    await expect(pub.publish(input, approval, () => {
+      if (!live) throw new UserError('ticket ticket-1 has ended; cannot publish')
+    })).rejects.toThrow(/ticket .* has ended/)
+
+    expect(calls.some(args => args[0] === 'fetch')).toBe(true)
+    expect(calls.some(args => args[0] === 'push')).toBe(false)
+    expect(gh).not.toHaveBeenCalled()
+    expect(() => execFileSync('git', ['--git-dir', bare, 'show-ref', '--verify', 'refs/heads/peanut/ending'])).toThrow()
+  })
+
   it('refuses publication when HEAD resolves through an external object alternate', async () => {
     const root = tempHome()
     const bare = bareFixture(root)

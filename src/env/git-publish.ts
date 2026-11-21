@@ -131,6 +131,7 @@ export class FeaturePrPublisher {
   async publish(
     input: PublishFeaturePrInput,
     approved: PublishApprovalBinding,
+    assertCanPublish?: () => void,
   ): Promise<PublishFeaturePrResult> {
     const binding = await this.prepare(input)
     if (JSON.stringify(binding) !== JSON.stringify(approved)) {
@@ -152,6 +153,7 @@ export class FeaturePrPublisher {
       if (stagedCommit.code !== 0) {
         throw new UserError('publish object transfer failed: staging repository cannot resolve the approved commit')
       }
+      assertCanPublish?.()
       const push = await this.git([
         'push', '--no-verify', '--no-follow-tags', '--',
         this.pushRemote, `${binding.head}:refs/heads/${binding.branch}`,
@@ -162,7 +164,13 @@ export class FeaturePrPublisher {
     } finally {
       fs.rmSync(hostRepo, { recursive: true, force: true })
     }
-    const { number, url } = await this.upsertPullRequest(binding.branch, binding.title, binding.body)
+    assertCanPublish?.()
+    const { number, url } = await this.upsertPullRequest(
+      binding.branch,
+      binding.title,
+      binding.body,
+      assertCanPublish,
+    )
     return { url, number, branch: binding.branch, remote: `${this.repo.owner}/${this.repo.repo}` }
   }
 
@@ -170,6 +178,7 @@ export class FeaturePrPublisher {
     headBranch: string,
     title: string,
     body?: string,
+    assertCanPublish?: () => void,
   ): Promise<{ number: number; url: string }> {
     let listOut: string
     try {
@@ -186,6 +195,7 @@ export class FeaturePrPublisher {
       throw new UserError(`gh pr list failed: ${error instanceof Error ? error.message : String(error)}`)
     }
     const items = listOut.trim() ? (JSON.parse(listOut) as { number: number; url: string }[]) : []
+    assertCanPublish?.()
     if (items[0]) {
       const number = items[0].number
       const url = items[0].url
