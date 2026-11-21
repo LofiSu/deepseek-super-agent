@@ -111,6 +111,38 @@ describe('publish-outcome read-only database entry', () => {
     expect(createHash('sha256').update(fs.readFileSync(dbPath)).digest('hex')).toBe(before)
   })
 
+  it('rejects an unsupported future schema before treating a missing ledger as unavailable history', () => {
+    for (const withLedger of [false, true]) {
+      const home = path.join(makeRoot(), withLedger ? 'future-with-ledger' : 'future-without-ledger')
+      fs.mkdirSync(home)
+      const dbPath = path.join(home, 'ds-agent.db')
+      if (withLedger) {
+        const store = new Store(home)
+        store.close()
+        const db = new DatabaseSync(dbPath)
+        db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)')
+          .run(7, 'owned future-schema fixture')
+        db.close()
+      } else {
+        const db = new DatabaseSync(dbPath)
+        db.exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_migrations VALUES(7, 'owned future-schema fixture')`)
+        db.close()
+      }
+      const before = createHash('sha256').update(fs.readFileSync(dbPath)).digest('hex')
+
+      for (const json of [true, false]) {
+        const result = runCli(home, 'future-ticket', json)
+        expect(result.status, `${withLedger ? 'with' : 'without'} ledger, ${json ? 'JSON' : 'human'}: ${result.stdout}${result.stderr}`)
+          .not.toBe(0)
+        expect(`${result.stdout}${result.stderr}`).toMatch(/schema.*newer|unsupported/i)
+        expect(result.stdout).not.toContain('historical publication activity cannot be determined')
+      }
+
+      expect(createHash('sha256').update(fs.readFileSync(dbPath)).digest('hex')).toBe(before)
+    }
+  })
+
   it('reports corrupt or invalid database paths without replacing them or falling back to Store', () => {
     const corruptHome = path.join(makeRoot(), 'corrupt-state')
     fs.mkdirSync(corruptHome)

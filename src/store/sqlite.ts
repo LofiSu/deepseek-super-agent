@@ -46,11 +46,6 @@ export function readPublishAdmissionsReadOnly(home: string, ticketId: string): R
 
   const db = new DatabaseSync(dbPath, { readOnly: true })
   try {
-    const admissionTable = db.prepare(
-      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'publish_approval_admissions'`,
-    ).get()
-    if (!admissionTable) return { admissions: [], admissionLedgerAvailable: false }
-
     const migrationTable = db.prepare(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`,
     ).get()
@@ -60,6 +55,11 @@ export function readPublishAdmissionsReadOnly(home: string, ticketId: string): R
     if (schemaVersion > LATEST_SCHEMA_VERSION) {
       throw new Error(`database schema version ${schemaVersion} is newer than this build supports (${LATEST_SCHEMA_VERSION})`)
     }
+
+    const admissionTable = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'publish_approval_admissions'`,
+    ).get()
+    if (!admissionTable) return { admissions: [], admissionLedgerAvailable: false }
 
     const columns = new Set((db.prepare('PRAGMA table_info(publish_approval_admissions)').all() as { name: string }[])
       .map(column => column.name))
