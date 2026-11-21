@@ -35,6 +35,15 @@ function bareFixture(root: string, name = 'remote.git'): string {
   return bare
 }
 
+function moveWorkspaceObjectsToAlternate(ws: string, root: string): string {
+  const externalObjects = path.join(root, 'external-objects')
+  const objects = path.join(ws, '.git', 'objects')
+  fs.renameSync(objects, externalObjects)
+  const info = path.join(objects, 'info')
+  fs.mkdirSync(info, { recursive: true })
+  return path.join(info, 'alternates')
+}
+
 function publisher(ws: string, options: { pushRemote?: string; git?: GitRun; gh?: ReturnType<typeof mockGh> } = {}): FeaturePrPublisher {
   return new FeaturePrPublisher({
     repo: parseRepo('o/r'),
@@ -62,6 +71,69 @@ describe('FeaturePrPublisher', () => {
     expect(result.number).toBe(42)
     expect(gh).toHaveBeenCalledWith(expect.arrayContaining(['pr', 'create', '--base', 'main']))
     expect(gh).not.toHaveBeenCalledWith(expect.arrayContaining(['merge']))
+  })
+
+  it('refuses publication when HEAD resolves through an external object alternate', async () => {
+    const root = tempHome()
+    const bare = bareFixture(root)
+    const ws = path.join(root, 'alternate-workspace')
+    fs.mkdirSync(ws)
+    initWorkspace(ws, 'peanut/alternate', bare)
+    const pub = publisher(ws, { pushRemote: bare, gh: mockGh() })
+    const approval = await pub.prepare(input)
+    const alternateFile = moveWorkspaceObjectsToAlternate(ws, root)
+    fs.writeFileSync(alternateFile, `# external object store\n${path.join(root, 'external-objects')}\n`)
+
+    await expect(pub.publish(input, approval)).rejects.toThrow(/alternate/i)
+    expect(() => execFileSync('git', ['--git-dir', bare, 'show-ref', '--verify', 'refs/heads/peanut/alternate'])).toThrow()
+  })
+
+  it('refuses a symlinked alternates file that exposes external objects', async () => {
+    const root = tempHome()
+    const bare = bareFixture(root)
+    const ws = path.join(root, 'symlink-alternate-workspace')
+    fs.mkdirSync(ws)
+    initWorkspace(ws, 'peanut/symlink-alternate', bare)
+    const alternateFile = moveWorkspaceObjectsToAlternate(ws, root)
+    const externalAlternateFile = path.join(root, 'external-alternates')
+    fs.writeFileSync(externalAlternateFile, `${path.join(root, 'external-objects')}\n`)
+    fs.symlinkSync(externalAlternateFile, alternateFile)
+    const pub = publisher(ws, { pushRemote: bare, gh: mockGh() })
+
+    await expect(pub.prepare(input)).rejects.toThrow(/alternate/i)
+    expect(() => execFileSync('git', ['--git-dir', bare, 'show-ref', '--verify', 'refs/heads/peanut/symlink-alternate'])).toThrow()
+  })
+
+  it('rejects case-varied HTTP alternate metadata in the resolved common directory', async () => {
+    const root = tempHome()
+    const bare = bareFixture(root)
+    const ws = path.join(root, 'case-varied-alternate-workspace')
+    fs.mkdirSync(ws)
+    initWorkspace(ws, 'peanut/case-varied-alternate', bare)
+    const info = path.join(ws, '.git', 'Objects', 'INFO')
+    fs.mkdirSync(info, { recursive: true })
+    fs.writeFileSync(path.join(info, 'HTTP-Alternates'), '# external object URL\nhttps://invalid.example/objects\n')
+    const pub = publisher(ws, { pushRemote: bare, gh: mockGh() })
+
+    await expect(pub.prepare(input)).rejects.toThrow(/alternate/i)
+    expect(() => execFileSync('git', ['--git-dir', bare, 'show-ref', '--verify', 'refs/heads/peanut/case-varied-alternate'])).toThrow()
+  })
+
+  it('publishes normally when alternate metadata files are empty', async () => {
+    const root = tempHome()
+    const bare = bareFixture(root)
+    const ws = path.join(root, 'empty-alternates-workspace')
+    fs.mkdirSync(ws)
+    initWorkspace(ws, 'peanut/empty-alternates', bare)
+    const info = path.join(ws, '.git', 'objects', 'info')
+    fs.mkdirSync(info, { recursive: true })
+    fs.writeFileSync(path.join(info, 'alternates'), '')
+    fs.writeFileSync(path.join(info, 'http-alternates'), '')
+    const pub = publisher(ws, { pushRemote: bare, gh: mockGh() })
+    const approval = await pub.prepare(input)
+    await pub.publish(input, approval)
+
+    expect(execFileSync('git', ['--git-dir', bare, 'rev-parse', 'refs/heads/peanut/empty-alternates'], { encoding: 'utf8' }).trim()).toBe(approval.head)
   })
 
   it('does not execute a worker repository pre-push hook', async () => {

@@ -119,6 +119,43 @@ function realGitCommonDir(workspace: string): string {
   throw new UserError('workspace is not a git checkout')
 }
 
+function directoryEntries(directory: string): string[] {
+  try {
+    return fs.readdirSync(directory)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return []
+    throw new UserError('publish refused: cannot inspect workspace git object metadata')
+  }
+}
+
+function hasUsableObjectAlternate(common: string): boolean {
+  const objectDirs = directoryEntries(common).filter(name => name.toLowerCase() === 'objects')
+  for (const objectDir of objectDirs) {
+    const objectPath = path.join(common, objectDir)
+    const infoDirs = directoryEntries(objectPath).filter(name => name.toLowerCase() === 'info')
+    for (const infoDir of infoDirs) {
+      const infoPath = path.join(objectPath, infoDir)
+      const alternateFiles = directoryEntries(infoPath).filter(name =>
+        name.toLowerCase() === 'alternates' || name.toLowerCase() === 'http-alternates',
+      )
+      for (const alternateFile of alternateFiles) {
+        let contents: string
+        try {
+          // readFile follows symlinks, as Git does for these metadata files.
+          contents = fs.readFileSync(path.join(infoPath, alternateFile), 'utf8')
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code
+          if (code === 'ENOENT') continue
+          throw new UserError('publish refused: cannot inspect workspace git object alternates')
+        }
+        if (contents.split(/\r?\n/).some(line => line.replace(/#.*/, '').trim().length > 0)) return true
+      }
+    }
+  }
+  return false
+}
+
 /** Refuse linked worktrees whose object database lives outside the workspace. */
 export function assertGitCommonDirInsideWorkspace(workspace: string): void {
   let wsReal: string
@@ -137,6 +174,9 @@ export function assertGitCommonDirInsideWorkspace(workspace: string): void {
     throw new UserError(
       'publish refused: workspace git directory is outside the worker workspace',
     )
+  }
+  if (hasUsableObjectAlternate(common)) {
+    throw new UserError('publish refused: workspace git object alternates are not allowed')
   }
 }
 

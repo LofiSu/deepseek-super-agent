@@ -148,6 +148,10 @@ export class FeaturePrPublisher {
       if (fetch.code !== 0) {
         throw new UserError(`publish object transfer failed (exit ${fetch.code}): ${fetch.stderr.trim().slice(0, 400)}`)
       }
+      const stagedCommit = await this.git(['cat-file', '-e', `${binding.head}^{commit}`], { cwd: hostRepo })
+      if (stagedCommit.code !== 0) {
+        throw new UserError('publish object transfer failed: staging repository cannot resolve the approved commit')
+      }
       const push = await this.git([
         'push', '--no-verify', '--no-follow-tags', '--',
         this.pushRemote, `${binding.head}:refs/heads/${binding.branch}`,
