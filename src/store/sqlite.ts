@@ -3,8 +3,25 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { LifecycleEvent } from '../core/lifecycle.ts'
 import type { DomainEventName } from '../shared/events.ts'
-import type { JobRow, ObjectRef, OutboxRow, ReplyRow, SessionRow } from '../shared/types.ts'
+import type { JobRow, ObjectRef, OutboxRow, PublishApprovalBinding, ReplyRow, SessionRow } from '../shared/types.ts'
 import { migrate } from './schema.ts'
+
+export type PublishObservationState =
+  | 'admitted'
+  | 'attempt_started'
+  | 'returned'
+  | 'unconfirmed'
+  | 'legacy_unrecorded'
+
+export interface PublishAdmissionRecord {
+  ticketId: string
+  approvalId: string
+  admittedAt: string
+  binding?: PublishApprovalBinding
+  observationState: PublishObservationState
+  result?: { number: number; branch: string; remote: string }
+  observedAt?: string
+}
 
 export class Store {
   readonly path: string
@@ -108,17 +125,89 @@ export class Store {
     this.db.prepare('DELETE FROM documents WHERE kind = ? AND id = ?').run(kind, id)
   }
 
-  /** Persist the one-use admission for a human-approved feature PR publication. */
-  admitPublishApprovalOnce(input: { ticketId: string; approvalId: string }): boolean {
-    const { ticketId, approvalId } = input
+  /** Persist the one-use admission and immutable approval binding before publisher entry. */
+  admitPublishApprovalOnce(input: {
+    ticketId: string
+    approvalId: string
+    binding: PublishApprovalBinding
+  }): boolean {
+    const { ticketId, approvalId, binding } = input
     return this.atomic(() => {
       const result = this.db.prepare(
-        `INSERT INTO publish_approval_admissions(ticket_id, approval_id, admitted_at)
-         VALUES(?, ?, ?)
+        `INSERT INTO publish_approval_admissions(
+           ticket_id, approval_id, admitted_at, binding_json, observation_state
+         ) VALUES(?, ?, ?, ?, ?)
          ON CONFLICT(ticket_id, approval_id) DO NOTHING`,
-      ).run(ticketId, approvalId, new Date().toISOString())
+      ).run(
+        ticketId,
+        approvalId,
+        new Date().toISOString(),
+        JSON.stringify(binding),
+        'admitted',
+      )
       return result.changes === 1
     })
+  }
+
+  /** Publisher entry is possible only after this marker commits. */
+  markPublishAttemptStarted(ticketId: string, approvalId: string): void {
+    const result = this.db.prepare(
+      `UPDATE publish_approval_admissions
+       SET observation_state = 'attempt_started', observed_at = ?
+       WHERE ticket_id = ? AND approval_id = ? AND observation_state = 'admitted'`,
+    ).run(new Date().toISOString(), ticketId, approvalId)
+    if (result.changes !== 1) throw new Error('publish admission is not awaiting publisher entry')
+  }
+
+  /** Persist the publisher's public returned result; no provider output is retained. */
+  recordPublishReturned(
+    ticketId: string,
+    approvalId: string,
+    result: { number: number; branch: string; remote: string },
+  ): void {
+    const observedAt = new Date().toISOString()
+    const updated = this.db.prepare(
+      `UPDATE publish_approval_admissions
+       SET observation_state = 'returned', result_json = ?, observed_at = ?
+       WHERE ticket_id = ? AND approval_id = ? AND observation_state = 'attempt_started'`,
+    ).run(JSON.stringify(result), observedAt, ticketId, approvalId)
+    if (updated.changes !== 1) throw new Error('publish admission cannot record returned result')
+  }
+
+  /** A thrown publisher call is uncertain: errors do not prove no remote effect. */
+  recordPublishUnconfirmed(ticketId: string, approvalId: string): void {
+    this.db.prepare(
+      `UPDATE publish_approval_admissions
+       SET observation_state = 'unconfirmed', result_json = NULL, observed_at = ?
+       WHERE ticket_id = ? AND approval_id = ? AND observation_state = 'attempt_started'`,
+    ).run(new Date().toISOString(), ticketId, approvalId)
+  }
+
+  /** Read publisher facts for one Ticket; this query never changes admissions. */
+  listPublishAdmissions(ticketId: string): PublishAdmissionRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ticket_id, approval_id, admitted_at, binding_json, observation_state, result_json, observed_at
+       FROM publish_approval_admissions WHERE ticket_id = ? ORDER BY admitted_at, approval_id`,
+    ).all(ticketId) as {
+      ticket_id: string
+      approval_id: string
+      admitted_at: string
+      binding_json: string | null
+      observation_state: string
+      result_json: string | null
+      observed_at: string | null
+    }[]
+    return rows.map(row => ({
+      ticketId: row.ticket_id,
+      approvalId: row.approval_id,
+      admittedAt: row.admitted_at,
+      ...(row.binding_json ? { binding: JSON.parse(row.binding_json) as PublishApprovalBinding } : {}),
+      observationState: row.observation_state as PublishObservationState,
+      ...(row.result_json ? {
+        result: JSON.parse(row.result_json) as PublishAdmissionRecord['result'],
+      } : {}),
+      ...(row.observed_at ? { observedAt: row.observed_at } : {}),
+    }))
   }
 
   addEvent(type: DomainEventName, payload: unknown): void {

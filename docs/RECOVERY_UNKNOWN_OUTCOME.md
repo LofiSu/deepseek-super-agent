@@ -23,6 +23,18 @@ Exactly-once side effects to local specialists (`delegate_agent`) or remote chan
 
 Ended tickets have no resumable approval. Inspect their durable effect IDs with `pnpm ds-agent recovery-effects <ticketId>`, then resolve exactly one verified ID with `pnpm ds-agent recovery-effects <ticketId> retry <effectId>` or `pnpm ds-agent recovery-effects <ticketId> acknowledge <effectId>`. `retry` is available only for an uncertain Outbox row, because it has a durable redrain path. Delegate operations have no resumable child process after Ticket end, so the CLI requires `acknowledge` after remote verification. The CLI refuses live Tickets, which must use their recovery approval.
 
+## Feature PR publication approval outcome
+
+A feature PR approval is durably consumed before the host publisher runs. Inspect its persisted facts with the read-only command `pnpm ds-agent publish-outcome <ticketId>` (or add `--json`). It does not call GitHub, inspect credentials, change approval state, or retry publication.
+
+- `admitted` means the approval and immutable repository/commit/branch/PR binding were recorded, but publisher entry was not recorded. The approval remains consumed.
+- `attempt_started` means the publisher boundary was recorded before entry. After a crash or a failed local confirmation write, an external push or PR effect may or may not have happened.
+- `unconfirmed` means the publisher threw. The exception is not evidence that the remote effect did not happen; raw provider errors are not stored in the diagnosis record.
+- `returned` records that the publisher returned normally and its PR number, branch, and repository were stored. It does not provide an independent remote reconciliation check.
+- `legacy_unrecorded` is a pre-v6 consumed admission. Its original binding and publisher result were not persisted, and the current Ticket approval is not used to invent them.
+
+The owner should inspect the recorded repository, head commit, branch, base, and PR details directly in the remote service. If the result remains uncertain, keep the consumed approval and do not retry it. After resolving the remote state, have the Worker request a fresh approval with a new approval ID; the owner makes that decision explicitly. There is no automatic replay, admission release, automatic approval, or claim of GitHub exactly-once behavior. No admission row means only that this ledger has no row; it does not backfill or rule out older publication activity.
+
 ## Boundaries
 
 - In-process worker bash and mesh tools remain at-least-once as before.

@@ -650,15 +650,40 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
           throw new UserError('publish_feature_pr approval does not match this repository, commit, branch, or PR metadata')
         }
         const currentTicket = assertTicketCanPublish()
-        if (!store.admitPublishApprovalOnce({ ticketId: currentTicket.id, approvalId: approval.id })) {
+        if (!store.admitPublishApprovalOnce({
+          ticketId: currentTicket.id,
+          approvalId: approval.id,
+          binding: approval.publish,
+        })) {
           throw new UserError('publish_feature_pr approval has already been used')
         }
-        const result = await deps.publishFeaturePr.publish({
-          workerId: ctx.sessionId,
-          title,
-          body,
-          branch,
-        }, approval.publish, assertTicketCanPublish)
+        // Commit the publisher boundary before calling out. A crash before this
+        // marker is known not to have entered the publisher; after it, outcome
+        // stays unknown until a successful return is durably recorded.
+        store.markPublishAttemptStarted(currentTicket.id, approval.id)
+        let result
+        try {
+          result = await deps.publishFeaturePr.publish({
+            workerId: ctx.sessionId,
+            title,
+            body,
+            branch,
+          }, approval.publish, assertTicketCanPublish)
+        } catch (error) {
+          // Keep only the fact of an exception. Its text cannot establish that
+          // Git or GitHub had no effect and may contain provider-sensitive data.
+          try {
+            store.recordPublishUnconfirmed(currentTicket.id, approval.id)
+          } catch {
+            // attempt_started remains the durable, honest uncertainty marker.
+          }
+          throw error
+        }
+        store.recordPublishReturned(currentTicket.id, approval.id, {
+          number: result.number,
+          branch: result.branch,
+          remote: result.remote,
+        })
         log(`[publish] session=${ctx.sessionId} branch=${result.branch} pr=${result.number}`)
         return result
       }),

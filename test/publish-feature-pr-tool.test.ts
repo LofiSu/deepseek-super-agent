@@ -227,6 +227,12 @@ describe('publish_feature_pr tool', () => {
     )
 
     await expect(call()).resolves.toMatchObject({ number: 1 })
+    expect(runtime.store.listPublishAdmissions('ticket-single-use')[0]).toMatchObject({
+      approvalId: request.approval.id,
+      binding,
+      observationState: 'returned',
+      result: { number: 1, branch: binding.branch, remote: binding.repo },
+    })
     const reopened = new Store(runtime.home)
     try {
       await expect(registry(runtime, pub, reopened).invoke(
@@ -339,12 +345,87 @@ describe('publish_feature_pr tool', () => {
 
     await expect(tools.invoke({ id: 'c1', name: 'publish_feature_pr', args: input }, ctx))
       .rejects.toThrow('local push succeeded; confirmation interrupted')
+    const persisted = runtime.store.listPublishAdmissions('ticket-uncertain')[0]
+    expect(persisted).toMatchObject({ binding: approved, observationState: 'unconfirmed' })
+    expect(JSON.stringify(persisted)).not.toContain('confirmation interrupted')
     expect(execFileSync('git', ['--git-dir', bare, 'rev-parse', `refs/heads/${approved.branch}`], {
       encoding: 'utf8', env: gitEnv,
     }).trim()).toBe(head)
     await expect(tools.invoke({ id: 'c2', name: 'publish_feature_pr', args: input }, ctx))
       .rejects.toThrow(/already been used/)
     expect(pub.publish).toHaveBeenCalledOnce()
+  })
+
+  it('keeps admission consumed when the process stops before publisher entry', async () => {
+    runtime = freshRuntime({ allowMockModel: true })
+    seedTicket(runtime, 'ticket-stopped-before-publisher')
+    const request = runtime.engine.requestApproval('ticket-stopped-before-publisher', {
+      action: `publish_feature_pr ${JSON.stringify(binding)}`,
+      requestedBy: 'w1',
+      publish: binding,
+    })
+    runtime.engine.decideApproval('ticket-stopped-before-publisher', request.approval.id, 'approved')
+    const publisher = {
+      prepare: vi.fn(async () => binding),
+      publish: vi.fn(async () => ({ url: 'x', number: 1, branch: binding.branch, remote: binding.repo })),
+    }
+    const tools = registry(runtime, publisher as unknown as FeaturePrPublisher)
+    const call = () => tools.invoke(
+      { id: 'c1', name: 'publish_feature_pr', args: {
+        approvalId: request.approval.id, title: binding.title, body: binding.body, branch: binding.branch,
+      } },
+      { sessionId: 'w1', role: 'worker', ticketId: 'ticket-stopped-before-publisher' },
+    )
+    const marker = vi.spyOn(runtime.store, 'markPublishAttemptStarted').mockImplementation(() => {
+      throw new Error('simulated stop before publisher entry')
+    })
+    await expect(call()).rejects.toThrow('simulated stop before publisher entry')
+    marker.mockRestore()
+    expect(publisher.publish).not.toHaveBeenCalled()
+    expect(runtime.store.listPublishAdmissions('ticket-stopped-before-publisher')[0])
+      .toMatchObject({ binding, observationState: 'admitted' })
+    await expect(call()).rejects.toThrow(/already been used/)
+    expect(publisher.publish).not.toHaveBeenCalled()
+  })
+
+  it('leaves an unconfirmed publisher boundary when result persistence fails', async () => {
+    runtime = freshRuntime({ allowMockModel: true })
+    seedTicket(runtime, 'ticket-confirmation-write-fails')
+    const request = runtime.engine.requestApproval('ticket-confirmation-write-fails', {
+      action: `publish_feature_pr ${JSON.stringify(binding)}`,
+      requestedBy: 'w1',
+      publish: binding,
+    })
+    runtime.engine.decideApproval('ticket-confirmation-write-fails', request.approval.id, 'approved')
+    let externalEffect = 0
+    const publisher = {
+      prepare: vi.fn(async () => binding),
+      publish: vi.fn(async () => {
+        externalEffect += 1
+        return { url: 'https://github.invalid/o/r/pull/8', number: 8, branch: binding.branch, remote: binding.repo }
+      }),
+    }
+    const tools = registry(runtime, publisher as unknown as FeaturePrPublisher)
+    const persist = vi.spyOn(runtime.store, 'recordPublishReturned').mockImplementation(() => {
+      throw new Error('simulated local confirmation write failure')
+    })
+    await expect(tools.invoke(
+      { id: 'c1', name: 'publish_feature_pr', args: {
+        approvalId: request.approval.id, title: binding.title, body: binding.body, branch: binding.branch,
+      } },
+      { sessionId: 'w1', role: 'worker', ticketId: 'ticket-confirmation-write-fails' },
+    )).rejects.toThrow('simulated local confirmation write failure')
+    persist.mockRestore()
+    expect(externalEffect).toBe(1)
+    expect(runtime.store.listPublishAdmissions('ticket-confirmation-write-fails')[0])
+      .toMatchObject({ binding, observationState: 'attempt_started' })
+    await expect(tools.invoke(
+      { id: 'c2', name: 'publish_feature_pr', args: {
+        approvalId: request.approval.id, title: binding.title, body: binding.body, branch: binding.branch,
+      } },
+      { sessionId: 'w1', role: 'worker', ticketId: 'ticket-confirmation-write-fails' },
+    )).rejects.toThrow(/already been used/)
+    expect(publisher.publish).toHaveBeenCalledOnce()
   })
 
   it('refuses an approved request bound to different metadata', async () => {

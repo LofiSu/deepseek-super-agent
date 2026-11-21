@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS events (
 `
 
 /** The schema version this build writes and understands. */
-export const LATEST_SCHEMA_VERSION = 5
+export const LATEST_SCHEMA_VERSION = 6
 
 const SCHEMA_MIGRATIONS_DDL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -166,6 +166,17 @@ CREATE TABLE IF NOT EXISTS publish_approval_admissions (
   PRIMARY KEY (ticket_id, approval_id)
 );
 `),
+  },
+  {
+    version: 6,
+    // Add durable outcome evidence without inferring facts for consumed v5 rows.
+    // Existing rows receive only the explicit legacy marker; binding/result stay NULL.
+    up: db => {
+      ensureColumn(db, 'publish_approval_admissions', 'binding_json', 'TEXT')
+      ensureColumn(db, 'publish_approval_admissions', 'observation_state', "TEXT NOT NULL DEFAULT 'legacy_unrecorded'")
+      ensureColumn(db, 'publish_approval_admissions', 'result_json', 'TEXT')
+      ensureColumn(db, 'publish_approval_admissions', 'observed_at', 'TEXT')
+    },
   },
 ]
 

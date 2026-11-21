@@ -16,6 +16,13 @@ import {
 import { Store } from '../src/store/sqlite.ts'
 
 const homes: string[] = []
+const publishBinding = {
+  repo: 'owner/repo',
+  head: 'a'.repeat(40),
+  branch: 'peanut/store-test',
+  base: 'main' as const,
+  title: 'Store test binding',
+}
 const execFileAsync = promisify(execFile)
 
 /**
@@ -44,10 +51,23 @@ const store = new Store(home)
 try {
   const waitMs = Number(startAtRaw) - Date.now()
   if (waitMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs)
-  process.stdout.write(store.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_shared' }) ? 'admitted' : 'denied')
+  process.stdout.write(store.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_shared', binding: { repo: 'owner/repo', head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', branch: 'peanut/store-test', base: 'main', title: 'Store test binding' } }) ? 'admitted' : 'denied')
 } finally {
   store.close()
 }
+`
+
+const CRASH_AFTER_ADMISSION_SCRIPT = `
+import { pathToFileURL } from 'node:url'
+const [storePath, home] = process.argv.slice(2)
+const { Store } = await import(pathToFileURL(storePath).href)
+const store = new Store(home)
+store.admitPublishApprovalOnce({
+  ticketId: 'ticket_crashed_after_admission',
+  approvalId: 'approval_crashed',
+  binding: { repo: 'owner/repo', head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', branch: 'peanut/crashed', base: 'main', title: 'Crash fixture' },
+})
+process.exit(71)
 `
 
 afterEach(() => {
@@ -312,10 +332,114 @@ describe('store schema migrations', () => {
     try {
       expect(upgraded.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
       expect(rawDocument(home, 'ticket', 'ticket_legacy')).toBe(legacyPayload)
-      expect(upgraded.admitPublishApprovalOnce({ ticketId: 'ticket_legacy', approvalId: 'approval_legacy' })).toBe(true)
-      expect(upgraded.admitPublishApprovalOnce({ ticketId: 'ticket_legacy', approvalId: 'approval_legacy' })).toBe(false)
+      expect(upgraded.admitPublishApprovalOnce({ ticketId: 'ticket_legacy', approvalId: 'approval_legacy', binding: publishBinding })).toBe(true)
+      expect(upgraded.admitPublishApprovalOnce({ ticketId: 'ticket_legacy', approvalId: 'approval_legacy', binding: publishBinding })).toBe(false)
     } finally {
       upgraded.close()
+    }
+  })
+
+  it('persists immutable publish identity and explicit publisher observations across reopen', () => {
+    const home = tempHome()
+    const binding = {
+      repo: 'owner/repo',
+      head: 'c'.repeat(40),
+      branch: 'peanut/frozen-binding',
+      base: 'main' as const,
+      title: 'Frozen title',
+      body: 'Frozen body',
+    }
+    const first = new Store(home)
+    expect(first.admitPublishApprovalOnce({
+      ticketId: 'ticket_facts', approvalId: 'approval_facts', binding,
+    })).toBe(true)
+    expect(first.listPublishAdmissions('ticket_facts')[0]).toMatchObject({
+      approvalId: 'approval_facts', binding, observationState: 'admitted',
+    })
+    first.markPublishAttemptStarted('ticket_facts', 'approval_facts')
+    expect(first.listPublishAdmissions('ticket_facts')[0]?.observationState).toBe('attempt_started')
+    first.close()
+
+    const reopened = new Store(home)
+    try {
+      expect(reopened.admitPublishApprovalOnce({
+        ticketId: 'ticket_facts', approvalId: 'approval_facts', binding: { ...binding, head: 'd'.repeat(40) },
+      })).toBe(false)
+      const returned = { number: 12, branch: binding.branch, remote: 'owner/repo' }
+      reopened.recordPublishReturned('ticket_facts', 'approval_facts', returned)
+      expect(reopened.listPublishAdmissions('ticket_facts')[0]).toMatchObject({
+        binding, result: returned, observationState: 'returned', observedAt: expect.any(String),
+      })
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('upgrades consumed v5 admissions without fabricating binding or outcome facts', () => {
+    const home = tempHome()
+    const ticketPayload = JSON.stringify({ id: 'ticket_v5', title: 'historical bytes' })
+    const db = new DatabaseSync(dbPath(home))
+    migrate(db, MIGRATIONS.slice(0, 5), 5)
+    db.prepare('INSERT INTO documents(kind, id, payload) VALUES(?, ?, ?)')
+      .run('ticket', 'ticket_v5', ticketPayload)
+    db.prepare(`INSERT INTO publish_approval_admissions(ticket_id, approval_id, admitted_at)
+                VALUES(?, ?, ?)`)
+      .run('ticket_v5', 'approval_v5', '2026-11-20T00:00:00.000Z')
+    db.close()
+
+    const upgraded = new Store(home)
+    try {
+      expect(upgraded.schemaVersion).toBe(6)
+      expect(upgraded.listPublishAdmissions('ticket_v5')).toEqual([{
+        ticketId: 'ticket_v5',
+        approvalId: 'approval_v5',
+        admittedAt: '2026-11-20T00:00:00.000Z',
+        observationState: 'legacy_unrecorded',
+      }])
+    } finally {
+      upgraded.close()
+    }
+    expect(rawDocument(home, 'ticket', 'ticket_v5')).toBe(ticketPayload)
+
+    const olderDb = new DatabaseSync(dbPath(home))
+    try {
+      expect(() => migrate(olderDb, MIGRATIONS.slice(0, 5), 5)).toThrow(/newer than this build supports \(5\)/)
+    } finally {
+      olderDb.close()
+    }
+    const reopened = new Store(home)
+    try {
+      expect(reopened.listPublishAdmissions('ticket_v5')[0]?.observationState).toBe('legacy_unrecorded')
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('preserves consumed admission when a process crashes before publisher entry', async () => {
+    const home = tempHome()
+    const script = path.join(home, 'crash-after-admission.mjs')
+    fs.writeFileSync(script, CRASH_AFTER_ADMISSION_SCRIPT)
+    const storePath = fileURLToPath(new URL('../src/store/sqlite.ts', import.meta.url))
+    const crashed = await execFileAsync(
+      process.execPath,
+      ['--experimental-strip-types', script, storePath, home],
+      { encoding: 'utf8', timeout: 15_000 },
+    ).then(() => undefined, error => error as { code?: number })
+    expect(crashed).toMatchObject({ code: 71 })
+
+    const reopened = new Store(home)
+    try {
+      expect(reopened.listPublishAdmissions('ticket_crashed_after_admission')[0]).toMatchObject({
+        approvalId: 'approval_crashed',
+        observationState: 'admitted',
+      })
+      expect(reopened.admitPublishApprovalOnce({
+        ticketId: 'ticket_crashed_after_admission',
+        approvalId: 'approval_crashed',
+        binding: publishBinding,
+      })).toBe(false)
+    } finally {
+      reopened.close()
     }
   })
 
@@ -339,9 +463,9 @@ describe('store schema migrations', () => {
 
     const reopened = new Store(home)
     try {
-      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_shared' })).toBe(false)
-      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_other' })).toBe(true)
-      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_other', approvalId: 'approval_shared' })).toBe(true)
+      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_shared', binding: publishBinding })).toBe(false)
+      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_other', binding: publishBinding })).toBe(true)
+      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_other', approvalId: 'approval_shared', binding: publishBinding })).toBe(true)
     } finally {
       reopened.close()
     }

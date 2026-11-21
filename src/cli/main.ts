@@ -184,6 +184,8 @@ function help(): void {
   pnpm ds-agent routines [--json]  # owner-defined recurring work and its channel
   pnpm ds-agent recovery-effects <ticketId> [retry|acknowledge <effectId>] [--json]
                             # inspect or resolve one uncertain external effect on an ended Ticket
+  pnpm ds-agent publish-outcome <ticketId> [--json]
+                            # read-only facts for consumed feature-PR approvals; never retries
 
 Mid-task collaboration (persisted in SQLite):
   pnpm ds-agent pause <ticketId> [--reason "waiting on staging"]
@@ -668,6 +670,53 @@ async function main(): Promise<void> {
       console.log(`  ${item.title}${item.reason ? ` — ${item.reason}` : ''}`)
       console.log(`  requested by ${item.requestedBy} at ${item.at}`)
     }
+    return
+  }
+  if (cmd === 'publish-outcome') {
+    const [ticketId] = bare(3)
+    if (!ticketId) throw new Error('usage: ds-agent publish-outcome <ticketId> [--json]')
+    const store = new Store(home)
+    let admissions: ReturnType<Store['listPublishAdmissions']>
+    try {
+      // Resolve directly against the immutable ledger key. Do not derive identity
+      // or binding from a mutable current Ticket document.
+      admissions = store.listPublishAdmissions(ticketId)
+    } finally {
+      store.close()
+    }
+    const guidance = {
+      safeNextStep: 'Inspect the recorded repository, branch, commit, and PR details remotely. If uncertain, do not retry this approval; after resolving the remote state, request a fresh explicit owner approval with a new approval id.',
+      remoteInspectionPerformed: false,
+      retryPerformed: false,
+      approvalChanged: false,
+    }
+    const diagnosis = { ticketId, admissions, guidance }
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify(diagnosis, null, 2))
+      return
+    }
+    if (admissions.length === 0) {
+      console.log(`no publication admission recorded for ticket ${ticketId}; this does not establish whether older publication activity occurred`)
+    }
+    for (const item of admissions) {
+      console.log(`${item.approvalId}  state=${item.observationState}  admitted=${item.admittedAt}`)
+      if (item.binding) {
+        console.log(`  repo=${item.binding.repo} branch=${item.binding.branch} head=${item.binding.head} base=${item.binding.base}`)
+        console.log(`  title=${item.binding.title}${item.binding.body ? ` body=${item.binding.body}` : ''}`)
+      } else {
+        console.log('  binding unavailable (legacy admission predates immutable binding evidence)')
+      }
+      if (item.observationState === 'returned' && item.result) {
+        console.log(`  publisher returned PR #${item.result.number} branch=${item.result.branch} remote=${item.result.remote}`)
+      } else if (item.observationState === 'admitted') {
+        console.log('  publisher entry was not recorded; admission remains consumed')
+      } else if (item.observationState === 'legacy_unrecorded') {
+        console.log('  publisher outcome was not recorded; no result can be inferred from this admission')
+      } else {
+        console.log('  publisher result is unconfirmed; an external effect may or may not have happened')
+      }
+    }
+    console.log(guidance.safeNextStep)
     return
   }
   if (cmd === 'recovery-effects') {
