@@ -712,6 +712,8 @@ async function main(): Promise<void> {
         console.log('  publisher entry was not recorded; admission remains consumed')
       } else if (item.observationState === 'legacy_unrecorded') {
         console.log('  publisher outcome was not recorded; no result can be inferred from this admission')
+      } else if (item.observationState === 'unsupported') {
+        console.log('  observation state is unsupported; publisher outcome cannot be inferred and this admission remains consumed')
       } else {
         console.log('  publisher result is unconfirmed; an external effect may or may not have happened')
       }

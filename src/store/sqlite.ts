@@ -12,6 +12,17 @@ export type PublishObservationState =
   | 'returned'
   | 'unconfirmed'
   | 'legacy_unrecorded'
+  | 'unsupported'
+
+const PUBLISH_OBSERVATION_STATES: readonly string[] = [
+  'admitted', 'attempt_started', 'returned', 'unconfirmed', 'legacy_unrecorded',
+]
+
+function parsePublishObservationState(value: string): PublishObservationState {
+  return PUBLISH_OBSERVATION_STATES.includes(value)
+    ? value as PublishObservationState
+    : 'unsupported'
+}
 
 export interface PublishAdmissionRecord {
   ticketId: string
@@ -93,7 +104,7 @@ export function readPublishAdmissionsReadOnly(home: string, ticketId: string): R
         admittedAt: row.admitted_at,
         ...(row.binding_json ? { binding: JSON.parse(row.binding_json) as PublishApprovalBinding } : {}),
         observationState: hasObservationColumns
-          ? row.observation_state as PublishObservationState
+          ? parsePublishObservationState(row.observation_state ?? '')
           : 'legacy_unrecorded',
         ...(row.result_json ? {
           result: JSON.parse(row.result_json) as PublishAdmissionRecord['result'],
@@ -285,7 +296,7 @@ export class Store {
       approvalId: row.approval_id,
       admittedAt: row.admitted_at,
       ...(row.binding_json ? { binding: JSON.parse(row.binding_json) as PublishApprovalBinding } : {}),
-      observationState: row.observation_state as PublishObservationState,
+      observationState: parsePublishObservationState(row.observation_state),
       ...(row.result_json ? {
         result: JSON.parse(row.result_json) as PublishAdmissionRecord['result'],
       } : {}),

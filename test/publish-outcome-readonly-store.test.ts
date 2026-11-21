@@ -255,6 +255,59 @@ describe('publish-outcome read-only database entry', () => {
     expect(human.stdout).toContain('repo=owner/repo')
   })
 
+  it('labels an unsupported observation state without inferring an outcome or changing consumed evidence', () => {
+    const home = path.join(makeRoot(), 'unsupported-observation')
+    const store = new Store(home)
+    expect(store.admitPublishApprovalOnce({
+      ticketId: 'unsupported-ticket',
+      approvalId: 'unsupported-approval',
+      binding: {
+        repo: 'owner/repo', head: 'c'.repeat(40), branch: 'peanut/unsupported', base: 'main', title: 'Owned unsupported fixture',
+      },
+    })).toBe(true)
+    store.close()
+
+    const dbPath = path.join(home, 'ds-agent.db')
+    const writer = new DatabaseSync(dbPath)
+    writer.prepare(`UPDATE publish_approval_admissions SET observation_state = ?
+                    WHERE ticket_id = ? AND approval_id = ?`)
+      .run('returend_private_sentinel', 'unsupported-ticket', 'unsupported-approval')
+    writer.close()
+    const before = createHash('sha256').update(fs.readFileSync(dbPath)).digest('hex')
+
+    const json = runCli(home, 'unsupported-ticket')
+    const human = runCli(home, 'unsupported-ticket', false)
+
+    expect(json.status, json.stderr).toBe(0)
+    const diagnosis = JSON.parse(json.stdout) as { admissions: Array<Record<string, unknown>> }
+    expect(diagnosis.admissions).toEqual([expect.objectContaining({
+      approvalId: 'unsupported-approval', observationState: 'unsupported',
+    })])
+    expect(json.stdout).not.toContain('returend_private_sentinel')
+    expect(json.stdout).not.toContain('result')
+    expect(human.status, human.stderr).toBe(0)
+    expect(human.stdout).toContain('state=unsupported')
+    expect(human.stdout).toMatch(/unsupported.*outcome|outcome.*unsupported/i)
+    expect(human.stdout).not.toContain('returend_private_sentinel')
+    expect(human.stdout).not.toContain('publisher result is unconfirmed')
+    expect(human.stdout).not.toContain('publisher returned PR')
+    expect(createHash('sha256').update(fs.readFileSync(dbPath)).digest('hex')).toBe(before)
+
+    const reopened = new Store(home)
+    try {
+      expect(reopened.admitPublishApprovalOnce({
+        ticketId: 'unsupported-ticket',
+        approvalId: 'unsupported-approval',
+        binding: {
+          repo: 'owner/repo', head: 'c'.repeat(40), branch: 'peanut/unsupported', base: 'main', title: 'Owned unsupported fixture',
+        },
+      })).toBe(false)
+      expect(reopened.listPublishAdmissions('unsupported-ticket')[0]?.observationState).toBe('unsupported')
+    } finally {
+      reopened.close()
+    }
+  })
+
   it('projects a consumed v5 row without changing its schema, migration ledger, row, or database bytes', () => {
     const home = path.join(makeRoot(), 'state')
     const dbPath = createV5Database(home)
