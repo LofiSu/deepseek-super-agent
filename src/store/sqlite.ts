@@ -108,6 +108,19 @@ export class Store {
     this.db.prepare('DELETE FROM documents WHERE kind = ? AND id = ?').run(kind, id)
   }
 
+  /** Persist the one-use admission for a human-approved feature PR publication. */
+  admitPublishApprovalOnce(input: { ticketId: string; approvalId: string }): boolean {
+    const { ticketId, approvalId } = input
+    return this.atomic(() => {
+      const result = this.db.prepare(
+        `INSERT INTO publish_approval_admissions(ticket_id, approval_id, admitted_at)
+         VALUES(?, ?, ?)
+         ON CONFLICT(ticket_id, approval_id) DO NOTHING`,
+      ).run(ticketId, approvalId, new Date().toISOString())
+      return result.changes === 1
+    })
+  }
+
   addEvent(type: DomainEventName, payload: unknown): void {
     this.db.prepare(
       'INSERT INTO events(type, payload, created_at) VALUES(?, ?, ?)',

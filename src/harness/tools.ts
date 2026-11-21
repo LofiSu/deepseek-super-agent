@@ -649,7 +649,10 @@ function executorTools(ports: RolePortFor<'worker'>, deps: WorkerToolDeps): Tool
         if (JSON.stringify(requested) !== JSON.stringify(approval.publish)) {
           throw new UserError('publish_feature_pr approval does not match this repository, commit, branch, or PR metadata')
         }
-        assertTicketCanPublish()
+        const currentTicket = assertTicketCanPublish()
+        if (!store.admitPublishApprovalOnce({ ticketId: currentTicket.id, approvalId: approval.id })) {
+          throw new UserError('publish_feature_pr approval has already been used')
+        }
         const result = await deps.publishFeaturePr.publish({
           workerId: ctx.sessionId,
           title,

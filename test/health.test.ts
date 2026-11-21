@@ -40,7 +40,7 @@ describe('health probe', () => {
         watchdogIdle: true,
       })
       expect(result.capabilities.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
-      expect(LATEST_SCHEMA_VERSION).toBe(4)
+      expect(LATEST_SCHEMA_VERSION).toBe(5)
       expect(result.capabilities.readIsolation).toEqual({ requested: 'off', enforced: 'unknown' })
       expect(result.capabilities.workerSandbox).toEqual({ requested: 'on', enforced: 'unknown' })
       expect(result.capabilities.sandboxAvailability).toEqual(probeSandboxAvailability(process.env))

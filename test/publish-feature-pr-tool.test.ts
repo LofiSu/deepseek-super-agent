@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bindRolePorts } from '../src/core/role-ports.ts'
@@ -7,6 +9,7 @@ import { ToolRegistry } from '../src/harness/tools.ts'
 import type { PublishApprovalBinding } from '../src/shared/types.ts'
 import { UserError } from '../src/shared/errors.ts'
 import type { Runtime } from '../src/runtime.ts'
+import { Store } from '../src/store/sqlite.ts'
 import { freshRuntime, shutdown } from './fixtures.ts'
 
 const binding: PublishApprovalBinding = {
@@ -18,9 +21,9 @@ const binding: PublishApprovalBinding = {
   body: 'Approved body',
 }
 
-function registry(runtime: Runtime, publisher?: FeaturePrPublisher): ToolRegistry {
+function registry(runtime: Runtime, publisher?: FeaturePrPublisher, store: Store = runtime.store): ToolRegistry {
   return new ToolRegistry({
-    store: runtime.store,
+    store,
     ports: bindRolePorts(runtime.engine),
     env: new LocalEnv(path.join(runtime.home, 'workspaces')),
     metrics: runtime.metrics,
@@ -199,6 +202,151 @@ describe('publish_feature_pr tool', () => {
     expect(pub.publish).not.toHaveBeenCalled()
   })
 
+  it('consumes one approved publish request after its first publication', async () => {
+    runtime = freshRuntime({ allowMockModel: true })
+    seedTicket(runtime, 'ticket-single-use')
+    const request = runtime.engine.requestApproval('ticket-single-use', {
+      action: `publish_feature_pr ${JSON.stringify(binding)}`,
+      requestedBy: 'w1',
+      publish: binding,
+    })
+    runtime.engine.decideApproval('ticket-single-use', request.approval.id, 'approved')
+    const pub = {
+      prepare: vi.fn(async () => binding),
+      publish: vi.fn(async () => ({ url: 'x', number: 1, branch: binding.branch, remote: binding.repo })),
+    } as unknown as FeaturePrPublisher
+    const tools = registry(runtime, pub)
+    const call = () => tools.invoke(
+      { id: 'c1', name: 'publish_feature_pr', args: {
+        approvalId: request.approval.id,
+        title: binding.title,
+        body: binding.body,
+        branch: binding.branch,
+      } },
+      { sessionId: 'w1', role: 'worker', ticketId: 'ticket-single-use' },
+    )
+
+    await expect(call()).resolves.toMatchObject({ number: 1 })
+    const reopened = new Store(runtime.home)
+    try {
+      await expect(registry(runtime, pub, reopened).invoke(
+        { id: 'c2', name: 'publish_feature_pr', args: {
+          approvalId: request.approval.id,
+          title: binding.title,
+          body: binding.body,
+          branch: binding.branch,
+        } },
+        { sessionId: 'w1', role: 'worker', ticketId: 'ticket-single-use' },
+      )).rejects.toThrow(/already been used/)
+    } finally {
+      reopened.close()
+    }
+    expect(pub.publish).toHaveBeenCalledOnce()
+  })
+
+  it('admits only one of two overlapping calls on separate SQLite connections', async () => {
+    runtime = freshRuntime({ allowMockModel: true })
+    seedTicket(runtime, 'ticket-overlapping')
+    const request = runtime.engine.requestApproval('ticket-overlapping', {
+      action: `publish_feature_pr ${JSON.stringify(binding)}`,
+      requestedBy: 'w1',
+      publish: binding,
+    })
+    runtime.engine.decideApproval('ticket-overlapping', request.approval.id, 'approved')
+
+    let readyCount = 0
+    let release!: () => void
+    const bothPrepared = new Promise<void>(resolve => { release = resolve })
+    const publisher = () => ({
+      prepare: vi.fn(async () => {
+        readyCount += 1
+        if (readyCount === 2) release()
+        await bothPrepared
+        return binding
+      }),
+      publish: vi.fn(async () => ({ url: 'x', number: 1, branch: binding.branch, remote: binding.repo })),
+    })
+    const firstPublisher = publisher()
+    const secondPublisher = publisher()
+    const secondStore = new Store(runtime.home)
+    try {
+      const calls = [
+        registry(runtime, firstPublisher as unknown as FeaturePrPublisher).invoke(
+          { id: 'c1', name: 'publish_feature_pr', args: {
+            approvalId: request.approval.id,
+            title: binding.title,
+            body: binding.body,
+            branch: binding.branch,
+          } },
+          { sessionId: 'w1', role: 'worker', ticketId: 'ticket-overlapping' },
+        ),
+        registry(runtime, secondPublisher as unknown as FeaturePrPublisher, secondStore).invoke(
+          { id: 'c2', name: 'publish_feature_pr', args: {
+            approvalId: request.approval.id,
+            title: binding.title,
+            body: binding.body,
+            branch: binding.branch,
+          } },
+          { sessionId: 'w1', role: 'worker', ticketId: 'ticket-overlapping' },
+        ),
+      ]
+      const results = await Promise.allSettled(calls)
+      expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+      expect(results.filter(result => result.status === 'rejected')).toHaveLength(1)
+      expect(firstPublisher.publish.mock.calls.length + secondPublisher.publish.mock.calls.length).toBe(1)
+    } finally {
+      secondStore.close()
+    }
+  })
+
+  it('does not replay approval after local push succeeds but confirmation fails', async () => {
+    runtime = freshRuntime({ allowMockModel: true })
+    seedTicket(runtime, 'ticket-uncertain')
+    const ws = path.join(runtime.home, 'workspaces', 'w1')
+    const bare = path.join(runtime.home, 'uncertain-local-remote.git')
+    fs.mkdirSync(ws, { recursive: true })
+    const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' }
+    execFileSync('git', ['init', '--bare', bare], { stdio: 'ignore', env: gitEnv })
+    execFileSync('git', ['init', '-b', 'main'], { cwd: ws, stdio: 'ignore', env: gitEnv })
+    execFileSync('git', ['config', 'user.email', 'fixture@invalid'], { cwd: ws, env: gitEnv })
+    execFileSync('git', ['config', 'user.name', 'Owned Fixture'], { cwd: ws, env: gitEnv })
+    fs.writeFileSync(path.join(ws, 'README.md'), 'owned uncertainty fixture\n')
+    execFileSync('git', ['add', 'README.md'], { cwd: ws, env: gitEnv })
+    execFileSync('git', ['commit', '-m', 'owned fixture'], { cwd: ws, stdio: 'ignore', env: gitEnv })
+    execFileSync('git', ['checkout', '-b', 'peanut/uncertain'], { cwd: ws, stdio: 'ignore', env: gitEnv })
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ws, encoding: 'utf8', env: gitEnv }).trim()
+    const approved: PublishApprovalBinding = { ...binding, head, branch: 'peanut/uncertain' }
+    const request = runtime.engine.requestApproval('ticket-uncertain', {
+      action: `publish_feature_pr ${JSON.stringify(approved)}`,
+      requestedBy: 'w1',
+      publish: approved,
+    })
+    runtime.engine.decideApproval('ticket-uncertain', request.approval.id, 'approved')
+    const pub = {
+      prepare: vi.fn(async () => approved),
+      publish: vi.fn(async (_input: unknown, authorized: PublishApprovalBinding) => {
+        execFileSync('git', ['push', bare, `${authorized.head}:refs/heads/${authorized.branch}`], {
+          cwd: ws,
+          stdio: 'ignore',
+          env: gitEnv,
+        })
+        throw new Error('local push succeeded; confirmation interrupted')
+      }),
+    }
+    const tools = registry(runtime, pub as unknown as FeaturePrPublisher)
+    const input = { approvalId: request.approval.id, title: approved.title, body: approved.body, branch: approved.branch }
+    const ctx = { sessionId: 'w1', role: 'worker' as const, ticketId: 'ticket-uncertain' }
+
+    await expect(tools.invoke({ id: 'c1', name: 'publish_feature_pr', args: input }, ctx))
+      .rejects.toThrow('local push succeeded; confirmation interrupted')
+    expect(execFileSync('git', ['--git-dir', bare, 'rev-parse', `refs/heads/${approved.branch}`], {
+      encoding: 'utf8', env: gitEnv,
+    }).trim()).toBe(head)
+    await expect(tools.invoke({ id: 'c2', name: 'publish_feature_pr', args: input }, ctx))
+      .rejects.toThrow(/already been used/)
+    expect(pub.publish).toHaveBeenCalledOnce()
+  })
+
   it('refuses an approved request bound to different metadata', async () => {
     runtime = freshRuntime({ allowMockModel: true })
     seedTicket(runtime, 'ticket-approval')
@@ -211,8 +359,8 @@ describe('publish_feature_pr tool', () => {
     const pub = {
       prepare: vi.fn(async () => ({ ...binding, head: 'b'.repeat(40) })),
       publish: vi.fn(async () => ({ url: 'x', number: 1, branch: binding.branch, remote: binding.repo })),
-    } as unknown as FeaturePrPublisher
-    const tools = registry(runtime, pub)
+    }
+    const tools = registry(runtime, pub as unknown as FeaturePrPublisher)
     await expect(tools.invoke(
       { id: 'c1', name: 'publish_feature_pr', args: {
         approvalId: request.approval.id,
@@ -223,6 +371,17 @@ describe('publish_feature_pr tool', () => {
       { sessionId: 'w1', role: 'worker', ticketId: 'ticket-approval' },
     )).rejects.toThrow(/does not match/)
     expect(pub.publish).not.toHaveBeenCalled()
+    pub.prepare.mockResolvedValue(binding)
+    await expect(tools.invoke(
+      { id: 'c2', name: 'publish_feature_pr', args: {
+        approvalId: request.approval.id,
+        title: binding.title,
+        body: binding.body,
+        branch: binding.branch,
+      } },
+      { sessionId: 'w1', role: 'worker', ticketId: 'ticket-approval' },
+    )).resolves.toMatchObject({ number: 1 })
+    expect(pub.publish).toHaveBeenCalledOnce()
   })
 
   it('is not exposed to router or watchdog', async () => {

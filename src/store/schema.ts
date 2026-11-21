@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS events (
 `
 
 /** The schema version this build writes and understands. */
-export const LATEST_SCHEMA_VERSION = 4
+export const LATEST_SCHEMA_VERSION = 5
 
 const SCHEMA_MIGRATIONS_DDL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -153,6 +153,19 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
     // Chain of Recall: each spill carries typed next-hop refs. Existing rows
     // keep an empty ref list; the body and grants are untouched.
     up: db => ensureColumn(db, 'spills', 'refs', "TEXT NOT NULL DEFAULT '[]'"),
+  },
+  {
+    version: 5,
+    // A publish approval is admitted at most once. Rows are durable tombstones:
+    // failures never release them because an external push may have happened.
+    up: db => db.exec(`
+CREATE TABLE IF NOT EXISTS publish_approval_admissions (
+  ticket_id TEXT NOT NULL,
+  approval_id TEXT NOT NULL,
+  admitted_at TEXT NOT NULL,
+  PRIMARY KEY (ticket_id, approval_id)
+);
+`),
   },
 ]
 

@@ -36,6 +36,20 @@ db.close()
 process.stdout.write(String(version))
 `
 
+const ADMISSION_SCRIPT = `
+import { pathToFileURL } from 'node:url'
+const [storePath, home, startAtRaw] = process.argv.slice(2)
+const { Store } = await import(pathToFileURL(storePath).href)
+const store = new Store(home)
+try {
+  const waitMs = Number(startAtRaw) - Date.now()
+  if (waitMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs)
+  process.stdout.write(store.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_shared' }) ? 'admitted' : 'denied')
+} finally {
+  store.close()
+}
+`
+
 afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true })
 })
@@ -221,6 +235,7 @@ describe('store schema migrations', () => {
 
     expect(migrationRows(home)).toEqual(firstRows)
     expect(tableNames(home)).toContain('schema_migrations')
+    expect(tableNames(home)).toContain('publish_approval_admissions')
   })
 
   it('completes a partial legacy database without rewriting its tables or data', () => {
@@ -269,6 +284,67 @@ describe('store schema migrations', () => {
     expect(tableColumns(home, 'spills')).toContain('refs')
     expect(rawDocument(home, 'note', 'doc_1')).toBe(JSON.stringify({ body: 'keep me', nested: { n: 7 } }))
     expect(rawSpill(home, 'legacy_spill_1')).toBe('legacy spill body')
+  })
+
+  it('adds admission state without rewriting a legacy approved Ticket', () => {
+    const home = tempHome()
+    const legacyTicket = {
+      id: 'ticket_legacy',
+      collab: { approvals: [{
+        id: 'approval_legacy',
+        at: '2026-01-01T00:00:00.000Z',
+        action: 'publish feature PR',
+        requestedBy: 'worker_1',
+        status: 'approved',
+        decidedAt: '2026-01-01T00:01:00.000Z',
+        decidedBy: 'human',
+        publish: { repo: 'o/r', head: 'a'.repeat(40), branch: 'peanut/old', base: 'main', title: 'old title' },
+      }] },
+    }
+    const legacyPayload = JSON.stringify(legacyTicket)
+    const db = new DatabaseSync(dbPath(home))
+    migrate(db, MIGRATIONS.slice(0, 4), 4)
+    db.prepare('INSERT INTO documents(kind, id, payload) VALUES(?, ?, ?)')
+      .run('ticket', 'ticket_legacy', legacyPayload)
+    db.close()
+
+    const upgraded = new Store(home)
+    try {
+      expect(upgraded.schemaVersion).toBe(LATEST_SCHEMA_VERSION)
+      expect(rawDocument(home, 'ticket', 'ticket_legacy')).toBe(legacyPayload)
+      expect(upgraded.admitPublishApprovalOnce({ ticketId: 'ticket_legacy', approvalId: 'approval_legacy' })).toBe(true)
+      expect(upgraded.admitPublishApprovalOnce({ ticketId: 'ticket_legacy', approvalId: 'approval_legacy' })).toBe(false)
+    } finally {
+      upgraded.close()
+    }
+  })
+
+  it('admits one approval once across independent processes and preserves it after reopen', async () => {
+    const home = tempHome()
+    const initial = new Store(home)
+    initial.close()
+
+    const script = path.join(home, 'admit-once.mjs')
+    fs.writeFileSync(script, ADMISSION_SCRIPT)
+    const storePath = fileURLToPath(new URL('../src/store/sqlite.ts', import.meta.url))
+    const startAt = Date.now() + 500
+    const results = await Promise.all([0, 1].map(() =>
+      execFileAsync(
+        process.execPath,
+        ['--experimental-strip-types', script, storePath, home, String(startAt)],
+        { encoding: 'utf8', timeout: 15_000 },
+      ),
+    ))
+    expect(results.map(result => String(result.stdout).trim()).sort()).toEqual(['admitted', 'denied'])
+
+    const reopened = new Store(home)
+    try {
+      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_shared' })).toBe(false)
+      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_process-race', approvalId: 'approval_other' })).toBe(true)
+      expect(reopened.admitPublishApprovalOnce({ ticketId: 'ticket_other', approvalId: 'approval_shared' })).toBe(true)
+    } finally {
+      reopened.close()
+    }
   })
 
   it('serializes a second connection opening the same database', () => {
